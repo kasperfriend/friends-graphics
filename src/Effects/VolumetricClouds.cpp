@@ -129,8 +129,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float3 p=cameraPos.xyz+ray*t;
    float density=Density(p);
    if(density>.002) {
+     // A real loop, not [unroll]: four inlined copies of the two-octave
+     // Shape() keep far too many intermediate values alive at once and
+     // blow past the 32 temp registers ps_3_0 has (fxc error X4505).
      float lightOptical=0;
-     [unroll] for(int j=0;j<4;++j) {
+     [loop] for(int j=0;j<4;++j) {
        float3 q=p+lightDir*lightStep*(j+.65);
        lightOptical+=Shape(q)*shape.y*lightStep;
      }
