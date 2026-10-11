@@ -144,6 +144,7 @@ void LocalLightingRenderer::Reset(IDirect3DDevice9* device)
     m_surfaceShader.Reset(); m_compositeShader.Reset();
     m_owner = nullptr; m_width = m_height = m_lightWidth = m_lightHeight = 0;
     m_format = D3DFMT_UNKNOWN; m_quality = -1; m_retry = RetryGate{};
+    m_shaderErrorLogged = false; m_resourceErrorLogged = false;
 }
 
 bool LocalLightingRenderer::EnsureShaders(IDirect3DDevice9* device)
