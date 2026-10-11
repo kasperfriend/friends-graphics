@@ -102,7 +102,12 @@ rewritten.
 
 Two passes: one quarter-resolution march (at 1920x1080 that is 480x270 rays, 20 steps with a 4-tap light march) and
 one full-resolution composite. Both are timed as `GpuPerfStage::VolumetricClouds` and appear in the performance
-report. Budget is enforced in CI by `tools/ValidateShaders.ps1`.
+report.
+
+`tools/ValidateShaders.ps1` compiles both shaders with `fxc` in CI and enforces an instruction budget. Measured on
+the CI runner: **march 314 slots**, composite 36, against the 512-slot `ps_3_0` ceiling (for scale, the atmosphere's
+integrate pass is 462). The light march is a real `[loop]`, not `[unroll]` - four inlined copies of the two-octave
+`Shape()` keep more intermediates alive than the 32 temp registers `ps_3_0` has, and fxc rejects it with X4505.
 
 ## Tests
 
