@@ -107,9 +107,6 @@ float Density(float3 p,float h,float erosion) {
 // direct term is "sunlight times how much of it reaches here" and the gain
 // slider means what it says.
 float HG(float c,float g) { return (1-g*g)*pow(max(1+g*g-2*g*c,1e-4),-1.5); }
-// Sharp forward peak for the silver lining plus a broad backward lobe so
-// the anti-solar side is not flat.
-float Lobes(float c,float e) { return lerp(HG(c,lobe.x*e),HG(c,-lobe.y*e),.35); }
 
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float raw=tex2D(depthMap,uv).r;
@@ -159,9 +156,13 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // Phase depends only on the angle between the ray and the light, so all
  // three scattering octaves are evaluated once per pixel.
  float cosTheta=dot(ray,normalize(celestial.xyz));
- float silver=skyColor.w*pow(saturate(cosTheta),24);
- float3 phase=min(float3(Lobes(cosTheta,1),Lobes(cosTheta,lobe.z),
-                         Lobes(cosTheta,lobe.z*lobe.z))+silver,9);
+ // Sharp forward peak for the silver lining plus a broad backward lobe so
+ // the anti-solar side is not flat. Evaluated once: each deeper scattering
+ // octave only relaxes it towards isotropic, which is both what the
+ // approximation wants and six Henyey-Greenstein evaluations cheaper.
+ float single=min(lerp(HG(cosTheta,lobe.x),HG(cosTheta,-lobe.y),.35)
+                 +skyColor.w*pow(saturate(cosTheta),24),9);
+ float3 phase=float3(single,lerp(1,single,lobe.z),lerp(1,single,lobe.z*lobe.z));
 
  // A step tied to world length, never to the span divided by the step
  // count: the shell is 1400 units thick but 25000 long near the horizon,
@@ -178,13 +179,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float stepLength=max(baseStep,t*stepping.y);
    float3 p=cameraPos.xyz+ray*t;
    float h=HeightFraction(p);
+   // One inlined copy of the field per iteration, not one per branch: the
+   // coarse probe simply asks for it without the erosion fetch. Two call
+   // sites here cost about seventy instruction slots of the 512 budget.
+   float density=Density(p,h,mode<0?0:scales.w);
    if(mode<0) {
      // Big strides until something is hit, then step back and integrate
      // properly. Doubles the usable range for free.
-     if(Density(p,h,0)>0) { mode=0; t-=stepLength*stepping.z; }
+     if(density>0) { mode=0; t-=stepLength*stepping.z; }
      else t+=stepLength*stepping.z;
    } else {
-     float density=Density(p,h,scales.w);
      if(density<=0) {
        mode+=1;
        if(mode>6) mode=-1;

@@ -155,7 +155,7 @@ struct CloudConfig
     float stepGrowth = .010f;
     float coarseScale = 3.f;
     int lightSteps = 6;
-    float lightConeRadius = .09f;
+    float lightConeRadius = 0.f;   // the shader marches a straight light ray
     float horizonFade = .018f;
     float jitterAmount = .25f;
 };
@@ -384,16 +384,15 @@ struct Marcher
         // all three scattering octaves are evaluated once per pixel.
         const float cosTheta = Dot(dir, lightDir);
         const float silver = c.silverIntensity * std::pow(Saturate(cosTheta), 24.f);
-        float phase[3];
-        for (int n = 0; n < 3; ++n)
-        {
-            const float e = std::pow(c.msEccentricity, float(n));
-            // Dual lobe: a sharp forward peak for the silver lining plus a
-            // broad backward lobe so the anti-solar side is not flat.
-            const float lobes = Lerp(HenyeyGreenstein(cosTheta, c.forwardG * e),
-                                     HenyeyGreenstein(cosTheta, -c.backwardG * e), .35f);
-            phase[n] = std::min(lobes + silver, 9.f);
-        }
+        // Dual lobe: a sharp forward peak for the silver lining plus a broad
+        // backward lobe so the anti-solar side is not flat. Evaluated once;
+        // each deeper octave only relaxes it towards isotropic, which keeps
+        // the pixel shader inside its 512 instruction slots.
+        const float single = std::min(Lerp(HenyeyGreenstein(cosTheta, c.forwardG),
+                                           HenyeyGreenstein(cosTheta, -c.backwardG), .35f) + silver, 9.f);
+        const float phase[3] = { single,
+                                 Lerp(1.f, single, c.msEccentricity),
+                                 Lerp(1.f, single, c.msEccentricity * c.msEccentricity) };
 
         V3 scattered{};
         float t = entry + jitter * baseStep;
