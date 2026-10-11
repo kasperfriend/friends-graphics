@@ -112,9 +112,9 @@ void EnvironmentProfileManager::Retarget() {
     from=current;blendStart=lastNow;progress=0;
     if(config.debug)Log("Profile resolved: "+resolved.profile+" source="+resolved.source);
 }
-void EnvironmentProfileManager::Update(uint64_t now,bool world) {
+void EnvironmentProfileManager::Update(uint64_t now,bool world,bool hold) {
     lastNow=now;
-    if(!lastPoll||now-lastPoll>=125) {
+    if(!hold&&(!lastPoll||now-lastPoll>=125)) {
         lastPoll=now;const auto sample=provider.Sample(database,world);
         // Invalid world context uses the same confirmation discipline: brief
         // particle/camera gaps cannot oscillate the environment.

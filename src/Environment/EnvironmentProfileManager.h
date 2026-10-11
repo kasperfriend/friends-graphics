@@ -9,7 +9,8 @@ public:
     static EnvironmentProfileManager& Instance();
     void Configure(const std::wstring& base);
     void Reload();
-    void Update(uint64_t now,bool worldContext);
+    // hold keeps the last confirmed location (focus or device gaps); blending still advances.
+    void Update(uint64_t now,bool worldContext,bool holdLocation=false);
     const ResolvedEnvironmentState& State() const {return current;}
     const LocationContext& Location() const {return location;}
     bool LocationTuningVerified() const {return provider.Verified()&&database.Authoritative();}

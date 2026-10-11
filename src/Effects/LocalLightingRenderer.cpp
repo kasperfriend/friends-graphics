@@ -9,6 +9,8 @@
 #include "../D3D9/ScopedRenderState.h"
 #include "../Lighting/LocalLightManager.h"
 
+#include <windows.h>
+
 #pragma comment(lib, "d3dcompiler.lib")
 
 namespace renderer
@@ -125,7 +127,7 @@ LocalLightingRenderer& LocalLightingRenderer::Instance()
 void LocalLightingRenderer::Configure(const std::wstring& basePath)
 {
     m_logPath = basePath + L"LocalLighting.log";
-    m_sessionDisabled = false;
+    m_retry = RetryGate{};
 }
 
 void LocalLightingRenderer::Log(const std::string& message) const
@@ -141,7 +143,7 @@ void LocalLightingRenderer::Reset(IDirect3DDevice9* device)
     m_litSurface.Reset(); m_litTexture.Reset();
     m_surfaceShader.Reset(); m_compositeShader.Reset();
     m_owner = nullptr; m_width = m_height = m_lightWidth = m_lightHeight = 0;
-    m_format = D3DFMT_UNKNOWN; m_quality = -1; m_sessionDisabled = false;
+    m_format = D3DFMT_UNKNOWN; m_quality = -1; m_retry = RetryGate{};
 }
 
 bool LocalLightingRenderer::EnsureShaders(IDirect3DDevice9* device)
@@ -151,11 +153,24 @@ bool LocalLightingRenderer::EnsureShaders(IDirect3DDevice9* device)
     if (!Compile(device, kSurfaceSource, m_surfaceShader.GetAddressOf(), error) ||
         !Compile(device, kCompositeSource, m_compositeShader.GetAddressOf(), error))
     {
-        Log("Dynamic lighting disabled for this device: " + error);
-        m_surfaceShader.Reset(); m_compositeShader.Reset(); m_sessionDisabled = true;
+        m_surfaceShader.Reset(); m_compositeShader.Reset();
+        if (!m_shaderErrorLogged) {
+            m_shaderErrorLogged = true;
+            Log("Dynamic lighting shaders unavailable, will retry: " + error);
+        }
         return false;
     }
+    m_shaderErrorLogged = false;
     return true;
+}
+
+void LocalLightingRenderer::NoteFailure(const std::string& reason)
+{
+    // Logged once per failure streak; the retry gate handles the rest.
+    if (m_retry.Fail(GetTickCount64(), kOptionalPassRetryMs) && !m_resourceErrorLogged) {
+        m_resourceErrorLogged = true;
+        Log(reason + "; feature skipped and retried without affecting the scene");
+    }
 }
 
 bool LocalLightingRenderer::EnsureResources(IDirect3DDevice9* device, uint32_t width, uint32_t height, D3DFORMAT format, int quality)
@@ -194,15 +209,17 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     auto& manager = LocalLightManager::Instance();
     manager.SelectForFrame(f.cameraPosition, { f.inverseView.m[2][0], f.inverseView.m[2][1], f.inverseView.m[2][2] });
     const auto& lights = manager.Selected();
-    if (m_sessionDisabled || !manager.Enabled() || lights.empty() || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
+    if (!manager.Enabled() || lights.empty() || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
+    if (!m_retry.Open(GetTickCount64())) return false;
     D3DSURFACE_DESC desc{};
     if (!f.sceneSurface || FAILED(f.sceneSurface->GetDesc(&desc)) || !EnsureShaders(device) ||
         !EnsureResources(device, desc.Width, desc.Height, desc.Format, manager.Quality()))
     {
-        if (!m_sessionDisabled) Log("Dynamic lighting render targets unavailable; feature skipped without affecting the scene");
-        m_sessionDisabled = true;
+        NoteFailure("Dynamic lighting render targets unavailable");
         return false;
     }
+    m_retry.Succeed();
+    m_resourceErrorLogged = false;
 
     ScopedRenderState state(device);
     DepthCapture::Instance().RawSetDepth(device, nullptr);

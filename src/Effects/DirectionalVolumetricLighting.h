@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <wrl/client.h>
 #include <string>
+#include "../Core/DeviceHealth.h"
 #include "../Core/FrameContext.h"
 
 namespace renderer
@@ -91,6 +92,8 @@ namespace renderer
         static DirectionalVolumetricLighting& Instance();
         void Configure(const std::wstring& basePath);
         void Reset(IDirect3DDevice9* device);
+        // Drops temporal history after a frame-stream break (Alt+Tab, minimise, loading).
+        void InvalidateHistory() { m_historyValid = false; }
         bool Render(IDirect3DDevice9* device, const FrameContext& frameContext,
                     IDirect3DSurface9* targetSurface, bool globalFogEnabled = true);
         VolumetricSettings& Settings() { return m_settings; }
@@ -129,6 +132,7 @@ namespace renderer
         ComPtr<IDirect3DSurface9> m_boundarySurface;
         uint32_t m_historyReadIndex = 0;
         bool m_historyValid = false;
+        RetryGate m_setupRetry;
         ComPtr<IDirect3DPixelShader9> m_depthShader;
         ComPtr<IDirect3DPixelShader9> m_integrateShader;
         ComPtr<IDirect3DPixelShader9> m_temporalShader;

@@ -376,6 +376,14 @@ void Reset(IDirect3DDevice9* d) {
     shadowCacheValid = shadowAnchorValid = false;
 }
 
+// A break in the presented frame stream (Alt+Tab, minimise, loading screen)
+// leaves temporal history describing a view the player no longer has. Drop it
+// without touching any GPU resource; the next frame rebuilds it from scratch.
+void InvalidateTemporalHistory() {
+    legacyTargets.historyValid = false;
+    renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
+}
+
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) {
     const HRESULT hr = renderer::DepthCapture::Instance().HookSetDepth(d, s);
     if (SUCCEEDED(hr) && !internal) nativeshadowdiag::OnSetDepth(s);
