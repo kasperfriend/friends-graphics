@@ -17,3 +17,9 @@
 - [x] Add local environment-light injection to surfaces and the atmospheric raymarch, with depth-derived normals, screen-space occlusion, water/UI exclusion, temporal-history invalidation, and a fail-closed DX9 resource path.
 - [ ] Populate the authoritative world-space WMO/M2 light manifest from placement exports; ambiguous emissive/model-local candidates remain in `MaterialCache/LocalLightReview.json` and are never auto-enabled.
 - [ ] Extend the local fog with location/weather/indoor profiles and native-shadow sampling before considering a full froxel atlas.
+
+## Sky
+
+- [x] Add a raymarched volumetric cloud deck integrated into the scene before the atmosphere compositor, sharing the existing noise atlas, sky-masked by depth, and coupled to detected weather. Runtime visual tuning remains.
+- [ ] Project the deck's transmittance onto the ground as moving cloud shadows, reusing the same slab and wind so the shadows match the clouds that cast them.
+- [ ] Give the deck location/weather profiles (overcast valleys, clear deserts) instead of one set of zone-tuned values.

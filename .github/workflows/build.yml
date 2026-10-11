@@ -1,16 +1,31 @@
 name: Build
 
+# Continuous integration for the proxy DLL. This workflow only builds and
+# checks the tree - publishing a GitHub Release is a separate, manual
+# workflow (.github/workflows/release.yml) so that pushing to main never
+# creates a release by itself.
 on:
   push:
     branches:
       - main
+      - 'arena/**'
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
+  # Called by the manual release workflow so a release always ships exactly
+  # the binaries this CI produced, from the same steps.
+  workflow_call:
+    inputs:
+      configurations:
+        description: JSON array of MSBuild configurations to build.
+        type: string
+        default: '["Debug","Release"]'
+      artifact-name:
+        description: Name of the uploaded Release package artifact.
+        type: string
+        default: ''
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -19,15 +34,17 @@ concurrency:
 jobs:
   build:
     name: Win32 ${{ matrix.configuration }}
-    runs-on: windows-2025-vs2026
-    timeout-minutes: 15
+    # windows-2025-vs2026 carries the VS 2026 (v145) toolset this solution
+    # targets. Forks or self-hosted setups can point CI at another image by
+    # defining the WINDOWS_RUNNER repository variable; the toolset is then
+    # detected below instead of being hard-coded.
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-2025-vs2026' }}
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
       matrix:
-        configuration:
-          - Debug
-          - Release
+        configuration: ${{ fromJSON(inputs.configurations || '["Debug","Release"]') }}
 
     steps:
       - name: Checkout
@@ -51,11 +68,25 @@ jobs:
           $msbuild = Join-Path $installPath "MSBuild\Current\Bin\MSBuild.exe"
           Write-Host "Using MSBuild: $msbuild"
 
+          # The solution asks for v145 (VS 2026). Fall back to the newest
+          # toolset the runner actually has so a different Windows image
+          # still produces a build instead of an unresolved-toolset error.
+          $toolsRoot = Join-Path $installPath "VC\Tools\MSVC"
+          $toolset = "v145"
+          if (Test-Path $toolsRoot) {
+            $versions = Get-ChildItem $toolsRoot -Directory | Sort-Object Name -Descending
+            Write-Host "Installed MSVC toolsets: $($versions.Name -join ', ')"
+            if (-not ($versions.Name | Where-Object { $_ -like "14.5*" })) {
+              $toolset = if ($versions.Name | Where-Object { $_ -like "14.4*" }) { "v143" } else { "v142" }
+            }
+          }
+          Write-Host "Using PlatformToolset: $toolset"
+
           & $msbuild "ModernWoWRenderer.sln" `
             /m `
             /p:Configuration="${{ matrix.configuration }}" `
             /p:Platform="Win32" `
-            /p:PlatformToolset="v145" `
+            /p:PlatformToolset="$toolset" `
             /verbosity:minimal
 
           if ($LASTEXITCODE -ne 0) {
@@ -107,41 +138,20 @@ jobs:
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
-          name: modern-wow-renderer-win32-${{ github.sha }}
+          name: ${{ inputs.artifact-name || format('modern-wow-renderer-win32-{0}', github.sha) }}
           path: package/
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish GitHub Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: windows-2025-vs2026
+  shaders:
+    name: Validate HLSL
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-2025-vs2026' }}
     timeout-minutes: 10
 
     steps:
-      - name: Download Release build
-        uses: actions/download-artifact@v4
-        with:
-          name: modern-wow-renderer-win32-${{ github.sha }}
-          path: package
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Create ZIP archive
+      - name: Compile embedded shaders with fxc
         shell: pwsh
-        run: |
-          $archive = "modern-wow-renderer-win32-${{ github.sha }}.zip"
-          Compress-Archive -Path "package\*" -DestinationPath $archive -CompressionLevel Optimal
-
-          if (-not (Test-Path -LiteralPath $archive)) {
-            throw "Release archive was not created: $archive"
-          }
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Modern WoW Renderer build ${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          make_latest: true
-          files: modern-wow-renderer-win32-${{ github.sha }}.zip
+        run: ./tools/ValidateShaders.ps1

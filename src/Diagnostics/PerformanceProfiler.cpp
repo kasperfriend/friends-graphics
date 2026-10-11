@@ -227,6 +227,7 @@ namespace renderer
             ss << "  AtmosphereTemporal GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereTemporal)) << " ms\n";
             ss << "  AtmosphereUpsample GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereUpsample)) << " ms\n";
             ss << "  AtmosphereComposite GPU       = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereComposite)) << " ms\n";
+            ss << "  VolumetricClouds GPU          = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::VolumetricClouds)) << " ms\n";
             ss << "  LegacyComposite GPU           = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::LegacyComposite)) << " ms\n";
             ss << "  Water GPU                     = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::Water)) << " ms\n";
             ss << "  TotalGpu                      = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::TotalGpu)) << " ms\n";

@@ -50,6 +50,20 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 - Local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
 - Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.
 
+### Volumetric clouds
+
+- A raymarched cloud deck replaces the flat sky: Perlin-Worley shapes placed by a weather map, lit by the tracked sun or moon, self-shadowed, and drifting with the wind.
+- The deck is a spherical shell, so it meets the horizon with a curve and can be flown into and above instead of being a slab pushed out of the camera's way.
+- Clouds are clipped by the scene rather than drawn only on sky pixels, so the layer is still there when you fly over it and a peak inside the deck is fogged by the cloud it stands in.
+- Distance hazes clouds out, the deck casts moving shadows on the world, and the layer is integrated into the scene before the atmosphere, so haze, the sun halo and god rays react to the clouds above them.
+- Coverage thickens automatically while native rain or snow is falling, and the slider runs from scattered puffs to a solid overcast lid.
+- Coverage, altitude, thickness, wind, haze, lighting and a four-step quality level are on the F7 menu and in `[VolumetricClouds]`. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
+
+![Volumetric clouds](Screenshots/volumetric-clouds.png)
+
+*Scattered, backlit broken, overcast and the deck from above - rendered by `tools/CloudPreview.cpp`, the CPU mirror
+of the cloud shader, at the shipped defaults.*
+
 ### Dynamic environment lighting
 
 - Trusted native point and spot lights can illuminate nearby world surfaces.
