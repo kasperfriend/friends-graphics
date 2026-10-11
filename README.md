@@ -61,6 +61,9 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 
 ![Volumetric clouds](Screenshots/volumetric-clouds.png)
 
+*Scattered, backlit broken, overcast and the deck from above - rendered by `tools/CloudPreview.cpp`, the CPU mirror
+of the cloud shader, at the shipped defaults.*
+
 ### Dynamic environment lighting
 
 - Trusted native point and spot lights can illuminate nearby world surfaces.
