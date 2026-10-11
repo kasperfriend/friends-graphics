@@ -20,9 +20,11 @@ approximation - inside a `ps_3_0` instruction budget.
   from independent integer-period Perlin bands (fronts and groups) multiplied by a masked Worley cell field. The
   periods are integers per axis because the field has to tile exactly over the 34 km weather tile - scaling a sample
   coordinate to stretch the fronts instead would seam the sky.
-- **Sky pixels only.** The march returns `transmittance = 1` for every pixel whose depth is below the sky threshold
-  (`0.9999`, the same constant the atmosphere's boundary pass uses), so the quarter-resolution buffer cannot bleed
-  across a silhouette.
+- **Clipped by the scene, not skipped on it.** The march reconstructs the distance to whatever the client already
+  drew and stops there. A sky-only pass - which is what this started as - deletes every cloud between the camera and
+  a surface: fly above the deck and you get terrain with cloud shadows on it and no clouds. It also keeps the common
+  case cheap, because a ground pixel thirty units away leaves the shell before it enters it and bails on the first
+  test. The composite pays for this with a depth-aware upsample (below).
 - **Before the atmosphere, not after.** The composite writes into the scene target and the scene copy is refreshed
   afterwards, so aerial perspective, the sun halo and the god-ray source mask all see the clouds. A deck in front of
   the sun dims its rays instead of letting them glow through it.
@@ -33,7 +35,7 @@ approximation - inside a `ps_3_0` instruction budget.
 | --- | --- | --- |
 | Shadow | 256² top-down | transmittance of the deck above each world point |
 | March | quarter (half on ULTRA) | `rgb` = in-scattered light, `a` = transmittance |
-| Composite | full | `lerp(scene, scene * transmittance + scattering, skyMask)` |
+| Composite | full | `scene * transmittance + scattering`, depth-aware upsample of the march |
 
 The march itself:
 
@@ -155,8 +157,10 @@ Three passes, all timed as `GpuPerfStage::VolumetricClouds`: a 256² shadow map,
 1920x1080 that is 480x270 rays) and one full-resolution composite.
 
 `tools/ValidateShaders.ps1` compiles every shader literal with `fxc` in CI and fails the build if one exceeds its
-budget. Measured on the CI runner against the 512-slot `ps_3_0` ceiling: **march 466**, shadow 116, composite 66
-(for scale, the atmosphere's integrate pass is 462).
+budget. Measured on the CI runner against the 512-slot `ps_3_0` ceiling: **march 458**, shadow 116, composite 112
+(for scale, the atmosphere's integrate pass is 462). The march keeps a tenth of the budget free on purpose: the
+shader is compiled at runtime by whatever `d3dx9` the player has, and it does not have to agree with CI's `fxc`
+about instruction selection.
 
 Two constraints shape the march code and are worth knowing before editing it:
 
@@ -165,6 +169,14 @@ Two constraints shape the march code and are worth knowing before editing it:
   to pay for aerial perspective.
 - `[unroll]` around anything that inlines the density sampler more than about twice fails with `X4505: maximum temp
   register index exceeded`. The light march is a real `[loop]`; `ps_3_0` allows four levels of nesting.
+
+## What it looks like
+
+![Volumetric clouds: scattered, broken and backlit, overcast, and the deck seen from above](../Screenshots/volumetric-clouds.png)
+
+Four frames from `tools/CloudPreview.cpp` at the shipped defaults: scattered cumulus at coverage 30, a backlit
+broken deck at 50, an overcast lid at 92, and the same sky seen from 3600 units up. All four are the same field and
+the same lighting - only the slider and the camera move.
 
 ## Tests
 
