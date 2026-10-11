@@ -424,7 +424,10 @@ struct Marcher
         for (int i = 0; i < c.steps && t < exitDistance; ++i)
         {
             if (transmittance < .01f) break;
-            const float stepLength = std::max(baseStep, t * c.stepGrowth);
+            // Clamped to what is left: an overshooting last step integrates
+            // cloud from behind the surface that stopped the march, which
+            // shows up as a bright fringe where terrain cuts into the deck.
+            const float stepLength = std::min(std::max(baseStep, t * c.stepGrowth), exitDistance - t);
             const V3 p = origin + dir * t;
             const float h = HeightFraction(p);
 
@@ -641,7 +644,9 @@ int main(int argc, char** argv)
         else if (a == "--no-jitter") o.jitter = false;
         else if (a == "--jitter") c.jitterAmount = ArgFloat(next()) * .01f;
         else if (a == "--coverage") c.coverage = ArgFloat(next()) * .01f;
-        else if (a == "--type") c.typeBias = ArgFloat(next()) * .01f;
+        // Halved exactly like the renderer maps CloudTypePercent, so a
+        // number given here means the same thing it means in the ini.
+        else if (a == "--type") c.typeBias = ArgFloat(next()) * .005f;
         else if (a == "--density") c.density = ArgFloat(next()) * .01f;
         else if (a == "--steps") c.steps = std::atoi(next());
         else if (a == "--base-step") c.baseStep = ArgFloat(next());

@@ -51,7 +51,7 @@ float4 shell:register(c7);          // x=inner radius, y=outer radius, z=1/thick
 float4 centre:register(c8);         // xyz=planet centre, w=camera region (0 inside, 1 below, 2 above)
 float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=aerial opacity
 float4 scales:register(c10);        // x=1/feature size, y=shape z scale, z=1/detail size, w=detail strength
-float4 motion:register(c11);        // xy=shape uv offset, z=1/weather size, w=unused
+float4 motion:register(c11);        // xy=shape uv offset, z=1/weather size, w=light reach in steps
 float4 motion2:register(c12);       // xy=weather uv offset, zw=shear (world units per height fraction)
 float4 stepping:register(c13);      // x=base step, y=step growth, z=coarse scale, w=jitter amount
 float4 lighting:register(c14);      // x=extinction, y=light absorption, z=direct gain, w=ambient gain
@@ -129,7 +129,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // A sky-only march deletes every cloud you are flying over - from above
  // the layer each downward ray ends on terrain - and stops a mountain top
  // inside the deck from being fogged by the cloud it is standing in.
- float sceneLimit=raw<depthRange.z?(projection.y/(rawDepth-projection.x))*viewLength:shell.w;
+ // The reciprocal is clamped away from the projection's pole: a far plane
+ // at infinity puts raw depth exactly on it, and the infinity that comes
+ // back turns into a NaN the moment it meets another one.
+ float sceneLimit=raw<depthRange.z?(projection.y/min(rawDepth-projection.x,-1e-6))*viewLength:shell.w;
 
  // Shell intersection. The planet centre sits directly under the camera, so
  // the quadratic collapses to a couple of multiplies.
@@ -190,7 +193,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 
  [loop] for(int i=0;i<160;i++) {
    if(i>=(int)depthRange.w||t>=exitDistance||transmittance<.01) break;
-   float stepLength=max(baseStep,t*stepping.y);
+   // Clamped to what is left: an overshooting last step integrates cloud
+   // from behind the surface that stopped the march, which shows up as a
+   // bright fringe exactly where terrain cuts into the deck.
+   float stepLength=min(max(baseStep,t*stepping.y),exitDistance-t);
    float3 p=cameraPos.xyz+ray*t;
    float h=HeightFraction(p);
    // One inlined copy of the field per iteration, not one per branch: the
@@ -220,7 +226,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
        [loop] for(int j=0;j<8;j++) {
          if(j>=(int)detailMotion.w) break;
          float last=saturate(j-detailMotion.w+2);
-         float3 q=p+lightDir*(detailMotion.z*lerp(j+.5,detailMotion.w*3,last));
+         float3 q=p+lightDir*(detailMotion.z*lerp(j+.5,motion.w,last));
          optical+=Density(q,HeightFraction(q),0)*lerp(1,3,last);
        }
        optical*=detailMotion.z*lighting.y;
@@ -310,7 +316,9 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float innerDisc=b*b-cc+shell.x*shell.x;
  float outerDisc=b*b-cc+shell.y*shell.y;
  if(outerDisc<0) return float4(1,1,1,1);
- float entry=-b+(innerDisc>0?sqrt(innerDisc):0);
+ // Clamped forward: a receiver inside or above the deck would otherwise
+ // start its march below itself and be shadowed by cloud that is under it.
+ float entry=max(-b+(innerDisc>0?sqrt(innerDisc):0),0);
  float stepLength=min(-b+sqrt(outerDisc)-entry,(shell.y-shell.x)*2.4)*.125;
  if(stepLength<=0) return float4(1,1,1,1);
  float optical=0;
@@ -350,9 +358,12 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
                     tex2D(depthMap,base+float2(0,lowTexel.y)).r,tex2D(depthMap,base+lowTexel).r);
  // Compare in linear view depth: raw depth-buffer values crowd into the
  // last fraction of their range at distance, where most of the sky is.
- float centreZ=projection.y/(linearRaw-projection.x);
+ // Both reciprocals are clamped away from the projection's pole, which a
+ // far plane at infinity sits exactly on: two infinities one subtraction
+ // apart are a NaN, and a NaN weight poisons the whole pixel.
+ float centreZ=projection.y/min(linearRaw-projection.x,-1e-6);
  float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
-              /(.002+abs(projection.y/(taps-projection.x)-centreZ)/max(centreZ,1));
+              /(.002+abs(projection.y/min(taps-projection.x,-1e-6)-centreZ)/max(centreZ,1));
  float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
               +tex2D(cloudMap,base+float2(0,lowTexel.y))*weight.z+tex2D(cloudMap,base+lowTexel)*weight.w)
               /max(dot(weight,1),1e-5);
@@ -360,23 +371,24 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
  float raw=linearRaw>=.99999?1:saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
  float sky=smoothstep(depthRange.z,1,raw);
- // Applied to every pixel, not just the sky: the march already stopped at
- // the depth buffer, so what is left in front of geometry belongs there.
- float3 result=scene.rgb*saturate(cloud.a)+max(cloud.rgb,0);
  // Reconstruct where this pixel is in the world and read the deck's
  // transmittance straight above it. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
  // are masked out by the (1 - sky) term instead.
- float z=projection.y/(linearRaw-projection.x);
- float3 v=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*z;
+ float3 v=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*centreZ;
  float2 world=cameraPos.xy+v.x*invView0.xy+v.y*invView1.xy+v.z*invView2.xy;
  float2 shadowUv=(world-area.xy)*area.z;
  float2 edge=abs(shadowUv-.5);
  // Fade the map out before its border instead of clamping, which would
  // smear the last texel across the whole distance.
  float inside=1-smoothstep(.40,.49,max(edge.x,edge.y));
- result*=lerp(1,tex2D(shadowMap,shadowUv).r,area.w*inside*(1-sky));
- return float4(result,scene.a);
+ // The shadow belongs to the surface, so it is applied to the surface -
+ // before the cloud in front of it is composited, not to the sum. Cloud
+ // between the eye and the ground is not standing in its own shadow.
+ float3 lit=scene.rgb*lerp(1,tex2D(shadowMap,shadowUv).r,area.w*inside*(1-sky));
+ // Applied to every pixel, not just the sky: the march already stopped at
+ // the depth buffer, so what is left in front of geometry belongs there.
+ return float4(lit*saturate(cloud.a)+max(cloud.rgb,0),scene.a);
 })HLSL";
 
 bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
@@ -755,7 +767,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                     settings.aerialPerspective};
  const float c10[4]={1.f/featureSize,std::max(settings.shapeAspect,.05f)/featureSize,
                      1.f/detailSize,settings.detailStrength};
- const float c11[4]={wrap(windX/featureSize),wrap(windY/featureSize),1.f/weatherSize,0.f};
+ // The light march spends its last iteration on a long reach sample; how
+ // long is a constant, not something to recompute per sample.
+ const float lightSteps=float(std::clamp(settings.lightSampleCount,1u,6u));
+ const float c11[4]={wrap(windX/featureSize),wrap(windY/featureSize),1.f/weatherSize,lightSteps*3.f};
  const float c12[4]={wrap(windX*.35f/weatherSize),wrap(windY*.35f/weatherSize),
                      std::cos(windRadians)*settings.windShear*featureSize,
                      std::sin(windRadians)*settings.windShear*featureSize};
@@ -828,8 +843,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;
   const float c19[4]={a,a*a,bContribution,bContribution*bContribution};
   const float c20[4]={wrap(windX*1.7f/detailSize),wrap(windY*1.7f/detailSize),
-                      std::max(thickness*.18f,1.f),
-                      float(std::clamp(settings.lightSampleCount,1u,6u)+1u)};
+                      std::max(thickness*.18f,1.f),lightSteps+1.f};
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);
   d->SetPixelShaderConstantF(2,inv[0],3);
   d->SetPixelShaderConstantF(5,c5,1);d->SetPixelShaderConstantF(6,c6,1);

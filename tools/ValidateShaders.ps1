@@ -42,11 +42,16 @@ $jobs = @(
 # ps_3_0 allows 512 instruction slots. The budgeted shaders are the ones
 # with a raymarch loop, where an innocent-looking edit can unroll past the
 # limit on a real driver long after it still compiles here.
+# The cloud march is held below the ceiling rather than at it: these
+# shaders are compiled at runtime by whatever d3dx9 the player has, and it
+# does not have to agree with this fxc about instruction selection. A
+# change that needs the last sixteen slots should have to say so here.
 $budgets = @{
-    'kLocalFogFieldSource' = 512
-    'kIntegrateSource'     = 512
-    'kCloudMarchSource'    = 512
-    'kCloudShadowSource'   = 512
+    'kLocalFogFieldSource'   = 512
+    'kIntegrateSource'       = 512
+    'kCloudMarchSource'      = 496
+    'kCloudShadowSource'     = 512
+    'kCloudCompositeSource'  = 512
 }
 
 # Workflow annotations: the run log is not always reachable (log retention,

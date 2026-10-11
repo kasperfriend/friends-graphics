@@ -64,12 +64,19 @@ jobs:
       - name: Resolve release identity
         id: identity
         shell: bash
+        # The inputs arrive through the environment, never interpolated into
+        # the script body: a tag with a quote in it would otherwise rewrite
+        # this shell command rather than name a release.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_NAME: ${{ inputs.name }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          tag="${{ inputs.tag }}"
+          tag="$INPUT_TAG"
           if [ -z "$tag" ]; then
-            tag="build-${{ github.run_number }}"
+            tag="build-$RUN_NUMBER"
           fi
-          name="${{ inputs.name }}"
+          name="$INPUT_NAME"
           if [ -z "$name" ]; then
             name="Modern WoW Renderer $tag"
           fi
@@ -80,12 +87,14 @@ jobs:
 
       - name: Create ZIP archive
         shell: bash
+        env:
+          ARCHIVE: ${{ steps.identity.outputs.archive }}
         run: |
           cd package
-          zip -r "../${{ steps.identity.outputs.archive }}" .
+          zip -r "../$ARCHIVE" .
           cd ..
-          test -f "${{ steps.identity.outputs.archive }}"
-          unzip -l "${{ steps.identity.outputs.archive }}"
+          test -f "$ARCHIVE"
+          unzip -l "$ARCHIVE"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
