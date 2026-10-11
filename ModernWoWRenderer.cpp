@@ -102,6 +102,9 @@ void SetAvailability(renderer::DeviceAvailability next)
 {
     if (next == g_availability) return;
     g_availability = next;
+    // Presents keep arriving while the device is lost, so the frame-gap check
+    // alone would not notice. History from either side of the transition is stale.
+    volume::InvalidateTemporalHistory();
     Log(next == renderer::DeviceAvailability::Lost
         ? "Direct3D device lost (Alt+Tab, mode change or driver reset): effects paused until it is restored."
         : "Direct3D device restored: effects resumed.");
