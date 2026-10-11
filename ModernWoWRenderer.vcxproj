@@ -33,6 +33,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClCompile Include="src\D3D9\CameraCapture.cpp" />
     <ClCompile Include="src\Diagnostics\PerformanceProfiler.cpp" />
     <ClCompile Include="src\Effects\DirectionalVolumetricLighting.cpp" />
+    <ClCompile Include="src\Effects\VolumetricClouds.cpp" />
     <ClCompile Include="src\Diagnostics\CelestialMemoryProbe.cpp" />
     <ClCompile Include="src\D3D9\CelestialTracker.cpp" />
     <ClCompile Include="src\Materials\MaterialCacheManager.cpp" />
@@ -64,6 +65,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\D3D9\CameraCapture.h" />
     <ClInclude Include="src\D3D9\ScopedRenderState.h" />
     <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
+    <ClInclude Include="src\Effects\VolumetricClouds.h" />
     <ClInclude Include="src\Effects\LocalLightingRenderer.h" />
     <ClInclude Include="src\Lighting\LocalLightManager.h" />
     <ClInclude Include="src\Diagnostics\CelestialMemoryProbe.h" />

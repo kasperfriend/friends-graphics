@@ -15,6 +15,7 @@
 #include "src/D3D9/ScopedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
+#include "src/Effects/VolumetricClouds.h"
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
@@ -26,6 +27,12 @@ using SetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*);
 using GetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9**);
 SetDepthFn setDepth=nullptr; GetDepthFn getDepth=nullptr;
 bool enabled=false,active=true,ready=false,composed=false,internal=false;
+bool cloudsEffectEnabled=true;
+// Pushed in by the host once per frame (ModernWoWRenderer.cpp) because the
+// weather layer is included after this header. A covered sky during native
+// rain/snow is a weather property, not a cloud-renderer property, so the
+// cloud pass only consumes the already-smoothed signal.
+float cloudWeatherCoverageBoost=0.f;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,cloudShadowsEffectEnabled=true,temporalShaftsEnabled=false;
 bool postProcessEffectEnabled=true;
 bool sunGlareEnabled=true;
@@ -318,7 +325,9 @@ void ReloadTuning() {
 
     if (!savedBasePath.empty()) {
         renderer::DirectionalVolumetricLighting::Instance().Configure(savedBasePath);
+        renderer::VolumetricClouds::Instance().Configure(savedBasePath);
     }
+    cloudsEffectEnabled = renderer::VolumetricClouds::Instance().Settings().enabled;
 }
 
 void Configure(const std::wstring& base) {
@@ -329,6 +338,7 @@ void Configure(const std::wstring& base) {
     celestialProbeLogPath = base + L"CelestialProbe.log";
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
+    renderer::VolumetricClouds::Instance().Configure(base);
     enabled = renderer::locationtuning::ReadInt(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
     ReloadTuning();
 }
@@ -350,6 +360,7 @@ void Reset(IDirect3DDevice9* d) {
     renderer::ShaderCache::Instance().Clear();
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DirectionalVolumetricLighting::Instance().Reset(d);
+    renderer::VolumetricClouds::Instance().Reset(d);
     renderer::GroundSurfaceCapture::Instance().Reset();
     renderer::PerformanceProfiler::Instance().Reset(d);
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
@@ -380,9 +391,10 @@ inline bool HasActiveEffects() {
         (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)));
     bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
     bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
+    bool hasClouds = (!shaftDebug && cloudsEffectEnabled && renderer::VolumetricClouds::Instance().Settings().enabled);
     bool hasPost = postProcessEffectEnabled &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasPost;
+    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost;
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
@@ -926,10 +938,40 @@ bool Composite(IDirect3DDevice9* d) {
 
         check(d->SetTexture(0, nullptr));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+        // This pass wrote straight into `target`, so the scene copy the
+        // passes below sample is now stale. The cloud composite re-publishes
+        // that copy across the whole screen, so refreshing it here is what
+        // keeps a re-enabled contact shadow from being erased again.
+        check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(1, depth.Get()));
         check(d->SetTexture(2, resources.noise.Get()));
         check(d->SetPixelShaderConstantF(0, constants[0], 14));
+    }
+
+    // Volumetric cloud deck, integrated into the SCENE rather than painted
+    // over the finished frame: it runs before local lighting, the
+    // atmosphere and the glare pass, and refreshes the scene copy those
+    // passes read. Aerial perspective, the sun halo and the god-ray source
+    // mask therefore all see the clouds - a deck in front of the sun dims
+    // its rays instead of glowing through them.
+    if (!shaftDebug && cloudsEffectEnabled) {
+        auto& clouds = renderer::VolumetricClouds::Instance();
+        clouds.Settings().weatherCoverageBoost =
+            std::clamp(cloudWeatherCoverageBoost * frameCtx.environment[renderer::Weather], 0.f, 1.f);
+        if (clouds.Render(d, frameCtx, target.Get())) {
+            // Everything downstream samples legacyTargets.scene, so the
+            // copy has to carry the clouds too.
+            check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
+            // VolumetricClouds restores the render target, viewport,
+            // shaders and constants it found, but the legacy passes below
+            // expect their own texture bindings to still be live.
+            check(d->SetPixelShader(legacyShaders.volume.Get()));
+            check(d->SetTexture(0, nullptr));
+            check(d->SetTexture(1, depth.Get()));
+            check(d->SetTexture(2, resources.noise.Get()));
+            check(d->SetPixelShaderConstantF(0, constants[0], 14));
+        }
     }
 
     // Local environment lights are accumulated before atmosphere so their

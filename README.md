@@ -50,6 +50,13 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 - Local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
 - Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.
 
+### Volumetric clouds
+
+- A raymarched cloud deck replaces the flat sky: lit by the tracked sun or moon, self-shadowed, and drifting with the wind.
+- The layer is integrated into the scene before the atmosphere, so haze, the sun halo and god rays react to the clouds above them.
+- Coverage thickens automatically while native rain or snow is falling.
+- Coverage, altitude, thickness, wind, lighting and a three-step quality level are on the F7 menu and in `[VolumetricClouds]`. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
+
 ### Dynamic environment lighting
 
 - Trusted native point and spot lights can illuminate nearby world surfaces.

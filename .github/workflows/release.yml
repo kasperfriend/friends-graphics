@@ -1,0 +1,100 @@
+name: Release
+
+# Manual release only: nothing here runs on push. Start it from
+# Actions -> Release -> "Run workflow", pick a tag and press the button.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create or reuse (for example v0.5.0). Leave empty for build-<run number>.'
+        type: string
+        required: false
+        default: ''
+      name:
+        description: 'Release title. Leave empty to reuse the tag name.'
+        type: string
+        required: false
+        default: ''
+      prerelease:
+        description: Mark the release as a pre-release.
+        type: boolean
+        required: false
+        default: false
+      draft:
+        description: Create the release as a draft (nothing is published until you confirm).
+        type: boolean
+        required: false
+        default: false
+      make_latest:
+        description: Mark this release as "Latest".
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Exactly the CI build, so a release can never ship binaries that were
+  # produced by different steps than the ones CI validates.
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+    with:
+      configurations: '["Release"]'
+      artifact-name: modern-wow-renderer-win32-release-${{ github.run_id }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download Release build
+        uses: actions/download-artifact@v4
+        with:
+          name: modern-wow-renderer-win32-release-${{ github.run_id }}
+          path: package
+
+      - name: Resolve release identity
+        id: identity
+        shell: bash
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="build-${{ github.run_number }}"
+          fi
+          name="${{ inputs.name }}"
+          if [ -z "$name" ]; then
+            name="Modern WoW Renderer $tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "archive=modern-wow-renderer-win32-$tag.zip" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag as \"$name\" from ${{ github.sha }}"
+
+      - name: Create ZIP archive
+        shell: bash
+        run: |
+          cd package
+          zip -r "../${{ steps.identity.outputs.archive }}" .
+          cd ..
+          test -f "${{ steps.identity.outputs.archive }}"
+          unzip -l "${{ steps.identity.outputs.archive }}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.identity.outputs.tag }}
+          name: ${{ steps.identity.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ inputs.make_latest }}
+          files: ${{ steps.identity.outputs.archive }}

@@ -13,6 +13,7 @@
 #include "../src/D3D9/TrackedRenderState.h"
 #include "../src/Effects/DirectionalVolumetricLighting.h"
 #include "../src/Effects/LocalLightingRenderer.h"
+#include "../src/Effects/VolumetricClouds.h"
 #include "../src/Effects/GroundSurfaceCapture.h"
 #include "../src/Lighting/LocalLightManager.h"
 #include "../src/D3D9/DepthCapture.h"
@@ -444,5 +445,79 @@ int main() try {
  Require(linkedRay(250,true,false)<15,"dense banks extinguish linked rays");
  Require(linkedRay(0,false,false)==128,"missing current fog preserves unlinked fallback");
  Require(linkedRay(0,true,true)==128,"shaft diagnostic mask bypasses fog coupling");
+ // --- Volumetric clouds -------------------------------------------------
+ // Same device, a fresh synthetic depth buffer: genuine sky (far plane) in
+ // the top half, solid geometry thirty units away in the bottom half. The
+ // uniform noise atlas makes the coverage remap exactly predictable, so
+ // these are value assertions, not "something changed" assertions.
+ auto& clouds=VolumetricClouds::Instance();auto& cloud=clouds.Settings();
+ cloud.enabled=true;cloud.quality=1;cloud.sampleCount=20;cloud.resolutionScale=.25f;
+ cloud.coverage=1.f;cloud.density=2.f;cloud.weatherCoverageBoost=0;cloud.debugMode=CloudDebugMode::None;
+ cloud.altitude=480;cloud.thickness=190;cloud.minClearance=140;cloud.featureSize=2600;
+ cloud.windSpeed=0;cloud.maxDistance=9000;cloud.horizonFade=.085f;
+ f.cameraPosition={0,0,0};f.sunDirectionWorld={0,0,1};f.directionalLightColor={0,0,0};
+ f.celestialIntensity=1;f.celestialIsMoon=false;f.daylightFactor=1;f.moonlightFactor=0;
+ f.viewport.MinZ=0;f.viewport.MaxZ=1;f.depthMaxZ=1;
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int y=0;y<128;++y)for(int x=0;x<128;++x)
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=y<64?1.f:f.projUnpack[0]+f.projUnpack[1]/30.f;
+  Check(depth->UnlockRect(0));
+ }
+ fill(scene.Get(),0xff202020);fill(noise.Get(),0xffb0b0b0);
+ // Clearing to a colour the scene never uses proves the composite really
+ // re-published the scene instead of the target happening to survive.
+ auto renderClouds=[&]{Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));
+  Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff123456,1,0));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));
+  Check(d->BeginScene());bool ok=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());return ok;};
+ Require(renderClouds(),"overcast cloud deck renders on the production device");
+ {
+  float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));
+  Require(!memcmp(sentinels,restored,sizeof(restored)),"cloud pass restores c0..c63");
+  D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));
+  Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"cloud pass restores the viewport");
+ }
+ DWORD overcastSky=pixel(64,20);
+ printf("clouds overcast sky=%08lx ground=%08lx\n",overcastSky,pixel(64,110));
+ Require(diff(overcastSky,0xff202020)>12,"overcast deck is visible against the sky");
+ Require(pixel(64,110)==0xff202020,"cloud composite leaves solid geometry byte-identical");
+ Require((overcastSky&255)>((overcastSky>>16)&255),"deck takes the environment ambient tint instead of a fixed white");
+ // Opacity, not brightness, is the honest density measurement: the
+ // diagnostic returns the integrated (1 - transmittance) directly.
+ cloud.debugMode=CloudDebugMode::Coverage;
+ cloud.density=.05f;renderClouds();const int sparseDeck=pixel(64,20)&255;
+ cloud.density=.3f;renderClouds();const int denseDeck=pixel(64,20)&255;
+ printf("clouds opacity sparse=%d dense=%d\n",sparseDeck,denseDeck);
+ Require(sparseDeck>8&&denseDeck>sparseDeck+40,"density drives the integrated opacity of the deck");
+ cloud.density=2.f;cloud.debugMode=CloudDebugMode::None;
+ // A field below the coverage threshold has to produce a mathematically
+ // clear sky, not a faint wash: the scene must come back untouched.
+ fill(noise.Get(),0xff404040);cloud.coverage=.42f;
+ Require(renderClouds()&&pixel(64,20)==0xff202020,"a noise field under the coverage threshold leaves the sky exactly as drawn");
+ fill(noise.Get(),0xff808080);cloud.coverage=.3f;
+ Require(renderClouds()&&diff(pixel(64,20),0xff202020)<=1,"mid field below the threshold stays clear");
+ cloud.weatherCoverageBoost=.4f;
+ Require(renderClouds()&&diff(pixel(64,20),0xff202020)>12,"native rain pushes coverage up through the weather boost");
+ Require(clouds.Settings().coverage==.3f,"the weather boost never mutates the configured coverage");
+ cloud.weatherCoverageBoost=0;
+ // Flying above the authored altitude must not leave the camera over the
+ // slab with an empty sky: the clearance clamp carries the deck upwards.
+ fill(noise.Get(),0xffb0b0b0);cloud.coverage=1.f;f.cameraPosition={0,0,4000};
+ Require(renderClouds()&&diff(pixel(64,20),0xff202020)>12,"minimum clearance keeps the deck above a camera flown past the authored altitude");
+ f.cameraPosition={0,0,0};
+ cloud.debugMode=CloudDebugMode::Coverage;
+ Require(renderClouds()&&(pixel(64,20)&255)>200&&pixel(64,110)==0xff202020,"coverage diagnostic paints the sky only");
+ cloud.debugMode=CloudDebugMode::None;
+ cloud.enabled=false;
+ Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff123456,1,0));
+ Check(d->BeginScene());bool cloudsOff=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());
+ Require(!cloudsOff&&pixel(64,20)==0xff123456,"disabled clouds draw nothing at all");
+ cloud.enabled=true;cloud.coverage=0;
+ Check(d->BeginScene());bool clearSky=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());
+ Require(!clearSky&&pixel(64,20)==0xff123456,"zero coverage skips the pass entirely");
+ cloud.coverage=.42f;cloud.density=1.f;clouds.Reset(d.Get());
+ Require(clouds.GetCloudTexture()==nullptr,"cloud reset releases the device resources");
+ Require(renderClouds()&&clouds.GetCloudTexture()!=nullptr,"the deck rebuilds itself after a device reset");
+ clouds.Reset(d.Get());
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}

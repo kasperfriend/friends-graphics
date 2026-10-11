@@ -35,6 +35,7 @@ namespace renderer
         AtmosphereTemporal,
         AtmosphereUpsample,
         AtmosphereComposite,
+        VolumetricClouds,
         LegacyComposite,
         Water,
         TotalGpu,
