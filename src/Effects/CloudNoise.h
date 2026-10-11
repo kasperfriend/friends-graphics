@@ -180,6 +180,62 @@ namespace renderer::cloudnoise
         return Lerp(Lerp(x00, x10, uy), Lerp(x01, x11, uy), uz);
     }
 
+    // Tileable 2D gradient noise with INDEPENDENT periods per axis. The
+    // weather map needs that: real cloud fields are stretched into streets
+    // along the wind, and scaling the sample coordinate instead of the
+    // period would break the wrap and put a seam in the sky every tile.
+    inline float Grad2(uint32_t h, float x, float y)
+    {
+        const float a = Unit(h) * 6.283185307f;
+        return std::cos(a) * x + std::sin(a) * y;
+    }
+
+    inline float Perlin2(float x, float y, int px, int py, uint32_t seed)
+    {
+        const float fx = x * px, fy = y * py;
+        const int ix = int(std::floor(fx)), iy = int(std::floor(fy));
+        const float tx = fx - ix, ty = fy - iy;
+        const float ux = Fade(tx), uy = Fade(ty);
+        float corner[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            const int dx = i & 1, dy = (i >> 1) & 1;
+            corner[i] = Grad2(HashCell(Wrap(ix + dx, px), Wrap(iy + dy, py), 0, seed), tx - dx, ty - dy);
+        }
+        return Lerp(Lerp(corner[0], corner[1], ux), Lerp(corner[2], corner[3], ux), uy);
+    }
+
+    inline float PerlinFBM2(float x, float y, int px, int py, int octaves, uint32_t seed)
+    {
+        float sum = 0.f, amplitude = .5f, total = 0.f;
+        for (int octave = 0; octave < octaves; ++octave)
+        {
+            sum += Perlin2(x, y, px << octave, py << octave, seed + uint32_t(octave) * 101U) * amplitude;
+            total += amplitude;
+            amplitude *= .5f;
+        }
+        return sum / total;  // about -1..1
+    }
+
+    // Tileable 2D Worley, returned INVERTED (1 at a feature point) so it
+    // reads as a field of discrete cloud cells rather than a web of cracks.
+    inline float Worley2(float x, float y, int cells, uint32_t seed)
+    {
+        const float fx = x * cells, fy = y * cells;
+        const int ix = int(std::floor(fx)), iy = int(std::floor(fy));
+        float best = 4.f;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const uint32_t h = HashCell(Wrap(ix + dx, cells), Wrap(iy + dy, cells), 0, seed);
+                const float px = float(ix + dx) + Unit(h);
+                const float py = float(iy + dy) + Unit(HashU32(h));
+                const float ex = fx - px, ey = fy - py;
+                best = std::min(best, ex * ex + ey * ey);
+            }
+        return Saturate(1.f - std::sqrt(best));
+    }
+
     inline float PerlinFBM(float x, float y, float z, int period, uint32_t seed)
     {
         float sum = 0.f, amplitude = .5f, total = 0.f;
@@ -333,20 +389,36 @@ namespace renderer::cloudnoise
             for (int x = 0; x < size; ++x)
             {
                 const float fx = (float(x) + .5f) / float(size);
-                // Large, slowly varying masses with a second, finer break-up
-                // so the clearings are not all the same size.
-                const float broad = PerlinFBM(fx, fy, .31f, 2, 9103U) * .5f + .5f;
-                const float medium = PerlinFBM(fx, fy, .67f, 5, 9209U) * .5f + .5f;
-                float coverage = Saturate(broad * .68f + medium * .32f);
-                coverage = Saturate(Remap(coverage, .32f, .82f, 0.f, 1.f));
+                // Scale is everything here. This map tiles over ~34 km of
+                // world and the march reaches ~26 km, so whatever frequency
+                // dominates IS the composition of the sky: at period 3 the
+                // whole visible dome is one mass parked on the horizon with
+                // empty blue overhead, which is exactly what a flight-sim
+                // sky looks like and exactly what a real one does not.
+                //
+                //   front   periods  3 x  4  ~ 11 x 8 km : where weather is
+                //   group   periods  7 x 11 ~  5 x 3 km  : groups of clouds
+                //   cell    14 cells         ~  2.4 km   : individual clouds
+                //
+                // The x/y periods differ on purpose: cloud streets line up
+                // downwind, and independent periods keep the map tileable,
+                // which scaling the sample coordinate would not.
+                const float front = PerlinFBM2(fx, fy, 3, 4, 3, 9103U) * .5f + .5f;
+                const float group = PerlinFBM2(fx, fy, 7, 11, 4, 9209U) * .5f + .5f;
+                const float cell = Worley2(fx, fy, 14, 9533U);
+                // Worley cells give discrete clouds, but only where the
+                // larger fields already want weather - otherwise the sky
+                // turns into evenly spaced polka dots.
+                float coverage = Saturate(front * .38f + group * .40f + cell * front * .34f);
+                coverage = Saturate(Remap(coverage, .26f, .72f, 0.f, 1.f));
 
-                // Cloud type: low flat stratus in the clearings, tall cumulus
+                // Cloud type: low flat stratus at the fringes, tall cumulus
                 // in the middle of a mass. Correlating it with coverage is
                 // what makes the sky read as weather instead of noise.
-                const float typeNoise = PerlinFBM(fx, fy, .13f, 3, 9311U) * .5f + .5f;
-                const float type = Saturate(typeNoise * .55f + coverage * .55f);
+                const float typeNoise = PerlinFBM2(fx, fy, 2, 3, 3, 9311U) * .5f + .5f;
+                const float type = Saturate(typeNoise * .5f + coverage * .62f);
 
-                const float variation = Saturate(PerlinFBM(fx, fy, .79f, 7, 9413U) * .5f + .5f);
+                const float variation = Saturate(PerlinFBM2(fx, fy, 9, 13, 4, 9413U) * .5f + .5f);
                 const float storm = Saturate(Remap(coverage * typeNoise, .35f, .8f, 0.f, 1.f));
 
                 uint8_t* texel = &image.rgba[(size_t(y) * size + x) * 4];

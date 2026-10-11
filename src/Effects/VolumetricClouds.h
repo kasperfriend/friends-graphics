@@ -44,15 +44,19 @@ namespace renderer
         // can be flown into and above instead of being a flat slab that has
         // to be pushed out of the camera's way.
         float planetRadius = 42000.f;
-        float baseAltitude = 900.f;
-        float thickness = 1400.f;
+        float baseAltitude = 850.f;
+        float thickness = 2150.f;
 
         // World size of one tile of each noise field, and how hard the
-        // high-frequency volume erodes the base shape.
-        float featureSize = 5200.f;
-        float detailSize = 380.f;
+        // high-frequency volume erodes the base shape. `shapeAspect` is how
+        // many times the base shape repeats vertically per horizontal tile:
+        // anything much above 1 squashes the billows into lozenges, which is
+        // what makes a cloud deck read as painted-on rather than solid.
+        float featureSize = 3000.f;
+        float shapeAspect = 1.3f;
+        float detailSize = 240.f;
         float weatherSize = 34000.f;
-        float detailStrength = .62f;
+        float detailStrength = .88f;
 
         // Wind advects the whole field; the shear offsets the tops downwind
         // with height, which is what gives a cumulus its leaning anvil.
@@ -63,16 +67,16 @@ namespace renderer
         // Lighting response. The light march is a Beer integral toward the
         // tracked disc; `multiScatter*` are the three octaves of Wrenninge's
         // approximation that keep thick clouds from going black.
-        float lightAbsorption = .75f;
-        float sunIntensity = 1.15f;
-        float ambientIntensity = .80f;
+        float lightAbsorption = .38f;
+        float sunIntensity = 1.30f;
+        float ambientIntensity = 1.05f;
         float moonStrength = .3f;
         float forwardScatter = .78f;
         float backwardScatter = .32f;
         float silverLining = .55f;
         float powder = .70f;
-        float multiScatterAttenuation = .45f;
-        float multiScatterContribution = .78f;
+        float multiScatterAttenuation = .60f;
+        float multiScatterContribution = .92f;
         float multiScatterEccentricity = .55f;
 
         // March shape: the step grows with distance because a 1400-unit-thick
@@ -84,6 +88,12 @@ namespace renderer
         float jitter = .25f;
         float horizonFade = .018f;
         float maxDistance = 26000.f;
+
+        // Aerial perspective: how much of the sky's own haze colour a cloud
+        // picks up over the draw distance. Distance has to wash a cloud out,
+        // or near and far clouds read as the same contrast and the deck
+        // looks like a backdrop painting.
+        float aerialPerspective = .60f;
 
         // Cloud shadows on the world below, rendered as a small top-down
         // transmittance map centred on the camera.

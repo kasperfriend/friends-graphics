@@ -49,7 +49,7 @@ float4 projection:register(c5);     // x=A, y=B (raw->view z), z=P00, w=P11
 float4 depthRange:register(c6);     // x=viewport MinZ, y=viewport depth range, z=sky threshold, w=march steps
 float4 shell:register(c7);          // x=inner radius, y=outer radius, z=1/thickness, w=max march distance
 float4 centre:register(c8);         // xyz=planet centre, w=camera region (0 inside, 1 below, 2 above)
-float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=unused
+float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=aerial opacity
 float4 scales:register(c10);        // x=1/feature size, y=shape z scale, z=1/detail size, w=detail strength
 float4 motion:register(c11);        // xy=shape uv offset, z=1/weather size, w=unused
 float4 motion2:register(c12);       // xy=weather uv offset, zw=shear (world units per height fraction)
@@ -61,6 +61,7 @@ float4 groundColor:register(c17);   // rgb=ground bounce ambient, w=horizon fade
 float4 lobe:register(c18);          // x=forward g, y=backward g, z=ms eccentricity, w=debug mode
 float4 octaves:register(c19);       // x=a^1, y=a^2 (extinction), z=b^1, w=b^2 (contribution)
 float4 detailMotion:register(c20);  // xy=detail uv offset, z=light step length, w=light steps
+float4 haze:register(c22);          // rgb=aerial perspective colour, w=1/fade distance
 
 // Analytic vertical profile per cloud type: this is what separates a flat
 // overcast lid from towering cumulus with flat bottoms and round tops.
@@ -97,7 +98,11 @@ float Density(float3 p,float h,float erosion) {
    float3 n=tex3Dlod(detailMap,float4((p.xy+motion2.zw*h)*scales.z+detailMotion.xy,p.z*scales.z,0)).rgb;
    // Wispy shreds at the base, cauliflower billows at the top.
    float dfbm=n.r*.625+n.g*.25+n.b*.125;
-   d=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*erosion)/max(1-erosion,1e-4));
+   // Erosion that fades out inside the core. Eroding uniformly either
+   // leaves the silhouette smooth or hollows the cloud out; real cumulus
+   // shred at the edges and stay solid in the middle.
+   float strength=erosion*(1-d*.7);
+   d=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*strength)/max(1-erosion,1e-4));
  }
  // More water higher up, modulated by the weather map's variation channel.
  return d*lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b)*lighting.x;
@@ -155,7 +160,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 
  // Phase depends only on the angle between the ray and the light, so all
  // three scattering octaves are evaluated once per pixel.
- float cosTheta=dot(ray,normalize(celestial.xyz));
+ float3 lightDir=normalize(celestial.xyz);
+ float cosTheta=dot(ray,lightDir);
  // Sharp forward peak for the silver lining plus a broad backward lobe so
  // the anti-solar side is not flat. Evaluated once: each deeper scattering
  // octave only relaxes it towards isotropic, which is both what the
@@ -172,6 +178,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float jitter=.5+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)*stepping.w;
  float t=entry+jitter*baseStep;
  float transmittance=1,direct=0,mode=-1;   // mode<0 marches coarse, >=0 counts empty steps
+ float depthSum=0;                        // transmittance-weighted distance
  float3 scattered=0;
 
  [loop] for(int i=0;i<160;i++) {
@@ -198,16 +205,18 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
        // Beer march toward the disc. A real loop, not [unroll]: inlined
        // copies of the field keep far too many intermediates alive at once
        // and blow past the 32 temp registers ps_3_0 has (fxc error X4505).
+       // The final iteration is the long reach sample - a tower far up the
+       // light path still has to cast a shadow - folded into the loop
+       // instead of being a second call site, because one more inlined copy
+       // of the density field costs about forty of the 512 slots.
        float optical=0;
-       [loop] for(int j=0;j<6;j++) {
+       [loop] for(int j=0;j<8;j++) {
          if(j>=(int)detailMotion.w) break;
-         float3 q=p+normalize(celestial.xyz)*(detailMotion.z*(j+.5));
-         optical+=Density(q,HeightFraction(q),0);
+         float last=saturate(j-detailMotion.w+2);
+         float3 q=p+lightDir*(detailMotion.z*lerp(j+.5,detailMotion.w*3,last));
+         optical+=Density(q,HeightFraction(q),0)*lerp(1,3,last);
        }
-       optical*=detailMotion.z;
-       // One long reach so a tower far up the light path still casts.
-       float3 reach=p+normalize(celestial.xyz)*(detailMotion.z*detailMotion.w*3);
-       optical=(optical+Density(reach,HeightFraction(reach),0)*detailMotion.z*3)*lighting.y;
+       optical*=detailMotion.z*lighting.y;
        // Three octaves with geometrically scaled extinction, contribution
        // and phase: single scattering alone renders thick cloud as slate.
        float energy=phase.x*exp(-optical)+octaves.z*phase.y*exp(-optical*octaves.x)
@@ -220,13 +229,26 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
        // Analytic in-scattering over the step: energy conserving, and
        // stable when the step length changes along the ray.
        float stepTransmittance=exp(-density*stepLength);
-       scattered+=lit*(transmittance*(1-stepTransmittance));
+       float deposited=transmittance*(1-stepTransmittance);
+       scattered+=lit*deposited;
+       // Where the light the eye receives actually came from. The weights
+       // sum to exactly 1-transmittance, so this costs one mad per sample.
+       depthSum+=t*deposited;
        direct+=energy*(1-stepTransmittance);
        transmittance*=stepTransmittance;
        t+=stepLength;
      }
    }
  }
+
+ // Aerial perspective, applied once to the integrated result rather than
+ // per sample: distance has to desaturate the radiance AND eat the
+ // silhouette, or every cloud reads as equally close no matter how far
+ // away it is.
+ float opacity=saturate(1-transmittance);
+ float aerial=1-exp(-(depthSum/max(opacity,1e-4))*haze.w);
+ scattered=lerp(scattered,haze.rgb*opacity,aerial);
+ transmittance=lerp(transmittance,1,aerial*window.w);
 
  scattered*=fade;
  transmittance=lerp(1,saturate(transmittance),fade);
@@ -350,7 +372,7 @@ constexpr float kBaseExtinction = .022f;
 
 constexpr uint32_t kShapeSize = 64, kDetailSize = 32, kWeatherSize = 512;
 constexpr uint32_t kCacheMagic = 0x46435743;  // 'CWCF'
-constexpr uint32_t kCacheVersion = 1;
+constexpr uint32_t kCacheVersion = 2;
 
 struct CacheHeader
 {
@@ -480,31 +502,33 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.density=std::clamp(read(L"DensityPercent",100),10,400)*.01f;
  m_settings.cloudType=std::clamp(read(L"CloudTypePercent",0),-100,100)*.01f;
  m_settings.planetRadius=float(std::clamp(read(L"PlanetRadius",42000),6000,400000));
- m_settings.baseAltitude=float(std::clamp(read(L"BaseAltitude",900),100,20000));
- m_settings.thickness=float(std::clamp(read(L"Thickness",1400),100,12000));
- m_settings.featureSize=float(std::clamp(read(L"FeatureSize",5200),600,40000));
- m_settings.detailSize=float(std::clamp(read(L"DetailSize",380),40,4000));
+ m_settings.baseAltitude=float(std::clamp(read(L"BaseAltitude",850),100,20000));
+ m_settings.thickness=float(std::clamp(read(L"Thickness",2150),100,12000));
+ m_settings.featureSize=float(std::clamp(read(L"FeatureSize",3000),600,40000));
+ m_settings.shapeAspect=std::clamp(read(L"ShapeAspectPercent",130),20,400)*.01f;
+ m_settings.detailSize=float(std::clamp(read(L"DetailSize",240),40,4000));
  m_settings.weatherSize=float(std::clamp(read(L"WeatherSize",34000),4000,400000));
- m_settings.detailStrength=std::clamp(read(L"DetailPercent",62),0,90)*.01f;
+ m_settings.detailStrength=std::clamp(read(L"DetailPercent",88),0,90)*.01f;
  m_settings.windSpeed=float(std::clamp(read(L"WindSpeed",26),0,400));
  m_settings.windAngle=float(std::clamp(read(L"WindAngle",25),-180,180));
  m_settings.windShear=std::clamp(read(L"WindShearPercent",22),0,200)*.01f;
- m_settings.lightAbsorption=std::clamp(read(L"AbsorptionPercent",75),5,400)*.01f;
- m_settings.sunIntensity=std::clamp(read(L"SunIntensityPercent",115),0,400)*.01f;
- m_settings.ambientIntensity=std::clamp(read(L"AmbientPercent",80),0,250)*.01f;
+ m_settings.lightAbsorption=std::clamp(read(L"AbsorptionPercent",38),5,400)*.01f;
+ m_settings.sunIntensity=std::clamp(read(L"SunIntensityPercent",130),0,400)*.01f;
+ m_settings.ambientIntensity=std::clamp(read(L"AmbientPercent",105),0,250)*.01f;
  m_settings.moonStrength=std::clamp(read(L"MoonStrengthPercent",30),0,150)*.01f;
  m_settings.forwardScatter=std::clamp(read(L"ForwardScatterPercent",78),0,92)*.01f;
  m_settings.backwardScatter=std::clamp(read(L"BackwardScatterPercent",32),0,92)*.01f;
  m_settings.silverLining=std::clamp(read(L"SilverLiningPercent",55),0,400)*.01f;
  m_settings.powder=std::clamp(read(L"PowderPercent",70),0,100)*.01f;
- m_settings.multiScatterAttenuation=std::clamp(read(L"MultiScatterAttenuationPercent",45),5,95)*.01f;
- m_settings.multiScatterContribution=std::clamp(read(L"MultiScatterContributionPercent",78),5,120)*.01f;
+ m_settings.multiScatterAttenuation=std::clamp(read(L"MultiScatterAttenuationPercent",60),5,95)*.01f;
+ m_settings.multiScatterContribution=std::clamp(read(L"MultiScatterContributionPercent",92),5,120)*.01f;
  m_settings.multiScatterEccentricity=std::clamp(read(L"MultiScatterEccentricityPercent",55),5,100)*.01f;
  m_settings.stepGrowth=std::clamp(read(L"StepGrowthPermille",10),0,200)*.001f;
  m_settings.coarseScale=float(std::clamp(read(L"CoarseStepScale",3),1,12));
  m_settings.jitter=std::clamp(read(L"JitterPercent",25),0,100)*.01f;
  m_settings.horizonFade=std::clamp(read(L"HorizonFadePermille",18),1,400)*.001f;
  m_settings.maxDistance=float(std::clamp(read(L"MaxDistance",26000),2000,200000));
+ m_settings.aerialPerspective=std::clamp(read(L"AerialPerspectivePercent",60),0,100)*.01f;
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",14000),2000,80000));
@@ -645,8 +669,13 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  auto wrap=[](float v){return v-std::floor(v);};
 
  const float coverage=std::clamp(settings.coverage,0.f,1.f);
- const float windowLow=1.f-coverage*1.6f;
- const float windowHigh=1.f-coverage*.4f;
+ // The slider slides a window along the weather map's equalised coverage
+ // channel. The high edge closes QUADRATICALLY so that the top of the
+ // slider is a genuine overcast lid: with a linear high edge the window
+ // still ends at .6 and half the sky keeps broken cloud no matter how far
+ // the player pushes it.
+ const float windowLow=1.f-coverage*1.5f;
+ const float windowHigh=1.f-coverage*coverage*1.05f;
 
  // Zone-authored fog colour doubles as the sky ambient so the deck belongs
  // to the same palette as the atmosphere below it.
@@ -695,14 +724,21 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float c1[4]={lightDir[0],lightDir[1],lightDir[2],directIntensity};
  const float c7[4]={innerRadius,outerRadius,1.f/thickness,settings.maxDistance};
  const float c8[4]={f.cameraPosition.x,f.cameraPosition.y,centreZ,region};
- const float c9[4]={windowLow,1.f/std::max(windowHigh-windowLow,1e-4f),settings.cloudType*.5f,0.f};
- const float c10[4]={1.f/featureSize,3.2f/featureSize,1.f/detailSize,settings.detailStrength};
+ const float c9[4]={windowLow,1.f/std::max(windowHigh-windowLow,1e-4f),settings.cloudType*.5f,
+                    settings.aerialPerspective};
+ const float c10[4]={1.f/featureSize,std::max(settings.shapeAspect,.05f)/featureSize,
+                     1.f/detailSize,settings.detailStrength};
  const float c11[4]={wrap(windX/featureSize),wrap(windY/featureSize),1.f/weatherSize,0.f};
  const float c12[4]={wrap(windX*.35f/weatherSize),wrap(windY*.35f/weatherSize),
                      std::cos(windRadians)*settings.windShear*featureSize,
                      std::sin(windRadians)*settings.windShear*featureSize};
+ // Less sky reaches the base of an overcast lid than the base of a lone
+ // cumulus, so the ambient term closes down as the deck fills in. Without
+ // it a full-coverage sky renders as a bright white ceiling.
+ const float ambientOcclusion=1.f-coverage*.45f;
  const float c14[4]={kBaseExtinction*settings.density,settings.lightAbsorption,
-                     settings.sunIntensity*directIntensity,settings.ambientIntensity*ambientLevel};
+                     settings.sunIntensity*directIntensity,
+                     settings.ambientIntensity*ambientLevel*ambientOcclusion};
 
  ScopedRenderState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
@@ -759,13 +795,14 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c16[4]={skyR*ambientLevel,skyG*ambientLevel,skyB*ambientLevel,settings.silverLining};
   // Ground bounce keeps the tuned relationship with whatever palette the
   // zone pushed: cooler, much darker, never a flat grey.
-  const float c17[4]={skyR*ambientLevel*.48f,skyG*ambientLevel*.39f,skyB*ambientLevel*.34f,settings.horizonFade};
+  const float c17[4]={skyR*ambientLevel*.62f,skyG*ambientLevel*.52f,skyB*ambientLevel*.45f,settings.horizonFade};
   const float c18[4]={settings.forwardScatter,settings.backwardScatter,settings.multiScatterEccentricity,
                       float(uint32_t(settings.debugMode))};
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;
   const float c19[4]={a,a*a,bContribution,bContribution*bContribution};
   const float c20[4]={wrap(windX*1.7f/detailSize),wrap(windY*1.7f/detailSize),
-                      std::max(thickness*.18f,1.f),float(std::clamp(settings.lightSampleCount,1u,6u))};
+                      std::max(thickness*.18f,1.f),
+                      float(std::clamp(settings.lightSampleCount,1u,6u)+1u)};
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);
   d->SetPixelShaderConstantF(2,inv[0],3);
   d->SetPixelShaderConstantF(5,c5,1);d->SetPixelShaderConstantF(6,c6,1);
@@ -775,7 +812,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);
+  // Aerial perspective colour: the zone's own sky, lifted toward white,
+  // so the haze belongs to the palette the atmosphere pass is already
+  // using instead of being a second opinion about what distance looks like.
+  const float c22[4]={(skyR+(1.f-skyR)*.28f)*ambientLevel,
+                      (skyG+(1.f-skyG)*.28f)*ambientLevel,
+                      (skyB+(1.f-skyB)*.28f)*ambientLevel,
+                      1.f/std::max(settings.maxDistance*.5f,1.f)};
   d->SetPixelShaderConstantF(19,c19,1);d->SetPixelShaderConstantF(20,c20,1);
+  d->SetPixelShaderConstantF(22,c22,1);
   DrawScreenQuad(d,m_lowWidth,m_lowHeight);
   for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);
  }

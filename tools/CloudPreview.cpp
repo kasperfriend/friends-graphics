@@ -107,22 +107,23 @@ struct CloudConfig
 {
     // Shell geometry, in world units (WoW world Z is up, ground near z = 0).
     float planetRadius = 42000.f;
-    float bottom = 900.f;
-    float top = 2300.f;
+    float bottom = 850.f;
+    float top = 3000.f;
     float maxDistance = 26000.f;
 
     // Field
     float coverage = .5f;          // user slider, biases the weather map
     float typeBias = 0.f;          // pushes stratus <-> cumulonimbus
-    float featureSize = 5200.f;    // world size of one shape-volume tile
-    float detailSize = 380.f;      // world size of one detail-volume tile
+    float featureSize = 3000.f;    // world size of one shape-volume tile
+    float shapeZScale = 1.3f;      // vertical tiling of the shape volume
+    float detailSize = 240.f;      // world size of one detail-volume tile
     float weatherSize = 34000.f;   // world size of one weather-map tile
-    float detailStrength = .62f;
+    float detailStrength = .88f;
     float extinction = .022f;      // per world unit at density 100 %
     float density = 1.f;
     float anvil = .18f;            // tops shear out with height
-    float coverageLow = 1.6f;      // weather-histogram window, low edge
-    float coverageHigh = .4f;      // ... and high edge
+    float coverageLow = 1.5f;      // weather-histogram window, low edge
+    float coverageHigh = 1.05f;    // ... and high edge (closes quadratically)
 
     // Wind
     float windSpeed = 24.f;
@@ -133,17 +134,25 @@ struct CloudConfig
     // Lighting
     V3 sunColor{ 1.f, .96f, .88f };
     V3 skyAmbient{ .42f, .56f, .80f };
-    V3 groundAmbient{ .20f, .22f, .27f };
-    float sunIntensity = 1.15f;
-    float ambientIntensity = .80f;
+    V3 groundAmbient{ .26f, .29f, .36f };
+    float sunIntensity = 1.30f;
+    float ambientIntensity = 1.05f;
     float forwardG = .78f;
     float backwardG = .32f;
     float silverIntensity = .55f;
     float powder = .70f;
-    float lightAbsorption = .75f;
-    float msAttenuation = .45f;    // a: extinction scale per octave
-    float msContribution = .78f;   // b: scattering scale per octave
+    float lightAbsorption = .38f;
+    float msAttenuation = .60f;    // a: extinction scale per octave
+    float msContribution = .92f;   // b: scattering scale per octave
     float msEccentricity = .55f;   // c: phase scale per octave
+
+    // Aerial perspective. Without it every cloud is equally contrasty no
+    // matter how far away it is, which is the single loudest tell that a
+    // sky is rendered rather than photographed: distance has to desaturate
+    // the radiance AND eat the silhouette.
+    V3 hazeColor{ .58f, .68f, .84f };
+    float aerialDistance = 13000.f;   // e-folding distance of that fade
+    float aerialOpacity = .60f;       // how much of the silhouette it eats
 
     // March. The step is a WORLD length, not a slice of the span: a ray
     // along the horizon crosses 25000 units of shell, and dividing that by
@@ -236,7 +245,10 @@ struct Marcher
         // sky gets any cloud at all, the high edge how solid the middle of a
         // mass becomes.
         const float cov = Saturate(c.coverage);
-        const float coverage = Saturate(Remap(w[0], 1.f - cov * c.coverageLow, 1.f - cov * c.coverageHigh, 0.f, 1.f));
+        // The high edge closes quadratically so the top of the slider is a
+        // genuine overcast lid rather than permanently broken cloud.
+        const float coverage = Saturate(Remap(w[0], 1.f - cov * c.coverageLow,
+                                              1.f - cov * cov * c.coverageHigh, 0.f, 1.f));
         if (coverage <= 0.f) return 0.f;
         const float type = Saturate(w[1] + c.typeBias);
 
@@ -251,7 +263,7 @@ struct Marcher
         r.shapeSampler.Sample(
             std::fmod((sheared.x + windX) / c.featureSize + 64.f, 1.f),
             std::fmod((sheared.y + windY) / c.featureSize + 64.f, 1.f),
-            std::fmod(sheared.z / c.featureSize * 3.2f + 64.f, 1.f), s);
+            std::fmod(sheared.z / c.featureSize * c.shapeZScale + 64.f, 1.f), s);
         const float fbm = s[1] * .625f + s[2] * .25f + s[3] * .125f;
         float base = Saturate(Remap(s[0], fbm - 1.f, 1.f, 0.f, 1.f));
         base *= gradient;
@@ -271,7 +283,11 @@ struct Marcher
             const float dfbm = d[0] * .625f + d[1] * .25f + d[2] * .125f;
             // Wispy shreds at the base, cauliflower billows at the top.
             const float modifier = Lerp(1.f - dfbm, dfbm, Saturate(h * 4.f));
-            density = Saturate(Remap(density, modifier * c.detailStrength, 1.f, 0.f, 1.f));
+            // Erosion that fades out inside the core. Eroding uniformly
+            // either leaves the silhouette smooth or hollows the cloud out;
+            // real cumulus shred at the edge and stay solid in the middle.
+            const float strength = c.detailStrength * (1.f - density * .7f);
+            density = Saturate(Remap(density, modifier * strength, 1.f, 0.f, 1.f));
         }
 
         // Density rises with height inside the cloud (more water up top) and
@@ -442,16 +458,31 @@ struct Marcher
             const V3 sun = c.sunColor * (c.sunIntensity * energy * powderTerm);
             // Sky above, dark ground below: the vertical ambient gradient is
             // most of what makes a cumulus read as three-dimensional.
-            const V3 ambient = Lerp3(c.groundAmbient, c.skyAmbient, std::pow(h, .7f)) * c.ambientIntensity;
+            // Less sky reaches the base of an overcast lid than the base of
+            // a lone cumulus. Without this a full-coverage sky renders as a
+            // bright white ceiling instead of a grey one.
+            const V3 ambient = Lerp3(c.groundAmbient, c.skyAmbient, std::pow(h, .7f)) *
+                               (c.ambientIntensity * (1.f - Saturate(c.coverage) * .45f));
             const float stepTransmittance = std::exp(-density * stepLength);
-            scattered += (sun + ambient) * (transmittance * (1.f - stepTransmittance));
-            if (depth == 0.f) depth = t;
+            const float deposited = transmittance * (1.f - stepTransmittance);
+            scattered += (sun + ambient) * deposited;
+            // Transmittance-weighted mean distance: where the light the eye
+            // receives actually came from. The sum of the weights is exactly
+            // 1 - transmittance, so it costs one multiply-add per sample.
+            depth += t * deposited;
             transmittance *= stepTransmittance;
             t += stepLength;
         }
 
+        // Aerial perspective, applied to the integrated result rather than
+        // per sample: one exponential instead of ninety-six.
+        const float lit = Saturate(1.f - transmittance);
+        depth = lit > 1e-4f ? depth / lit : entry;
+        const float aerial = 1.f - std::exp(-depth / std::max(c.aerialDistance, 1.f));
+        scattered = Lerp3(scattered, c.hazeColor * lit, aerial);
+        transmittance = Lerp(transmittance, 1.f, aerial * c.aerialOpacity);
+
         transmittance = Lerp(1.f, Saturate(transmittance), fade);
-        if (depth == 0.f) depth = entry;
         return scattered * fade;
     }
 
@@ -613,6 +644,7 @@ int main(int argc, char** argv)
         else if (a == "--bottom") c.bottom = ArgFloat(next());
         else if (a == "--top") c.top = ArgFloat(next());
         else if (a == "--feature-size") c.featureSize = ArgFloat(next());
+        else if (a == "--shape-z") c.shapeZScale = ArgFloat(next());
         else if (a == "--detail-size") c.detailSize = ArgFloat(next());
         else if (a == "--weather-size") c.weatherSize = ArgFloat(next());
         else if (a == "--detail-strength") c.detailStrength = ArgFloat(next()) * .01f;
@@ -629,6 +661,9 @@ int main(int argc, char** argv)
         else if (a == "--ms-attenuation") c.msAttenuation = ArgFloat(next()) * .01f;
         else if (a == "--ms-contribution") c.msContribution = ArgFloat(next()) * .01f;
         else if (a == "--max-distance") c.maxDistance = ArgFloat(next());
+        else if (a == "--aerial") c.aerialDistance = ArgFloat(next());
+        else if (a == "--aerial-opacity") c.aerialOpacity = ArgFloat(next()) * .01f;
+        else if (a == "--haze-color") { c.hazeColor.x = ArgFloat(next()); c.hazeColor.y = ArgFloat(next()); c.hazeColor.z = ArgFloat(next()); }
         else if (a == "--shape-size") o.shapeSize = std::atoi(next());
         else { std::printf("unknown option %s\n", a.c_str()); return 2; }
     }
