@@ -65,6 +65,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\D3D9\CameraCapture.h" />
     <ClInclude Include="src\D3D9\ScopedRenderState.h" />
     <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
+    <ClInclude Include="src\Effects\CloudNoise.h" />
     <ClInclude Include="src\Effects\VolumetricClouds.h" />
     <ClInclude Include="src\Effects\LocalLightingRenderer.h" />
     <ClInclude Include="src\Lighting\LocalLightManager.h" />

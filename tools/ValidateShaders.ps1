@@ -36,7 +36,7 @@ $jobs = @(
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
-    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudCompositeSource') }
+    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') }
 )
 
 # ps_3_0 allows 512 instruction slots. The budgeted shaders are the ones
@@ -46,6 +46,7 @@ $budgets = @{
     'kLocalFogFieldSource' = 512
     'kIntegrateSource'     = 512
     'kCloudMarchSource'    = 512
+    'kCloudShadowSource'   = 512
 }
 
 # Workflow annotations: the run log is not always reachable (log retention,

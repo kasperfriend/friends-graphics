@@ -57,19 +57,22 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"WeatherVisuals",L"Mode","WEATHER HINT (0=AUTO 1=RAIN 2=SNOW)",0,2,1,0},
  {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","WEATHER STRENGTH",25,200,5,100},
 
- // Raymarched cloud deck in the sky. It shares this column with the
+ // Raymarched volumetric cloud deck. It shares this column with the
  // weather controls because a covered sky and active precipitation are
- // the same mood; CLOUD DETAIL and CLOUD AMBIENT stay ini-only.
+ // the same mood; the shape, scattering and multiple-scattering knobs
+ // stay ini-only.
  {KIND_HEADER,nullptr,nullptr,"--- VOLUMETRIC CLOUDS ---",0,0,0,0},
  {KIND_TOGGLE,L"VolumetricClouds",L"Enabled","CLOUDS",0,1,1,1},
- {KIND_SLIDER,L"VolumetricClouds",L"CoveragePercent","CLOUD COVERAGE",0,100,2,42},
+ {KIND_SLIDER,L"VolumetricClouds",L"CoveragePercent","CLOUD COVERAGE",0,100,2,50},
  {KIND_SLIDER,L"VolumetricClouds",L"DensityPercent","CLOUD DENSITY",10,400,5,100},
- {KIND_SLIDER,L"VolumetricClouds",L"Altitude","CLOUD HEIGHT",120,2000,20,480},
- {KIND_SLIDER,L"VolumetricClouds",L"Thickness","CLOUD THICKNESS",40,900,10,190},
- {KIND_SLIDER,L"VolumetricClouds",L"FeatureSize","CLOUD SIZE",400,12000,100,2600},
- {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD WIND",0,120,2,11},
- {KIND_SLIDER,L"VolumetricClouds",L"SunIntensityPercent","CLOUD SUNLIGHT",0,400,5,130},
- {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD QUALITY (0 LOW 1 BAL 2 HIGH)",0,2,1,1},
+ {KIND_SLIDER,L"VolumetricClouds",L"CloudTypePercent","CLOUD TYPE (-100 FLAT 100 TOWERING)",-100,100,5,0},
+ {KIND_SLIDER,L"VolumetricClouds",L"BaseAltitude","CLOUD HEIGHT",100,20000,50,900},
+ {KIND_SLIDER,L"VolumetricClouds",L"Thickness","CLOUD THICKNESS",100,12000,50,1400},
+ {KIND_SLIDER,L"VolumetricClouds",L"FeatureSize","CLOUD SIZE",600,40000,200,5200},
+ {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD WIND",0,400,5,26},
+ {KIND_SLIDER,L"VolumetricClouds",L"SunIntensityPercent","CLOUD SUNLIGHT",0,400,5,115},
+ {KIND_SLIDER,L"VolumetricClouds",L"GroundShadowPercent","CLOUD SHADOWS",0,100,5,55},
+ {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD QUALITY (0 LOW 3 ULTRA)",0,3,1,2},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
