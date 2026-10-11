@@ -419,18 +419,31 @@ namespace renderer::cloudnoise
                 const float type = Saturate(typeNoise * .5f + coverage * .62f);
 
                 const float variation = Saturate(PerlinFBM2(fx, fy, 9, 13, 4, 9413U) * .5f + .5f);
-                const float storm = Saturate(Remap(coverage * typeNoise, .35f, .8f, 0.f, 1.f));
 
                 uint8_t* texel = &image.rgba[(size_t(y) * size + x) * 4];
                 texel[0] = detail::ToByte(coverage);
                 texel[1] = detail::ToByte(type);
                 texel[2] = detail::ToByte(variation);
-                texel[3] = detail::ToByte(storm);
             }
         });
         detail::StretchChannel(image.rgba, 0, .02f, .98f);
         detail::StretchChannel(image.rgba, 1, .02f, .98f);
         detail::StretchChannel(image.rgba, 2, .05f, .95f);
+
+        // The storm mask is the deep core of a tall mass: both coverage and
+        // type high at once. It has to be built from the EQUALISED channels,
+        // after the stretch - computed from the raw fields it never reached
+        // the top of its range at all, which is how it spent its first
+        // version as a channel of zeroes.
+        detail::ParallelFor(0, size, [&](int y) {
+            for (int x = 0; x < size; ++x)
+            {
+                uint8_t* texel = &image.rgba[(size_t(y) * size + x) * 4];
+                const float cover = float(texel[0]) * (1.f / 255.f);
+                const float type = float(texel[1]) * (1.f / 255.f);
+                texel[3] = detail::ToByte(Saturate(Remap(cover * type, .34f, .72f, 0.f, 1.f)));
+            }
+        });
         return image;
     }
 }

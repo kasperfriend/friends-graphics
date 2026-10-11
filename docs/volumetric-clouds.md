@@ -16,8 +16,11 @@ approximation - inside a `ps_3_0` instruction budget.
   512² RGBA weather map are built on the CPU from fixed seeds the first time the renderer starts and cached next to
   the dll as `CloudFields.cache`. Fixed seeds mean every player sees the same sky; the cache means the cost is paid
   once rather than every launch. A cache written by an older build is rejected by its version field and rebuilt.
-- **The weather map decides where clouds are at all.** Coverage, cloud type, a variation band and a storm mask come
-  from independent integer-period Perlin bands (fronts and groups) multiplied by a masked Worley cell field. The
+- **The weather map decides where clouds are at all.** Coverage (R), cloud type (G) and a variation band (B) come
+  from independent integer-period Perlin bands (fronts and groups) multiplied by a masked Worley cell field, each
+  histogram-equalised so the coverage slider has a predictable response. The storm mask (A) is built afterwards from
+  the equalised channels - coverage and type high at once, the deep core of a tall mass - and is reserved: nothing
+  samples it yet. The
   periods are integers per axis because the field has to tile exactly over the 34 km weather tile - scaling a sample
   coordinate to stretch the fronts instead would seam the sky.
 - **Clipped by the scene, not skipped on it.** The march reconstructs the distance to whatever the client already
@@ -119,7 +122,7 @@ the F7 menu in the first column.
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
 | `AmbientPercent` | 105 | Sky ambient contribution, tinted by the zone fog colour. |
 | `MoonStrengthPercent` | 30 | Direct contribution at night relative to daylight. |
-| `MultiScatterAttenuationPercent` / `ContributionPercent` / `EccentricityPercent` | 60 / 92 / 55 | The three octave scalars. |
+| `MultiScatterAttenuationPercent` / `MultiScatterContributionPercent` / `MultiScatterEccentricityPercent` | 60 / 92 / 55 | The three octave scalars. |
 | `ForwardScatterPercent` / `BackwardScatterPercent` | 78 / 32 | The two phase lobes. |
 | `SilverLiningPercent` | 55 | Bright rim on a backlit edge. |
 | `PowderPercent` | 70 | Dark edge where a cloud faces the light. |
@@ -158,9 +161,9 @@ Three passes, all timed as `GpuPerfStage::VolumetricClouds`: a 256² shadow map,
 
 `tools/ValidateShaders.ps1` compiles every shader literal with `fxc` in CI and fails the build if one exceeds its
 budget. Measured on the CI runner against the 512-slot `ps_3_0` ceiling: **march 458**, shadow 116, composite 112
-(for scale, the atmosphere's integrate pass is 462). The march keeps a tenth of the budget free on purpose: the
-shader is compiled at runtime by whatever `d3dx9` the player has, and it does not have to agree with CI's `fxc`
-about instruction selection.
+(for scale, the atmosphere's integrate pass is 462). The march keeps a tenth of the budget free on purpose, and CI holds it to
+496: these shaders are compiled at runtime by whatever `d3dcompiler_47.dll` the player's Windows ships, which does
+not have to agree with the CI runner's `fxc` about instruction selection.
 
 Two constraints shape the march code and are worth knowing before editing it:
 

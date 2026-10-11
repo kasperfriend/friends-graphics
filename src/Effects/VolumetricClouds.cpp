@@ -411,7 +411,7 @@ constexpr float kBaseExtinction = .022f;
 
 constexpr uint32_t kShapeSize = 64, kDetailSize = 32, kWeatherSize = 512;
 constexpr uint32_t kCacheMagic = 0x46435743;  // 'CWCF'
-constexpr uint32_t kCacheVersion = 2;
+constexpr uint32_t kCacheVersion = 3;
 
 struct CacheHeader
 {
@@ -581,6 +581,8 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  m_cloudSurface.Reset();m_cloudTexture.Reset();
  m_shadowSurface.Reset();m_shadowTexture.Reset();
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
+ // A new device (or a resize, which is rare) is worth one more attempt.
+ m_shadersFailed=false;
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_shadowSize=0;
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
  // an alt-tab does not pay for regenerating them. Only a different device
@@ -595,9 +597,23 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
 bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
 {
  if(m_marchShader&&m_compositeShader&&m_shadowShader)return true;
- return Compile(d,kCloudMarchSource,m_marchShader.GetAddressOf())&&
-        Compile(d,kCloudCompositeSource,m_compositeShader.GetAddressOf())&&
-        Compile(d,kCloudShadowSource,m_shadowShader.GetAddressOf());
+ // Compiling a 460-slot ps_3_0 shader costs tens of milliseconds. Without
+ // remembering the failure, a driver that rejects the march would be asked
+ // to reject it again on every single frame - turning "this machine has no
+ // clouds" into "this machine has no frames". The fields cache their own
+ // failure for the same reason.
+ if(m_shadersFailed)return false;
+ if(Compile(d,kCloudMarchSource,m_marchShader.GetAddressOf())&&
+    Compile(d,kCloudCompositeSource,m_compositeShader.GetAddressOf())&&
+    Compile(d,kCloudShadowSource,m_shadowShader.GetAddressOf()))return true;
+ m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
+ m_shadersFailed=true;
+ if(!m_logPath.empty())
+ {
+  std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
+  out<<"clouds: pixel shader compilation failed on this device; the deck is off\n";
+ }
+ return false;
 }
 
 bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)

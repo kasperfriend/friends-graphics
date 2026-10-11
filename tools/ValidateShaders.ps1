@@ -43,9 +43,11 @@ $jobs = @(
 # with a raymarch loop, where an innocent-looking edit can unroll past the
 # limit on a real driver long after it still compiles here.
 # The cloud march is held below the ceiling rather than at it: these
-# shaders are compiled at runtime by whatever d3dx9 the player has, and it
-# does not have to agree with this fxc about instruction selection. A
-# change that needs the last sixteen slots should have to say so here.
+# shaders are compiled at runtime by whatever d3dcompiler the player's
+# Windows ships, which does not have to agree with this runner's fxc about
+# instruction selection. A change that needs the last sixteen slots should
+# have to say so here, in a diff, rather than discover it on a player's
+# machine.
 $budgets = @{
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
