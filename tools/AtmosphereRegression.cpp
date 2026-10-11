@@ -517,6 +517,23 @@ int main() try {
  cloud.coverage=1.f;
  f.cameraPosition={0,0,1500};
  Require(renderClouds()&&diff(pixel(64,20),0xff202020)>12,"a camera inside the deck still integrates the cloud around it");
+ // The march is clipped by the depth buffer, not skipped on it: cloud
+ // between the eye and a surface is as real as cloud against the sky, and
+ // a sky-only pass deletes the whole deck the moment you fly above it.
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int y=64;y<128;++y)for(int x=0;x<128;++x)
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=f.projUnpack[0]+f.projUnpack[1]/800.f;
+  Check(depth->UnlockRect(0));
+ }
+ Require(renderClouds()&&diff(pixel(64,110),0xff202020)>12,"cloud in front of distant geometry is composited over it");
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int y=64;y<128;++y)for(int x=0;x<128;++x)
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=f.projUnpack[0]+f.projUnpack[1]/30.f;
+  Check(depth->UnlockRect(0));
+ }
+ Require(renderClouds()&&pixel(64,110)==0xff202020,"a surface thirty units away is still in front of the deck");
  f.cameraPosition={0,0,9000};
  Require(renderClouds()&&pixel(64,20)==0xff202020,"above the deck the sky overhead is genuinely empty");
  f.cameraPosition={0,0,0};

@@ -1,22 +1,28 @@
 # Volumetric clouds
 
 A raymarched cloud deck for the sky, integrated into the scene colour before the atmosphere compositor rather than
-painted over the finished frame.
+painted over the finished frame. The field follows the Nubis/Horizon recipe - a Perlin-Worley base shape eroded by a
+Worley detail volume, placed by a weather map, lit with a dual-lobe phase function and a multiple-scattering
+approximation - inside a `ps_3_0` instruction budget.
 
 ## Why it is built this way
 
-- **One world-space slab, not a dome.** The deck is an absolute band in world space (WoW world Z is up) between
-  `Altitude` and `Altitude + Thickness`. A camera-relative dome slides with the player and makes flight feel like the
-  sky is running away; an absolute slab stays where it was authored. The band is still clamped to at least
-  `MinimumClearance` above the camera, so a mountain top or a flying mount can never end up inside or above the layer,
-  where a sky-only pass has nothing sensible to show.
-- **No 3D volume texture.** Density comes from the same tiling 128x128 value-noise atlas the atmosphere already
-  creates (`EnsureNoise` in `VolumeIntegration.h`). Two bilinear slices offset by `(.173, .317)` and lerped on a
-  smoothstepped fraction give a cheap 3D field. DX9-class hardware is not guaranteed to have the bandwidth for a real
-  volume texture, and this costs no extra VRAM at all.
+- **A spherical shell, not a slab.** The deck lies between `BaseAltitude` and `BaseAltitude + Thickness` on a shell
+  of radius `PlanetRadius` (42000 units, about 2.5x the real Earth-to-WoW scale ratio) centred under the camera. A
+  flat slab either ends in a visible straight edge or has to be pushed out of the way when the player flies; a shell
+  meets the horizon with a curve and can be flown into and above. The shader handles three camera regions explicitly
+  (below the deck, inside it, above it), so looking down at the tops from a flying mount works.
+- **Real 3D noise, generated once.** A 64³ RGBA Perlin-Worley shape volume, a 32³ RGB Worley detail volume and a
+  512² RGBA weather map are built on the CPU from fixed seeds the first time the renderer starts and cached next to
+  the dll as `CloudFields.cache`. Fixed seeds mean every player sees the same sky; the cache means the cost is paid
+  once rather than every launch. A cache written by an older build is rejected by its version field and rebuilt.
+- **The weather map decides where clouds are at all.** Coverage, cloud type, a variation band and a storm mask come
+  from independent integer-period Perlin bands (fronts and groups) multiplied by a masked Worley cell field. The
+  periods are integers per axis because the field has to tile exactly over the 34 km weather tile - scaling a sample
+  coordinate to stretch the fronts instead would seam the sky.
 - **Sky pixels only.** The march returns `transmittance = 1` for every pixel whose depth is below the sky threshold
-  (`0.9999`, the same constant the atmosphere's boundary pass uses). Everything the client already drew keeps the
-  scene exactly, so the quarter-resolution buffer cannot bleed across a silhouette.
+  (`0.9999`, the same constant the atmosphere's boundary pass uses), so the quarter-resolution buffer cannot bleed
+  across a silhouette.
 - **Before the atmosphere, not after.** The composite writes into the scene target and the scene copy is refreshed
   afterwards, so aerial perspective, the sun halo and the god-ray source mask all see the clouds. A deck in front of
   the sun dims its rays instead of letting them glow through it.
@@ -25,89 +31,140 @@ painted over the finished frame.
 
 | Pass | Resolution | Output |
 | --- | --- | --- |
+| Shadow | 256² top-down | transmittance of the deck above each world point |
 | March | quarter (half on ULTRA) | `rgb` = in-scattered light, `a` = transmittance |
 | Composite | full | `lerp(scene, scene * transmittance + scattering, skyMask)` |
 
 The march itself:
 
-1. Reconstruct the world ray from `projUnpack` and the inverse view rows.
-2. Reject pixels below the horizon (`smoothstep(0, HorizonFadePermille/1000, ray.z)`) and fade out rays whose slab
-   entry approaches `MaxDistance`, so the deck never ends in a straight edge.
-3. Intersect the slab, jitter the first step with an interleaved-gradient offset derived from `VPOS` (fixed in
-   screen space, never a frame counter - the bilinear upsample then averages neighbouring phases instead of
-   flickering).
-4. Step through the slab (14/20/28 samples, hard-clamped to 32). At each sample with density, take four fixed steps
-   towards the sun or moon on the cheap base shape for self-shadowing, apply Henyey-Greenstein forward scattering plus
-   an isotropic floor, a powder term for the bright rim, and a height-dependent ambient from the zone's own fog
-   colour. In-scattering is integrated analytically over the step, so changing the step length (a grazing ray crosses
-   far more slab than a vertical one) does not change the brightness.
-5. Break out as soon as transmittance drops below `0.012`.
+1. Reconstruct the world ray from `projUnpack` and the inverse view rows, and intersect the two shell radii for the
+   camera's region.
+2. Fade grazing rays near the horizon and fade the far end of the march, so neither the shell nor the march limit
+   ends in a hard edge.
+3. Jitter the first step with an interleaved-gradient offset derived from `VPOS` - fixed in screen space, never a
+   frame counter, so the bilinear upsample averages neighbouring phases instead of flickering.
+4. March with a **step tied to world length that grows with distance**, never the span divided by a step count: the
+   shell is 2150 units thick but 25000 units long near the horizon, and dividing the span is what turns detail into
+   putty. Empty space is crossed with strides three times longer; the march steps back and integrates properly as
+   soon as it hits density, and returns to striding after seven empty samples.
+5. At each sample with density: a six-step Beer march toward the sun or moon whose last step is a long reach sample
+   (a tower far up the light path still has to cast), three scattering octaves with geometrically scaled extinction,
+   contribution and phase, a powder term, and a vertical ambient gradient from the zone's own fog colour.
+6. Accumulate a transmittance-weighted mean distance alongside the radiance, and apply aerial perspective once to
+   the integrated result.
 
-## Coverage mapping
+## Field shape
 
-The coverage slider is mapped across the **measured** distribution of the noise field, not across `0..1`. For the
-shipped atlas the two-octave mix has p2 = .27, p25 = .40, p50 = .46, p75 = .52, p98 = .64, so a naive
-`field > 1 - coverage` test hides the entire usable range between slider 0.55 and 0.70. The density threshold is
-`lerp(.70, .20, coverage)` with a `.14` soft edge instead.
+Density at a point is
 
-Measured response of the shipped build (fraction of above-horizon pixels with transmittance < 0.9, offline
-simulation of the exact shader math over a 160x90 ray grid):
+```
+base    = Remap(shape.r, (shape.g*.625 + shape.b*.25 + shape.a*.125) - 1, 1)   // Perlin-Worley
+profile = analytic vertical gradient for the cloud type at this point
+d       = Remap(base * profile, 1 - coverage, 1) * coverage
+d       = Remap(d, detailFbm * strength * (1 - d*.7), 1)                       // erosion
+```
 
-| CoveragePercent | Sky covered | Mean transmittance | Mean optical depth |
-| --- | --- | --- | --- |
-| 0 | 0.0 % | 1.00 | 0.00 |
-| 15 | 1.5 % | 0.99 | 0.01 |
-| 30 | 17.8 % | 0.91 | 0.21 |
-| 42 (default) | 46.6 % | 0.66 | 0.98 |
-| 60 | 82.4 % | 0.32 | 2.66 |
-| 80 | 95.1 % | 0.08 | 4.11 |
-| 100 | 95.2 % | 0.06 | 4.43 |
+Three details matter more than they look:
 
-`DensityPercent` scales extinction per world unit around a base of `0.022` (`kBaseExtinction`), which is an optical
-depth of about 4 across the default 190-unit deck - thick enough to be opaque at the centre of a cloud, thin enough
-that the edges stay translucent.
+- **`ShapeAspectPercent` is how many times the base volume repeats vertically per horizontal tile.** It shipped at
+  320 in the first build, which made vertical features three times smaller than horizontal ones and flattened every
+  cloud into a lozenge. 130 gives billows that are about as tall as they are wide.
+- **Erosion fades inside the core** (`* (1 - d*.7)`). Eroding uniformly either leaves the silhouette smooth or
+  hollows the cloud out. Raising `DetailPercent` towards 1 does not produce wisps either - the `Remap` normalisation
+  divides by `1 - strength`, so it just hardens edges into binary cut-outs.
+- **The coverage window closes quadratically at the top.** The slider slides a window `[1 - c*1.5, 1 - c²*1.05]`
+  along the weather map's equalised coverage channel. With a linear high edge the window still ends at 0.6 and half
+  the sky keeps broken cloud no matter how far the slider is pushed, so overcast was unreachable.
+
+## Lighting
+
+| Term | Role |
+| --- | --- |
+| Dual-lobe Henyey-Greenstein | `lerp(HG(g=.78), HG(g=-.32), .35)` - a forward peak for the silver lining and a broad backward lobe so the anti-solar side is not flat |
+| Silver lining | `SilverLiningPercent * pow(saturate(cosTheta), 24)` on top of the phase |
+| Multiple scattering | Wrenninge's three octaves: extinction `a^n`, contribution `b^n`, phase relaxed toward isotropic by `c^n` |
+| Powder | `lerp(1, 1-exp(-d*18), powder * sun-facing)` - the dark edge pure Beer absorption cannot reproduce |
+| Ambient | `lerp(groundBounce, skyColour, h^0.7)`, both derived from the zone's authored fog colour, closing down by `1 - 0.45*coverage` because less sky reaches the base of an overcast lid |
+| Aerial perspective | `1 - exp(-meanDistance / (MaxDistance/2))` blends the radiance toward the sky's haze colour and lifts transmittance by `AerialPerspectivePercent` |
+
+Dark interiors are an optical-depth problem on the **light** path, not a multiple-scattering problem: at
+`AbsorptionPercent 75` the cone optical depth reaches 13-22 and every multiple-scattering octave underflows anyway.
+Absorption is 38 instead, which decouples self-shadowing strength from view opacity.
 
 ## Settings
 
-`[VolumetricClouds]` in `GraphicsEffects.ini`, per location like the rest of the tuning (`LocationTuning`), and on the
-F7 menu in the first column.
+`[VolumetricClouds]` in `GraphicsEffects.ini`, per location like the rest of the tuning (`LocationTuning`), and on
+the F7 menu in the first column.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `Enabled` | 1 | Master switch for the pass. |
-| `Quality` | 1 | 0 = LOW (quarter res, 14 steps), 1 = BALANCED (quarter, 20), 2 = HIGH (half, 28). |
-| `CoveragePercent` | 42 | How much of the sky the deck covers. 0 skips the pass entirely. |
-| `DensityPercent` | 100 | Optical thickness of the cloud material. |
-| `Altitude` | 480 | World Z of the bottom of the slab. |
-| `Thickness` | 190 | Height of the slab. |
-| `MinimumClearance` | 140 | Minimum distance the slab is kept above the camera. |
-| `FeatureSize` | 2600 | World size of one noise tile: larger means bigger, slower cloud shapes. |
-| `DetailPercent` | 34 | Strength of the erosion octave that breaks up cloud edges. |
-| `WindSpeed` | 11 | Drift speed in world units per second. |
-| `WindAngle` | 25 | Drift direction in degrees. |
-| `AbsorptionPercent` | 125 | Self-shadowing strength along the light march. |
+| `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128, half-res). Presets only set defaults; every value below stays overridable. |
+| `SampleCount` / `LightSampleCount` / `BaseStep` / `ResolutionPercent` | preset | March budget overrides. |
+| `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
+| `DensityPercent` | 100 | Optical thickness of the cloud material (base extinction 0.022/unit). |
+| `CloudTypePercent` | 0 | -100 flattens everything into stratus, 0 is cumulus, +100 builds towering cumulonimbus. |
+| `PlanetRadius` | 42000 | How fast the deck curves away to the horizon. |
+| `BaseAltitude` | 850 | World Z of the cloud base. |
+| `Thickness` | 2150 | Height of the layer. |
+| `FeatureSize` | 3000 | World size of one tile of the base shape volume. |
+| `ShapeAspectPercent` | 130 | Vertical repeats of the shape volume per horizontal tile. |
+| `DetailSize` | 240 | World size of one tile of the erosion volume. |
+| `WeatherSize` | 34000 | World size of one tile of the weather map. |
+| `DetailPercent` | 88 | Strength of the erosion that shreds cloud edges. |
+| `WindSpeed` / `WindAngle` / `WindShearPercent` | 26 / 25 / 22 | Drift speed, direction, and how far the tops lean downwind. |
+| `AbsorptionPercent` | 38 | Self-shadowing strength along the light march. |
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
-| `AmbientPercent` | 62 | Sky ambient contribution, tinted by the zone fog colour. |
+| `AmbientPercent` | 105 | Sky ambient contribution, tinted by the zone fog colour. |
 | `MoonStrengthPercent` | 30 | Direct contribution at night relative to daylight. |
-| `ForwardScatterPercent` | 55 | Henyey-Greenstein `g`: the silver lining when looking towards the sun. |
-| `HorizonFadePermille` | 85 | How quickly the deck fades out towards the horizon. |
-| `MaxDistance` | 9000 | March limit; the deck fades out before it. |
-| `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only. |
+| `MultiScatterAttenuationPercent` / `ContributionPercent` / `EccentricityPercent` | 60 / 92 / 55 | The three octave scalars. |
+| `ForwardScatterPercent` / `BackwardScatterPercent` | 78 / 32 | The two phase lobes. |
+| `SilverLiningPercent` | 55 | Bright rim on a backlit edge. |
+| `PowderPercent` | 70 | Dark edge where a cloud faces the light. |
+| `StepGrowthPermille` / `CoarseStepScale` / `JitterPercent` | 10 / 3 / 25 | March shape. |
+| `HorizonFadePermille` | 18 | How quickly grazing rays fade out. |
+| `MaxDistance` | 26000 | March limit; the deck fades out before it. |
+| `AerialPerspectivePercent` | 60 | How much of the sky's haze a cloud picks up with distance. 0 makes near and far clouds equally contrasty. |
+| `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 14000 | Cloud shadows cast on the world below. |
+| `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only, 4 = shadow map. |
 
-Rain and snow add up to `0.26 * WeatherIntensity` to coverage while the weather layer is actually live
-(`volume::cloudWeatherCoverageBoost`). The boost is applied to a copy of the settings, so the player's slider is never
-rewritten.
+Rain and snow add coverage while the weather layer is live (`volume::cloudWeatherCoverageBoost`). The boost is
+applied to a copy of the settings, so the player's slider is never rewritten.
+
+## Looking at changes without a GPU
+
+`tools/CloudPreview.cpp` is a CPU mirror of the shader - the same noise generators from `src/Effects/CloudNoise.h`,
+the same density function, the same light march and the same scattering - that renders a PNG with `g++ -O2
+-std=c++20 -pthread`. Every tuning decision in this document was made by looking at its output first, because the
+shader itself can only be compiled in CI.
+
+```sh
+g++ -O2 -std=c++20 -pthread tools/CloudPreview.cpp -o build/cloudpreview
+build/cloudpreview out.png --coverage 45 --sun-elevation 30 --stats
+
+CLOUDSHEET_BASE="--width 420 --height 236" python3 tools/cloudsheet.py sheet.png \
+  "overcast=--coverage 92" "broken=--coverage 45" "scattered=--coverage 20" "sunset=--sun-elevation 6"
+```
+
+`tools/cloudsheet.py` renders the variants in parallel and stitches them into one labelled contact sheet, which is
+the only practical way to compare four parameter choices at once.
 
 ## Cost
 
-Two passes: one quarter-resolution march (at 1920x1080 that is 480x270 rays, 20 steps with a 4-tap light march) and
-one full-resolution composite. Both are timed as `GpuPerfStage::VolumetricClouds` and appear in the performance
-report.
+Three passes, all timed as `GpuPerfStage::VolumetricClouds`: a 256² shadow map, one quarter-resolution march (at
+1920x1080 that is 480x270 rays) and one full-resolution composite.
 
-`tools/ValidateShaders.ps1` compiles both shaders with `fxc` in CI and enforces an instruction budget. Measured on
-the CI runner: **march 314 slots**, composite 36, against the 512-slot `ps_3_0` ceiling (for scale, the atmosphere's
-integrate pass is 462). The light march is a real `[loop]`, not `[unroll]` - four inlined copies of the two-octave
-`Shape()` keep more intermediates alive than the 32 temp registers `ps_3_0` has, and fxc rejects it with X4505.
+`tools/ValidateShaders.ps1` compiles every shader literal with `fxc` in CI and fails the build if one exceeds its
+budget. Measured on the CI runner against the 512-slot `ps_3_0` ceiling: **march 466**, shadow 116, composite 66
+(for scale, the atmosphere's integrate pass is 462).
+
+Two constraints shape the march code and are worth knowing before editing it:
+
+- `ps_3_0` has 224 float constants but only 512 instruction slots and 32 temp registers. Constants are free;
+  instructions are not. Anything new has to be paid for - the long reach light sample was folded into the light loop
+  to pay for aerial perspective.
+- `[unroll]` around anything that inlines the density sampler more than about twice fails with `X4505: maximum temp
+  register index exceeded`. The light march is a real `[loop]`; `ps_3_0` allows four levels of nesting.
 
 ## Tests
 

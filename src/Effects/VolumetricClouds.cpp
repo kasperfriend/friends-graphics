@@ -114,15 +114,22 @@ float Density(float3 p,float h,float erosion) {
 float HG(float c,float g) { return (1-g*g)*pow(max(1+g*g-2*g*c,1e-4),-1.5); }
 
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
- float raw=tex2D(depthMap,uv).r;
+ float rawDepth=tex2D(depthMap,uv).r;
  // INTZ stores viewport depth; normalise it exactly like the atmosphere's
  // boundary pass so one convention covers every injected pass.
- raw=raw>=.99999?1:saturate((raw-depthRange.x)/max(depthRange.y,.001));
- // Transmittance 1 / no in-scattering means "this pixel keeps the scene".
- if(raw<depthRange.z) return float4(0,0,0,1);
+ float raw=rawDepth>=.99999?1:saturate((rawDepth-depthRange.x)/max(depthRange.y,.001));
 
  float3 view=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1);
- float3 ray=normalize(view.x*invView0.xyz+view.y*invView1.xyz+view.z*invView2.xyz);
+ // The inverse view rows are orthonormal, so dividing by the view-space
+ // length is the normalize - and it hands back the scale factor that turns
+ // a view-space depth into a distance along this ray for free.
+ float viewLength=length(view);
+ float3 ray=(view.x*invView0.xyz+view.y*invView1.xyz+view.z*invView2.xyz)/viewLength;
+ // Geometry in front of the deck clips the march instead of cancelling it.
+ // A sky-only march deletes every cloud you are flying over - from above
+ // the layer each downward ray ends on terrain - and stops a mountain top
+ // inside the deck from being fogged by the cloud it is standing in.
+ float sceneLimit=raw<depthRange.z?(projection.y/(rawDepth-projection.x))*viewLength:shell.w;
 
  // Shell intersection. The planet centre sits directly under the camera, so
  // the quadratic collapses to a couple of multiplies.
@@ -146,7 +153,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    entry=0;
    exitDistance=(innerDisc>0&&-b-innerSq>0)?(-b-innerSq):(-b+outerSq);
  }
- exitDistance=min(exitDistance,shell.w);
+ exitDistance=min(exitDistance,min(shell.w,sceneLimit));
  if(exitDistance<=entry) return float4(0,0,0,1);
 
  // The horizon fade stops a grazing ray from UNDER the deck stretching the
@@ -327,15 +334,35 @@ float4 projection:register(c6);  // x=A, y=B, z=P00, w=P11
 float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow strength
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
- float4 cloud=tex2D(cloudMap,uv);
- if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
- float raw=tex2D(depthMap,uv).r;
- float linearRaw=raw;
- raw=raw>=.99999?1:saturate((raw-depthRange.x)/max(depthRange.y,.001));
+ float linearRaw=tex2D(depthMap,uv).r;
+
+ // Depth-aware upsample of the quarter-resolution march. The deck is no
+ // longer sky-only - it is clipped by the scene, so a cloud in front of a
+ // mountain is a real pixel - and a plain bilinear fetch would drag the
+ // far cloud across the near silhouette as a halo. The four taps are
+ // low-resolution texel centres, so point-sampling the depth map at the
+ // same places returns exactly the depth each of those marches used.
+ float2 lowTexel=texels.zw;
+ float2 grid=uv/lowTexel-.5;
+ float2 base=(floor(grid)+.5)*lowTexel, fr=frac(grid);
+ float4 taps=float4(tex2D(depthMap,base).r,tex2D(depthMap,base+float2(lowTexel.x,0)).r,
+                    tex2D(depthMap,base+float2(0,lowTexel.y)).r,tex2D(depthMap,base+lowTexel).r);
+ // Compare in linear view depth: raw depth-buffer values crowd into the
+ // last fraction of their range at distance, where most of the sky is.
+ float centreZ=projection.y/(linearRaw-projection.x);
+ float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
+              /(.002+abs(projection.y/(taps-projection.x)-centreZ)/max(centreZ,1));
+ float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
+              +tex2D(cloudMap,base+float2(0,lowTexel.y))*weight.z+tex2D(cloudMap,base+lowTexel)*weight.w)
+              /max(dot(weight,1),1e-5);
+
+ if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
+ float raw=linearRaw>=.99999?1:saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
  float sky=smoothstep(depthRange.z,1,raw);
- float3 lit=scene.rgb*saturate(cloud.a)+max(cloud.rgb,0);
- float3 result=lerp(scene.rgb,lit,sky);
+ // Applied to every pixel, not just the sky: the march already stopped at
+ // the depth buffer, so what is left in front of geometry belongs there.
+ float3 result=scene.rgb*saturate(cloud.a)+max(cloud.rgb,0);
  // Reconstruct where this pixel is in the world and read the deck's
  // transmittance straight above it. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
@@ -831,7 +858,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetRenderTarget(0,target);
   d->SetPixelShader(m_compositeShader.Get());
   d->SetTexture(0,f.sceneColor);SetSampler(d,0,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
-  d->SetTexture(1,m_cloudTexture.Get());SetSampler(d,1,D3DTEXF_LINEAR,D3DTADDRESS_CLAMP);
+  d->SetTexture(1,m_cloudTexture.Get());SetSampler(d,1,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   d->SetTexture(2,f.depthTexture);SetSampler(d,2,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   d->SetTexture(3,shadowsOn?m_shadowTexture.Get():nullptr);SetSampler(d,3,D3DTEXF_LINEAR,D3DTADDRESS_CLAMP);
   const float c0[4]={1.f/float(m_fullWidth),1.f/float(m_fullHeight),1.f/float(m_lowWidth),1.f/float(m_lowHeight)};

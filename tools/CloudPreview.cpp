@@ -374,12 +374,18 @@ struct Marcher
     }
 
     // Returns scattered light; `transmittance` is the view transmittance.
-    V3 March(V3 origin, V3 dir, V3 lightDir, float jitter, float& transmittance, float& depth) const
+    // `limit` is the distance to whatever the scene already drew: the march
+    // is clipped by geometry rather than skipped on geometry pixels, which
+    // is what lets you fly above the deck and still see it below you.
+    V3 March(V3 origin, V3 dir, V3 lightDir, float jitter, float& transmittance, float& depth,
+             float limit = 1e9f) const
     {
         transmittance = 1.f;
         depth = 0.f;
         float entry = 0.f, exitDistance = 0.f;
         if (!ShellRange(origin, dir, entry, exitDistance)) return {};
+        exitDistance = std::min(exitDistance, limit);
+        if (exitDistance <= entry) return {};
 
         // The horizon fade exists so a grazing ray from UNDER the deck does
         // not stretch the shell out to infinity and show a hard band. Seen
@@ -787,7 +793,8 @@ int main(int argc, char** argv)
 
             V3 color = sky;
             float groundShadow = 1.f;
-            bool hitGround = false;
+            [[maybe_unused]] bool hitGround = false;
+            float sceneLimit = 1e9f;
             if (o.ground && dir.z < -.0015f)
             {
                 // Flat ground plane so the moving cloud shadows are visible.
@@ -795,6 +802,7 @@ int main(int argc, char** argv)
                 if (t > 0.f && t < 60000.f)
                 {
                     hitGround = true;
+                    sceneLimit = t;
                     const V3 hit = camera + dir * t;
                     groundShadow = marcher.SunShadow(hit, light);
                     const float checker = (std::fmod(std::floor(hit.x / 220.f) + std::floor(hit.y / 220.f), 2.f) == 0.f) ? 1.f : .86f;
@@ -806,9 +814,8 @@ int main(int argc, char** argv)
             }
 
             float transmittance = 1.f, depth = 0.f;
-            const V3 scatter = marcher.March(camera, dir, light, jitter, transmittance, depth);
-            if (!hitGround)
-                color = color * transmittance + scatter;
+            const V3 scatter = marcher.March(camera, dir, light, jitter, transmittance, depth, sceneLimit);
+            color = color * transmittance + scatter;
 
             uint8_t* out = &pixels[(size_t(y) * o.width + x) * 3];
             out[0] = uint8_t(Saturate(color.x) * 255.f + .5f);
