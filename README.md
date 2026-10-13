@@ -57,7 +57,8 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 - Clouds are clipped by the scene rather than drawn only on sky pixels, so the layer is still there when you fly over it and a peak inside the deck is fogged by the cloud it stands in.
 - Distance hazes clouds out, the deck casts moving shadows on the world, and the layer is integrated into the scene before the atmosphere, so haze, the sun halo and god rays react to the clouds above them.
 - Coverage thickens automatically while native rain or snow is falling, and the slider runs from scattered puffs to a solid overcast lid.
-- Coverage, altitude, thickness, wind, haze, lighting and a four-step quality level are on the F7 menu and in `[VolumetricClouds]`. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
+- Cloud-filtered sunlight forms rays through moving gaps; world-anchored ground shadows no longer change with camera height or off-screen sun tracking.
+- Coverage, altitude, thickness, wind, haze, lighting, cloud-ray strength, independent resolution (20–100%) and a four-step quality level are on the F7 menu and in `[VolumetricClouds]`. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
 
 ![Volumetric clouds](Screenshots/volumetric-clouds.png)
 

@@ -90,6 +90,12 @@ namespace renderer
         IDirect3DTexture9* sceneColor = nullptr;
         IDirect3DSurface9* sceneSurface = nullptr;
         IDirect3DTexture9* atmosphereNoise = nullptr;
+        // Published only after a successful cloud pass in this frame.
+        IDirect3DTexture9* cloudTexture = nullptr;
+        IDirect3DTexture9* cloudShadowTexture = nullptr;
+        Vec4 cloudShadowArea; // origin XY, reciprocal extent, elevation fade
+        Vec4 cloudLightProjection; // light XY/Z, base altitude, thickness
+        float cloudRayStrength = 0.f;
         // Per-pixel "how much of this pixel is water" (0..1) and the water
         // surface's own view-space depth, written by watereffect::Scope as
         // extra render targets during the actual water draws this frame

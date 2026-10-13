@@ -95,11 +95,14 @@ namespace renderer
         // looks like a backdrop painting.
         float aerialPerspective = .60f;
 
-        // Cloud shadows on the world below, rendered as a small top-down
-        // transmittance map centred on the camera.
+        // Cloud shadows and rays share a small transmittance map on a fixed
+        // world plane. The camera only selects its texel-snapped coverage;
+        // each receiver is projected along sunlight using its own height.
         bool groundShadows = true;
         float groundShadowStrength = .55f;
         float groundShadowExtent = 14000.f;
+        bool sunRays = true;
+        float sunRayStrength = .8f;
 
         // Pushed in per frame by the host when the client is actually
         // rendering rain or snow: a storm sky is a covered sky.
@@ -122,7 +125,9 @@ namespace renderer
         VolumetricCloudSettings& Settings() { return m_settings; }
         const VolumetricCloudSettings& Settings() const { return m_settings; }
         IDirect3DTexture9* GetCloudTexture() const { return m_cloudTexture.Get(); }
-        IDirect3DTexture9* GetShadowTexture() const { return m_shadowTexture.Get(); }
+        IDirect3DTexture9* GetShadowTexture() const { return m_shadowValid ? m_shadowTexture.Get() : nullptr; }
+        Vec4 ShadowArea() const { return m_shadowArea; }
+        Vec4 LightProjection() const { return m_lightProjection; }
         // True once the noise fields exist on the GPU. Generation happens on
         // the first frame that renders clouds (or loads from the cache file).
         bool FieldsReady() const { return m_fieldsReady; }
@@ -153,6 +158,9 @@ namespace renderer
         bool m_shadersFailed = false;
         bool m_fieldsReady = false;
         bool m_fieldsFailed = false;
+        bool m_shadowValid = false;
+        Vec4 m_shadowArea;
+        Vec4 m_lightProjection;
         uint32_t m_shadowSize = 0;
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;

@@ -28,6 +28,15 @@ approximation - inside a `ps_3_0` instruction budget.
   a surface: fly above the deck and you get terrain with cloud shadows on it and no clouds. It also keeps the common
   case cheap, because a ground pixel thirty units away leaves the shell before it enters it and bails on the first
   test. The composite pays for this with a depth-aware upsample (below).
+- **World-anchored ground shadows.** The inexpensive shadow field uses a local planar approximation to the deck,
+  integrated from a fixed sea-level reference plane. Its XY origin is snapped to texels; each terrain/object
+  receiver is projected along sunlight according to its own world height. Moving the camera vertically does not
+  change the cloud optical path or darken/lighten the entire world. Shadows fade out above the deck and at the map
+  border. The approximation deliberately omits high-frequency erosion and distant spherical curvature.
+- **Cloud-filtered sun rays.** The atmosphere samples that same moving transmittance field at eight positions along
+  each depth/water-clipped view ray. Sunlight passes through the gaps while dense clouds block it, including when
+  the sun is off screen. The radial glare source separately samples the cloud buffer's alpha, never cloud brightness.
+  Rays require the atmosphere's global fog and the SUN RAYS master toggle; no scattering is drawn through walls.
 - **Before the atmosphere, not after.** The composite writes into the scene target and the scene copy is refreshed
   afterwards, so aerial perspective, the sun halo and the god-ray source mask all see the clouds. A deck in front of
   the sun dims its rays instead of letting them glow through it.
@@ -37,7 +46,7 @@ approximation - inside a `ps_3_0` instruction budget.
 | Pass | Resolution | Output |
 | --- | --- | --- |
 | Shadow | 256² top-down | transmittance of the deck above each world point |
-| March | quarter (half on ULTRA) | `rgb` = in-scattered light, `a` = transmittance |
+| March | configurable 20–100% of width/height | `rgb` = in-scattered light, `a` = transmittance |
 | Composite | full | `scene * transmittance + scattering`, depth-aware upsample of the march |
 
 The march itself:
@@ -102,7 +111,10 @@ edge - so gating the deck's light on it lit and unlit the whole sky as the camer
 toggled with it. The compositor now builds a stabilized direct-light signal (`CelestialLightStabilizer`): a
 confirmed disc sets it, the view-independent daylight/moonlight state keeps it up while the disc is off screen or
 behind the deck itself, brief dropouts are held, real transitions (sunset) fade over a fraction of a second, and
-only the god-ray/glare origin stays gated on the disc being on screen. Cloud-shadow strength additionally fades
+only the radial god-ray/glare origin stays gated on the disc being on screen. World-space rays do not require
+an on-screen disc. The confirmed world direction is also retained separately for each body when its billboard is
+culled; camera-derived fallback constants cannot replace it. Confirmed direction updates are gently smoothed.
+Cloud-shadow strength additionally fades
 in with sun elevation instead of snapping at the horizon gate.
 
 ## Settings
@@ -113,8 +125,10 @@ the F7 menu in the first column.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `Enabled` | 1 | Master switch for the pass. |
-| `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128, half-res). Presets only set defaults; every value below stays overridable. |
-| `SampleCount` / `LightSampleCount` / `BaseStep` / `ResolutionPercent` | preset | March budget overrides. |
+| `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128, half-res unless overridden). Presets only set defaults; the shipped explicit resolution is 25%. |
+| `SampleCount` / `LightSampleCount` / `BaseStep` | preset | March budget overrides. |
+| `ResolutionPercent` | 25 | Independent F7 slider, 20–100% of screen width and height in steps of 5. Resizes live without changing march samples. Explicit value overrides preset resolution. |
+| `SunRaysEnabled` / `SunRayPercent` | 1 / 80 | Cloud-filtered world-space shafts, toggle and 0–200% strength in F7. SUN RAYS is also a master gate. |
 | `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
 | `DensityPercent` | 100 | Optical thickness of the cloud material (base extinction 0.022/unit). |
 | `CloudTypePercent` | 0 | -100 flattens everything into stratus, 0 is cumulus, +100 builds towering cumulonimbus. |

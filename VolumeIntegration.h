@@ -137,6 +137,7 @@ float celestialShadowLight = 0;
 // its whole job is to remember the light through frames where the disc
 // draw is culled, missed or covered, so clouds/fog do not blink with it.
 renderer::CelestialLightStabilizer celestialLightStabilizer;
+renderer::CelestialDirectionStabilizer celestialDirectionStabilizer;
 ULONGLONG celestialLightLastTick = 0;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
@@ -382,6 +383,7 @@ void Reset(IDirect3DDevice9* d) {
     stableShadowLightValid = false;
     shadowCacheValid = shadowAnchorValid = false;
     celestialLightStabilizer.Reset();
+    celestialDirectionStabilizer.Reset();
     celestialLightLastTick = 0;
 }
 
@@ -394,6 +396,7 @@ void InvalidateTemporalHistory() {
     // The next presented frame re-primes the stabilizer at its current
     // target instead of fading the sky in from the pre-break state.
     celestialLightStabilizer.Reset();
+    celestialDirectionStabilizer.Reset();
     celestialLightLastTick = 0;
 }
 
@@ -849,9 +852,10 @@ bool Composite(IDirect3DDevice9* d) {
         // billboard at the screen edge, or when our own cloud deck crosses
         // it - all three used to toggle celestialIntensity between frames
         // and blink the whole sky (clouds lit/unlit, ground shadowed/
-        // unshadowed). At this point sunDirectionView/World hold exactly
-        // the right direction either way: the tracked disc's when it was
-        // drawn, the per-frame v[24]-derived direction otherwise.
+        // unshadowed). Stabilize the world direction too: retain the
+        // confirmed body's direction when its billboard is culled instead
+        // of switching back to potentially camera-dependent v[24] data.
+        // Only use that fallback until a body has actually been tracked.
         {
             const ULONGLONG lightNow = GetTickCount64();
             const float lightDt = celestialLightLastTick
@@ -872,8 +876,15 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.directLightIntensity = stable.intensity;
             frameCtx.directLightIsMoon = stable.isMoon;
             frameCtx.directLightValid = true;
-            frameCtx.directLightDirectionView = frameCtx.sunDirectionView;
-            frameCtx.directLightDirectionWorld = frameCtx.sunDirectionWorld;
+            const renderer::Vec3* confirmed = body && useMoon == stable.isMoon
+                ? &body->worldSpaceDirection : nullptr;
+            frameCtx.directLightDirectionWorld = celestialDirectionStabilizer.Update(
+                frameCtx.sunDirectionWorld, confirmed, stable.isMoon, lightDt);
+            const auto& world = frameCtx.directLightDirectionWorld;
+            frameCtx.directLightDirectionView = {
+                renderer::Dot(world, {frameCtx.inverseView.m[0][0], frameCtx.inverseView.m[0][1], frameCtx.inverseView.m[0][2]}),
+                renderer::Dot(world, {frameCtx.inverseView.m[1][0], frameCtx.inverseView.m[1][1], frameCtx.inverseView.m[1][2]}),
+                renderer::Dot(world, {frameCtx.inverseView.m[2][0], frameCtx.inverseView.m[2][1], frameCtx.inverseView.m[2][2]})};
         }
     }
 
@@ -1012,11 +1023,20 @@ bool Composite(IDirect3DDevice9* d) {
     // passes read. Aerial perspective, the sun halo and the god-ray source
     // mask therefore all see the clouds - a deck in front of the sun dims
     // its rays instead of glowing through them.
+    frameCtx.cloudTexture = nullptr;
+    frameCtx.cloudShadowTexture = nullptr;
+    frameCtx.cloudRayStrength = 0.f;
     if (!shaftDebug && cloudsEffectEnabled) {
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weatherCoverageBoost =
             std::clamp(cloudWeatherCoverageBoost * frameCtx.environment[renderer::Weather], 0.f, 1.f);
         if (clouds.Render(d, frameCtx, target.Get())) {
+            frameCtx.cloudTexture = clouds.GetCloudTexture();
+            frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
+            frameCtx.cloudShadowArea = clouds.ShadowArea();
+            frameCtx.cloudLightProjection = clouds.LightProjection();
+            frameCtx.cloudRayStrength = shaftsEffectEnabled && clouds.Settings().sunRays
+                ? clouds.Settings().sunRayStrength : 0.f;
             // Everything downstream samples legacyTargets.scene, so the
             // copy has to carry the clouds too.
             check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
@@ -1068,7 +1088,17 @@ bool Composite(IDirect3DDevice9* d) {
         // that fix.
         float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
+        check(d->SetTexture(3, frameCtx.cloudTexture));
+        check(d->SetSamplerState(3, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
+        check(d->SetSamplerState(3, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
+        check(d->SetSamplerState(3, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+        check(d->SetSamplerState(3, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+        check(d->SetSamplerState(3, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
+        check(d->SetSamplerState(3, D3DSAMP_SRGBTEXTURE, FALSE));
+        float cloudMask[4] = {frameCtx.cloudTexture ? 1.f : 0.f, 0, 0, 0};
+        check(d->SetPixelShaderConstantF(14, cloudMask, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
+        check(d->SetTexture(3, nullptr));
 
         check(d->SetTexture(1, nullptr));
         check(d->SetTexture(2, nullptr));

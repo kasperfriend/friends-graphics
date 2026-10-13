@@ -57,6 +57,10 @@ namespace renderer
         sceneColor = nullptr;
         sceneSurface = nullptr;
         atmosphereNoise = nullptr;
+        cloudTexture = cloudShadowTexture = nullptr;
+        cloudShadowArea = {};
+        cloudLightProjection = {};
+        cloudRayStrength = 0.f;
 
         depthAvailable = false;
         cameraValid = false;

@@ -37,7 +37,16 @@ int main() try {
   if(GetPrivateProfileIntW(L"Atmosphere",L"ShaftsEnabled",-1,globalFile)!=1)throw std::runtime_error("Global fallback toggle did not change");
   if(renderer::locationtuning::ReadEditorInt(L"Atmosphere",L"ShaftsEnabled",0,globalFile)!=1)throw std::runtime_error("Global fallback value does not read back");
   if(std::filesystem::exists("build/overlay-preview/global-fallback/LocationGraphics.ini"))throw std::runtime_error("Global fallback invented a location file");
-  std::cout<<"PASS overlay global fallback toggle round-trips on an unverified client\n";
+  bool resolutionFound=false;
+  for(auto& control:tuningoverlay::items)if(control.key&&wcscmp(control.key,L"ResolutionPercent")==0&&
+      control.section&&wcscmp(control.section,L"VolumetricClouds")==0){
+   control.value=50;
+   if(!tuningoverlay::Save(control)||renderer::locationtuning::ReadEditorInt(L"VolumetricClouds",L"ResolutionPercent",0,globalFile)!=50)
+    throw std::runtime_error("Cloud resolution slider did not round-trip");
+   resolutionFound=true;
+  }
+  if(!resolutionFound)throw std::runtime_error("Cloud resolution slider missing");
+  std::cout<<"PASS overlay global fallback toggle and cloud resolution round-trip on an unverified client\n";
  }
  // While the menu is visible the game window must not receive the clicks
  // aimed at it (they would click the world / orbit the camera mid-drag).

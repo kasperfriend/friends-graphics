@@ -32,6 +32,7 @@ catch {
 Write-Output "Using fxc: $Fxc"
 
 $jobs = @(
+    @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
@@ -49,6 +50,7 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
+    'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
     'kCloudMarchSource'      = 496

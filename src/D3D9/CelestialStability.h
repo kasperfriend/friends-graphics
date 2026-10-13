@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include "../Core/MathTypes.h"
 
 namespace renderer
 {
@@ -149,6 +150,41 @@ namespace renderer
         bool m_discWasMoon = false;
         bool m_hasDisc = false;
         float m_secondsSinceDisc = 1e6f;
+    };
+
+    // Keep separate world-space directions for the sun and moon. Once a
+    // billboard confirms a body, camera-derived fallback constants must not
+    // replace it merely because the camera turned away from the billboard.
+    class CelestialDirectionStabilizer
+    {
+    public:
+        Vec3 Update(Vec3 fallback, const Vec3* confirmed, bool moon, float dt) noexcept
+        {
+            const unsigned body = moon ? 1u : 0u;
+            Vec3 target = confirmed ? *confirmed : fallback;
+            const float length = Length(target);
+            if (!std::isfinite(length) || length < 1e-4f)
+                return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
+            target = target * (1.f / length);
+            if (!m_primed[body])
+            {
+                m_direction[body] = target;
+                m_primed[body] = true;
+            }
+            else if (confirmed || !m_confirmed[body])
+            {
+                const float alpha = 1.f - std::exp(-std::clamp(dt, 0.f, .25f) / .35f);
+                const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
+                if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
+            }
+            if (confirmed) m_confirmed[body] = true;
+            return m_direction[body];
+        }
+        void Reset() noexcept { *this = CelestialDirectionStabilizer{}; }
+    private:
+        Vec3 m_direction[2]{};
+        bool m_primed[2]{};
+        bool m_confirmed[2]{};
     };
 
     // Cloud shadows used to switch fully on/off at a fixed sun elevation,
