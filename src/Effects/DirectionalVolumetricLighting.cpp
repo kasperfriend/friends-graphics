@@ -230,10 +230,9 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // Screen-space bloom is only a sky contribution. The raymarch also runs
  // up to foreground geometry, so leaving this term ungated paints a perfect
  // sun/moon-centred circle on walls through which the source is occluded.
- float sourceOnSky=sourceScreen.w*sky;
- float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceOnSky;
+ float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceScreen.w*sky;
  float directionalLean=pow(saturate(cosTheta*.5+.5),6)*.08;
- float discProtection=lerp(1,lerp(.06,1,smoothstep(.025,.055,sourceRadius)),sourceOnSky);
+ float discProtection=1-.94*sky*(1-smoothstep(.025,.055,sourceRadius));
  // Normalized forward phase, bounded for artistic intensity and half-float stability.
  float g=.62;
  float angular=(1-g*g)/pow(max(1+g*g-2*g*cosTheta,.04),1.5);
