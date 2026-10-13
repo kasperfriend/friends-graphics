@@ -152,6 +152,11 @@ int main() try {
     Check(offscreen->GetSurfaceLevel(0,offscreenRT.GetAddressOf()));Check(d->SetRenderTarget(0,offscreenRT.Get()));
     waterreflection::Prepare(d.Get());Require(!waterreflection::ready,"offscreen water cannot capture the main scene");
     Check(d->SetRenderTarget(0,volume::target.Get()));Check(d->SetViewport(&viewport));
+    waterreflection::Prepare(d.Get());Require(waterreflection::ready,"world capture available again");
+    Check(d->SetRenderTarget(0,offscreenRT.Get()));waterreflection::Prepare(d.Get());
+    Require(!watereffect::reflectionScene&&!watereffect::reflectionDepth,"ready world capture not exposed to offscreen water");
+    Check(d->SetRenderTarget(0,volume::target.Get()));Check(d->SetViewport(&viewport));waterreflection::Prepare(d.Get());
+    Require(watereffect::reflectionScene!=nullptr,"owned scene re-exposed on returning to world target");
     waterreflection::Reset(d.Get());
     Require(!waterreflection::resources.scene&&!waterreflection::resources.surface,"capture reset releases default-pool resources");
     // Render the complete shader, not just a diagnostic extraction, without capture.
@@ -164,10 +169,11 @@ int main() try {
     Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,15));
     ComPtr<IDirect3DSurface9> back,readback;Check(d->GetRenderTarget(0,back.GetAddressOf()));
     Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,readback.GetAddressOf(),nullptr));
+    bool wroteMRT=false;
     auto pixel=[&](float debug) {
         watereffect::waterDebugMode=debug;
         Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
-        {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"production draw uses modern shader");Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
+        {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"production draw uses modern shader");wroteMRT=scope.maskBound&&scope.depthBound;Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
         Check(d->EndScene());Check(d->GetRenderTargetData(back.Get(),readback.Get()));
         D3DLOCKED_RECT r{};Check(readback->LockRect(&r,nullptr,D3DLOCK_READONLY));
         DWORD value=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64];Check(readback->UnlockRect());return value;
@@ -190,10 +196,27 @@ int main() try {
         ComPtr<IDirect3DSurface9> checkRT;
         Require(d->GetRenderTarget(1,checkRT.GetAddressOf())==D3DERR_NOTFOUND,"mask slot restored to unbound");
         Require(d->GetRenderTarget(2,checkRT.GetAddressOf())==D3DERR_NOTFOUND,"depth slot restored to unbound");
+        if(wroteMRT) {
+            auto translucent=texture(8,64,0x80406080);Check(d->SetTexture(0,translucent.Get()));
+            Check(d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE));
+            Check(d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA));Check(d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA));
+            Check(d->ColorFill(maskRT.Get(),nullptr,0));Check(d->ColorFill(depthRT.Get(),nullptr,0));
+            pixel(0);
+            Check(d->GetRenderTargetData(maskRT.Get(),readback.Get()));D3DLOCKED_RECT r{};
+            Check(readback->LockRect(&r,nullptr,D3DLOCK_READONLY));
+            DWORD coverage=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64]&255;
+            Check(readback->UnlockRect());Require(coverage>=126&&coverage<=130,"water mask preserves fractional shoreline coverage");
+            ComPtr<IDirect3DSurface9> floatReadback;
+            Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_R32F,D3DPOOL_SYSTEMMEM,floatReadback.GetAddressOf(),nullptr));
+            Check(d->GetRenderTargetData(depthRT.Get(),floatReadback.Get()));Check(floatReadback->LockRect(&r,nullptr,D3DLOCK_READONLY));
+            float waterZ=reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64];Check(floatReadback->UnlockRect());
+            Require(std::abs(waterZ-1.f)<.001f,"water surface depth is not attenuated by color alpha");
+            Check(d->SetTexture(0,base.Get()));Check(d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+        } else std::puts("SKIP optional water MRT readbacks: capability gate declined the pair");
         // Reproduce the old resize mismatch: reject the pair before mutating RTs.
-        ComPtr<IDirect3DTexture9> small;ComPtr<IDirect3DSurface9> smallRT;
-        Check(d->CreateTexture(64,64,1,D3DUSAGE_RENDERTARGET,D3DFMT_R32F,D3DPOOL_DEFAULT,small.GetAddressOf(),nullptr));
-        Check(small->GetSurfaceLevel(0,smallRT.GetAddressOf()));watereffect::waterDepthSurface=smallRT.Get();
+        ComPtr<IDirect3DTexture9> smallTexture;ComPtr<IDirect3DSurface9> smallRT;
+        Check(d->CreateTexture(64,64,1,D3DUSAGE_RENDERTARGET,D3DFMT_R32F,D3DPOOL_DEFAULT,smallTexture.GetAddressOf(),nullptr));
+        Check(smallTexture->GetSurfaceLevel(0,smallRT.GetAddressOf()));watereffect::waterDepthSurface=smallRT.Get();
         {watereffect::Scope scope(d.Get());Require(!scope.maskBound&&!scope.depthBound,"mismatched resize pair not bound");}
         restored();watereffect::waterTargetSurface=watereffect::waterMaskSurface=watereffect::waterDepthSurface=nullptr;
     } else std::puts("SKIP optional R32F MRT checks: unsupported format");

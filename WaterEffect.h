@@ -52,7 +52,7 @@ inline bool NeedsScene() {
         reflectionsEnabled, refractionEnabled, depthEnabled, foamEnabled, sunGlintEnabled);
 }
 bool showStatus=false;
-unsigned frameMatches=0,frameCandidates=0;
+unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
 inline void ReportFailure(const char* operation,HRESULT hr) {
@@ -377,9 +377,9 @@ void Present() {
     if(++frames%600==0)
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
-            <<" active="<<active<<" enabled="<<effectEnabled<<" scene="<<(reflectionScene!=nullptr)
+            <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
             <<" shaderFailure="<<shaderCreationFailed<<'\n';
-    frameMatches=frameCandidates=0;
+    frameMatches=frameCandidates=frameSceneMatches=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
     if(cachedShaderDevice == d) {
@@ -549,7 +549,7 @@ struct Scope {
                 device=d;extraState=true;
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
                 for(unsigned slot=0;slot<2;++slot) {
-                    const DWORD values[]={slot?D3DTEXF_POINT:D3DTEXF_LINEAR,slot?D3DTEXF_POINT:D3DTEXF_LINEAR,
+                    const DWORD values[]={DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),
                         D3DTEXF_NONE,D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,FALSE};
                     for(unsigned state=0;state<6;++state) {
                         const HRESULT hr=d->SetSamplerState(2+slot,samplerStates[state],values[state]);
@@ -579,6 +579,7 @@ struct Scope {
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
             static bool reflectionReported=false;if(reflectionScene&&reflectionDepth&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             ++frameMatches;
+            if(reflectionScene&&reflectionDepth)++frameSceneMatches;
         }catch(...){Restore();}
     }
     void Restore() noexcept {
