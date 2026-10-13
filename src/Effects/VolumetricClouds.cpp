@@ -47,7 +47,7 @@ float4 cameraPos:register(c0);      // xyz=camera world position, w=elapsed seco
 float4 celestial:register(c1);      // xyz=world direction TOWARDS the tracked disc, w=intensity
 float4 invView0:register(c2); float4 invView1:register(c3); float4 invView2:register(c4);
 float4 projection:register(c5);     // x=A, y=B (raw->view z), z=P00, w=P11
-float4 depthRange:register(c6);     // x=viewport MinZ, y=viewport depth range, z=sky threshold, w=march steps
+float4 depthRange:register(c6);     // x=viewport MinZ, y=depth range, z=viewport MaxZ, w=march steps
 float4 shell:register(c7);          // x=inner radius, y=outer radius, z=1/thickness, w=max march distance
 float4 centre:register(c8);         // xyz=planet centre, w=camera region (0 inside, 1 below, 2 above)
 float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=aerial opacity
@@ -118,7 +118,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float rawDepth=tex2D(depthMap,uv).r;
  // INTZ stores viewport depth; normalise it exactly like the atmosphere's
  // boundary pass so one convention covers every injected pass.
- float raw=rawDepth>=.99999?1:saturate((rawDepth-depthRange.x)/max(depthRange.y,.001));
+ // Clear depth stays at one; normalize only the depth used for
+ // projection reconstruction. Geometry/sky classification below uses the
+ // original viewport-mapped value and MaxZ.
+ float raw=rawDepth>=1?1:saturate((rawDepth-depthRange.x)/max(depthRange.y,.001));
 
  float3 view=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1);
  // The inverse view rows are orthonormal, so dividing by the view-space
@@ -133,7 +136,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // The reciprocal is clamped away from the projection's pole: a far plane
  // at infinity puts raw depth exactly on it, and the infinity that comes
  // back turns into a NaN the moment it meets another one.
- float sceneLimit=raw<depthRange.z?(projection.y/min(rawDepth-projection.x,-1e-6))*viewLength:shell.w;
+ float hasGeometry=1-step((depthRange.z+1)*.5,rawDepth);
+ float sceneLimit=hasGeometry>.5?(projection.y/min(raw-projection.x,-1e-6))*viewLength:shell.w;
 
  // Shell intersection. The planet centre sits directly under the camera, so
  // the quadratic collapses to a couple of multiplies.
@@ -372,7 +376,7 @@ const char* kCloudCompositeSource = R"HLSL(
 sampler2D sceneMap:register(s0); sampler2D cloudMap:register(s1);
 sampler2D depthMap:register(s2); sampler2D shadowMap:register(s3);
 float4 texels:register(c0);      // x=1/full width, y=1/full height, z=1/low width, w=1/low height
-float4 depthRange:register(c1);  // x=viewport MinZ, y=viewport depth range, z=sky threshold, w=debug
+float4 depthRange:register(c1);  // x=viewport MinZ, y=depth range, z=viewport MaxZ, w=debug
 float4 cameraPos:register(c2);
 float4 invView0:register(c3); float4 invView1:register(c4); float4 invView2:register(c5);
 float4 projection:register(c6);  // x=A, y=B, z=P00, w=P11
@@ -399,16 +403,17 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // Both reciprocals are clamped away from the projection's pole, which a
  // far plane at infinity sits exactly on: two infinities one subtraction
  // apart are a NaN, and a NaN weight poisons the whole pixel.
- float centreZ=projection.y/min(linearRaw-projection.x,-1e-6);
+ float normalizedRaw=saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
+ float4 normalizedTaps=saturate((taps-depthRange.x)/max(depthRange.y,.001));
+ float centreZ=projection.y/min(normalizedRaw-projection.x,-1e-6);
  float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
-              /(.002+abs(projection.y/min(taps-projection.x,-1e-6)-centreZ)/max(centreZ,1));
+              /(.002+abs(projection.y/min(normalizedTaps-projection.x,-1e-6)-centreZ)/max(centreZ,1));
  float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
               +tex2D(cloudMap,base+float2(0,lowTexel.y))*weight.z+tex2D(cloudMap,base+lowTexel)*weight.w)
               /max(dot(weight,1),1e-5);
 
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
- float raw=linearRaw>=.99999?1:saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
- float sky=smoothstep(depthRange.z,1,raw);
+ float sky=step((depthRange.z+1)*.5,linearRaw);
  // Reconstruct where this pixel is in the world and read the deck's
  // transmittance toward the sun. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
@@ -449,10 +454,6 @@ bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shad
  if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),errors.GetAddressOf()))||!blob)return false;
  return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(blob->GetBufferPointer()),shader));
 }
-
-// Sky pixels sit at the far plane. The same threshold the atmosphere's
-// integration uses, kept in one place for both cloud passes.
-constexpr float kSkyThreshold = .9999f;
 
 // Extinction of fully dense cloud material per world unit. DensityPercent
 // scales this, so the ini value stays a readable percentage instead of a
@@ -935,7 +936,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                          {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
   const float c5[4]={f.projUnpack[0],f.projUnpack[1],f.projUnpack[2],f.projUnpack[3]};
-  const float c6[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,kSkyThreshold,
+  const float c6[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,
                      float(std::clamp(settings.sampleCount,8u,160u))};
   const float c13[4]={std::max(settings.baseStep,1.f),settings.stepGrowth,settings.coarseScale,settings.jitter};
   const float c15[4]={sunR,sunG,sunB,settings.powder};
@@ -981,7 +982,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetTexture(2,f.depthTexture);SetSampler(d,2,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   d->SetTexture(3,shadowsOn?m_shadowTexture.Get():nullptr);SetSampler(d,3,D3DTEXF_LINEAR,D3DTADDRESS_CLAMP);
   const float c0[4]={1.f/float(m_fullWidth),1.f/float(m_fullHeight),1.f/float(m_lowWidth),1.f/float(m_lowHeight)};
-  const float c1c[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,kSkyThreshold,float(uint32_t(settings.debugMode))};
+  const float c1c[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,float(uint32_t(settings.debugMode))};
   const float c2[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};
   const float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},
                          {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},

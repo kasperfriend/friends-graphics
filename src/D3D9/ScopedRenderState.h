@@ -29,8 +29,9 @@ namespace renderer
             m_device->GetStreamSource(0, m_stream0.GetAddressOf(), &m_streamOffset, &m_streamStride);
             m_device->GetIndices(m_indices.GetAddressOf());
 
-            // Atmosphere uses stage 5 for local fog and stage 6 for cloud light.
-            for (DWORD s = 0; s < 7; ++s)
+            // Atmosphere uses stages 4/7 for raw depth and 5/6 for local/cloud
+            // inputs across its temporal, integration and composite passes.
+            for (DWORD s = 0; s < 8; ++s)
             {
                 m_device->GetTexture(s, m_tex[s].GetAddressOf());
                 m_device->GetSamplerState(s, D3DSAMP_MINFILTER, &m_samp[s].minFilter);
@@ -97,7 +98,7 @@ namespace renderer
             m_device->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, m_slopeBias);
 
             // Restore Textures & Samplers
-            for (DWORD s = 0; s < 7; ++s)
+            for (DWORD s = 0; s < 8; ++s)
             {
                 m_device->SetTexture(s, m_tex[s].Get());
                 m_device->SetSamplerState(s, D3DSAMP_MINFILTER, m_samp[s].minFilter);
@@ -148,7 +149,7 @@ namespace renderer
         UINT m_streamStride = 0;
         ComPtr<IDirect3DIndexBuffer9> m_indices;
 
-        ComPtr<IDirect3DBaseTexture9> m_tex[7];
+        ComPtr<IDirect3DBaseTexture9> m_tex[8];
         struct SamplerStateBackup
         {
             DWORD minFilter = D3DTEXF_POINT;
@@ -157,7 +158,7 @@ namespace renderer
             DWORD addressU = D3DTADDRESS_CLAMP;
             DWORD addressV = D3DTADDRESS_CLAMP;
             DWORD srgb = FALSE;
-        } m_samp[7];
+        } m_samp[8];
 
         DWORD m_zEnable = FALSE, m_zWrite = FALSE, m_zFunc = D3DCMP_LESSEQUAL;
         DWORD m_alphaBlend = FALSE, m_srcBlend = D3DBLEND_ONE, m_destBlend = D3DBLEND_ZERO, m_blendOp = D3DBLENDOP_ADD;

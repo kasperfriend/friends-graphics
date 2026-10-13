@@ -29,15 +29,20 @@ float4 rayTuning:register(c12);
 float4 groundMist:register(c13);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
-    float z=raw>=.9999 ? medium.w : projection.y/(raw/max(sun.w,.001)-projection.x);
+    // INTZ contains viewport-mapped depth. Normalize for the projection
+    // reconstruction, but retain the raw value for sky tests: clear depth
+    // remains 1.0 while geometry is bounded by viewport MaxZ.
+    float linearDepth=saturate(raw/max(sun.w,.001));
+    float z=raw>=.9999 ? medium.w : projection.y/(linearDepth-projection.x);
     z=clamp(z,0,medium.w);
     if(mode.x<.5)return float4(z/medium.w,z/medium.w,z/medium.w,1);
     if(mode.x>5.5) {
-        float clearThreshold=lerp(.9995,.955,step(sun.w,.99));
         // Depth-based occlusion ONLY - is this pixel actually open sky.
         // Geometry/cloud can attenuate this, never emit: brightness never
-        // enters the emission term below.
-        float openness=smoothstep(clearThreshold,1,raw);
+        // enters the emission term below. Geometry maps to <=MaxZ while the
+        // midpoint between those values rejects every occluder and keeps the
+        // clear sky open, including when MaxZ itself is nearly one.
+        float openness=step((sun.w+1)*.5,raw);
         // Aspect-ratio-correct distance to the real, CelestialTracker-
         // confirmed disc position (sun.xy). Raw UV-space distance is
         // squashed on non-square screens - a 0.1 horizontal delta covers
@@ -108,11 +113,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     optDepth*=lerp(.75,1.25,cloud*detail.z);
 
     float transmission=exp(-clamp(optDepth,0.0,12.0));
-    // Was a hard step() at the sky/geometry depth threshold - any camera
-    // angle that put the horizon near mid-screen showed this as a visible
-    // seam/band. smoothstep spreads the transition over a few depth units
-    // instead of one hard edge.
-    float isSky=smoothstep(.9985,.9998,raw);
+    // Classify clear sky from viewport-mapped depth before normalization.
+    // Geometry is bounded by MaxZ; the midpoint leaves only the gap to the
+    // D3D clear value (1.0) on the sky side, even when MaxZ is near one.
+    float isSky=step((sun.w+1)*.5,raw);
     float distFog=1.0-exp(-min(z,medium.w)*medium.z*0.06);
     float fogAmount=max(1.0-transmission,distFog*0.35);
     // Smooth transition into sky distance fog rather than a hard cut
@@ -184,6 +188,8 @@ float4 invView1:register(c3);
 float4 invView2:register(c4);
 // xyz=camera world position (this frame)
 float4 cameraPos:register(c5);
+// x=viewport MinZ, y=viewport Z range, z=viewport MaxZ
+float4 depthRange:register(c10);
 // LAST frame's raw forward (world->view) matrix rows (row-vector
 // convention: pos_view = pos_world * M, row3 = translation)
 float4 prevView0:register(c6);
@@ -206,7 +212,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(temporal.w<.5)return c;
 
     float raw=tex2D(depthMap,uv).r;
-    if(raw>=.9999) {
+    float sky=step((depthRange.z+1)*.5,raw);
+    // Keep reconstruction depth separate from clear/geometry classification.
+    raw=saturate((raw-depthRange.x)/max(depthRange.y,.001));
+    if(sky>.5) {
         // Sky: no stable world point to reproject - same-UV clamp only.
         return lerp(c,clampedHistory(uv,c),temporal.z);
     }
@@ -216,10 +225,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float3 worldPos=cameraPos.xyz
         +viewPos.x*invView0.xyz+viewPos.y*invView1.xyz+viewPos.z*invView2.xyz;
 
+    // The raw view matrix is stored as rows, but a row-vector world*view
+    // transform produces each output from a matrix column. Using row dots
+    // transposes the camera motion and sends shaft history to the wrong
+    // screen location whenever the camera rotates.
     float3 prevViewPos=float3(
-        dot(worldPos,prevView0.xyz)+prevView3.x,
-        dot(worldPos,prevView1.xyz)+prevView3.y,
-        dot(worldPos,prevView2.xyz)+prevView3.z);
+        worldPos.x*prevView0.x+worldPos.y*prevView1.x+worldPos.z*prevView2.x+prevView3.x,
+        worldPos.x*prevView0.y+worldPos.y*prevView1.y+worldPos.z*prevView2.y+prevView3.y,
+        worldPos.x*prevView0.z+worldPos.y*prevView1.z+worldPos.z*prevView2.z+prevView3.z);
 
     if(prevViewPos.z<=0.05) return lerp(c,clampedHistory(uv,c),temporal.z);
 
@@ -254,7 +267,10 @@ float4 projection:register(c1);
 // xyz=view-space direction toward the sun, w=viewport depth maximum
 float4 light:register(c2);
 float linearZ(float raw) {
-    return raw>=.9999 ? 100000 : projection.y/(raw/max(light.w,.001)-projection.x);
+    // Classify clear depth in the original viewport range, then normalize
+    // separately for projection reconstruction. MaxZ can itself be near one.
+    float clearThreshold=(light.w+1)*.5;
+    return raw>=clearThreshold ? 100000 : projection.y/(raw/max(light.w,.001)-projection.x);
 }
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
@@ -289,8 +305,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 inline const char* rayCompositePixelSource=R"HLSL(
 sampler2D rays:register(s0);
 sampler2D resolvedFog:register(s1);
+sampler2D sceneDepth:register(s2);
 // x=valid current-frame fog, y=raw diagnostic mask
 float4 fogLink:register(c0);
+// Viewport MaxZ; D3D's depth clear remains 1.0.
+float4 depthInfo:register(c1);
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 ray=tex2D(rays,uv);
     if(fogLink.x>.5&&fogLink.y<.5) {
@@ -300,10 +319,19 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         float visibility=4*transmission*(1-transmission);
         ray.rgb*=visibility;
     }
+    // The radial blur begins at an open-sky source, but its taps cross
+    // foreground silhouettes in screen space. Clip its output to sky as
+    // well: otherwise a moon's circular halo/shafts are additively painted
+    // over walls and characters that should occlude the source.
+    float raw=tex2D(sceneDepth,uv).r;
+    // Geometry maps to <=MaxZ while the clear remains 1. The midpoint test
+    // blocks radial taps on walls for every viewport depth range.
+    float sky=step((depthInfo.x+1)*.5,raw);
     // Last quantization before the additive blend onto the 8-bit scene:
     // half a level of fixed dither keeps the ray falloff from banding into
     // rings around the source (signed, so the blend can round either way).
     ray.rgb+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
+    ray.rgb*=sky;
     return ray;
 }
 )HLSL";
@@ -357,7 +385,7 @@ sampler2D scene:register(s0);
 sampler2D depthMap:register(s1);
 float4 localTuning:register(c0);
 float4 localMode:register(c1);
-float4 depthInfo:register(c2);
+float4 depthInfo:register(c2); // viewport MaxZ
 float3 sourceAt(float2 uv) {
     float3 c=tex2D(scene,uv).rgb;
     float peak=max(c.r,max(c.g,c.b));
@@ -366,8 +394,10 @@ float3 sourceAt(float2 uv) {
     float blueShoulder=smoothstep(.001,.025,c.b);
     float amberRatio=1-smoothstep(.90,.98,c.g/max(c.r,.01));
     float raw=tex2D(depthMap,uv).r;
-    float clearThreshold=lerp(.9995,.955,step(depthInfo.x,.99));
-    float worldGeometry=1-smoothstep(clearThreshold,1,raw);
+    // Clear depth is 1 while geometry is capped by viewport MaxZ; use the
+    // gap between them rather than a fixed threshold that can leak bright
+    // foreground into the local-light source mask.
+    float worldGeometry=1-step((depthInfo.x+1)*.5,raw);
     return c*bright*warm*blueShoulder*amberRatio*worldGeometry;
 }
 float4 main(float2 uv:TEXCOORD0):COLOR0 {

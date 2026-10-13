@@ -4,6 +4,7 @@
 // Synthetic depth is encoded with WoW's viewport range, not just 0..1.
 #include <windows.h>
 #include <d3d9.h>
+#include <algorithm>
 #include <wrl/client.h>
 #include <cstdio>
 #include <cmath>
@@ -104,7 +105,7 @@ int main() try {
  weathervisuals::lastNativeWeatherTick=GetTickCount()-weathervisuals::nativeWeatherHoldMs-1;weathervisuals::Present(nullptr,true);
  Require(weathervisuals::nativeWeatherMode==1&&weathervisuals::weatherSuspended,"F7 preserves detected weather across missing native draws");
  weathervisuals::Reset(d.Get());weathervisuals::nativeWeatherMode=0;weathervisuals::weatherSuspended=false;g_trackedState={};
- auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->SetTexture(6,scene.Get()));Check(d->SetSamplerState(6,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(6,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");ComPtr<IDirect3DBaseTexture9> tex6;DWORD address6=0,srgb6=0;Check(d->GetTexture(6,tex6.GetAddressOf()));Check(d->GetSamplerState(6,D3DSAMP_ADDRESSU,&address6));Check(d->GetSamplerState(6,D3DSAMP_SRGBTEXTURE,&srgb6));Require(tex6.Get()==scene.Get()&&address6==D3DTADDRESS_MIRROR&&srgb6==TRUE,"cloud light sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
+ auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(4,scene.Get()));Check(d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->SetTexture(6,scene.Get()));Check(d->SetSamplerState(6,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(6,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->SetTexture(7,scene.Get()));Check(d->SetSamplerState(7,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(7,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex4;DWORD address4=0,srgb4=0;Check(d->GetTexture(4,tex4.GetAddressOf()));Check(d->GetSamplerState(4,D3DSAMP_ADDRESSU,&address4));Check(d->GetSamplerState(4,D3DSAMP_SRGBTEXTURE,&srgb4));Require(tex4.Get()==scene.Get()&&address4==D3DTADDRESS_MIRROR&&srgb4==TRUE,"raw-depth composite sampler restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");ComPtr<IDirect3DBaseTexture9> tex6;DWORD address6=0,srgb6=0;Check(d->GetTexture(6,tex6.GetAddressOf()));Check(d->GetSamplerState(6,D3DSAMP_ADDRESSU,&address6));Check(d->GetSamplerState(6,D3DSAMP_SRGBTEXTURE,&srgb6));Require(tex6.Get()==scene.Get()&&address6==D3DTADDRESS_MIRROR&&srgb6==TRUE,"cloud light sampler restored");ComPtr<IDirect3DBaseTexture9> tex7;DWORD address7=0,srgb7=0;Check(d->GetTexture(7,tex7.GetAddressOf()));Check(d->GetSamplerState(7,D3DSAMP_ADDRESSU,&address7));Check(d->GetSamplerState(7,D3DSAMP_SRGBTEXTURE,&srgb7));Require(tex7.Get()==scene.Get()&&address7==D3DTADDRESS_MIRROR&&srgb7==TRUE,"raw-depth sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
  auto diff=[](DWORD a,DWORD b){int m=0;for(int s=0;s<24;s+=8)m=std::max(m,abs(int((a>>s)&255)-int((b>>s)&255)));return m;};
  encode(120,1);DWORD standard=render(true);Require(diff(standard,0xff202020)>8,"fog visible on first resource creation");
  const float baseDensity=settings.densityScale;
@@ -433,24 +434,124 @@ int main() try {
  ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
  Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));
  Check(d->CreatePixelShader((DWORD*)rayLinkCode->GetBufferPointer(),rayLinkShader.GetAddressOf()));
- auto linkedRay=[&](int opacity,bool available,bool debug){
-  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);
-  Check(d->BeginScene());Check(d->SetRenderTarget(0,back.Get()));
-  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());
+ auto linkedRay=[&](int opacity,bool available,bool debug,float rawDepth,float maxZ){
+  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);fillFloat(depth.Get(),rawDepth);
+  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+  Check(d->BeginScene());
+  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());d->SetTexture(2,depth.Get());
+  d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(2,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  d->SetSamplerState(2,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(2,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetSamplerState(2,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(2,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
   d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
-  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0};d->SetPixelShaderConstantF(0,link,1);
+  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0},depthInfo[4]={maxZ,0,0,0};
+  d->SetPixelShaderConstantF(0,link,1);d->SetPixelShaderConstantF(1,depthInfo,1);
   struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
   Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());return pixel()&255;};
- Require(linkedRay(0,true,false)==0,"clear medium suppresses linked rays");
- Require(linkedRay(128,true,false)>120,"moderate fog reveals rays");
- Require(linkedRay(250,true,false)<15,"dense banks extinguish linked rays");
- Require(linkedRay(0,false,false)==128,"missing current fog preserves unlinked fallback");
- Require(linkedRay(0,true,true)==128,"shaft diagnostic mask bypasses fog coupling");
+ Require(linkedRay(0,true,false,1.f,1.f)==0,"clear medium suppresses linked rays");
+ Require(linkedRay(128,true,false,1.f,1.f)>120,"moderate fog reveals rays");
+ Require(linkedRay(250,true,false,1.f,1.f)<15,"dense banks extinguish linked rays");
+ Require(linkedRay(0,false,false,1.f,1.f)==128,"missing current fog preserves unlinked fallback");
+ Require(linkedRay(0,true,true,1.f,1.f)==128,"shaft diagnostic mask bypasses fog coupling");
+ Require(linkedRay(128,true,false,.5f,1.f)==0,
+         "depth-aware radial composite blocks moonlight on a foreground wall");
+ Require(linkedRay(128,false,false,.5f,1.f)==0,
+         "depth gate also blocks the unlinked fallback from bleeding through walls");
+ // With viewport MaxZ=.99, a foreground surface can have raw depth .98;
+ // it must not be confused with the clear value of exactly 1.
+ Require(linkedRay(128,true,false,.98f,.99f)==0,
+         "viewport-mapped foreground is not mistaken for sky");
+ Require(linkedRay(128,false,false,.98f,.99f)==0,
+         "raw-depth gate also blocks fallback rays at reduced viewport MaxZ");
+ Require(linkedRay(128,true,false,.9997f,.9998f)==0,
+         "geometry remains occluding when viewport MaxZ is nearly one");
+ Require(linkedRay(128,true,false,.9997f,1.f)==0,
+         "distant geometry cannot bleed radial shafts at the full viewport range");
+ ComPtr<ID3DBlob> sourceMaskCode;ComPtr<IDirect3DPixelShader9> sourceMaskShader;
+ Check(D3DCompile(volumePixelSource,strlen(volumePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,sourceMaskCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)sourceMaskCode->GetBufferPointer(),sourceMaskShader.GetAddressOf()));
+ auto sourceMaskPixel=[&](float rawDepth,float maxZ){
+  fillFloat(depth.Get(),rawDepth);Check(d->SetRenderTarget(0,back.Get()));
+  Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
+  d->SetVertexShader(nullptr);d->SetPixelShader(sourceMaskShader.Get());
+  d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(1,depth.Get());
+  d->SetTexture(3,scene.Get());d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_POINT);
+  d->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);
+  d->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,FALSE);d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);
+  d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
+  float projection[4]={f.projUnpack[0],f.projUnpack[1],f.projUnpack[2],f.projUnpack[3]};
+  float medium[4]={0,0,0,350},sun[4]={.5f,.5f,1.f,maxZ},mode[4]={7,1,0,0};
+  float rayTuning[4]={1.f/128,1.f/128,0,0},cloudMask[4]={0,0,0,0};
+  d->SetPixelShaderConstantF(0,projection,1);d->SetPixelShaderConstantF(1,medium,1);
+  d->SetPixelShaderConstantF(2,sun,1);d->SetPixelShaderConstantF(8,mode,1);
+  d->SetPixelShaderConstantF(12,rayTuning,1);d->SetPixelShaderConstantF(14,cloudMask,1);
+  struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
+  Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());
+  d->SetTexture(1,nullptr);d->SetTexture(3,nullptr);return pixel()&255;};
+ Require(sourceMaskPixel(.98f,.99f)<2,"viewport-mapped foreground is excluded from the celestial source mask");
+ Require(sourceMaskPixel(.9997f,.9998f)<2,"near-one viewport geometry is excluded from the celestial source mask");
+ Require(sourceMaskPixel(.9997f,1.f)<2,"far geometry is excluded from the source mask at MaxZ=1");
+ Require(sourceMaskPixel(1.f,.99f)>250,"clear depth remains open sky in the celestial source mask");
+ ComPtr<ID3DBlob> localSourceCode;ComPtr<IDirect3DPixelShader9> localSourceShader;
+ Check(D3DCompile(localLightPixelSource,strlen(localLightPixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,localSourceCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)localSourceCode->GetBufferPointer(),localSourceShader.GetAddressOf()));
+ auto localSourcePixel=[&](float rawDepth,float maxZ){
+  fill(scene.Get(),0xffe08020);fillFloat(depth.Get(),rawDepth);
+  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+  Check(d->BeginScene());d->SetVertexShader(nullptr);d->SetPixelShader(localSourceShader.Get());
+  d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,depth.Get());
+  d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  d->SetSamplerState(0,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
+  float tuning[4]={1.f/128,1.f/128,.01f,.25f},mode[4]={0,0,0,0},depthInfo[4]={maxZ,0,0,0};
+  d->SetPixelShaderConstantF(0,tuning,1);d->SetPixelShaderConstantF(1,mode,1);
+  d->SetPixelShaderConstantF(2,depthInfo,1);
+  struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
+  Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());
+  d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);return (pixel()>>16)&255;};
+ Require(localSourcePixel(.98f,.99f)>30,"reduced-MaxZ geometry remains eligible for local-light extraction");
+ Require(localSourcePixel(.9997f,.9998f)>30,"near-one viewport geometry remains eligible for local-light extraction");
+ Require(localSourcePixel(.9997f,1.f)>30,"distant geometry remains eligible for local-light extraction at MaxZ=1");
+ Require(localSourcePixel(1.f,.99f)<2,"clear sky is excluded from local-light extraction");
+ ComPtr<ID3DBlob> temporalCode;ComPtr<IDirect3DPixelShader9> temporalShader;
+ Check(D3DCompile(volumeTemporalPixelSource,strlen(volumeTemporalPixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,temporalCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)temporalCode->GetBufferPointer(),temporalShader.GetAddressOf()));
+ auto temporalCurrent=texture(D3DFMT_A8R8G8B8),temporalHistory=texture(D3DFMT_A8R8G8B8);
+ fill(temporalCurrent.Get(),0xff808080);fill(temporalHistory.Get(),0xff202020);
+ auto setPixel=[&](IDirect3DTexture9* t,int x,int y,DWORD value){D3DLOCKED_RECT r{};Check(t->LockRect(0,&r,nullptr,0));reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=value;Check(t->UnlockRect(0));};
+ setPixel(temporalCurrent.Get(),63,64,0xff000000);setPixel(temporalCurrent.Get(),65,64,0xffffffff);
+ for(int y=62;y<=66;++y)for(int x=94;x<=98;++x)setPixel(temporalHistory.Get(),x,y,0xffe0e0e0);
+ auto temporalPixel=[&](float rawDepth,float maxZ){
+  f.viewport.MinZ=0;f.viewport.MaxZ=maxZ;f.depthMaxZ=maxZ;
+  fillFloat(depth.Get(),rawDepth);Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));
+  Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
+  Check(d->SetVertexShader(nullptr));Check(d->SetPixelShader(temporalShader.Get()));Check(d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));
+  Check(d->SetTexture(0,temporalCurrent.Get()));Check(d->SetTexture(1,temporalHistory.Get()));Check(d->SetTexture(2,depth.Get()));
+  for(DWORD s=0;s<3;++s){Check(d->SetSamplerState(s,D3DSAMP_MINFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT));Check(d->SetSamplerState(s,D3DSAMP_MAGFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT));Check(d->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));Check(d->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));Check(d->SetSamplerState(s,D3DSAMP_SRGBTEXTURE,FALSE));}
+  Check(d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));Check(d->SetRenderState(D3DRS_ZENABLE,FALSE));Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE));Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,15));
+  float temporal[4]={1.f/128,1.f/128,1,1},inverse[3][4]={{1,0,0,0},{0,1,0,0},{0,0,1,0}},camera[4]={0,0,0,0};
+  float previousView[4][4]={{1,0,0,1},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
+  float normalized=std::clamp(rawDepth/maxZ,0.f,1.f);
+  float z=f.projUnpack[1]/(normalized-f.projUnpack[0]);previousView[3][0]=.5f*z/f.projUnpack[2];
+  float depthRange[4]={0,maxZ,maxZ,0};
+  Check(d->SetPixelShaderConstantF(0,temporal,1));Check(d->SetPixelShaderConstantF(1,f.projUnpack,1));
+  Check(d->SetPixelShaderConstantF(2,inverse[0],3));Check(d->SetPixelShaderConstantF(5,camera,1));
+  Check(d->SetPixelShaderConstantF(6,previousView[0],4));Check(d->SetPixelShaderConstantF(10,depthRange,1));
+  struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
+  Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());
+  for(DWORD s=0;s<3;++s)Check(d->SetTexture(s,nullptr));return (pixel(64,64)>>16)&255;
+ };
+ const int clearHistory=temporalPixel(1.f,.99f),farGeometryHistory=temporalPixel(.99f,.99f);
+ printf("temporal reduced-MaxZ clear=%d far geometry=%d\n",clearHistory,farGeometryHistory);
+ Require(clearHistory<80&&farGeometryHistory>160,
+         "temporal sky classification uses raw depth before MaxZ normalization");
  // --- Volumetric clouds -------------------------------------------------
- // Same device, a fresh synthetic depth buffer: genuine sky (far plane) in
- // the top half, solid geometry thirty units away in the bottom half. The
- // noise fields are generated deterministically from fixed seeds, so the
- // coverage response is a value assertion, not "something changed".
+ // Same device, a fresh synthetic depth buffer: genuine clear sky in the
+ // top half, solid geometry thirty units away in the bottom half, with a
+ // reduced viewport MaxZ to exercise raw-depth sky classification. The
+ // noise fields are deterministic, so coverage is a value assertion.
  auto& clouds=VolumetricClouds::Instance();auto& cloud=clouds.Settings();
  clouds.ApplyQualityPreset(1);
  cloud.enabled=true;cloud.coverage=1.f;cloud.density=1.f;cloud.weatherCoverageBoost=0;
@@ -461,11 +562,11 @@ int main() try {
  cloud.groundShadows=false;cloud.groundShadowStrength=.55f;cloud.groundShadowExtent=14000;
  f.cameraPosition={0,0,0};f.sunDirectionWorld={0,0,1};f.directionalLightColor={0,0,0};
  f.celestialIntensity=1;f.celestialIsMoon=false;f.daylightFactor=1;f.moonlightFactor=0;
- f.viewport.MinZ=0;f.viewport.MaxZ=1;f.depthMaxZ=1;
+ f.viewport.MinZ=0;f.viewport.MaxZ=.94f;f.depthMaxZ=.94f;
  {
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
   for(int y=0;y<128;++y)for(int x=0;x<128;++x)
-   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=y<64?1.f:f.projUnpack[0]+f.projUnpack[1]/30.f;
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
   Check(depth->UnlockRect(0));
  }
  fill(scene.Get(),0xff202020);
@@ -534,14 +635,14 @@ int main() try {
  {
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
   for(int y=64;y<128;++y)for(int x=0;x<128;++x)
-   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=f.projUnpack[0]+f.projUnpack[1]/800.f;
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=.94f*(f.projUnpack[0]+f.projUnpack[1]/800.f);
   Check(depth->UnlockRect(0));
  }
  Require(renderClouds()&&diff(pixel(64,110),0xff202020)>12,"cloud in front of distant geometry is composited over it");
  {
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
   for(int y=64;y<128;++y)for(int x=0;x<128;++x)
-   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=f.projUnpack[0]+f.projUnpack[1]/30.f;
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
   Check(depth->UnlockRect(0));
  }
  Require(renderClouds()&&pixel(64,110)==0xff202020,"a surface thirty units away is still in front of the deck");
@@ -626,6 +727,36 @@ int main() try {
  Require(diff(openCloudRays,blockedCloudRays)>5,"cloud gaps transmit sunlight even with the disc off screen");
  f.cloudRayStrength=0;const DWORD raysOff=render(true);
  Require(diff(openCloudRays,raysOff)>5,"cloud ray strength zero removes the new shaft contribution");
- f.cloudShadowTexture=nullptr;f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
+
+ // The circular screen-space term belongs to open sky, not to foreground
+ // surfaces that happen to be inside the fog raymarch. A tracked moon toggle
+ // must therefore have no effect on an opaque wall, while the same halo is
+ // still visible around the source in clear-sky pixels.
+ f.cloudShadowTexture=nullptr;f.cloudRayStrength=0;
+ settings.debugMode=VolumetricDebugMode::None;settings.temporalEnabled=false;
+ settings.localFogEnabled=false;settings.edgeFogEnabled=false;settings.aerialDensity=.002f;
+ settings.heightDensity=settings.mistDensity=0;settings.sunGlowStrength=3.f;settings.moonStrength=1.f;
+ f.directLightValid=true;f.directLightIsMoon=true;f.directLightIntensity=1.f;
+ f.directLightDirectionView={0,0,-1};f.sunScreenX=.5f;f.sunScreenY=.5f;
+ f.cameraPosition={0,0,0};f.celestialIntensity=0;
+ encode(40,1.f);render(true);const DWORD wallWithoutMoon=pixel(74,64);
+ f.celestialIntensity=1.f;render(true);const DWORD wallWithMoon=pixel(74,64);
+ Require(diff(wallWithMoon,wallWithoutMoon)<=1,
+         "moon halo does not paint through a foreground wall");
+ // Near the far plane, normalized/reconstructed depth can be almost one
+ // even though the raw depth buffer still contains opaque geometry. The
+ // screen-space halo must use the original clear-depth signal, not the
+ // normalized depth used to reconstruct the raymarch distance.
+ encode(700,1.f);f.celestialIntensity=0;render(true);const DWORD farWallWithoutMoon=pixel(74,63);
+ f.celestialIntensity=1.f;render(true);const DWORD farWallWithMoon=pixel(74,63);
+ Require(diff(farWallWithMoon,farWallWithoutMoon)<=1,
+         "moon halo does not leak through far-plane geometry");
+ fillFloat(depth.Get(),1.f);f.celestialIntensity=0;
+ render(true);const DWORD skyWithoutMoon=pixel(74,64);
+ f.celestialIntensity=1.f;
+ render(true);const DWORD skyWithMoon=pixel(74,64);
+ Require(diff(skyWithMoon,skyWithoutMoon)>1,"moon halo remains visible through open-sky fog");
+
+ f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}
