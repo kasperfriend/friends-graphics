@@ -160,9 +160,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     slopes*=filter;
     float2 offset=slopes*controls.y;
     float flowGate=saturate(controls.y*100+controls.z*4);
-    float3 surfaceA=tex2D(surfaceTexture,uv1+offset+drift*.010*flowGate).rgb;
-    float3 surfaceB=tex2D(surfaceTexture,rotated-offset*.63-drift*.006).rgb;
-    float3 surface=lerp(surfaceA,surfaceB,flowControl.y*.45*flowGate);
+    float3 surface=tex2D(surfaceTexture,uv1+offset+drift*.010*flowGate).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
     float3 v=safeNormalize(-viewPos);
     float3 n=safeNormalize(viewNormal);
@@ -265,7 +263,9 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
             float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z/max(samplePosition.z,.05),
                                    .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
-            float inside=step(0,sampleUV.x)*step(sampleUV.x,1)*step(0,sampleUV.y)*step(sampleUV.y,1)*step(.05,samplePosition.z);
+            // border is already zero outside the viewport; don't compute the
+            // same four inside tests a second time for every SSR step.
+            float inside=step(.05,samplePosition.z);
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw/max(reflectionControl.w,.001)-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
@@ -276,11 +276,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             float confidence=inside*step(sceneZ,99999)*sided*range*border;
             float replace=step(bestConfidence+.0001,confidence);
             hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,replace);
-            edge=lerp(edge,border,replace);
             bestConfidence=max(bestConfidence,confidence);
         }
         hit=saturate(bestConfidence*1.8);
-        edge*=hit;
+        edge=hit;
         reflected=lerp(environment,hitColor,edge);
     }
 
@@ -298,7 +297,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
         float distance=length(delta);float3 toLight=delta/max(distance,.001);
         float reach=saturate(1-distance/max(localPosition[li].w,.01));
         float specular=pow(saturate(dot(wave,safeNormalize(toLight+v))),64);
-        float fresnelLocal=.04+.96*pow(1-saturate(dot(wave,v)),5);
+        float fresnelLocal=.04+.96*foreverFresnel*foreverFresnel;
         localReflection+=localColor[li].rgb*localColor[li].w*specular*fresnelLocal*
             saturate(dot(wave,toLight))*reach*reach/(1+distance*distance*.035);
     }
@@ -483,7 +482,10 @@ struct Scope {
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
-            float controls[36]={float(std::fmod(renderer::PerformanceSeconds(),600.0)),strength,normalStrength,specularStrength};
+            // Relative time avoids both uptime-sized float precision loss and
+            // the old discontinuous wave jump every ten minutes.
+            static const double animationStart=renderer::PerformanceSeconds();
+            float controls[36]={float(renderer::PerformanceSeconds()-animationStart),strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)

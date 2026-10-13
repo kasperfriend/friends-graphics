@@ -1,6 +1,15 @@
 // Tests the production water Scope, not a second implementation of it.
 #include "../WaterEffect.h"
 #include "../src/Scene/DrawCallClassifier.h"
+// The capture provider is controlled here; Prepare itself is production code.
+namespace volume {
+inline bool internal=false,ready=false,composed=false;
+inline IDirect3DDevice9* owner=nullptr;
+inline Microsoft::WRL::ComPtr<IDirect3DSurface9> target;
+inline Microsoft::WRL::ComPtr<IDirect3DTexture9> depth;
+inline float constants[3][4]{};
+}
+#include "../WaterReflection.h"
 #include <stdexcept>
 #include <cstdio>
 
@@ -117,6 +126,27 @@ int main() try {
         Check(d->SetTexture(1,surface.Get()));
         Require(classifier.Classify(d.Get(),ctx,translation,false,0).isWater,"water material not poisoned by non-water cache");
     }
+    // Exercise the real pre-water copy with reflections off, inside a scene.
+    // Refraction/depth/foam must still get a fresh image and finish must drop it.
+    Check(d->GetRenderTarget(0,volume::target.GetAddressOf()));
+    volume::owner=d.Get();volume::ready=true;volume::depth=sentinel;
+    volume::constants[0][0]=1.001f;volume::constants[0][1]=-.1f;
+    volume::constants[0][2]=volume::constants[0][3]=1;volume::constants[2][3]=.94f;
+    waterreflection::Configure(L".\\");
+    Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+    Require(waterreflection::ready&&watereffect::reflectionScene&&watereffect::reflectionDepth,
+        "pre-water scene copy works with reflections disabled");
+    waterreflection::Finish();
+    Require(!waterreflection::ready&&!watereffect::reflectionScene&&!watereffect::reflectionDepth,
+        "frame end clears borrowed capture inputs");
+    // An offscreen draw with water textures must not copy the wrong scene.
+    ComPtr<IDirect3DTexture9> offscreen;ComPtr<IDirect3DSurface9> offscreenRT;
+    Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,offscreen.GetAddressOf(),nullptr));
+    Check(offscreen->GetSurfaceLevel(0,offscreenRT.GetAddressOf()));Check(d->SetRenderTarget(0,offscreenRT.Get()));
+    waterreflection::Prepare(d.Get());Require(!waterreflection::ready,"offscreen water cannot capture the main scene");
+    Check(d->SetRenderTarget(0,volume::target.Get()));Check(d->SetViewport(&viewport));
+    waterreflection::Reset(d.Get());
+    Require(!waterreflection::resources.scene&&!waterreflection::resources.surface,"capture reset releases default-pool resources");
     // Render the complete shader, not just a diagnostic extraction, without capture.
     struct Vertex {float x,y,z,nx,ny,nz;DWORD color;float u,v,s,t;};
     Vertex vertices[]={{-1,1,1,0,0,-1,0xffffffff,0,0,0,0},{1,1,1,0,0,-1,0xffffffff,1,0,1,0},
@@ -139,6 +169,27 @@ int main() try {
     Require((pixel(1)&0xffffff)==0xff00ff,"debug mode proves replacement reaches the framebuffer");
     Require((pixel(0)&0xffffff)!=0,"modern water without capture is finite and nonblack");
     restored();
+    // The optional atmosphere MRTs must never corrupt the main water draw.
+    ComPtr<IDirect3DTexture9> mask,waterDepth;ComPtr<IDirect3DSurface9> maskRT,depthRT;
+    Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,mask.GetAddressOf(),nullptr));
+    Check(mask->GetSurfaceLevel(0,maskRT.GetAddressOf()));
+    HRESULT depthHR=d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_R32F,D3DPOOL_DEFAULT,waterDepth.GetAddressOf(),nullptr);
+    if(SUCCEEDED(depthHR)) {
+        Check(waterDepth->GetSurfaceLevel(0,depthRT.GetAddressOf()));
+        Check(d->ColorFill(maskRT.Get(),nullptr,0));Check(d->ColorFill(depthRT.Get(),nullptr,0));
+        watereffect::waterTargetSurface=back.Get();watereffect::waterMaskSurface=maskRT.Get();watereffect::waterDepthSurface=depthRT.Get();
+        // Capability checks may decline MRTs on older hardware; color still renders.
+        Require((pixel(1)&0xffffff)==0xff00ff,"optional MRTs do not break the water draw");restored();
+        ComPtr<IDirect3DSurface9> checkRT;
+        Require(d->GetRenderTarget(1,checkRT.GetAddressOf())==D3DERR_NOTFOUND,"mask slot restored to unbound");
+        Require(d->GetRenderTarget(2,checkRT.GetAddressOf())==D3DERR_NOTFOUND,"depth slot restored to unbound");
+        // Reproduce the old resize mismatch: reject the pair before mutating RTs.
+        ComPtr<IDirect3DTexture9> small;ComPtr<IDirect3DSurface9> smallRT;
+        Check(d->CreateTexture(64,64,1,D3DUSAGE_RENDERTARGET,D3DFMT_R32F,D3DPOOL_DEFAULT,small.GetAddressOf(),nullptr));
+        Check(small->GetSurfaceLevel(0,smallRT.GetAddressOf()));watereffect::waterDepthSurface=smallRT.Get();
+        {watereffect::Scope scope(d.Get());Require(!scope.maskBound&&!scope.depthBound,"mismatched resize pair not bound");}
+        restored();watereffect::waterTargetSurface=watereffect::waterMaskSurface=watereffect::waterDepthSurface=nullptr;
+    } else std::puts("SKIP optional R32F MRT checks: unsupported format");
     watereffect::effectEnabled=false;
     {watereffect::Scope scope(d.Get());Require(scope.device==nullptr,"feature disabled leaves native draw untouched");}
     watereffect::effectEnabled=true;
