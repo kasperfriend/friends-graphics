@@ -93,6 +93,11 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Water device regressions
+        if: matrix.configuration == 'Release'
+        shell: cmd
+        run: tools\Test-Water.cmd
+
       - name: Verify output
         shell: pwsh
         run: |
@@ -172,3 +177,5 @@ jobs:
           ./build/cloud-layer-test
           g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
           ./build/frame-clock-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/WaterRegression.cpp -o build/water-test
+          ./build/water-test

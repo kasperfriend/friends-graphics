@@ -96,7 +96,7 @@ sampler2D sceneTexture:register(s2);
 sampler2D sceneDepth:register(s3);
 float4 fogColor:register(c4);
 float4 controls:register(c200);
-float4 lightDirection:register(c201);
+float4 lightDirection:register(c201); // xyz=direction, w=flow rotation sine
 float4 lightColor:register(c202);
 // c203=(projection A,B,scaleX,scaleY)
 float4 reflectionProjection:register(c203);
@@ -104,7 +104,7 @@ float4 reflectionProjection:register(c203);
 float4 reflectionControl:register(c204);
 // x=environment strength,y=max trace distance,z=base thickness,w=enabled
 float4 reflectionStyle:register(c205);
-// x=animation speed, y=counter-rotating layer strength.  The latter mirrors
+// x=animation speed, y=counter-rotating layer strength, z=debug, w=rotation cosine.  The latter mirrors
 // the modern client's animated UV transforms without depending on its ADT data.
 float4 flowControl:register(c206);
 // x=refraction, y=depth absorption, z=shore foam, w=foam depth width
@@ -147,16 +147,15 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // Preserve WoW's two material UV transforms and add a slower
     // counter-rotating component.  This keeps a coherent current instead of
     // making the reflection look like a stationary mirror with noisy normals.
-    float angle=time*.035;
-    float s=sin(angle),c=cos(angle);
+    // Uniform trigonometry is evaluated once per draw on the CPU, not per pixel.
+    float s=lightDirection.w,c=flowControl.w;
     float2 rotated=float2(c*uv0.x-s*uv0.y,s*uv0.x+c*uv0.y);
     float2 flowingUv=lerp(uv1,rotated,flowControl.y);
     float2 p=float2(dot(flowingUv,float2(.91,.41)),dot(flowingUv,float2(-.41,.91)))*float2(14,31);
     float3 swell=noiseGradient(p*.055+drift*.085);
     float3 a=noiseGradient(p+drift+float2(swell.x,swell.x*.71));
-    float3 b=noiseGradient(float2(-p.y,p.x)*1.83-drift*.67+17.2);
     float2 longSlopes=swell.yz;
-    float2 slopes=(a.yz+float2(-b.z,b.y)*.43)*.72+longSlopes*foreverStyle.x;
+    float2 slopes=a.yz*.72+longSlopes*foreverStyle.x;
     float filter=rsqrt(1+16*dot(fwidth(p),fwidth(p)));
     slopes*=filter;
     float2 offset=slopes*controls.y;
@@ -213,15 +212,13 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float3 l=safeNormalize(-lightDirection.xyz);
     float ndh=saturate(dot(wave,safeNormalize(l+v)));
     float ndl=saturate(dot(wave,l));
-    // Keep the coherent reflection narrow. The previous low exponent made
-    // calm canal water turn into one white blanket.
-    float broad=pow(ndh,42);
-    float sparkle=pow(ndh,176);
-    float glitterVariation=.28+1.45*pow(saturate(a.x*.52+b.x*.31+swell.x*.17),3);
+    // One rough specular lobe with wave breakup creates the sun road. The
+    // previous shader evaluated three overlapping lobes, a halo and another
+    // copy of the same path; besides washing out water, it exceeded PS3 limits.
     float foreverFresnel=pow(1-saturate(dot(wave,v)),2);
     float fresnel=saturate(.08+foreverStyle.z*(.10+.62*foreverFresnel));
-    float pathBreakup=.08+1.10*smoothstep(.48,.90,a.x*.46+b.x*.34+swell.x*.20);
-    float celestialPath=pow(ndh,38)*pathBreakup*foreverStyle.y*(.28+.72*fresnel)*ndl;
+    float pathBreakup=.18+.82*saturate(a.x*.7+swell.x*.3);
+    float celestialPath=pow(ndh,64)*pathBreakup*foreverStyle.y*fresnel*ndl;
 
     // March from this water point toward the sun/moon through the captured
     // pre-water depth buffer. Buildings and terrain suppress direct glint,
@@ -244,13 +241,8 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
         }
     }
     celestialPath*=lightVisibility;
-    float spec=(.12*broad+sparkle*glitterVariation)*foreverStyle.y*(.55+fresnel)*ndl+celestialPath*.24;
-    float shading=1+controls.z*.6*(dot(wave,l)-dot(n,l));
-    float energy=max(spec*controls.w*lightVisibility,0);
-    energy=.68*energy/(.42+energy);
-    float luminance=dot(max(lightColor.rgb,0),float3(.2126,.7152,.0722));
-    float3 sheenColor=lerp(luminance.xxx,max(lightColor.rgb,0),.45);
-    rgb=rgb*shading+sheenColor*energy;
+    float3 sheenColor=max(lightColor.rgb,0);
+    rgb*=1+controls.z*.6*(dot(wave,l)-dot(n,l));
 
     // 1. Water body: bottom refracted scene + depth absorption
     float3 waterBody=rgb;
@@ -277,10 +269,9 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw/max(reflectionControl.w,.001)-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
-            float stepLength=max(reflectionStyle.y*(2*q-1.0/12.0)/(12.0),.25);
-            float thickness=reflectionStyle.z+stepLength*.72+traceDistance*.018;
+            float thickness=reflectionStyle.z+traceDistance*.05;
             float range=saturate(1-abs(difference)/max(thickness,.01));
-            float sided=step(-thickness*.28,difference)*step(difference,thickness);
+            float sided=step(-thickness*.28,difference);
             float border=saturate(min(min(sampleUV.x,sampleUV.y),min(1-sampleUV.x,1-sampleUV.y))*8);
             float confidence=inside*step(sceneZ,99999)*sided*range*border;
             float replace=step(bestConfidence+.0001,confidence);
@@ -316,15 +307,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // 4. Celestial reflection path & shore/crest foam
     float pathEnergy=saturate(celestialPath*controls.w*.62);
     rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
-    // Tiny core at the centre of the sun road, not a broad circular blanket.
-    float haloAlign=saturate(dot(reflect(-v,n),l));
-    float halo=pow(haloAlign,112)*foreverStyle.y*ndl*lightVisibility;
-    float3 warmTint=lerp(max(lightColor.rgb,.15),float3(1,.78,.5),.35);
-    rgb+=warmTint*halo*.24;
-    float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
+    float waveFoam=smoothstep(.70,.91,a.x*.7+swell.x*.3+length(longSlopes)*.10);
     float foamAmount=(shore*waterStyle.z+waveFoam*foreverStyle.w)*crest;
     rgb+=float3(.42,.48,.43)*foamAmount;
-    if(flowControl.z>1.5){result_.color=float4(saturate((pathEnergy+halo)*3).xxx,1);return result_;}
+    if(flowControl.z>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.z>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
@@ -527,6 +513,8 @@ struct Scope {
             controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=reflectionScene&&reflectionDepth?1.f:0.f;
             controls[24]=flowSpeed;controls[25]=flowRotation;
             controls[26]=waterDebugMode;
+            const float flowAngle=controls[0]*flowSpeed*.035f;
+            controls[7]=std::sin(flowAngle);controls[27]=std::cos(flowAngle);
             controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength:0;controls[31]=shoreFoamWidth;
             controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
             controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
