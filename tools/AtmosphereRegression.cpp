@@ -624,8 +624,8 @@ int main() try {
  cloud.weatherCoverageBoost=0;
  Require(diff(boosted,0xff202020)>12,"native rain pushes coverage up through the weather boost");
  Require(clouds.Settings().coverage==.3f,"the weather boost never mutates the configured coverage");
- // The deck is a shell, not a slab pushed out of the camera's way, so all
- // three camera regions have to behave: under it, inside it, above it.
+ // The deck stays at its configured world height, so all three camera
+ // regions have to behave: under it, inside it, above it.
  cloud.coverage=1.f;
  f.cameraPosition={0,0,1500};
  Require(renderClouds()&&diff(pixel(64,20),0xff202020)>12,"a camera inside the deck still integrates the cloud around it");

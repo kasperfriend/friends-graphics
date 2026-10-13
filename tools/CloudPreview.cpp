@@ -105,8 +105,7 @@ struct ImageSampler
 // ------------------------------------------------------------- settings ---
 struct CloudConfig
 {
-    // Shell geometry, in world units (WoW world Z is up, ground near z = 0).
-    float planetRadius = 42000.f;
+    // Fixed layer geometry in world units (WoW world Z is up).
     float bottom = 850.f;
     float top = 3000.f;
     float maxDistance = 26000.f;
@@ -155,7 +154,7 @@ struct CloudConfig
     float aerialOpacity = .60f;       // how much of the silhouette it eats
 
     // March. The step is a WORLD length, not a slice of the span: a ray
-    // along the horizon crosses 25000 units of shell, and dividing that by
+    // along the horizon crosses 25000 units of layer, and dividing that by
     // the step budget gives 260-unit steps that step clean over every
     // detail feature. It grows with distance because the pixel footprint
     // does, which is what keeps the far field affordable.
@@ -192,15 +191,11 @@ struct Marcher
 {
     const CloudConfig& c;
     const CloudResources& r;
-    V3 planetCenter;
-    float innerRadius = 0, outerRadius = 0, invThickness = 0;
+    float invThickness = 0;
     float windX = 0, windY = 0, shearX = 0, shearY = 0;
 
-    Marcher(const CloudConfig& config, const CloudResources& res, V3 camera) : c(config), r(res)
+    Marcher(const CloudConfig& config, const CloudResources& res, V3 /*camera*/) : c(config), r(res)
     {
-        planetCenter = V3(camera.x, camera.y, -c.planetRadius);
-        innerRadius = c.planetRadius + c.bottom;
-        outerRadius = c.planetRadius + c.top;
         invThickness = 1.f / std::max(c.top - c.bottom, 1.f);
         const float radians = c.windAngle * .01745329252f;
         windX = std::cos(radians) * c.windSpeed * c.time;
@@ -211,7 +206,7 @@ struct Marcher
 
     float HeightFraction(V3 p) const
     {
-        return Saturate((Length(p - planetCenter) - innerRadius) * invThickness);
+        return Saturate((p.z - c.bottom) * invThickness);
     }
 
     // Analytic vertical profile per cloud type. This is what separates a flat
@@ -336,38 +331,21 @@ struct Marcher
         return (1.f - g2) / std::pow(std::max(1.f + g2 - 2.f * g * cosTheta, 1e-4f), 1.5f);
     }
 
-    // Shell intersection. The planet centre sits directly under the camera,
-    // so the quadratic collapses to a couple of multiplies.
-    bool ShellRange(V3 origin, V3 dir, float& entry, float& exitDistance) const
+    // Fixed world-height layer intersection, matching kCloudMarchSource.
+    bool LayerRange(V3 origin, V3 dir, float& entry, float& exitDistance) const
     {
-        const float camR = origin.z - planetCenter.z;
-        const float b = camR * dir.z;
-        const float innerC = camR * camR - innerRadius * innerRadius;
-        const float outerC = camR * camR - outerRadius * outerRadius;
-        const float innerDisc = b * b - innerC;
-        const float outerDisc = b * b - outerC;
-        if (outerDisc < 0.f) return false;
-        const float outerSq = std::sqrt(outerDisc);
-        const float outerNear = -b - outerSq, outerFar = -b + outerSq;
-        const float innerSq = innerDisc > 0.f ? std::sqrt(innerDisc) : 0.f;
-        const float innerNear = -b - innerSq, innerFar = -b + innerSq;
-
-        if (camR < innerRadius)
+        entry = 0.f;
+        exitDistance = c.maxDistance;
+        if (std::fabs(dir.z) < 1e-6f)
         {
-            if (dir.z <= 0.f) return false;   // below the deck, looking down
-            entry = innerFar;
-            exitDistance = outerFar;
-        }
-        else if (camR > outerRadius)
-        {
-            if (outerNear < 0.f) return false;  // above the deck, looking up
-            entry = outerNear;
-            exitDistance = innerDisc > 0.f ? innerNear : outerFar;
+            if (origin.z < c.bottom || origin.z > c.top) return false;
         }
         else
         {
-            entry = 0.f;
-            exitDistance = (innerDisc > 0.f && innerNear > 0.f) ? innerNear : outerFar;
+            const float bottom = (c.bottom - origin.z) / dir.z;
+            const float top = (c.top - origin.z) / dir.z;
+            entry = std::max(0.f, std::min(bottom, top));
+            exitDistance = std::max(bottom, top);
         }
         exitDistance = std::min(exitDistance, c.maxDistance);
         return exitDistance > entry;
@@ -383,15 +361,15 @@ struct Marcher
         transmittance = 1.f;
         depth = 0.f;
         float entry = 0.f, exitDistance = 0.f;
-        if (!ShellRange(origin, dir, entry, exitDistance)) return {};
+        if (!LayerRange(origin, dir, entry, exitDistance)) return {};
         exitDistance = std::min(exitDistance, limit);
         if (exitDistance <= entry) return {};
 
         // The horizon fade exists so a grazing ray from UNDER the deck does
-        // not stretch the shell out to infinity and show a hard band. Seen
+        // not stretch the layer out to infinity and show a hard band. Seen
         // from inside or above the layer, downward rays are the whole point,
         // so the fade has to be gated on where the camera actually is.
-        const bool belowDeck = (origin.z - planetCenter.z) < innerRadius;
+        const bool belowDeck = origin.z < c.bottom;
         const float horizon = belowDeck ? Smoothstep(0.f, std::max(c.horizonFade, .001f), dir.z) : 1.f;
         if (horizon <= .002f) return {};
         const float reach = 1.f - Smoothstep(c.maxDistance * .55f, c.maxDistance, entry);
@@ -500,7 +478,7 @@ struct Marcher
     {
         if (lightDir.z <= .02f) return 1.f;
         float entry = 0.f, exitDistance = 0.f;
-        if (!ShellRange(p, lightDir, entry, exitDistance)) return 1.f;
+        if (!LayerRange(p, lightDir, entry, exitDistance)) return 1.f;
         const int samples = 8;
         const float step = std::min(exitDistance - entry, (c.top - c.bottom) * 2.4f) / float(samples);
         float optical = 0.f;
@@ -616,6 +594,7 @@ struct Options
 
 static float ArgFloat(const char* v) { return float(std::atof(v)); }
 
+#ifndef CLOUD_PREVIEW_NO_MAIN
 int main(int argc, char** argv)
 {
     Options o;
@@ -837,3 +816,5 @@ int main(int argc, char** argv)
     std::printf("wrote %s (%dx%d)\n", o.out.c_str(), o.width, o.height);
     return 0;
 }
+
+#endif // CLOUD_PREVIEW_NO_MAIN

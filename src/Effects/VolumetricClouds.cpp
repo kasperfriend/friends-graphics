@@ -21,10 +21,9 @@ namespace
 {
 // Volumetric cloud deck.
 //
-// The deck is a spherical shell (planet radius `shell`, centre directly
-// under the camera) rather than a flat slab, so it meets the horizon with a
-// curve, keeps a sane optical path at grazing angles, and can be flown into
-// and above. Density comes from three offline-generated, tiling fields that
+// The visible deck occupies a fixed world-Z interval, independent of the
+// camera position or orientation, so it can be flown into and above.
+// Density comes from three offline-generated, tiling fields that
 // `CloudNoise.h` builds once and caches next to the DLL:
 //
 //   shape   64^3 RGBA  R = Perlin-Worley base, GBA = Worley erosion octaves
@@ -37,9 +36,8 @@ namespace
 // is what keeps a thick cumulus from turning into a black cut-out, and a
 // powder term for the dark edge Beer alone cannot produce.
 //
-// Only sky pixels are integrated: everything the client already drew keeps a
-// transmittance of 1, so the composite below cannot touch solid geometry
-// even where the quarter-resolution buffer bleeds across a silhouette.
+// Scene depth clips the march: clouds in front of terrain remain visible
+// when flying inside or above the layer. Near geometry occludes the clouds.
 const char* kCloudMarchSource = R"HLSL(
 sampler2D depthMap:register(s0); sampler3D shapeMap:register(s1);
 sampler3D detailMap:register(s2); sampler2D weatherMap:register(s3);
@@ -48,8 +46,8 @@ float4 celestial:register(c1);      // xyz=world direction TOWARDS the tracked d
 float4 invView0:register(c2); float4 invView1:register(c3); float4 invView2:register(c4);
 float4 projection:register(c5);     // x=A, y=B (raw->view z), z=P00, w=P11
 float4 depthRange:register(c6);     // x=viewport MinZ, y=depth range, z=viewport MaxZ, w=march steps
-float4 shell:register(c7);          // x=inner radius, y=outer radius, z=1/thickness, w=max march distance
-float4 centre:register(c8);         // xyz=planet centre, w=camera region (0 inside, 1 below, 2 above)
+float4 layer:register(c7);          // x=world base Z, y=world top Z, z=1/thickness, w=max distance
+float4 region:register(c8);         // w=camera region (0 inside, 1 below, 2 above)
 float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=aerial opacity
 float4 scales:register(c10);        // x=1/feature size, y=shape z scale, z=1/detail size, w=detail strength
 float4 motion:register(c11);        // xy=shape uv offset, z=1/weather size, w=light reach in steps
@@ -73,7 +71,7 @@ float Gradient(float h,float type) {
  return stratus*saturate(1-type*2)+cumulus*saturate(1-abs(type-.5)*2)+tower*saturate(type*2-1);
 }
 
-float HeightFraction(float3 p) { return saturate((length(p-centre.xyz)-shell.x)*shell.z); }
+float HeightFraction(float3 p) { return saturate((p.z-layer.x)*layer.z); }
 
 // `erosion` is 0 for the light march and the coarse probe, which lets the
 // compiler drop the detail fetch from those two inlined copies entirely.
@@ -137,40 +135,30 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // at infinity puts raw depth exactly on it, and the infinity that comes
  // back turns into a NaN the moment it meets another one.
  float hasGeometry=1-step((depthRange.z+1)*.5,rawDepth);
- float sceneLimit=hasGeometry>.5?(projection.y/min(raw-projection.x,-1e-6))*viewLength:shell.w;
+ float sceneLimit=hasGeometry>.5?(projection.y/min(raw-projection.x,-1e-6))*viewLength:layer.w;
 
- // Shell intersection. The planet centre sits directly under the camera, so
- // the quadratic collapses to a couple of multiplies.
- float camR=cameraPos.z-centre.z;
- float b=camR*ray.z, cc=camR*camR;
- float outerDisc=b*b-cc+shell.y*shell.y;
- if(outerDisc<0) return float4(0,0,0,1);
- float outerSq=sqrt(outerDisc);
- float innerDisc=b*b-cc+shell.x*shell.x;
- float innerSq=innerDisc>0?sqrt(innerDisc):0;
- float entry,exitDistance;
- if(centre.w>1.5) {        // above the deck: enter at the top, leave at the bottom
-   entry=-b-outerSq;
-   if(entry<0) return float4(0,0,0,1);
-   exitDistance=innerDisc>0?(-b-innerSq):(-b+outerSq);
- } else if(centre.w>.5) {  // below the deck: skip the ground half of the sky
-   if(ray.z<=0) return float4(0,0,0,1);
-   entry=-b+innerSq;
-   exitDistance=-b+outerSq;
- } else {                  // inside the deck
-   entry=0;
-   exitDistance=(innerDisc>0&&-b-innerSq>0)?(-b-innerSq):(-b+outerSq);
+ // Intersect fixed world-height planes, never a camera-centred dome.
+ // Horizontal rays inside the layer march to the scene/distance limit;
+ // outside it they cannot hit a cloud. Avoid division by zero at the horizon.
+ float entry=0,exitDistance=layer.w;
+ if(abs(ray.z)<1e-6) {
+   if(cameraPos.z<layer.x||cameraPos.z>layer.y) return float4(0,0,0,1);
+ } else {
+   float bottom=(layer.x-cameraPos.z)/ray.z;
+   float top=(layer.y-cameraPos.z)/ray.z;
+   entry=max(0,min(bottom,top));
+   exitDistance=max(bottom,top);
  }
- exitDistance=min(exitDistance,min(shell.w,sceneLimit));
+ exitDistance=min(exitDistance,min(layer.w,sceneLimit));
  if(exitDistance<=entry) return float4(0,0,0,1);
 
  // The horizon fade stops a grazing ray from UNDER the deck stretching the
- // shell to infinity and showing a hard band; from inside or above the
+ // layer to infinity and showing a hard band; from inside or above the
  // layer, downward rays are the whole point, so it is gated on the region.
- float fade=(centre.w>.5&&centre.w<1.5)?smoothstep(0,max(groundColor.w,.001),ray.z):1;
- // The march stops at its own limit long before the shell does: fade there
+ float fade=(region.w>.5&&region.w<1.5)?smoothstep(0,max(groundColor.w,.001),ray.z):1;
+ // The march stops at its own limit long before the layer does: fade there
  // too or the cut shows up as a straight edge across the sky.
- fade*=1-smoothstep(shell.w*.55,shell.w,entry);
+ fade*=1-smoothstep(layer.w*.55,layer.w,entry);
  if(fade<=.002) return float4(0,0,0,1);
 
  // Phase depends only on the angle between the ray and the light, so all
@@ -186,7 +174,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float3 phase=float3(single,lerp(1,single,lobe.z),lerp(1,single,lobe.z*lobe.z));
 
  // A step tied to world length, never to the span divided by the step
- // count: the shell is 1400 units thick but 25000 long near the horizon,
+ // count: the layer is 1400 units thick but 25000 long near the horizon,
  // and dividing the span is what turns detail into putty. It grows with
  // distance because far clouds cover fewer pixels.
  float baseStep=max(stepping.x,(exitDistance-entry)/max(depthRange.w*3,1));
@@ -766,10 +754,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float weatherSize=std::max(settings.weatherSize,1.f);
  const float innerRadius=settings.planetRadius+settings.baseAltitude;
  const float outerRadius=innerRadius+thickness;
- // The planet centre tracks the camera horizontally: the deck is a dome
- // over the viewer, which is what gives the horizon its curve. The field
- // itself is sampled in absolute world coordinates, so the clouds stay put
- // while the curvature follows.
+ // Keep the existing ground-shadow parameters unchanged. The visible deck
+ // uses fixed world-Z bounds instead of these legacy spherical coordinates.
  const float centreZ=-settings.planetRadius;
  const float cameraRadius=f.cameraPosition.z-centreZ;
  const float region=cameraRadius<innerRadius?1.f:(cameraRadius>outerRadius?2.f:0.f);
@@ -953,7 +939,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);
   d->SetPixelShaderConstantF(2,inv[0],3);
   d->SetPixelShaderConstantF(5,c5,1);d->SetPixelShaderConstantF(6,c6,1);
-  d->SetPixelShaderConstantF(7,c7,1);d->SetPixelShaderConstantF(8,c8,1);
+  // Absolute world heights: never recenter the visible layer on the viewer.
+  const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};
+  d->SetPixelShaderConstantF(7,layer,1);d->SetPixelShaderConstantF(8,c8,1);
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);

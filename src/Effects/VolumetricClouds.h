@@ -40,11 +40,11 @@ namespace renderer
         float density = 1.f;
         float cloudType = 0.f;
 
-        // The deck is a spherical shell around a planet of `planetRadius`
-        // centred under the camera, so it meets the horizon with a curve and
-        // can be flown into and above instead of being a flat slab that has
-        // to be pushed out of the camera's way.
+        // Retained for the unchanged legacy ground-shadow parameters.
+        // The visible layer no longer uses a camera-centred planet curve.
         float planetRadius = 42000.f;
+        // Absolute world-Z base and thickness, independent of camera/terrain.
+        // The player can fly below, inside or above this fixed layer.
         float baseAltitude = 850.f;
         float thickness = 2150.f;
 
@@ -81,8 +81,8 @@ namespace renderer
         float multiScatterEccentricity = .55f;
 
         // March shape: the step grows with distance because a 1400-unit-thick
-        // shell seen edge-on is 25000 units long, and the width of the fade
-        // band that hides the shell's edge at the horizon.
+        // layer seen edge-on is 25000 units long, and the width of the fade
+        // band that hides the layer's edge at the horizon.
         float baseStep = 70.f;
         float stepGrowth = .010f;
         float coarseScale = 3.f;

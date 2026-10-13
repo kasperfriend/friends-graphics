@@ -1,0 +1,87 @@
+// Portable reference checks for fixed cloud height and flying through the layer.
+// g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-test
+// Run from the repository root. The GPU/state checks live in AtmosphereRegression.
+#define CLOUD_PREVIEW_NO_MAIN
+#include "CloudPreview.cpp"
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <stdexcept>
+
+static void Require(bool ok, const char* message)
+{
+    if (!ok) throw std::runtime_error(message);
+    std::cout << "PASS " << message << '\n';
+}
+static bool Near(float a, float b, float epsilon = .001f) { return std::fabs(a-b) < epsilon; }
+
+int main() try
+{
+    // Guard the production height profile as well as the reference math.
+    std::ifstream source("src/Effects/VolumetricClouds.cpp");
+    Require(bool(source), "production shader source is available");
+    const std::string text((std::istreambuf_iterator<char>(source)), {});
+    Require(text.find("float HeightFraction(float3 p) { return saturate((p.z-layer.x)*layer.z); }") != std::string::npos,
+            "production height profile uses world Z, not camera-relative curvature");
+    Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
+            "production march receives configured absolute layer bounds");
+
+    CloudConfig c;
+    c.bottom = 900; c.top = 2300; c.windSpeed = 0;
+    CloudResources resources;
+    resources.Build(64, 32, 512);
+    Marcher ground(c, resources, {0,0,0}), flying(c, resources, {6000,-4000,8000});
+    const V3 sample{4500,-3000,1600};
+    Require(Near(ground.HeightFraction(sample), .5f) &&
+            Near(ground.HeightFraction(sample), flying.HeightFraction(sample)),
+            "cloud height at a fixed world point is independent of camera XYZ");
+    Require(ground.Density(sample, .5f, true) == flying.Density(sample, .5f, true),
+            "flying cannot change density at a fixed world point");
+    float entry, exit;
+    Require(ground.LayerRange({0,0,0}, {0,0,1}, entry, exit) && Near(entry,900) && Near(exit,2300),
+            "below deck: ray reaches configured absolute base and top");
+    Require(ground.LayerRange({7000,-4000,800}, {0,0,1}, entry, exit) && Near(entry,100),
+            "approaching cloud base reduces distance instead of lifting the deck");
+    Require(flying.LayerRange({7000,-4000,1600}, {0,0,1}, entry, exit) && Near(entry,0) && Near(exit,700),
+            "inside deck: upward ray starts in cloud");
+    Require(flying.LayerRange({7000,-4000,3000}, {0,0,-1}, entry, exit) && Near(entry,700) && Near(exit,2100),
+            "above deck: downward ray hits cloud tops");
+    Require(!flying.LayerRange({0,0,3000}, {0,0,1}, entry, exit), "above deck: upward sky is clear");
+    Require(!ground.LayerRange({0,0,0}, {1,0,0}, entry, exit), "horizontal ray below layer misses");
+    Require(flying.LayerRange({0,0,1600}, {1,0,0}, entry, exit) && Near(entry,0) && Near(exit,c.maxDistance),
+            "horizontal ray inside layer stays finite and reaches march limit");
+    Require(ground.LayerRange({0,0,c.bottom}, {0,0,1}, entry, exit) && Near(entry,0),
+            "exact cloud base has no intersection gap");
+    Require(flying.LayerRange({0,0,c.top}, {0,0,-1}, entry, exit) && Near(entry,0),
+            "exact cloud top has no intersection gap");
+
+    for (const V3 view : {Normalize({1,0,.2f}), Normalize({-1,1,.8f}), V3{0,0,1}}) {
+        const V3 camera{7000,-4000,800};
+        Require(ground.LayerRange(camera,view,entry,exit) &&
+                Near((camera+view*entry).z,c.bottom) && Near((camera+view*exit).z,c.top),
+                "changing view direction does not move the cloud base or top");
+    }
+
+    c.coverage=1.f;
+    float transmittance, depth;
+    const V3 light{0,0,1};
+    flying.March({0,0,3000}, {0,0,1}, light, 0, transmittance, depth);
+    Require(transmittance==1.f, "above the deck, the view march leaves overhead sky clear");
+    ground.March({0,0,0}, {0,0,1}, light, 0, transmittance, depth, 100);
+    Require(transmittance==1.f, "near geometry clips the march before the cloud base");
+    int insideCloud=0, aboveCloud=0;
+    for(int x=-4;x<=4;++x) {
+        flying.March({float(x)*700,0,1600}, {0,0,1}, light, 0, transmittance, depth);
+        insideCloud += transmittance < .95f;
+        flying.March({float(x)*700,0,3000}, {0,0,-1}, light, 0, transmittance, depth, 5000);
+        aboveCloud += transmittance < .95f;
+    }
+    Require(insideCloud>0, "camera inside the deck integrates cloud around it");
+    Require(aboveCloud>0, "camera above the deck sees clouds in front of distant terrain");
+    return 0;
+}
+catch (const std::exception& e)
+{
+    std::cerr << "FAIL " << e.what() << '\n';
+    return 1;
+}
