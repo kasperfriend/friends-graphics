@@ -53,6 +53,8 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 ### Volumetric clouds
 
 - A raymarched cloud deck replaces the flat sky: Perlin-Worley shapes placed by a weather map, lit by the tracked sun or moon, self-shadowed, and drifting with the wind.
+- Eight cloud climates across 88 verified zones: fair-weather patches, sparse desert skies, coastal sheets, cold decks, mountain towers, lush billows, dark overcast and open alien skies. Unknown zones fall back safely.
+- Native rain, snow and sandstorms gradually close the sky; clearing opens it again. Cloud bodies and edges evolve over time, even without wind, while shadows and rays follow the same field.
 - The deck is a spherical shell, so it meets the horizon with a curve and can be flown into and above instead of being a slab pushed out of the camera's way.
 - Clouds are clipped by the scene rather than drawn only on sky pixels, so the layer is still there when you fly over it and a peak inside the deck is fogged by the cloud it stands in.
 - Distance hazes clouds out, the deck casts moving shadows on the world, and the layer is integrated into the scene before the atmosphere, so haze, the sun halo and god rays react to the clouds above them.

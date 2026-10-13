@@ -14,7 +14,7 @@ approximation - inside a `ps_3_0` instruction budget.
   march limit. `PlanetRadius` is retained for legacy shadow parameters but no longer shapes the visible deck.
 - **Real 3D noise, generated once.** A 64³ RGBA Perlin-Worley shape volume, a 32³ RGB Worley detail volume and a
   512² RGBA weather map are built on the CPU from fixed seeds the first time the renderer starts and cached next to
-  the dll as `CloudFields.cache`. Fixed seeds mean every player sees the same sky; the cache means the cost is paid
+  the dll as `CloudFields.cache`. Fixed seeds give reproducible fields (animation time is local to the session); the cache means the cost is paid
   once rather than every launch. A cache written by an older build is rejected by its version field and rebuilt.
 - **The weather map decides where clouds are at all.** Coverage (R), cloud type (G) and a variation band (B) come
   from independent integer-period Perlin bands (fronts and groups) multiplied by a masked Worley cell field, each
@@ -130,6 +130,9 @@ the F7 menu in the first column.
 | `ResolutionPercent` | 25 | Independent F7 slider, 20–100% of screen width and height in steps of 5. Resizes live without changing march samples. Explicit value overrides preset resolution. |
 | `SunRaysEnabled` / `SunRayPercent` | 1 / 80 | Cloud-filtered world-space shafts, toggle and 0–200% strength in F7. SUN RAYS is also a master gate. |
 | `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
+| `ZoneClouds` / `WeatherClouds` | 1 / 1 | Apply zone climate / native weather independently; also in F7. |
+| `EvolutionPercent` | 100 | 0–400% independent shape evolution; 0 freezes evolution, not wind. Also in F7. |
+| `TransitionSeconds` | 12 | Approximate 95% settling time for zone/manual shape edits, 0–60 seconds; 0 is immediate. |
 | `DensityPercent` | 100 | Optical thickness of the cloud material (base extinction 0.022/unit). |
 | `CloudTypePercent` | 0 | -100 flattens everything into stratus, 0 is cumulus, +100 builds towering cumulonimbus. |
 | `PlanetRadius` | 42000 | Legacy shadow parameter; no effect on visible cloud height. |
@@ -156,8 +159,79 @@ the F7 menu in the first column.
 | `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 14000 | Cloud shadows cast on the world below. |
 | `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only, 4 = shadow map. |
 
-Rain and snow add coverage while the weather layer is live (`volume::cloudWeatherCoverageBoost`). The boost is
-applied to a copy of the settings, so the player's slider is never rewritten.
+### Zone character, weather and evolution
+
+`EnvironmentProfiles.ini` now ships **88 zone assignments** and eight cloud-only
+climates. They leave existing fog, lighting and precipitation multipliers alone:
+
+| Climate | Character | Examples |
+| --- | --- | --- |
+| CloudFair | Smaller, separated fair-weather cumulus | Elwynn, Westfall, Mulgore, Nagrand |
+| CloudArid | Sparse, small, shallow clouds | Tanaris, Durotar, Barrens, Hellfire |
+| CloudDark | Broad, heavy, mostly flat decks | Duskwood, Plaguelands, Shadowmoon |
+| CloudCoastal | Sweeping stratus sheets | Darkshore, Wetlands, Azuremyst, Zangarmarsh |
+| CloudCold | Broken, subdued low decks | Dun Morogh, Winterspring, Dragonblight |
+| CloudMountain | Deeper, taller billows | Storm Peaks, Alterac, Howling Fjord |
+| CloudLush | Rounded, vertically developed masses | Feralas, Un'Goro, Sholazar |
+| CloudOpen | No fair-weather deck; native sky remains exposed | Netherstorm, Twisting Nether |
+
+Northrend has a cold map fallback; other unknown/custom zones inherit neutral
+settings. Zone assignments use IDs from the shipped authoritative database, not
+name guesses at runtime. The existing verified-client/database gate, location
+debounce, inheritance and environment transition remain in force. Unverified
+clients retain manual clouds, native weather detection where supported, and
+procedural evolution; they do **not** apply guessed zone IDs.
+
+Resolution order:
+
+1. Existing `GraphicsEffects.ini` → map/zone/area `LocationGraphics.ini` cloud settings.
+2. `EnvironmentProfiles.ini`: Default → Map → Zone → Area, including named inheritance.
+3. Smooth the physical shape (quality, debug and master-enable flags remain immediate).
+4. Blend native weather over that zone's fair-weather baseline.
+5. Integrate wind and evolution; upload the same field constants to sky and shadows.
+
+New environment keys: `CloudCoverageMultiplier` (0–2), `CloudTypeOffset` (-1–1),
+`CloudFeatureSizeMultiplier` and `CloudThicknessMultiplier` (.25–4),
+`CloudDetailMultiplier` (0–2), `CloudEvolutionMultiplier` (0–4).
+Multipliers default to 1, type offset to 0. Missing keys in old configs preserve
+manual tuning; existing installations must merge the shipped climate sections
+into their environment file to get these curated assignments. Reload with F12.
+An area can override individual cloud keys without replacing its zone's profile.
+Cloud type now interpolates toward **pure stratus at -100** and **pure towers at
++100**, retaining weather-map type variation between the endpoints.
+
+Weather consumes the existing exact native rain/snow/sand draw signatures and
+five-second detection hold. Detection no longer depends on enabled precipitation
+replacement or successful effect-texture loading. WeatherVisuals' hint does not
+force clouds or weather. The verified signal is the **type/presence**, not server
+severity: no primitive count is used as an invented intensity measurement.
+`WeatherVisuals.IntensityPercent × WeatherIntensityMultiplier`, clamped to 0–1,
+scales the cloud response; the default reaches full overcast. Rain builds deeper
+billows, snow a flatter deck, sand a dusty lid. The procedural weather map still
+provides local coverage, type and variation within that deck.
+
+Weather approaches its target over ~18 seconds (95%) and clears over ~35 seconds,
+after the detector hold. A normally empty sky can still develop a storm. To keep a
+strictly manual sky use `ZoneClouds=0` and `WeatherClouds=0`; `Enabled=0` is the
+immediate master off switch. `CoveragePercent=0` alone clears the **fair-weather
+baseline**, not native storms. Zone/manual edits settle over `TransitionSeconds`
+in addition to the environment manager's existing transition.
+
+Animation uses independent, slowly moving shape/detail Z slices and a slower
+weather-map drift. Its B channel gently opens/closes local patches; the variation
+fades out at full overcast so storms never acquire animated holes. These are
+noise-coordinate changes, **not changes to the world-height profile**. Wind and
+evolution integrate bounded frame deltas into wrapped double-precision phases;
+changing wind no longer recomputes displacement from the entire session age.
+INI reloads and device resets preserve phases. Set evolution and wind to zero
+and allow the transition to settle for a frozen field.
+
+No extra noise textures, texture fetches per density sample, ray steps or render
+passes are added. One shared constant register and a few arithmetic instructions
+extend the existing density functions. Shadow integration starts at the actual cloud base rather than sampling a
+sea-level copy of the noise field. It still omits detail erosion; it follows the same evolving bodies, coverage and type, and the ray pass
+continues to use that shadow map. `Clouds.log` reports effective coverage/type,
+feature size, weather blend and evolution phase for live diagnosis.
 
 ## Looking at changes without a GPU
 
@@ -168,14 +242,16 @@ shader itself can only be compiled in CI.
 
 ```sh
 g++ -O2 -std=c++20 -pthread tools/CloudPreview.cpp -o build/cloudpreview
-build/cloudpreview out.png --coverage 45 --sun-elevation 30 --stats
+build/cloudpreview --out build/cloud-fair.png --coverage 45 --type 15 --feature-size 2250 --top 2570
+build/cloudpreview --stats --coverage 100 --type 80 --time 300
 
-CLOUDSHEET_BASE="--width 420 --height 236" python3 tools/cloudsheet.py sheet.png \
-  "overcast=--coverage 92" "broken=--coverage 45" "scattered=--coverage 20" "sunset=--sun-elevation 6"
 ```
 
-`tools/cloudsheet.py` renders the variants in parallel and stitches them into one labelled contact sheet, which is
-the only practical way to compare four parameter choices at once.
+For stationary-camera evolution comparisons use `--wind-speed 0 --time 0` and
+`--wind-speed 0 --time 300`; `--evolution 0` freezes shape evolution. The density
+reference now matches the production erosion denominator and endpoint type
+mapping. These are offline reference renders, not in-game screenshots; the
+preview mirrors the shadow-column integral, not the GPU map upsample/composite.
 
 ## Cost
 
@@ -213,7 +289,7 @@ the production classes with a synthetic depth buffer - sky in the top half, geom
 - a noise field below the coverage threshold leaves the sky exactly as drawn;
 - the weather boost raises coverage without mutating the configured value;
 - a camera inside the deck sees clouds in front of distant geometry; above the deck, the overhead sky is clear;
-- disabled clouds and zero coverage do not touch the target at all;
+- disabled clouds and settled zero coverage without weather do not touch the target at all;
 - `c0..c63`, the viewport and the device resources survive the pass and a device reset.
 
 `tools/CloudLayerRegression.cpp` is a portable CPU-reference check for fixed world altitude, approach distance,
@@ -227,3 +303,32 @@ g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-
 
 This checks reference math and the production height/bounds expressions; it does not replace HLSL compilation
 or an in-game flight test. Ground-shadow rendering is deliberately unchanged by this fix.
+
+
+### Climate regression
+
+The portable test exercises the production climate parser/resolver/controller
+and samples the actual generated noise fields. It validates shipped zone IDs,
+inheritance, neutral fallback, signed/zero parameters, transactional reloads,
+rapid border reversals, 30/144 Hz weather transitions, zero-coverage storms,
+clearing, zero-wind evolution, phase bounds, and frame-to-frame density continuity.
+All eight climates are checked against rain, snow and sand for >98% covered
+vertical columns. This is a density/coverage test, not a substitute for in-client
+lighting/performance review.
+
+```sh
+mkdir -p build
+g++ -O2 -std=c++20 -pthread tools/CloudClimateRegression.cpp \
+  src/Environment/EnvironmentProfile.cpp src/Environment/EnvironmentDatabase.cpp \
+  -o build/cloud-climate-test
+./build/cloud-climate-test
+```
+
+CI runs this test, the fixed-layer checks and frame-clock regression on Linux;
+Windows CI builds Debug/Release and validates embedded shaders against ps_3_0
+budgets. `tools/Test-Atmosphere.cmd` remains the Windows GPU/state regression.
+Live acceptance: cross Elwynn/Duskwood and Barrens/Tanaris borders; observe native
+rain/snow/sand onset/clearing; check a zero-wind sky several minutes apart; fly
+below/inside/above; pan off the sun; toggle F7/F10, reload F12 and Alt+Tab. Confirm
+no field restart, boundary pop or cloud/shadow disagreement. Native weather
+recognition still requires a supported client draw signature.

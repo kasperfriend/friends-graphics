@@ -108,6 +108,9 @@ inline std::vector<Item> items={
  // stay ini-only.
  {KIND_HEADER,nullptr,nullptr,"--- VOLUMETRIC CLOUDS ---",0,0,0,0},
  {KIND_TOGGLE,L"VolumetricClouds",L"Enabled","CLOUDS",0,1,1,1},
+ {KIND_TOGGLE,L"VolumetricClouds",L"ZoneClouds","ZONE CLOUD CHARACTER",0,1,1,1},
+ {KIND_TOGGLE,L"VolumetricClouds",L"WeatherClouds","WEATHER-DRIVEN CLOUDS",0,1,1,1},
+ {KIND_SLIDER,L"VolumetricClouds",L"EvolutionPercent","CLOUD EVOLUTION",0,400,10,100},
  {KIND_SLIDER,L"VolumetricClouds",L"CoveragePercent","CLOUD COVERAGE",0,100,2,50},
  {KIND_SLIDER,L"VolumetricClouds",L"DensityPercent","CLOUD DENSITY",10,400,5,100},
  {KIND_SLIDER,L"VolumetricClouds",L"CloudTypePercent","CLOUD TYPE (-100 FLAT 100 TOWERING)",-100,100,5,0},

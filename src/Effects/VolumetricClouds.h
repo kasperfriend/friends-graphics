@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include "../Core/FrameClock.h"
+#include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
 
 namespace renderer
@@ -22,7 +23,7 @@ namespace renderer
         ShadowMap
     };
 
-    struct VolumetricCloudSettings
+    struct VolumetricCloudSettings : CloudShape
     {
         bool enabled = true;
         // 0 = LOW, 1 = MEDIUM, 2 = HIGH, 3 = ULTRA. Drives the march step
@@ -33,37 +34,15 @@ namespace renderer
         uint32_t lightSampleCount = 6;
         float resolutionScale = .25f;
 
-        // How much of the sky the deck covers (0 = clear sky), how optically
-        // thick the material is, and which way the vertical profile leans:
-        // -1 flattens everything to stratus, +1 pushes towering cumulus.
-        float coverage = .50f;
-        float density = 1.f;
-        float cloudType = 0.f;
-
-        // Retained for the unchanged legacy ground-shadow parameters.
-        // The visible layer no longer uses a camera-centred planet curve.
+        // Shape, wind and evolution defaults live in the portable CloudShape.
+        // Climate factors layer over the existing location-specific settings.
+        bool zoneClouds = true;
+        bool weatherClouds = true;
+        float transitionSeconds = 12.f;
+        CloudWeather weather = CloudWeather::Clear;
+        float weatherStrength = 0.f;
+        // Retained for the legacy ground-shadow coordinates only.
         float planetRadius = 42000.f;
-        // Absolute world-Z base and thickness, independent of camera/terrain.
-        // The player can fly below, inside or above this fixed layer.
-        float baseAltitude = 850.f;
-        float thickness = 2150.f;
-
-        // World size of one tile of each noise field, and how hard the
-        // high-frequency volume erodes the base shape. `shapeAspect` is how
-        // many times the base shape repeats vertically per horizontal tile:
-        // anything much above 1 squashes the billows into lozenges, which is
-        // what makes a cloud deck read as painted-on rather than solid.
-        float featureSize = 3000.f;
-        float shapeAspect = 1.3f;
-        float detailSize = 240.f;
-        float weatherSize = 34000.f;
-        float detailStrength = .88f;
-
-        // Wind advects the whole field; the shear offsets the tops downwind
-        // with height, which is what gives a cumulus its leaning anvil.
-        float windSpeed = 26.f;
-        float windAngle = 25.f;
-        float windShear = .22f;
 
         // Lighting response. The light march is a Beer integral toward the
         // tracked disc; `multiScatter*` are the three octaves of Wrenninge's
@@ -110,10 +89,6 @@ namespace renderer
         float groundShadowExtent = 14000.f;
         bool sunRays = true;
         float sunRayStrength = .8f;
-
-        // Pushed in per frame by the host when the client is actually
-        // rendering rain or snow: a storm sky is a covered sky.
-        float weatherCoverageBoost = 0.f;
 
         CloudDebugMode debugMode = CloudDebugMode::None;
     };
@@ -172,6 +147,6 @@ namespace renderer
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;
         FrameClock m_clock;
-        float m_elapsed = 0.f;
+        CloudDynamics m_dynamics;
     };
 }

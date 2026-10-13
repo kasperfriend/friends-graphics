@@ -531,7 +531,7 @@ public:
     NativeParticleScope(IDirect3DDevice9* device, UINT primitiveCount)
         : m_device(device)
     {
-        if (!device || !enabled || !effectEnabled || !active ||
+        if (!device ||
             !renderer::g_trackedState.alphaBlend ||
             renderer::g_trackedState.zWrite || !renderer::g_trackedState.zEnable ||
             primitiveCount < 16)
@@ -594,6 +594,15 @@ public:
         if (!detected)
             return;
 
+        // Detection is a world signal, not a side effect of successful
+        // texture/shader replacement. Clouds still follow native weather
+        // with WeatherVisuals disabled or optional assets unavailable.
+        nativeWeatherSeenThisFrame = detected;
+        nativeWeatherMode = detected;
+        lastNativeWeatherTick = GetTickCount();
+        nativeWeatherPrimitives += primitiveCount;
+        if (!enabled || !effectEnabled || !active) return;
+
         EnsureShaders(device);
         LoadTextures(device);
         IDirect3DBaseTexture9* replacement = detected == 2
@@ -603,10 +612,6 @@ public:
         if (!replacement || !nativeParticlePS)
             return;
 
-        nativeWeatherSeenThisFrame = detected;
-        nativeWeatherMode = detected;
-        lastNativeWeatherTick = GetTickCount();
-        nativeWeatherPrimitives += primitiveCount;
         internal = true;
         device->GetPixelShader(m_originalPS.GetAddressOf());
         device->GetPixelShaderConstantF(0, m_originalC0, 1);

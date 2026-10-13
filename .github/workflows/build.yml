@@ -155,3 +155,20 @@ jobs:
       - name: Compile embedded shaders with fxc
         shell: pwsh
         run: ./tools/ValidateShaders.ps1
+
+  cloud-regression:
+    name: Cloud climate and continuity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build and run portable cloud regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -pthread tools/CloudClimateRegression.cpp src/Environment/EnvironmentProfile.cpp src/Environment/EnvironmentDatabase.cpp -o build/cloud-climate-test
+          ./build/cloud-climate-test
+          g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-test
+          ./build/cloud-layer-test
+          g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
+          ./build/frame-clock-test
