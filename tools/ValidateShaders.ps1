@@ -50,6 +50,7 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
+    'source'                = 496 # Water: driver creation must work on 512-slot PS3 devices
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
@@ -109,6 +110,10 @@ foreach ($job in $jobs) {
             }
         }
         else {
+            if ($budgets.ContainsKey($name)) {
+                $failures += "$name : instruction count missing"
+                Write-Annotation 'error' "Missing instruction count ($name)" 'Cannot enforce the shader budget without an assembly instruction count.'
+            }
             $report += "$name = compiled"
             Write-Output "$name compiled"
         }

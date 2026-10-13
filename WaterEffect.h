@@ -7,6 +7,7 @@
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
+#include "src/Water/WaterMaterial.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 bool enabled=false, active=true, keyDown=false, hotkey=true;
@@ -30,16 +31,28 @@ float reflectionData[12]{};
 // must stop at the water SURFACE, not the seabed depth already sitting in
 // the main depth buffer (water doesn't write it) - see
 // DirectionalVolumetricLighting.cpp's boundary-depth pass.
+IDirect3DSurface9* waterTargetSurface=nullptr;
 IDirect3DSurface9* waterMaskSurface=nullptr;
 IDirect3DSurface9* waterDepthSurface=nullptr;
 std::vector<DWORD> code,vertexCode;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
+inline bool shaderCreationFailed = false;
+inline bool NeedsScene() {
+    return enabled && active && effectEnabled && renderer::water::NeedsScene(
+        reflectionsEnabled, refractionEnabled, depthEnabled, foamEnabled, sunGlintEnabled);
+}
 bool showStatus=false;
-unsigned frameMatches=0;
+unsigned frameMatches=0,frameCandidates=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
+inline void ReportFailure(const char* operation,HRESULT hr) {
+    static std::unordered_set<std::string> reported;
+    if(reported.insert(operation).second)
+        std::ofstream(std::filesystem::path(logPath),std::ios::app)
+            <<operation<<" failed hr="<<std::hex<<hr<<std::dec<<"; native water retained if replacement cannot be installed\n";
+}
 const char* vertexSource=R"HLSL(
 float4 projection[4]:register(c0);
 float4 fogParams:register(c4);
@@ -134,16 +147,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float2 flowingUv=lerp(uv1,rotated,flowControl.y);
     float2 p=float2(dot(flowingUv,float2(.91,.41)),dot(flowingUv,float2(-.41,.91)))*float2(14,31);
     float3 swell=noiseGradient(p*.055+drift*.085);
-    float3 swellCross=noiseGradient(float2(-p.y*.043,p.x*.043)-drift*.057+31.7);
-    float3 low=noiseGradient(p*.37+drift*.43+float2(swell.x,swellCross.x)*1.8);
-    float2 warped=p+float2(low.x,low.x*.71)*1.3;
-    float3 a=noiseGradient(warped+drift);
-    float3 b=noiseGradient(float2(warped.x*.8+warped.y*.6,-warped.x*.6+warped.y*.8)*1.83-drift*.67+17.2);
-    float2 longSlopes=swell.yz+float2(-swellCross.z,swellCross.y)*.72;
-    // Keep the pre-refactor wave energy: the reduced slope made every later
-    // effect (normal lighting, refraction, SSR and foam) nearly flat.
-    float2 slopes=(a.yz+float2(.8*b.y-.6*b.z,.6*b.y+.8*b.z)*.43)*.72+
-                  longSlopes*foreverStyle.x;
+    float3 a=noiseGradient(p+drift+float2(swell.x,swell.x*.71));
+    float3 b=noiseGradient(float2(-p.y,p.x)*1.83-drift*.67+17.2);
+    float2 longSlopes=swell.yz;
+    float2 slopes=(a.yz+float2(-b.z,b.y)*.43)*.72+longSlopes*foreverStyle.x;
     float filter=rsqrt(1+16*dot(fwidth(p),fwidth(p)));
     slopes*=filter;
     float2 offset=slopes*controls.y;
@@ -169,12 +176,11 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
                            .5-.5*viewPos.y*reflectionProjection.w/max(viewPos.z,.05));
     float behindRaw=tex2Dlod(sceneDepth,float4(screenUV,0,0)).r;
     float behindZ=behindRaw>=.9999?100000:reflectionProjection.y/(behindRaw/max(reflectionControl.w,.001)-reflectionProjection.x);
-    // Depending on the liquid batch winding, view-space depth can arrive on
-    // either side of the copied terrain depth. The absolute separation is the
-    // stable shallow-water measure; visibility has already been depth-tested.
-    float waterDepth=abs(behindZ-viewPos.z);
+    // Foreground geometry is not a deep seabed. Never turn negative
+    // separation into absorption/foam on the wrong side of a shoreline.
+    float waterDepth=max(behindZ-viewPos.z,0);
     float captureValid=reflectionStyle.w;
-    float depthValid=captureValid*step(behindZ,99999);
+    float depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
     // Open ocean has no seafloor within the depth buffer at all (behindRaw
     // reads as sky), so depthValid was 0 here - which used to zero every
     // absorption/tint term below AND still sample sceneTexture unmodified
@@ -183,12 +189,16 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // no matter how high DepthAbsorptionPercent was set: absorption was
     // gated to zero regardless of the slider. No floor found means this is
     // genuinely deep, not "not water" - treat it as maximum depth instead.
-    float openOcean=1-depthValid;
+    float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
-    float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*(15+waterStyle.x*120);
+    float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*waterStyle.x*120;
     float2 refractUV=screenUV+(depthValid?refractOffset:float2(0,0));
-    float3 refracted=depthValid>.5?tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb:float3(0,0,0);
-    float shallow=saturate(waterDepth/max(waterStyle.w,1e-3));
+    // Reject distortion across foreground silhouettes, rather than pulling
+    // a bridge/character into the water. Missing depth keeps the native body.
+    float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
+    float surfaceRaw=(reflectionProjection.x+reflectionProjection.y/max(viewPos.z,.05))*reflectionControl.w;
+    refractUV=lerp(screenUV,refractUV,step(surfaceRaw,refractRaw));
+    float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
     float3 deepTint=lerp(fogColor.rgb*.42,float3(.025,.105,.135),.62);
     float absorption=captureValid*(1-exp(-effectiveDepth*waterStyle.y*.14));
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
@@ -212,7 +222,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // while ambient sky reflection remains visible under cover.
     float lightVisibility=1.0;
     if(reflectionStyle.w>.5 && celestialPath>.00005) {
-        [unroll] for(int lightStep=0;lightStep<8;++lightStep) {
+        [loop] for(int lightStep=0;lightStep<8;++lightStep) {
             float q=(lightStep+1)/8.0;
             float traceDistance=1.5+q*q*110.0;
             float3 lightSample=viewPos+wave*.18+l*traceDistance;
@@ -230,7 +240,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     celestialPath*=lightVisibility;
     float spec=(.12*broad+sparkle*glitterVariation)*foreverStyle.y*(.55+fresnel)*ndl+celestialPath*.24;
     float shading=1+controls.z*.6*(dot(wave,l)-dot(n,l));
-    float energy=max(spec*controls.w,0);
+    float energy=max(spec*controls.w*lightVisibility,0);
     energy=.68*energy/(.42+energy);
     float luminance=dot(max(lightColor.rgb,0),float3(.2126,.7152,.0722));
     float3 sheenColor=lerp(luminance.xxx,max(lightColor.rgb,0),.45);
@@ -239,8 +249,8 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // 1. Water body: bottom refracted scene + depth absorption
     float3 waterBody=rgb;
     if(captureValid>.5) {
-        float3 bottom=lerp(refracted,deepTint,saturate(absorption*(.85-.22*fresnel)));
-        waterBody=lerp(rgb,bottom,saturate(.25+waterStyle.x*.75));
+        float3 bottom=lerp(rgb,refracted,depthValid*saturate(waterStyle.x));
+        waterBody=lerp(bottom,deepTint,saturate(absorption*(.85-.22*fresnel)));
     }
 
     // 2. Screen-Space Reflections (SSR) with wave normal perturbation
@@ -251,7 +261,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
         float3 ray=safeNormalize(reflect(-v,wave));
         float3 hitColor=environment;
         float bestConfidence=0;
-        [unroll] for(int stepIndex=0;stepIndex<12;++stepIndex) {
+        [loop] for(int stepIndex=0;stepIndex<12;++stepIndex) {
             float q=(stepIndex+1)/12.0;
             float traceDistance=.45+q*q*reflectionStyle.y;
             float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
@@ -306,13 +316,14 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float3 warmTint=lerp(max(lightColor.rgb,.15),float3(1,.78,.5),.35);
     rgb+=warmTint*halo*.24;
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
-    float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
+    float foamAmount=(shore*waterStyle.z+waveFoam*foreverStyle.w)*crest;
     rgb+=float3(.42,.48,.43)*foamAmount;
     if(flowControl.z>1.5){result_.color=float4(saturate((pathEnergy+halo)*3).xxx,1);return result_;}
     if(flowControl.z>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
     result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    result_.mask.a=result_.color.a;
     return result_;
 }
 )HLSL";
@@ -372,19 +383,26 @@ void Present() {
     DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
     keyDown=down;
-    frameMatches=0;
+    static unsigned frames=0;
+    if(++frames%600==0)
+        std::ofstream(std::filesystem::path(logPath),std::ios::app)
+            <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
+            <<" active="<<active<<" enabled="<<effectEnabled<<" scene="<<(reflectionScene!=nullptr)
+            <<" shaderFailure="<<shaderCreationFailed<<'\n';
+    frameMatches=frameCandidates=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
     if(cachedShaderDevice == d) {
         cachedReplacementPS.Reset();
         cachedReplacementVS.Reset();
         cachedShaderDevice = nullptr;
+        shaderCreationFailed=false;
     }
 }
 void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0) noexcept {
     if(!external&&(!enabled||!showStatus))return;
     try {
-        const char* label=external?external:!active?"WATER OFF":frameMatches?"WATER ON":"WATER WAIT";
+        const char* label=external?external:(!active||!effectEnabled)?"WATER OFF":frameMatches?"WATER ON":"WATER WAIT";
         const char* letters="WATERONFIHZX";
         const char* glyphs[]={"10001100011000110101101011101110001","01110100011000111111100011000110001","11111001000010000100001000010000100","11111100001000011110100001000011111","11110100011000111110101001001010001","01110100011000110001100011000101110","10001110011010110011100011000110001","11111100001000011110100001000010000","11111001000010000100001000010011111","10001100011000111111100011000110001","11111000010001000100010001000011111","10001100010101000100010101000110001"};
         auto rect=[&](float x,float y,float width,float height,DWORD color){
@@ -407,30 +425,51 @@ struct Scope {
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
     ComPtr<IDirect3DSurface9> oldDepthRT;bool depthBound=false;
+    D3DVIEWPORT9 oldViewport{};
+    DWORD oldColorWrite[2]{};
+    bool targetState=false;
+
+    void RestoreTargets() noexcept {
+        if(!device||!targetState)return;
+        if(maskBound)device->SetRenderTarget(1,oldMaskRT.Get());
+        if(depthBound)device->SetRenderTarget(2,oldDepthRT.Get());
+        device->SetRenderState(D3DRS_COLORWRITEENABLE1,oldColorWrite[0]);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE2,oldColorWrite[1]);
+        device->SetViewport(&oldViewport);
+        maskBound=depthBound=targetState=false;
+    }
+
+    void BindTargets(IDirect3DDevice9* d) {
+        if(!waterTargetSurface||!waterMaskSurface||!waterDepthSurface)return;
+        ComPtr<IDirect3DSurface9> current;
+        D3DCAPS9 caps{};
+        if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=waterTargetSurface||
+           FAILED(d->GetDeviceCaps(&caps))||caps.NumSimultaneousRTs<3 ||
+           !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING))return;
+        // NOTFOUND means an unbound slot; other query failures cannot be safely restored.
+        HRESULT maskHR=d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
+        HRESULT depthHR=d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
+        if((FAILED(maskHR)&&maskHR!=D3DERR_NOTFOUND)||(FAILED(depthHR)&&depthHR!=D3DERR_NOTFOUND)||
+           FAILED(d->GetViewport(&oldViewport))||
+           FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE1,&oldColorWrite[0]))||
+           FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE2,&oldColorWrite[1])))return;
+        targetState=true;
+        HRESULT hr=d->SetRenderTarget(1,waterMaskSurface);
+        maskBound=SUCCEEDED(hr);
+        if(SUCCEEDED(hr)){hr=d->SetRenderTarget(2,waterDepthSurface);depthBound=SUCCEEDED(hr);}
+        if(SUCCEEDED(hr))hr=d->SetRenderState(D3DRS_COLORWRITEENABLE1,15);
+        if(SUCCEEDED(hr))hr=d->SetRenderState(D3DRS_COLORWRITEENABLE2,15);
+        if(SUCCEEDED(hr))hr=d->SetViewport(&oldViewport);
+        if(FAILED(hr)){RestoreTargets();ReportFailure("water MRT binding",hr);}
+    }
+
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         try {
-            // Shader hashes are not a material identity in this client.  The
-            // very same liquid surface switches VS/PS variants at tile seams,
-            // under bridges, near the camera and after spell interaction.  A
-            // newly observed variant (VS 70faf83955e2b668) used the exact same
-            // input ABI and textures but was rejected by the old VS whitelist,
-            // producing the large triangular holes seen in canals/coasts.
-            //
-            // This two-texture layout is the stable material signature: slot 0
-            // is WoW's 8x64 liquid ripple LUT and slot 1 its 512x512 surface
-            // normal.  Requiring both slots excludes the unrelated 8x64 weather
-            // particles while accepting every shader variant of this water.
-            for(unsigned slot=0;slot<2;++slot) {
-                ComPtr<IDirect3DBaseTexture9> tex;
-                if(FAILED(d->GetTexture(slot,tex.GetAddressOf()))||!tex||tex->GetType()!=D3DRTYPE_TEXTURE)return;
-                D3DSURFACE_DESC desc{};
-                if(FAILED(static_cast<IDirect3DTexture9*>(tex.Get())->GetLevelDesc(0,&desc)))return;
-                if(slot==0&&(desc.Width!=8||desc.Height!=64))return;
-                if(slot==1&&(desc.Width!=512||desc.Height!=512))return;
-            }
-            original = renderer::g_trackedState.currentPS;
-            originalVertex = renderer::g_trackedState.currentVS;
+            if(!renderer::water::IsMaterial(d))return;
+            ++frameCandidates;
+            if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
+               FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
             if(FAILED(d->GetPixelShaderConstantF(200,old,9)))return;
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
@@ -466,35 +505,46 @@ struct Scope {
             controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
             controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
             float vertexControls[4]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,wavesEnabled?swellStrength:0,0};
-            if(cachedShaderDevice != d || !cachedReplacementPS || !cachedReplacementVS) {
+            if(cachedShaderDevice != d) {
+                cachedReplacementPS.Reset();cachedReplacementVS.Reset();
+                cachedShaderDevice=d;shaderCreationFailed=false;
+            }
+            if(shaderCreationFailed || code.empty() || vertexCode.empty())return;
+            if(!cachedReplacementPS || !cachedReplacementVS) {
                 cachedReplacementPS.Reset();
                 cachedReplacementVS.Reset();
                 cachedShaderDevice = d;
-                if(FAILED(d->CreatePixelShader(code.data(), cachedReplacementPS.GetAddressOf()))) return;
-                if(FAILED(d->CreateVertexShader(vertexCode.data(), cachedReplacementVS.GetAddressOf()))) return;
+                HRESULT hr=d->CreatePixelShader(code.data(), cachedReplacementPS.GetAddressOf());
+                if(SUCCEEDED(hr))hr=d->CreateVertexShader(vertexCode.data(), cachedReplacementVS.GetAddressOf());
+                if(FAILED(hr)) {
+                    shaderCreationFailed=true;
+                    D3DCAPS9 caps{};d->GetDeviceCaps(&caps);
+                    std::ofstream(std::filesystem::path(logPath),std::ios::app)
+                        <<"water shader creation failed hr="<<std::hex<<hr<<std::dec
+                        <<" PS30 slots="<<caps.MaxPixelShader30InstructionSlots
+                        <<"; keeping native water until device reset\n";
+                    return;
+                }
             }
             replacement = cachedReplacementPS;
             replacementVertex = cachedReplacementVS;
             const D3DSAMPLERSTATETYPE samplerStates[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
-            if(reflectionScene&&reflectionDepth){
+            {
                 for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}
-                device=d;
+                device=d;extraState=true;
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
-                for(unsigned slot=0;slot<2;++slot){d->SetSamplerState(2+slot,D3DSAMP_MINFILTER,slot?D3DTEXF_POINT:D3DTEXF_LINEAR);d->SetSamplerState(2+slot,D3DSAMP_MAGFILTER,slot?D3DTEXF_POINT:D3DTEXF_LINEAR);d->SetSamplerState(2+slot,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(2+slot,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(2+slot,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(2+slot,D3DSAMP_SRGBTEXTURE,FALSE);}extraState=true;
+                for(unsigned slot=0;slot<2;++slot) {
+                    const DWORD values[]={slot?D3DTEXF_POINT:D3DTEXF_LINEAR,slot?D3DTEXF_POINT:D3DTEXF_LINEAR,
+                        D3DTEXF_NONE,D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,FALSE};
+                    for(unsigned state=0;state<6;++state) {
+                        const HRESULT hr=d->SetSamplerState(2+slot,samplerStates[state],values[state]);
+                        if(FAILED(hr)){Restore();ReportFailure("water sampler setup",hr);return;}
+                    }
+                }
             }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
-            if(waterMaskSurface){
-                d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
-                if(SUCCEEDED(d->SetRenderTarget(1,waterMaskSurface))) maskBound=true;
-            }
-            if(waterDepthSurface){
-                d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
-                if(SUCCEEDED(d->SetRenderTarget(2,waterDepthSurface))) depthBound=true;
-            }
-            static bool reported=false;
-            if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
-            static bool reflectionReported=false;if(extraState&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
+            BindTargets(d);
             if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,9))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,1))){Restore();return;}
             {
                 float lights[17][4]{};
@@ -508,12 +558,33 @@ struct Scope {
                     }
                     lights[16][0]=float(count);lights[16][1]=reflectionStrength;
                 }
-                d->SetPixelShaderConstantF(180,lights[0],17);
+                if(FAILED(d->SetPixelShaderConstantF(180,lights[0],17))){Restore();return;}
             }
+            static bool reported=false;
+            if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
+            static bool reflectionReported=false;if(reflectionScene&&reflectionDepth&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             ++frameMatches;
         }catch(...){Restore();}
     }
-    void Restore() noexcept {if(device){if(localLightsSaved){device->SetPixelShaderConstantF(180,oldLocalLights,17);localLightsSaved=false;}device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}if(maskBound){device->SetRenderTarget(1,oldMaskRT.Get());maskBound=false;}if(depthBound){device->SetRenderTarget(2,oldDepthRT.Get());depthBound=false;}device=nullptr;}}
+    void Restore() noexcept {
+        if(!device)return;
+        RestoreTargets();
+        if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
+        device->SetPixelShader(original.Get());
+        device->SetVertexShader(originalVertex.Get());
+        device->SetPixelShaderConstantF(200,old,9);
+        device->SetVertexShaderConstantF(200,oldVertexControls,1);
+        if(extraState) {
+            const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
+                D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
+            for(unsigned slot=0;slot<2;++slot) {
+                device->SetTexture(2+slot,oldExtraTextures[slot].Get());
+                for(unsigned state=0;state<6;++state)
+                    device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
+            }
+        }
+        device=nullptr;extraState=localLightsSaved=false;
+    }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;
     Scope& operator=(const Scope&)=delete;

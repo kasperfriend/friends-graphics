@@ -48,7 +48,9 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float coverage=tex2D(waterCoverage,uv).r;
  if(coverage>.35) {
    float wz=tex2D(waterDepth,uv).r;
-   if(wz>.05) raw=saturate(projection.z+projection.w*saturate(projection.x+projection.y/wz));
+   // This output is already normalized, just like the scene-depth branch.
+   // Reapplying viewport MinZ/MaxZ puts nearby water at the wrong air depth.
+   if(wz>.05) raw=saturate(projection.x+projection.y/wz);
  }
  return raw.xxxx;
 })HLSL";

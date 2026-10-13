@@ -190,6 +190,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         } else {
             // Keep the per-frame state consistent and the weather detection
             // alive while the frame passes through untouched.
+            waterreflection::Finish();
             volume::Finish(d);
             weathervisuals::Present(d, true);
             return originalPresent(d, a, b, w, r);
@@ -273,8 +274,7 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
 HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalClear(d,n,rect,flags,color,z,stencil);
-    const bool waterNeedsDepth=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled&&
-        (watereffect::reflectionsEnabled||watereffect::refractionEnabled||watereffect::depthEnabled||watereffect::foamEnabled);
+    const bool waterNeedsDepth=watereffect::NeedsScene();
     if(volume::internal||g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
         return originalClear(d,n,rect,flags,color,z,stencil);
     volume::BeforeClear(d,n,rect,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
@@ -557,7 +557,7 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    if(volume::enabled){
+    if(volume::enabled||watereffect::enabled){
         InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
         InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
         InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
@@ -618,7 +618,7 @@ void HookDevice(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    if(volume::enabled){
+    if(volume::enabled||watereffect::enabled){
         volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
         volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
         renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);

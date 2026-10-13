@@ -52,6 +52,7 @@ namespace renderer
         shadowMapSize = 2048;
         shadowMapDistance = 180.0f;
 
+        waterMaskTexture = waterDepthTexture = nullptr;
         depthTexture = nullptr;
         depthSurface = nullptr;
         sceneColor = nullptr;
