@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: The picture no longer flickers faintly across the whole screen
 ---
-Two causes are gone: fog, clouds and sky light were timed by a coarse clock that advanced in steps instead of gliding, and the fog's frame smoothing was thrown away for a frame whenever the lamps around you changed, which happened constantly near lamp posts and at low sun. Both now keep a steady, smooth image.
+Fog, clouds and sky light were timed in coarse steps, so the haze pulsed instead of gliding, and frame smoothing was dropped for a frame whenever nearby lamps changed. Both are fixed: the picture now stays steady.
