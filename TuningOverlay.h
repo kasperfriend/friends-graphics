@@ -18,6 +18,51 @@ inline std::wstring ini;
 inline bool visible=false,f7Down=false,mouseDown=false;
 inline int hover=-1,dragItem=-1;
 inline std::string saveError;
+// The game's own window (captured from the D3D device in Draw). Mouse
+// coordinates and the input hook below must both refer to this window, not
+// to whatever happens to be foreground: polling GetForegroundWindow made
+// the hit-test jump whenever focus flickered.
+inline HWND gameWindow=nullptr;
+inline HWND inputWindow=nullptr;
+inline WNDPROC originalInputProc=nullptr;
+// While the menu is up the game must not see the same clicks: without this,
+// pressing a toggle also clicks the world behind the panel and dragging a
+// slider orbits the camera, which warps/hides the cursor WoW is dragging
+// with - the menu then hit-tests a cursor the player is not looking at.
+// Mouse messages are swallowed only while `visible`; every other message,
+// and everything once the menu closes, goes to the original procedure.
+// The menu itself never needed the messages (it polls GetCursorPos /
+// GetAsyncKeyState, which track the physical state either way).
+inline LRESULT CALLBACK InputWndProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam){
+ if(visible){
+  switch(message){
+   case WM_LBUTTONDOWN:case WM_LBUTTONUP:case WM_LBUTTONDBLCLK:
+   case WM_RBUTTONDOWN:case WM_RBUTTONUP:case WM_RBUTTONDBLCLK:
+   case WM_MBUTTONDOWN:case WM_MBUTTONUP:case WM_MBUTTONDBLCLK:
+   case WM_MOUSEMOVE:case WM_MOUSEWHEEL:case WM_MOUSEHWHEEL:
+    return 0;
+   case WM_SETCURSOR:
+    if(LOWORD(lParam)==HTCLIENT){SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));return TRUE;}
+    break;
+  }
+ }
+ return originalInputProc?CallWindowProcW(originalInputProc,window,message,wParam,lParam):DefWindowProcW(window,message,wParam,lParam);
+}
+inline void ReleaseInputHook(){
+ if(!inputWindow)return;
+ if(IsWindow(inputWindow)&&reinterpret_cast<WNDPROC>(GetWindowLongPtrW(inputWindow,GWLP_WNDPROC))==&InputWndProc)
+  SetWindowLongPtrW(inputWindow,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(originalInputProc));
+ inputWindow=nullptr;originalInputProc=nullptr;
+}
+inline void InstallInputHook(HWND window){
+ if(!window||!IsWindow(window))return;
+ if(inputWindow==window&&originalInputProc)return;
+ ReleaseInputHook();
+ SetLastError(0);
+ const LONG_PTR previous=SetWindowLongPtrW(window,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(&InputWndProc));
+ if(previous&&previous!=reinterpret_cast<LONG_PTR>(&InputWndProc)){inputWindow=window;originalInputProc=reinterpret_cast<WNDPROC>(previous);}
+ else if(!previous&&GetLastError())renderer::menudiagnostics::Write("INPUT HOOK FAILED win32="+std::to_string(GetLastError()));
+}
 inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
@@ -224,8 +269,12 @@ inline bool SelectScope(int scope){
  return true;
 }
 inline bool Update(){
- DWORD pid=0;HWND window=GetForegroundWindow();GetWindowThreadProcessId(window,&pid);bool focused=pid==GetCurrentProcessId();
+ DWORD pid=0;HWND foreground=GetForegroundWindow();GetWindowThreadProcessId(foreground,&pid);bool focused=pid==GetCurrentProcessId();
+ // Hit-test against the device's window (stored by Draw), falling back to
+ // the foreground window only before the first frame has been drawn.
+ HWND window=gameWindow&&IsWindow(gameWindow)?gameWindow:foreground;
  bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down){visible=!visible;if(visible)renderer::EnvironmentProfileManager::Instance().WriteMenuReport("F7 opened");}f7Down=f7;
+ if(visible)InstallInputHook(window);else ReleaseInputHook();
  if(!visible||!focused){hover=-1;dragItem=-1;mouseDown=false;return false;}
  RECT client{};GetClientRect(window,&client);
  if(!renderWidth||!renderHeight)Layout(client.right,client.bottom,window);
@@ -234,18 +283,25 @@ inline bool Update(){
  const float py=renderHeight&&client.bottom>0?float(p.y)*renderHeight/client.bottom:float(p.y);
  bool down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;bool changed=false;
  if(!down)dragItem=-1;
- if(down&&!mouseDown&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));mouseDown=down;return false;}
+ // The zone/subarea selector only exists in the verified per-location
+ // mode. In the global fallback the same screen row explains where the
+ // edits go (see Draw), and a click there must not eat input or switch
+ // the editor into a scope it cannot save to.
+ if(down&&!mouseDown&&renderer::locationtuning::editable&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));mouseDown=down;return false;}
  const int curHover=HitItem(px,py);
  hover=dragItem>=0?dragItem:curHover;
- const int editItem=dragItem>=0?dragItem:curHover;
- if(down&&!mouseDown&&editItem>=0&&!renderer::locationtuning::editable&&!renderer::locationtuning::IsGlobal(items[editItem].section))renderer::EnvironmentProfileManager::Instance().WriteMenuReport("blocked control click");
- if(down&&(renderer::locationtuning::editable||(editItem>=0&&renderer::locationtuning::IsGlobal(items[editItem].section)))){
+ // Every control is editable in both modes: verified locations save a
+ // scoped override, everything else saves the global GraphicsEffects.ini
+ // section (locationtuning::Save). Gating this on `editable` was what
+ // left stock 3.3.5 clients with a menu whose rows highlighted under the
+ // cursor but whose toggles never changed.
+ if(down){
   if(!mouseDown&&curHover>=0){auto& i=items[curHover];if(i.kind==KIND_TOGGLE){i.value=!i.value;changed=Save(i);}else dragItem=curHover;}
   if(dragItem>=0){
    auto& i=items[dragItem];const float left=PanelX()+ItemColumn(dragItem)*columnWidth*uiScale;
    float t=std::clamp((px-left-252*uiScale)/(82*uiScale),0.f,1.f);
    int value=std::clamp(i.lo+int((i.hi-i.lo)*t/i.step+.5f)*i.step,i.lo,i.hi);
-   if(value!=i.value){i.value=value;changed=Save(i)||changed;if(!changed)dragItem=-1;}
+   if(value!=i.value){i.value=value;const bool saved=Save(i);changed=saved||changed;if(!saved)dragItem=-1;}
   }
  }
  mouseDown=down;return changed;
@@ -256,6 +312,7 @@ inline void Draw(IDirect3DDevice9* d){
  auto check=[&](HRESULT result,const char* stage){auto& previous=lastErrors[stage];if(FAILED(result)&&result!=previous)renderer::menudiagnostics::Write(std::string("DRAW FAILED ")+stage+" HRESULT="+std::to_string(result));previous=result;return SUCCEEDED(result);};
  IDirect3DStateBlock9* raw=nullptr;if(!check(d->CreateStateBlock(D3DSBT_ALL,&raw),"CreateStateBlock"))return;if(!check(raw->Capture(),"Capture")){raw->Release();return;}
  D3DVIEWPORT9 viewport{};d->GetViewport(&viewport);D3DDEVICE_CREATION_PARAMETERS creation{};d->GetCreationParameters(&creation);
+ if(creation.hFocusWindow)gameWindow=creation.hFocusWindow;
  environmentLines=renderer::EnvironmentProfileManager::Instance().CompactDebugLines();
  renderWidth=int(viewport.Width);renderHeight=int(viewport.Height);
  Layout(viewport.Width,viewport.Height,creation.hFocusWindow);
@@ -270,16 +327,25 @@ inline void Draw(IDirect3DDevice9* d){
  auto label=[&](float xx,float yy,const std::string& text,DWORD color,float right){labels.push_back({xx,yy,right,text,color});};
  Rect(v,x,y,w,panelHeight,0xf5121820);Rect(v,x,y,w,30*uiScale,0xff1b3340);
  label(x+12*uiScale,y+5*uiScale,"Modern WoW Renderer",0xff8effbb,x+w);
- label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Local locked / F7 close",0xffb5cbd6,x+w-12*uiScale);
+ label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Global preset / F7 close",0xffb5cbd6,x+w-12*uiScale);
  for(size_t i=0;i<environmentLines.size();++i)label(x+12*uiScale,y+(36+23*i)*uiScale,environmentLines[i],i?0xffdce5ea:0xffffdc82,x+w-12*uiScale);
  const auto& manager=renderer::EnvironmentProfileManager::Instance();
  const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
  label(x+12*uiScale,y+135*uiScale,"Settings for:",0xffdce5ea,x+150*uiScale);
- Rect(v,x+155*uiScale,y+132*uiScale,430*uiScale,25*uiScale,zone?0xff246b47:0xff26343b);
- Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
- label(x+162*uiScale,y+135*uiScale,"Entire zone - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
- label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)",0xffdce5ea,x+w-12*uiScale);
- label(x+12*uiScale,y+165*uiScale,!saveError.empty()?saveError:renderer::locationtuning::editable?"Subarea settings override zone settings.":"Local locked: "+manager.TuningBlockedReason()+" | Send MenuDiagnostics.log",0xffb5cbd6,x+w-12*uiScale);
+ if(renderer::locationtuning::editable){
+  Rect(v,x+155*uiScale,y+132*uiScale,430*uiScale,25*uiScale,zone?0xff246b47:0xff26343b);
+  Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
+  label(x+162*uiScale,y+135*uiScale,"Entire zone - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
+  label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)",0xffdce5ea,x+w-12*uiScale);
+ }else{
+  // No verified location on this client: there are no zone/subarea
+  // scopes to offer, and pretending otherwise (two dead buttons and a
+  // "locked" menu) was the reported bug. Say plainly that the controls
+  // below edit the one global preset, which is what they now do.
+  Rect(v,x+155*uiScale,y+132*uiScale,883*uiScale,25*uiScale,0xff246b47);
+  label(x+162*uiScale,y+135*uiScale,"Entire game - GraphicsEffects.ini",0xffdce5ea,x+w-12*uiScale);
+ }
+ label(x+12*uiScale,y+165*uiScale,!saveError.empty()?saveError:renderer::locationtuning::editable?"Subarea settings override zone settings.":"This client/location is not verified: edits apply globally, per-zone presets are unavailable.",0xffb5cbd6,x+w-12*uiScale);
  for(int column=0;column<columns;++column){
   float xx=x+column*columnWidth*uiScale;
   if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-196*uiScale,0xff2a3d48);

@@ -96,6 +96,15 @@ Dark interiors are an optical-depth problem on the **light** path, not a multipl
 `AbsorptionPercent 75` the cone optical depth reaches 13-22 and every multiple-scattering octave underflows anyway.
 Absorption is 38 instead, which decouples self-shadowing strength from view opacity.
 
+Direct lighting deliberately does **not** come from whether the sun/moon disc was drawn this frame. That is a
+screen-space event - WoW culls the billboard outside the frustum and the tracker can miss frames at the screen
+edge - so gating the deck's light on it lit and unlit the whole sky as the camera panned, and the ground shadow
+toggled with it. The compositor now builds a stabilized direct-light signal (`CelestialLightStabilizer`): a
+confirmed disc sets it, the view-independent daylight/moonlight state keeps it up while the disc is off screen or
+behind the deck itself, brief dropouts are held, real transitions (sunset) fade over a fraction of a second, and
+only the god-ray/glare origin stays gated on the disc being on screen. Cloud-shadow strength additionally fades
+in with sun elevation instead of snapping at the horizon gate.
+
 ## Settings
 
 `[VolumetricClouds]` in `GraphicsEffects.ini`, per location like the rest of the tuning (`LocationTuning`), and on

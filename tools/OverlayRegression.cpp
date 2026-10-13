@@ -19,6 +19,38 @@ int main() try {
  if(tuningoverlay::Save(failedItem))throw std::runtime_error("Save succeeded into missing directory");
  std::ifstream diagnostic("build/overlay-preview/MenuDiagnostics.log");std::string diagnosticText((std::istreambuf_iterator<char>(diagnostic)),{});
  if(diagnosticText.find("SAVE FAILED")==std::string::npos||diagnosticText.find("win32=")==std::string::npos)throw std::runtime_error("Save failure missing from support log");
+ // Unverified client (a stock 3.3.5 build): the menu must still work, as
+ // global GraphicsEffects.ini edits - not as rows that highlight under
+ // the cursor and snap back. The toggle has to round-trip through the
+ // global file and must not invent a per-location file.
+ {
+  std::filesystem::create_directories("build/overlay-preview/global-fallback");
+  renderer::locationtuning::Sync(L"build\\overlay-preview\\global-fallback\\",{571,65,4164,true},false);
+  if(renderer::locationtuning::editable)throw std::runtime_error("Unverified sync unexpectedly editable");
+  auto& item=tuningoverlay::items[1];
+  item.value=0;
+  if(!tuningoverlay::Save(item))throw std::runtime_error("Global fallback toggle save failed");
+  const auto globalFile=L"build\\overlay-preview\\global-fallback\\GraphicsEffects.ini";
+  if(GetPrivateProfileIntW(L"Atmosphere",L"ShaftsEnabled",-1,globalFile)!=0)throw std::runtime_error("Global fallback did not write the global section");
+  item.value=1;
+  if(!tuningoverlay::Save(item))throw std::runtime_error("Global fallback toggle re-save failed");
+  if(GetPrivateProfileIntW(L"Atmosphere",L"ShaftsEnabled",-1,globalFile)!=1)throw std::runtime_error("Global fallback toggle did not change");
+  if(renderer::locationtuning::ReadEditorInt(L"Atmosphere",L"ShaftsEnabled",0,globalFile)!=1)throw std::runtime_error("Global fallback value does not read back");
+  if(std::filesystem::exists("build/overlay-preview/global-fallback/LocationGraphics.ini"))throw std::runtime_error("Global fallback invented a location file");
+  std::cout<<"PASS overlay global fallback toggle round-trips on an unverified client\n";
+ }
+ // While the menu is visible the game window must not receive the clicks
+ // aimed at it (they would click the world / orbit the camera mid-drag).
+ {
+  tuningoverlay::visible=true;tuningoverlay::InstallInputHook(window);
+  if(!tuningoverlay::inputWindow)throw std::runtime_error("Input hook was not installed");
+  if(SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,0)!=0)throw std::runtime_error("Menu click leaked to the game window");
+  if(SendMessageW(window,WM_MOUSEMOVE,0,0)!=0)throw std::runtime_error("Menu mouse move leaked to the game window");
+  tuningoverlay::ReleaseInputHook();
+  if(tuningoverlay::inputWindow)throw std::runtime_error("Input hook was not released");
+  tuningoverlay::visible=false;
+  std::cout<<"PASS overlay input hook swallows mouse while visible\n";
+ }
  for(auto height:{1080,1440,2160}) {
   int width=height*16/9;D3DPRESENT_PARAMETERS pp{};pp.Windowed=TRUE;pp.SwapEffect=D3DSWAPEFFECT_DISCARD;pp.hDeviceWindow=window;pp.BackBufferWidth=width;pp.BackBufferHeight=height;pp.BackBufferFormat=D3DFMT_A8R8G8B8;
   ComPtr<IDirect3DDevice9> device;Check(api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,device.GetAddressOf()));

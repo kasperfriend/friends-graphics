@@ -43,7 +43,16 @@ inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     if(IsGlobal(section))return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
-    if(!editable)return false;
+    // Per-location overrides are only meaningful once this client's location
+    // has been verified against the database. On every other 3.3.5 build
+    // (including a stock client) there is no verified location to scope the
+    // write to, and refusing the write made the whole F7 menu look alive -
+    // rows highlighted under the cursor - while every toggle/slider snapped
+    // straight back. Fall back to the plain global section in
+    // GraphicsEffects.ini instead: ReadAtLevel already reads exactly that
+    // value back whenever `editable` is false, so an edit now round-trips,
+    // and a later verified session still leaves its scoped file untouched.
+    if(!editable)return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
     const auto scope=Scope(editZone||!active.areaId?1:2)+L"."+section;
     return WritePrivateProfileStringW(scope.c_str(),key,std::to_wstring(value).c_str(),localFile.c_str())!=0;
 }

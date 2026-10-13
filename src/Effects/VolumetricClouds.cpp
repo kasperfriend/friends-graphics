@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
 #include "../D3D9/ScopedRenderState.h"
 #include "../Diagnostics/PerformanceProfiler.h"
@@ -741,8 +742,13 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float daylight=std::clamp(f.daylightFactor,0.f,1.f);
  const float moonlight=std::clamp(f.moonlightFactor,0.f,1.f);
  const float ambientLevel=std::clamp(std::max(daylight,moonlight*.5f),.2f,1.f);
- const bool moon=f.celestialIsMoon;
- const float directIntensity=f.celestialIntensity*(moon?settings.moonStrength:1.f);
+ // Direct light comes from the stabilized signal when the compositor
+ // filled it: the disc-draw signal (celestialIntensity) toggles as the
+ // camera pans the disc in and out of frame and made the deck blink
+ // lit/unlit. Frames built outside the compositor (regression tests)
+ // have no stabilized value and keep the legacy behaviour.
+ const bool moon=f.directLightValid?f.directLightIsMoon:f.celestialIsMoon;
+ const float directIntensity=(f.directLightValid?f.directLightIntensity:f.celestialIntensity)*(moon?settings.moonStrength:1.f);
  // The tracked light colour is the client's own directional colour; fall
  // back to a neutral daylight/moonlight tint when it has not been seen.
  const float lightLength=std::sqrt(f.directionalLightColor.x*f.directionalLightColor.x+
@@ -753,7 +759,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float sunG=useTracked?std::clamp(f.directionalLightColor.y,0.f,2.f):(moon?.72f:.97f);
  const float sunB=useTracked?std::clamp(f.directionalLightColor.z,0.f,2.f):(moon?.92f:.86f);
 
- float lightDir[3]={f.sunDirectionWorld.x,f.sunDirectionWorld.y,f.sunDirectionWorld.z};
+ const auto& lightWorld=f.directLightValid?f.directLightDirectionWorld:f.sunDirectionWorld;
+ float lightDir[3]={lightWorld.x,lightWorld.y,lightWorld.z};
  // A frame without a confirmed disc still needs a usable march direction.
  if(std::abs(lightDir[0])+std::abs(lightDir[1])+std::abs(lightDir[2])<.01f){lightDir[0]=0;lightDir[1]=0;lightDir[2]=1;}
 
@@ -763,6 +770,12 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float shadowExtent=std::max(settings.groundShadowExtent,100.f);
  const float shadowTexel=shadowExtent/float(std::max(m_shadowSize,1u));
  const bool shadowsOn=settings.groundShadows&&m_shadowSurface&&settings.groundShadowStrength>0.f&&lightDir[2]>.03f;
+ // Strength fades in with sun elevation and with the stabilized light
+ // instead of snapping at the .03 gate: near the horizon (or when the
+ // direction source changed by a degree) the whole world's cloud shadow
+ // used to toggle between full strength and none between two frames.
+ const float shadowStrength=settings.groundShadowStrength*CloudShadowElevationFade(lightDir[2])
+  *(f.directLightValid?std::clamp(f.directLightIntensity,0.f,1.f):1.f);
  m_shadowOrigin[0]=std::floor((f.cameraPosition.x-shadowExtent*.5f)/shadowTexel)*shadowTexel;
  m_shadowOrigin[1]=std::floor((f.cameraPosition.y-shadowExtent*.5f)/shadowTexel)*shadowTexel;
 
@@ -899,7 +912,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
   const float c6c[4]={f.projUnpack[0],f.projUnpack[1],f.projUnpack[2],f.projUnpack[3]};
   const float c7c[4]={m_shadowOrigin[0],m_shadowOrigin[1],1.f/shadowExtent,
-                      shadowsOn?settings.groundShadowStrength:0.f};
+                      shadowsOn?shadowStrength:0.f};
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1c,1);
   d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,inv[0],3);
   d->SetPixelShaderConstantF(6,c6c,1);d->SetPixelShaderConstantF(7,c7c,1);

@@ -20,6 +20,7 @@
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
+#include "src/D3D9/CelestialStability.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -131,6 +132,12 @@ bool shadowCacheValid = false, shadowAnchorValid = false;
 float shadowAnchor[3]{};
 float celestialDaylight = 0, celestialMoonlight = 0;
 float celestialShadowLight = 0;
+// Stable direct-light estimate built in Composite (see
+// src/D3D9/CelestialStability.h). Persistent across frames on purpose:
+// its whole job is to remember the light through frames where the disc
+// draw is culled, missed or covered, so clouds/fog do not blink with it.
+renderer::CelestialLightStabilizer celestialLightStabilizer;
+ULONGLONG celestialLightLastTick = 0;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
 bool localLightDebug = false;
@@ -374,6 +381,8 @@ void Reset(IDirect3DDevice9* d) {
     shadowFrameStarted = shadowFrameValid = false;
     stableShadowLightValid = false;
     shadowCacheValid = shadowAnchorValid = false;
+    celestialLightStabilizer.Reset();
+    celestialLightLastTick = 0;
 }
 
 // A break in the presented frame stream (Alt+Tab, minimise, loading screen)
@@ -382,6 +391,10 @@ void Reset(IDirect3DDevice9* d) {
 void InvalidateTemporalHistory() {
     legacyTargets.historyValid = false;
     renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
+    // The next presented frame re-primes the stabilizer at its current
+    // target instead of fading the sky in from the pre-break state.
+    celestialLightStabilizer.Reset();
+    celestialLightLastTick = 0;
 }
 
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) {
@@ -825,6 +838,42 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.sunStrength = 0.f;
             frameCtx.celestialIntensity = 0.f;
             frameCtx.celestialIsMoon = false;
+        }
+
+        // Stable direct light, separate from the disc signal above. The
+        // disc fields keep answering "is there a god-ray origin on screen
+        // right now" (constants[2]/sunScreen/celestialIntensity), which is
+        // genuinely a screen-space question. Cloud and atmosphere lighting
+        // must instead answer "is the sun/moon up", which does not change
+        // when the camera pans the disc out of frame, when WoW culls its
+        // billboard at the screen edge, or when our own cloud deck crosses
+        // it - all three used to toggle celestialIntensity between frames
+        // and blink the whole sky (clouds lit/unlit, ground shadowed/
+        // unshadowed). At this point sunDirectionView/World hold exactly
+        // the right direction either way: the tracked disc's when it was
+        // drawn, the per-frame v[24]-derived direction otherwise.
+        {
+            const ULONGLONG lightNow = GetTickCount64();
+            const float lightDt = celestialLightLastTick
+                ? std::clamp(float(lightNow - celestialLightLastTick) * .001f, .001f, .25f)
+                : 1.f / 60.f;
+            celestialLightLastTick = lightNow;
+            renderer::CelestialLightInput lightInput;
+            lightInput.discVisible = body != nullptr;
+            lightInput.discIsMoon = useMoon;
+            lightInput.daylight = frameCtx.daylightFactor;
+            lightInput.moonlight = frameCtx.moonlightFactor;
+            lightInput.directionalLuminance =
+                frameCtx.directionalLightColor.x * .2126f +
+                frameCtx.directionalLightColor.y * .7152f +
+                frameCtx.directionalLightColor.z * .0722f;
+            lightInput.deltaSeconds = lightDt;
+            const auto stable = celestialLightStabilizer.Update(lightInput);
+            frameCtx.directLightIntensity = stable.intensity;
+            frameCtx.directLightIsMoon = stable.isMoon;
+            frameCtx.directLightValid = true;
+            frameCtx.directLightDirectionView = frameCtx.sunDirectionView;
+            frameCtx.directLightDirectionWorld = frameCtx.sunDirectionWorld;
         }
     }
 

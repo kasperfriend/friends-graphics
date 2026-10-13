@@ -495,11 +495,11 @@ int main() try {
  // Opacity, not brightness, is the honest measurement: the diagnostic
  // returns the integrated (1 - transmittance) directly.
  cloud.debugMode=CloudDebugMode::Coverage;
- cloud.coverage=.15f;renderClouds();const double thin=skyMean();
+ cloud.coverage=.15f;renderClouds();const double thinDeck=skyMean();
  cloud.coverage=.45f;renderClouds();const double medium=skyMean();
  cloud.coverage=.85f;renderClouds();const double solid=skyMean();
- printf("clouds coverage thin=%.1f medium=%.1f solid=%.1f\n",thin,medium,solid);
- Require(thin<medium-10&&medium<solid-30,"the coverage slider walks the deck from broken to overcast");
+ printf("clouds coverage thin=%.1f medium=%.1f solid=%.1f\n",thinDeck,medium,solid);
+ Require(thinDeck<medium-10&&medium<solid-30,"the coverage slider walks the deck from broken to overcast");
  Require(solid>120,"maximum coverage really closes the sky");
  cloud.coverage=1.f;
  cloud.density=.05f;renderClouds();const double sparseDeck=skyMean();
@@ -555,6 +555,22 @@ int main() try {
  // the pass has to bow out instead of smearing one texel over the world.
  f.sunDirectionWorld={1,0,.01f};
  Require(renderClouds()&&pixel(64,110)==0xff202020,"a disc at the horizon casts no ground shadow");
+ // The stabilized direct light, not the disc-draw signal, drives both
+ // the deck's lighting and its ground shadow: with the stabilized light
+ // out (night / no body up) neither may appear, and with it on, both
+ // must - regardless of what celestialIntensity happens to say.
+ // DirectLighting debug returns the raw phase energy and ignores the
+ // intensity by design, so measure the real composite here.
+ f.sunDirectionWorld={0,0,1};
+ f.directLightValid=true;f.directLightIsMoon=false;f.directLightIntensity=0;f.directLightDirectionWorld={0,0,1};
+ renderClouds();const double unlitDirect=skyMean();
+ Require(renderClouds()&&pixel(64,110)==0xff202020,"no stabilized light casts no cloud shadow");
+ f.directLightIntensity=1;
+ renderClouds();const double litDirect=skyMean();
+ printf("clouds direct lighting unlit=%.1f lit=%.1f\n",unlitDirect,litDirect);
+ Require(litDirect>unlitDirect+20,"stabilized light lights the deck");
+ Require(renderClouds()&&((pixel(64,110)>>8)&255)<0x20,"stabilized light restores the cloud shadow");
+ f.directLightValid=false;
  f.sunDirectionWorld={0,0,1};cloud.groundShadows=false;
  cloud.enabled=false;
  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff123456,1,0));
