@@ -36,6 +36,11 @@ namespace renderer
         sunStrength = 0.0f;
         celestialIntensity = 0.0f;
         celestialIsMoon = false;
+        directLightIntensity = 0.0f;
+        directLightIsMoon = false;
+        directLightValid = false;
+        directLightDirectionView = { 0.0f, 0.0f, 1.0f };
+        directLightDirectionWorld = { 0.0f, 0.0f, 1.0f };
 
         projUnpack[0] = projUnpack[1] = projUnpack[2] = projUnpack[3] = 0.0f;
         depthMaxZ = 1.0f;

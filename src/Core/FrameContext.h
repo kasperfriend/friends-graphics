@@ -42,6 +42,20 @@ namespace renderer
         // guess which body is active.
         float celestialIntensity = 0.0f;
         bool celestialIsMoon = false;
+        // Stable direct light for clouds/atmosphere, decoupled from the
+        // disc-draw signal above: `celestialIntensity` means "the disc was
+        // drawn on screen this frame" and remains the god-ray/glare origin
+        // gate, while these fields mean "the dominant body is up" and stay
+        // lit when the disc is off screen, edge-culled or behind the cloud
+        // deck itself. Filled by CelestialLightStabilizer in the compositor
+        // (see src/D3D9/CelestialStability.h); directLightValid is false on
+        // frames built outside that path (tests, diagnostics), where the
+        // legacy celestial fields remain the fallback.
+        float directLightIntensity = 0.0f;
+        bool directLightIsMoon = false;
+        bool directLightValid = false;
+        Vec3 directLightDirectionView;
+        Vec3 directLightDirectionWorld;
 
         // Projection reconstruction parameters [P22, P32, P00, P11]
         float projUnpack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

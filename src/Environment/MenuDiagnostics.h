@@ -19,6 +19,6 @@ inline void Write(const std::string& message) {
 }
 inline void Configure(const std::wstring& base) {
     file=base+L"MenuDiagnostics.log";
-    Write("SESSION menu-fix-v1 build=" __DATE__ " " __TIME__);
+    Write("SESSION menu-fix-v2-cloud-light-v1 build=" __DATE__ " " __TIME__);
 }
 }
