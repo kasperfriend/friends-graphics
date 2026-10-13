@@ -41,14 +41,14 @@ namespace
 const char* kCloudMarchSource = R"HLSL(
 sampler2D depthMap:register(s0); sampler3D shapeMap:register(s1);
 sampler3D detailMap:register(s2); sampler2D weatherMap:register(s3);
-float4 cameraPos:register(c0);      // xyz=camera world position, w=elapsed seconds
+float4 cameraPos:register(c0);      // xyz=camera world position, w=unused
 float4 celestial:register(c1);      // xyz=world direction TOWARDS the tracked disc, w=intensity
 float4 invView0:register(c2); float4 invView1:register(c3); float4 invView2:register(c4);
 float4 projection:register(c5);     // x=A, y=B (raw->view z), z=P00, w=P11
 float4 depthRange:register(c6);     // x=viewport MinZ, y=depth range, z=viewport MaxZ, w=march steps
 float4 layer:register(c7);          // x=world base Z, y=world top Z, z=1/thickness, w=max distance
 float4 region:register(c8);         // w=camera region (0 inside, 1 below, 2 above)
-float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type bias, w=aerial opacity
+float4 window:register(c9);         // x=coverage low edge, y=1/(high-low), z=cloud type offset, w=aerial opacity
 float4 scales:register(c10);        // x=1/feature size, y=shape z scale, z=1/detail size, w=detail strength
 float4 motion:register(c11);        // xy=shape uv offset, z=1/weather size, w=light reach in steps
 float4 motion2:register(c12);       // xy=weather uv offset, zw=shear (world units per height fraction)
@@ -60,6 +60,7 @@ float4 groundColor:register(c17);   // rgb=ground bounce ambient, w=horizon fade
 float4 lobe:register(c18);          // x=forward g, y=backward g, z=ms eccentricity, w=debug mode
 float4 octaves:register(c19);       // x=a^1, y=a^2 (extinction), z=b^1, w=b^2 (contribution)
 float4 detailMotion:register(c20);  // xy=detail uv offset, z=light step length, w=light steps
+float4 evolution:register(c23);     // x=shape Z phase, y=detail Z phase, z=weather variation, w=type scale
 float4 haze:register(c22);          // rgb=aerial perspective colour, w=1/fade distance
 
 // Analytic vertical profile per cloud type: this is what separates a flat
@@ -80,12 +81,12 @@ float Density(float3 p,float h,float erosion) {
  // The slider slides a window along the weather map's (histogram-equalised)
  // coverage channel. Both ends matter: the low edge decides how much sky
  // gets any cloud at all, the high edge how solid a mass becomes.
- float cov=saturate((w.r-window.x)*window.y);
- float g=Gradient(h,saturate(w.g+window.z));
+ float cov=saturate((w.r+(w.b-.5)*evolution.z-window.x)*window.y);
+ float g=Gradient(h,saturate(w.g*evolution.w+window.z));
  if(cov*g<=0) return 0;
  // Shear the tops downwind with height - the cheap stand-in for a curl
  // distortion that ps_3_0 cannot afford - then sample the base shape.
- float4 s=tex3Dlod(shapeMap,float4((p.xy+motion2.zw*h)*scales.x+motion.xy,p.z*scales.y,0));
+ float4 s=tex3Dlod(shapeMap,float4((p.xy+motion2.zw*h)*scales.x+motion.xy,p.z*scales.y+evolution.x,0));
  float fbm=s.g*.625+s.b*.25+s.a*.125;
  // Perlin-Worley base eroded by its own Worley octaves, then the coverage
  // remap: raising coverage pulls the whole field up through the threshold
@@ -94,7 +95,7 @@ float Density(float3 p,float h,float erosion) {
  d=saturate((d-1+cov)/max(cov,1e-4))*(.45+.55*cov);
  if(d<=0) return 0;
  if(erosion>0) {
-   float3 n=tex3Dlod(detailMap,float4((p.xy+motion2.zw*h)*scales.z+detailMotion.xy,p.z*scales.z,0)).rgb;
+   float3 n=tex3Dlod(detailMap,float4((p.xy+motion2.zw*h)*scales.z+detailMotion.xy,p.z*scales.z+evolution.y,0)).rgb;
    // Wispy shreds at the base, cauliflower billows at the top.
    float dfbm=n.r*.625+n.g*.25+n.b*.125;
    // Erosion that fades out inside the core. Eroding uniformly either
@@ -293,6 +294,7 @@ float4 window:register(c9);
 float4 scales:register(c10);
 float4 motion:register(c11);
 float4 motion2:register(c12);
+float4 evolution:register(c23);
 float4 area:register(c21);          // xy=world origin, z=world extent, w=receiver height
 
 float Gradient(float h,float type) {
@@ -308,10 +310,10 @@ float Gradient(float h,float type) {
 // the same field the march would sample at that height.
 float Cloud(float3 p,float h) {
  float3 w=tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0)).rgb;
- float cov=saturate((w.r-window.x)*window.y);
- float g=Gradient(h,saturate(w.g+window.z));
+ float cov=saturate((w.r+(w.b-.5)*evolution.z-window.x)*window.y);
+ float g=Gradient(h,saturate(w.g*evolution.w+window.z));
  if(cov*g<=0) return 0;
- float4 s=tex3Dlod(shapeMap,float4((p.xy+motion2.zw*h)*scales.x+motion.xy,p.z*scales.y,0));
+ float4 s=tex3Dlod(shapeMap,float4((p.xy+motion2.zw*h)*scales.x+motion.xy,p.z*scales.y+evolution.x,0));
  float fbm=s.g*.625+s.b*.25+s.a*.125;
  float d=saturate((s.r-fbm+1)/max(2-fbm,1e-4))*g;
  return saturate((d-1+cov)/max(cov,1e-4))*(.45+.55*cov)
@@ -339,10 +341,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // subtracted, which is what makes an object inside or above the deck count
  // only the cloud that is actually between it and the light.
  float reach=1/(light.z*shell.z);
+ // Start at the actual world-height base, not a second copy of the field
+ // at sea level. Zone thickness/type changes must cast the visible bodies.
+ float baseDistance=max(base-p.z,0)/light.z;
  float amount=0;
  [loop] for(int i=0;i<16;i++) {
    float h=low+stepHeight*(i+.5);
-   amount+=Cloud(p+light*((h-low)*reach),h);
+   amount+=Cloud(p+light*(baseDistance+(h-low)*reach),h);
  }
  amount*=.0625;
  // Transmittance, with an opacity per unit of cloud amount rather than the
@@ -615,7 +620,10 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.sunRays=read(L"SunRaysEnabled",1)!=0;
  m_settings.sunRayStrength=std::clamp(read(L"SunRayPercent",80),0,200)*.01f;
  m_settings.debugMode=static_cast<CloudDebugMode>(std::clamp(read(L"DebugMode",0),0,4));
- m_settings.weatherCoverageBoost=0.f;
+ m_settings.zoneClouds=read(L"ZoneClouds",1)!=0;
+ m_settings.weatherClouds=read(L"WeatherClouds",1)!=0;
+ m_settings.evolutionSpeed=std::clamp(read(L"EvolutionPercent",100),0,400)*.01f;
+ m_settings.transitionSeconds=float(std::clamp(read(L"TransitionSeconds",12),0,60));
 }
 
 void VolumetricClouds::Reset(IDirect3DDevice9* device)
@@ -735,18 +743,20 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
 {
  m_shadowValid=false;
  VolumetricCloudSettings settings=m_settings;
- settings.coverage=std::clamp(settings.coverage+settings.weatherCoverageBoost,0.f,1.f);
- if(!settings.enabled||settings.coverage<=0.f||settings.density<=0.f)return false;
+ if(!settings.enabled)return false;
  if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
+
+ // Advance before the clear-sky early-out: an empty deck must still be
+ // able to develop a storm. The clock bounds loading/focus gaps.
+ const float dt=m_clock.Observe(PerformanceCounter(),PerformanceFrequency());
+ static_cast<CloudShape&>(settings)=m_dynamics.Update(m_settings,f.environment,
+     settings.zoneClouds,settings.weatherClouds?settings.weather:CloudWeather::Clear,
+     settings.weatherClouds?settings.weatherStrength:0.f,settings.transitionSeconds,dt);
+ if(settings.coverage<=0.f||settings.density<=0.f)return false;
+ const auto& motion=m_dynamics.Motion();
 
  D3DSURFACE_DESC desc{};
  if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)||!EnsureShaders(d)||!EnsureFields(d))return false;
-
- // Performance counter, not GetTickCount64 (~15.6 ms steps): the deck's
- // wind drift integrated from the coarse clock lurched instead of
- // gliding, pulsing the whole sky. See src/Core/FrameClock.h.
- const float dt=m_clock.Observe(PerformanceCounter(),PerformanceFrequency());
- m_elapsed+=dt;
 
  const float thickness=std::max(settings.thickness,20.f);
  const float featureSize=std::max(settings.featureSize,1.f);
@@ -761,13 +771,6 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float region=cameraRadius<innerRadius?1.f:(cameraRadius>outerRadius?2.f:0.f);
 
  const float windRadians=settings.windAngle*.01745329252f;
- const float windX=std::cos(windRadians)*settings.windSpeed*m_elapsed;
- const float windY=std::sin(windRadians)*settings.windSpeed*m_elapsed;
- // Every field tiles over one uv unit, so wrapping the accumulated offset
- // is exact - and it keeps the constants small enough that texture
- // coordinate precision never drifts during a long session.
- auto wrap=[](float v){return v-std::floor(v);};
-
  const float coverage=std::clamp(settings.coverage,0.f,1.f);
  // The slider slides a window along the weather map's equalised coverage
  // channel. The high edge closes QUADRATICALLY so that the top of the
@@ -839,6 +842,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   // (1 = the tracked disc, 0 = the captured light constant). Panning the
   // camera must not move `sun`; if it does, this line is where to see it.
   out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" coverage="<<settings.coverage
+     <<" type="<<settings.cloudType<<" feature="<<settings.featureSize
+     <<" weather="<<int(settings.weather)<<" wet="<<m_dynamics.WeatherAmount()
+     <<" evolution="<<settings.evolutionSpeed<<" phase="<<motion.shapeZ
      <<" density="<<settings.density<<" steps="<<settings.sampleCount<<" region="<<region
      <<" moon="<<(moon?1:0)<<" intensity="<<directIntensity<<" shadows="<<(shadowsOn?1:0)
      <<" sun=("<<lightDir[0]<<','<<lightDir[1]<<','<<lightDir[2]<<") stable="<<(f.directLightValid?1:0)
@@ -851,21 +857,23 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float c1[4]={lightDir[0],lightDir[1],lightDir[2],directIntensity};
  const float c7[4]={innerRadius,outerRadius,1.f/thickness,settings.maxDistance};
  const float c8[4]={f.cameraPosition.x,f.cameraPosition.y,centreZ,region};
- const float c9[4]={windowLow,1.f/std::max(windowHigh-windowLow,1e-4f),settings.cloudType*.5f,
+ const float c9[4]={windowLow,1.f/std::max(windowHigh-windowLow,1e-4f),std::max(settings.cloudType,0.f),
                     settings.aerialPerspective};
  const float c10[4]={1.f/featureSize,std::max(settings.shapeAspect,.05f)/featureSize,
                      1.f/detailSize,settings.detailStrength};
  // The light march spends its last iteration on a long reach sample; how
  // long is a constant, not something to recompute per sample.
  const float lightSteps=float(std::clamp(settings.lightSampleCount,1u,6u));
- const float c11[4]={wrap(windX/featureSize),wrap(windY/featureSize),1.f/weatherSize,lightSteps*3.f};
- const float c12[4]={wrap(windX*.35f/weatherSize),wrap(windY*.35f/weatherSize),
+ const float c11[4]={float(motion.shape[0]),float(motion.shape[1]),1.f/weatherSize,lightSteps*3.f};
+ const float c12[4]={float(motion.weather[0]),float(motion.weather[1]),
                      std::cos(windRadians)*settings.windShear*featureSize,
                      std::sin(windRadians)*settings.windShear*featureSize};
  // Less sky reaches the base of an overcast lid than the base of a lone
  // cumulus, so the ambient term closes down as the deck fills in. Without
  // it a full-coverage sky renders as a bright white ceiling.
  const float ambientOcclusion=1.f-coverage*.45f;
+ const float c23[4]={float(motion.shapeZ),float(motion.detailZ),motion.variation,
+                      1.f-std::abs(settings.cloudType)};
  const float c14[4]={kBaseExtinction*settings.density,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
@@ -896,7 +904,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(7,c7,1);
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);
   d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);
-  d->SetPixelShaderConstantF(12,c12,1);
+  d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
   // Deliberately no c14 (extinction / AbsorptionPercent) here: the shadow
   // map carries the unitless cloud amount, so DensityPercent stays an
   // optical-thickness knob for the sky and no longer decides how dark the
@@ -917,7 +925,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetTexture(2,m_detailTexture.Get());SetSampler(d,2,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
   d->SetTexture(3,m_weatherTexture.Get());SetSampler(d,3,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
 
-  const float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,m_elapsed};
+  const float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0.f};
   const float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},
                          {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
@@ -934,7 +942,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                       float(uint32_t(settings.debugMode))};
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;
   const float c19[4]={a,a*a,bContribution,bContribution*bContribution};
-  const float c20[4]={wrap(windX*1.7f/detailSize),wrap(windY*1.7f/detailSize),
+  const float c20[4]={float(motion.detail[0]),float(motion.detail[1]),
                       std::max(thickness*.18f,1.f),lightSteps+1.f};
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);
   d->SetPixelShaderConstantF(2,inv[0],3);
@@ -943,7 +951,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};
   d->SetPixelShaderConstantF(7,layer,1);d->SetPixelShaderConstantF(8,c8,1);
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
-  d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);
+  d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);

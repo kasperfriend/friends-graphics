@@ -554,7 +554,8 @@ int main() try {
  // noise fields are deterministic, so coverage is a value assertion.
  auto& clouds=VolumetricClouds::Instance();auto& cloud=clouds.Settings();
  clouds.ApplyQualityPreset(1);
- cloud.enabled=true;cloud.coverage=1.f;cloud.density=1.f;cloud.weatherCoverageBoost=0;
+ cloud.zoneClouds=false;cloud.evolutionSpeed=0;cloud.transitionSeconds=0;
+ cloud.enabled=true;cloud.coverage=1.f;cloud.density=1.f;cloud.weather=CloudWeather::Clear;cloud.weatherStrength=0;
  cloud.debugMode=CloudDebugMode::None;cloud.cloudType=0;
  cloud.planetRadius=42000;cloud.baseAltitude=900;cloud.thickness=1400;
  cloud.featureSize=5200;cloud.detailSize=380;cloud.weatherSize=34000;
@@ -619,11 +620,6 @@ int main() try {
  printf("clouds opacity sparse=%.1f dense=%.1f\n",sparseDeck,denseDeck);
  Require(denseDeck>sparseDeck+40,"density drives the integrated opacity of the deck");
  cloud.debugMode=CloudDebugMode::None;
- cloud.coverage=.3f;cloud.weatherCoverageBoost=.5f;
- const DWORD boosted=(renderClouds(),pixel(64,20));
- cloud.weatherCoverageBoost=0;
- Require(diff(boosted,0xff202020)>12,"native rain pushes coverage up through the weather boost");
- Require(clouds.Settings().coverage==.3f,"the weather boost never mutates the configured coverage");
  // The deck stays at its configured world height, so all three camera
  // regions have to behave: under it, inside it, above it.
  cloud.coverage=1.f;
@@ -708,6 +704,10 @@ int main() try {
  cloud.enabled=true;cloud.coverage=0;
  Check(d->BeginScene());bool clearSky=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());
  Require(!clearSky&&pixel(64,20)==0xff123456,"zero coverage skips the pass entirely");
+ cloud.weather=CloudWeather::Rain;cloud.weatherStrength=1.f;
+ Require(renderClouds(),"native weather can render from a zero-coverage baseline");
+ Require(clouds.Settings().coverage==0.f,"weather never mutates the configured coverage");
+ cloud.weather=CloudWeather::Clear;cloud.weatherStrength=0;
  cloud.coverage=.5f;cloud.density=1.f;clouds.Reset(d.Get());
  Require(clouds.GetCloudTexture()==nullptr,"cloud reset releases the device resources");
  Require(renderClouds()&&clouds.GetCloudTexture()!=nullptr,"the deck rebuilds itself after a device reset");

@@ -24,6 +24,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClCompile Include="src\Game\WoWLocationProvider.cpp" />
     <ClCompile Include="src\Environment\EnvironmentDatabase.cpp" />
     <ClCompile Include="src\Environment\EnvironmentProfileManager.cpp" />
+    <ClCompile Include="src\Environment\EnvironmentProfile.cpp" />
 
     <ClCompile Include="src\Core\FrameContext.cpp" />
     <ClCompile Include="src\Core\ShaderCache.cpp" />
@@ -67,6 +68,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\D3D9\ScopedRenderState.h" />
     <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
     <ClInclude Include="src\Effects\CloudNoise.h" />
+    <ClInclude Include="src\Effects\CloudDynamics.h" />
     <ClInclude Include="src\Effects\VolumetricClouds.h" />
     <ClInclude Include="src\Effects\LocalLightingRenderer.h" />
     <ClInclude Include="src\Lighting\LocalLightManager.h" />

@@ -206,15 +206,11 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
-    // A sky that is actively raining or snowing is a covered sky. The
-    // weather layer owns the detection (including its own hold through
-    // short native-particle gaps), the cloud deck only consumes the
-    // result - and only while the weather effect itself is live.
-    {
-        const bool weatherActive=weathervisuals::enabled&&weathervisuals::active&&
-            weathervisuals::effectEnabled&&weathervisuals::nativeWeatherMode!=0;
-        volume::cloudWeatherCoverageBoost=weatherActive?.26f*weathervisuals::intensity:0.f;
-    }
+    // Consume the held native weather observation, independently of whether
+    // precipitation replacement is enabled or its textures loaded. No draw
+    // count is treated as a researched server-side storm intensity.
+    volume::cloudWeather=static_cast<renderer::CloudWeather>(std::clamp(weathervisuals::nativeWeatherMode,0,3));
+    volume::cloudWeatherStrength=weathervisuals::intensity;
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
     weathervisuals::Present(d,tuningoverlay::visible);

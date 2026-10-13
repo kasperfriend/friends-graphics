@@ -14,6 +14,7 @@
 // Build:  g++ -O2 -std=c++20 -pthread tools/CloudPreview.cpp -o build/cloudpreview
 // Run:    build/cloudpreview --out preview.png --coverage 55 --sun-elevation 18
 #include "../src/Effects/CloudNoise.h"
+#include "../src/Effects/CloudDynamics.h"
 
 #include <cmath>
 #include <cstdio>
@@ -129,6 +130,7 @@ struct CloudConfig
     float windAngle = 25.f;
     float windShear = .22f;        // horizontal drift added with height
     float time = 0.f;
+    float evolutionSpeed = 1.f;
 
     // Lighting
     V3 sunColor{ 1.f, .96f, .88f };
@@ -192,14 +194,18 @@ struct Marcher
     const CloudConfig& c;
     const CloudResources& r;
     float invThickness = 0;
-    float windX = 0, windY = 0, shearX = 0, shearY = 0;
+    float shearX = 0, shearY = 0;
+    renderer::CloudMotion motion;
 
     Marcher(const CloudConfig& config, const CloudResources& res, V3 /*camera*/) : c(config), r(res)
     {
         invThickness = 1.f / std::max(c.top - c.bottom, 1.f);
         const float radians = c.windAngle * .01745329252f;
-        windX = std::cos(radians) * c.windSpeed * c.time;
-        windY = std::sin(radians) * c.windSpeed * c.time;
+        renderer::CloudShape shape;
+        shape.windSpeed=c.windSpeed;shape.windAngle=c.windAngle;
+        shape.featureSize=c.featureSize;shape.detailSize=c.detailSize;shape.weatherSize=c.weatherSize;
+        shape.evolutionSpeed=c.evolutionSpeed;shape.coverage=c.coverage;
+        motion.Advance(shape,c.time);
         shearX = std::cos(radians) * c.windShear;
         shearY = std::sin(radians) * c.windShear;
     }
@@ -224,14 +230,14 @@ struct Marcher
 
     void Weather(V3 p, float out[4]) const
     {
-        const float u = (p.x + windX * .35f) / c.weatherSize;
-        const float v = (p.y + windY * .35f) / c.weatherSize;
+        const float u = p.x / c.weatherSize + float(motion.weather[0]);
+        const float v = p.y / c.weatherSize + float(motion.weather[1]);
         r.weatherSampler.Sample(u - std::floor(u), v - std::floor(v), out);
     }
 
     // The density field. `detailed` is the full-quality version; the light
     // march uses the cheap one, which skips the erosion fetch.
-    float Density(V3 p, float h, bool detailed) const
+    float Density(V3 p, float h, bool detailed, bool unitless = false) const
     {
         float w[4];
         Weather(p, w);
@@ -242,10 +248,10 @@ struct Marcher
         const float cov = Saturate(c.coverage);
         // The high edge closes quadratically so the top of the slider is a
         // genuine overcast lid rather than permanently broken cloud.
-        const float coverage = Saturate(Remap(w[0], 1.f - cov * c.coverageLow,
+        const float coverage = Saturate(Remap(w[0] + (w[2]-.5f)*motion.variation, 1.f - cov * c.coverageLow,
                                               1.f - cov * cov * c.coverageHigh, 0.f, 1.f));
         if (coverage <= 0.f) return 0.f;
-        const float type = Saturate(w[1] + c.typeBias);
+        const float type = Saturate(w[1]*(1.f-std::abs(c.typeBias)) + std::max(c.typeBias,0.f));
 
         float gradient = HeightGradient(h, type);
         if (gradient <= 0.f) return 0.f;
@@ -256,9 +262,9 @@ struct Marcher
 
         float s[4];
         r.shapeSampler.Sample(
-            std::fmod((sheared.x + windX) / c.featureSize + 64.f, 1.f),
-            std::fmod((sheared.y + windY) / c.featureSize + 64.f, 1.f),
-            std::fmod(sheared.z / c.featureSize * c.shapeZScale + 64.f, 1.f), s);
+            std::fmod(sheared.x / c.featureSize + float(motion.shape[0]) + 64.f, 1.f),
+            std::fmod(sheared.y / c.featureSize + float(motion.shape[1]) + 64.f, 1.f),
+            std::fmod(sheared.z / c.featureSize * c.shapeZScale + float(motion.shapeZ) + 64.f, 1.f), s);
         const float fbm = s[1] * .625f + s[2] * .25f + s[3] * .125f;
         float base = Saturate(Remap(s[0], fbm - 1.f, 1.f, 0.f, 1.f));
         base *= gradient;
@@ -272,9 +278,9 @@ struct Marcher
         {
             float d[4];
             r.detailSampler.Sample(
-                std::fmod((sheared.x + windX * 1.7f) / c.detailSize + 64.f, 1.f),
-                std::fmod((sheared.y + windY * 1.7f) / c.detailSize + 64.f, 1.f),
-                std::fmod(sheared.z / c.detailSize + 64.f, 1.f), d);
+                std::fmod(sheared.x / c.detailSize + float(motion.detail[0]) + 64.f, 1.f),
+                std::fmod(sheared.y / c.detailSize + float(motion.detail[1]) + 64.f, 1.f),
+                std::fmod(sheared.z / c.detailSize + float(motion.detailZ) + 64.f, 1.f), d);
             const float dfbm = d[0] * .625f + d[1] * .25f + d[2] * .125f;
             // Wispy shreds at the base, cauliflower billows at the top.
             const float modifier = Lerp(1.f - dfbm, dfbm, Saturate(h * 4.f));
@@ -282,13 +288,13 @@ struct Marcher
             // either leaves the silhouette smooth or hollows the cloud out;
             // real cumulus shred at the edge and stay solid in the middle.
             const float strength = c.detailStrength * (1.f - density * .7f);
-            density = Saturate(Remap(density, modifier * strength, 1.f, 0.f, 1.f));
+            density = Saturate((density - modifier * strength) / std::max(1.f - c.detailStrength, 1e-4f));
         }
 
         // Density rises with height inside the cloud (more water up top) and
         // with the weather map's variation channel.
         const float profile = Lerp(.45f, 1.25f, Saturate(h * 1.4f)) * Lerp(.75f, 1.2f, w[2]);
-        return density * profile * c.extinction * c.density;
+        return density * profile * (unitless ? 1.f : c.extinction * c.density);
     }
 
     // Six-sample cone toward the light plus one long reach, the standard
@@ -476,20 +482,19 @@ struct Marcher
     // Transmittance from a world point toward the light: the ground shadow.
     float SunShadow(V3 p, V3 lightDir) const
     {
-        if (lightDir.z <= .02f) return 1.f;
-        float entry = 0.f, exitDistance = 0.f;
-        if (!LayerRange(p, lightDir, entry, exitDistance)) return 1.f;
-        const int samples = 8;
-        const float step = std::min(exitDistance - entry, (c.top - c.bottom) * 2.4f) / float(samples);
-        float optical = 0.f;
-        for (int i = 0; i < samples; ++i)
+        if (lightDir.z <= .03f) return 1.f;
+        const float low=HeightFraction(p);
+        const float stepHeight=(1.f-low)/16.f;
+        const float reach=(c.top-c.bottom)/lightDir.z;
+        const float baseDistance=std::max(c.bottom-p.z,0.f)/lightDir.z;
+        float amount=0;
+        for (int i=0;i<16;++i)
         {
-            const V3 q = p + lightDir * (entry + step * (float(i) + .5f));
-            const float h = HeightFraction(q);
-            if (h <= 0.f || h >= 1.f) continue;
-            optical += Density(q, h, false) * step;
+            const float h=low+stepHeight*(i+.5f);
+            const V3 q=p+lightDir*(baseDistance+(h-low)*reach);
+            amount+=Density(q,h,false,true);
         }
-        return std::exp(-optical);
+        return std::exp(-amount*5.f/16.f);
     }
 };
 
@@ -623,9 +628,7 @@ int main(int argc, char** argv)
         else if (a == "--no-jitter") o.jitter = false;
         else if (a == "--jitter") c.jitterAmount = ArgFloat(next()) * .01f;
         else if (a == "--coverage") c.coverage = ArgFloat(next()) * .01f;
-        // Halved exactly like the renderer maps CloudTypePercent, so a
-        // number given here means the same thing it means in the ini.
-        else if (a == "--type") c.typeBias = ArgFloat(next()) * .005f;
+        else if (a == "--type") c.typeBias = std::clamp(ArgFloat(next()) * .01f,-1.f,1.f);
         else if (a == "--density") c.density = ArgFloat(next()) * .01f;
         else if (a == "--steps") c.steps = std::atoi(next());
         else if (a == "--base-step") c.baseStep = ArgFloat(next());
@@ -645,6 +648,8 @@ int main(int argc, char** argv)
         else if (a == "--coverage-low") c.coverageLow = ArgFloat(next()) * .01f;
         else if (a == "--coverage-high") c.coverageHigh = ArgFloat(next()) * .01f;
         else if (a == "--shear") c.windShear = ArgFloat(next()) * .01f;
+        else if (a == "--evolution") c.evolutionSpeed = std::clamp(ArgFloat(next()) * .01f,0.f,4.f);
+        else if (a == "--wind-speed") c.windSpeed = ArgFloat(next());
         else if (a == "--time") c.time = ArgFloat(next());
         else if (a == "--sun-intensity") c.sunIntensity = ArgFloat(next()) * .01f;
         else if (a == "--ambient") c.ambientIntensity = ArgFloat(next()) * .01f;

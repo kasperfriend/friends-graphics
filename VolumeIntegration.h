@@ -30,11 +30,9 @@ using GetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9**);
 SetDepthFn setDepth=nullptr; GetDepthFn getDepth=nullptr;
 bool enabled=false,active=true,ready=false,composed=false,internal=false;
 bool cloudsEffectEnabled=true;
-// Pushed in by the host once per frame (ModernWoWRenderer.cpp) because the
-// weather layer is included after this header. A covered sky during native
-// rain/snow is a weather property, not a cloud-renderer property, so the
-// cloud pass only consumes the already-smoothed signal.
-float cloudWeatherCoverageBoost=0.f;
+// Held native observation; the cloud controller smooths weather transitions.
+renderer::CloudWeather cloudWeather=renderer::CloudWeather::Clear;
+float cloudWeatherStrength=1.f;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,cloudShadowsEffectEnabled=true,temporalShaftsEnabled=false;
 bool postProcessEffectEnabled=true;
 bool sunGlareEnabled=true;
@@ -1029,8 +1027,9 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudRayStrength = 0.f;
     if (!shaftDebug && cloudsEffectEnabled) {
         auto& clouds = renderer::VolumetricClouds::Instance();
-        clouds.Settings().weatherCoverageBoost =
-            std::clamp(cloudWeatherCoverageBoost * frameCtx.environment[renderer::Weather], 0.f, 1.f);
+        clouds.Settings().weather = cloudWeather;
+        clouds.Settings().weatherStrength =
+            std::clamp(cloudWeatherStrength * frameCtx.environment[renderer::Weather], 0.f, 1.f);
         if (clouds.Render(d, frameCtx, target.Get())) {
             frameCtx.cloudTexture = clouds.GetCloudTexture();
             frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
