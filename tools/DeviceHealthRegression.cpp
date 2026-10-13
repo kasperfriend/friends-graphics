@@ -132,6 +132,44 @@ int main() try
                 "loading reset allows a fresh world direction");
     }
 
+    {
+        // Before the tracker has ever confirmed a body there is no world-space
+        // truth to hold, and the fallback is derived from the frame's own
+        // light constant - so it moves with the camera. It may steer the deck
+        // only as fast as a real body could: a camera swing is not a sunset.
+        CelestialDirectionStabilizer direction;
+        const Vec3 start = Normalize({0, 0, 1});
+        direction.Update(start, nullptr, false, 1.f/60.f);
+        const Vec3 swung = Normalize({1, 0, 0});          // 90 degrees in one frame
+        const float moved = std::acos(std::clamp(Dot(direction.Update(swung, nullptr, false, 1.f/60.f), start), -1.f, 1.f));
+        Require(moved < 3.f * 3.14159265358979f / 180.f,
+                "a camera-sized swing of the fallback barely moves the light");
+        // The limit is exact: ten seconds of a 90-degree-wrong fallback moves
+        // the light by ten seconds of the fastest real celestial motion, and
+        // no more, however long the source keeps insisting.
+        for (int i = 0; i < 600; ++i) direction.Update(swung, nullptr, false, 1.f/60.f);
+        const Vec3 arrived = direction.Update(swung, nullptr, false, 1.f/60.f);
+        const float travelled = std::acos(std::clamp(Dot(arrived, start), -1.f, 1.f)) * 180.f / 3.14159265358979f;
+        Require(travelled > 22.f && travelled < 28.f,
+                "a wrong fallback can only steer the light at the celestial rate");
+
+        // One frame of the limit is the threshold: a disagreement inside it is
+        // resolved at once, so an honest source is not lagged by the cap.
+        CelestialDirectionStabilizer close;
+        const Vec3 near = Normalize({0.f, .0003f, 1.f});   // ~0.017 degrees away
+        close.Update(start, nullptr, false, 1.f/60.f);
+        Require(std::acos(std::clamp(Dot(close.Update(near, nullptr, false, 1.f/60.f), near), -1.f, 1.f)) < 1e-4f,
+                "a fallback inside one frame of the celestial rate is followed at once");
+
+        // A real, slow drift of the same source is followed as it happens.
+        CelestialDirectionStabilizer drift;
+        drift.Update(start, nullptr, false, 1.f/60.f);
+        const Vec3 target = Normalize({.2f, 0, 1});
+        for (int i = 0; i < 600; ++i) drift.Update(target, nullptr, false, 1.f/60.f);
+        const float driftAngle = std::acos(std::clamp(Dot(drift.Update(target, nullptr, false, 1.f/60.f), start), -1.f, 1.f));
+        Require(driftAngle > .01f, "slow real celestial motion is still tracked before confirmation");
+    }
+
     Require(CloudShadowElevationFade(0.0f) == 0.0f, "cloud shadows are off for a disc below the horizon");
     Require(CloudShadowElevationFade(0.03f) == 0.0f, "cloud shadows fade in from the horizon gate");
     Require(CloudShadowElevationFade(0.15f) == 1.0f, "cloud shadows reach full strength above the fade band");

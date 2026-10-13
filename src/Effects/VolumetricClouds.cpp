@@ -271,11 +271,27 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(max(scattered,0),transmittance);
 })HLSL";
 
-// Top-down transmittance of the deck toward the light, rendered into a
-// small map centred on the camera so the world below gets the moving cloud
-// shadows that sell the whole effect, and supplies cloud visibility to
-// atmospheric rays. Low-frequency planar approximation of the march field:
-// same weather/shape/profile/wind, without detail erosion or viewer curvature.
+// The cloud amount of the column between every world point and the top of
+// the deck, measured along the sunlight, rendered into a small map centred
+// on the camera. The world below reads it as its cloud shadow and the
+// atmosphere reads it to decide which sun rays reach which part of the sky.
+// Low-frequency planar approximation of the march field: same
+// weather/shape/profile/wind, without detail erosion or viewer curvature.
+//
+// What the map stores is the SHAPE of the deck, not an optical depth. The
+// first version marched the slant path with the cloud's real extinction,
+// which is 20-50 optical depths through a full column: `exp(-tau)` is then
+// 0 or 1, and the map degenerates into a saturated silhouette of a light
+// path that is two to five kilometres long at any sun elevation below 45
+// degrees. Everything within that distance of a point painted it black,
+// neighbouring shadows merged into one dark mass, and stepping under a
+// cloud dimmed the whole world instead of drawing that cloud's own shadow
+// beneath it (measured with tools/CloudShadowProbe.cpp at the shipped
+// defaults: 63 % of the ground shaded against 34 % of the plane having a
+// casting cloud up-sun, most of the shading under an open sky). An amount
+// that grows with coverage and saturates
+// only when the column is genuinely solid keeps the deck's silhouette and
+// its gradients, at every sun angle.
 const char* kCloudShadowSource = R"HLSL(
 sampler3D shapeMap:register(s1); sampler2D weatherMap:register(s3);
 float4 celestial:register(c1);
@@ -285,7 +301,6 @@ float4 window:register(c9);
 float4 scales:register(c10);
 float4 motion:register(c11);
 float4 motion2:register(c12);
-float4 lighting:register(c14);
 float4 area:register(c21);          // xy=world origin, z=world extent, w=receiver height
 
 float Gradient(float h,float type) {
@@ -295,10 +310,11 @@ float Gradient(float h,float type) {
  return stratus*saturate(1-type*2)+cumulus*saturate(1-abs(type-.5)*2)+tower*saturate(type*2-1);
 }
 
-float Density(float3 p) {
- // A local planar approximation for the low-frequency shadow field.
- // Neither camera XY nor camera height changes the optical path.
- float h=saturate((p.z-(shell.x+centre.z))*shell.z);
+// Unitless cloud fraction at a point of the layer: the march's density with
+// its extinction (and therefore DensityPercent) folded out, and with the
+// caller's own height fraction driving the profile, so a texel integrates
+// the same field the march would sample at that height.
+float Cloud(float3 p,float h) {
  float3 w=tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0)).rgb;
  float cov=saturate((w.r-window.x)*window.y);
  float g=Gradient(h,saturate(w.g+window.z));
@@ -307,7 +323,7 @@ float Density(float3 p) {
  float fbm=s.g*.625+s.b*.25+s.a*.125;
  float d=saturate((s.r-fbm+1)/max(2-fbm,1e-4))*g;
  return saturate((d-1+cov)/max(cov,1e-4))*(.45+.55*cov)
-       *lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b)*lighting.x;
+       *lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b);
 }
 
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
@@ -317,18 +333,34 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  if(light.z<=.03) return float4(1,1,1,1);
  float3 p=float3(area.xy+uv*area.z,area.w);
  float base=shell.x+centre.z;
- float entry=max((base-p.z)/light.z,0);
- float exitDistance=(base+shell.y-shell.x-p.z)/light.z;
- // More steps than the old 8: at grazing sun angles the slant path through
- // the deck is long, and 8 widely-spaced samples band the transmittance
- // into concentric stripes - the "lines on the shadow near the light
- // source" players report. 16 keeps the banding below the deck's own
- // feature scale even when the sun is low.
- float stepLength=max(0,exitDistance-entry)/16.f;
- if(stepLength<=0) return float4(1,1,1,1);
- float optical=0;
- [loop] for(int i=0;i<16;i++) optical+=Density(p+light*(entry+stepLength*(i+.5)));
- return exp(-optical*stepLength).xxxx;
+ // Sample the layer on a uniform grid in HEIGHT and displace each sample
+ // along the sunlight by the height it sits at: the field the light crosses
+ // on its way to this point, each sample weighted by the slice of column it
+ // stands for. Sixteen steps across the full height is more than the old
+ // eight across a slant path twice as long, and unlike the slant integral
+ // the sample spacing is the same for every sun elevation.
+ float low=saturate((p.z-base)*shell.z);
+ float span=1-low;
+ float stepHeight=span*.0625;
+ // 1/shell.z is the layer thickness, so (h-low) of it is how far up the
+ // light has to travel to reach that height. The receiver's own height is
+ // subtracted, which is what makes an object inside or above the deck count
+ // only the cloud that is actually between it and the light.
+ float reach=1/(light.z*shell.z);
+ float amount=0;
+ [loop] for(int i=0;i<16;i++) {
+   float h=low+stepHeight*(i+.5);
+   amount+=Cloud(p+light*((h-low)*reach),h);
+ }
+ amount*=.0625;
+ // Transmittance, with an opacity per unit of cloud amount rather than the
+ // cloud's physical extinction. The extinction is what saturated the old
+ // map: a column that is one fifth covered is already 9 optical depths
+ // deep, so it read as solid. Five is a contrast curve instead - a solidly
+ // covered column blocks ~95 % of the light, a tenth-covered one ~35 %, and
+ // open sky with a wisp up-sun a few percent - which is what makes the map
+ // read as the deck's silhouette instead of a grey wash.
+ return exp(-amount*5).xxxx;
 })HLSL";
 
 // Full-resolution composite. The low-resolution deck is a smooth signal
@@ -805,9 +837,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
 
  if((++m_renderFrames%600)==0&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
+  // `sun` is the world direction the deck is lit from and the direction the
+  // ground shadow is projected along, and `stable` says where it came from
+  // (1 = the tracked disc, 0 = the captured light constant). Panning the
+  // camera must not move `sun`; if it does, this line is where to see it.
   out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" coverage="<<settings.coverage
      <<" density="<<settings.density<<" steps="<<settings.sampleCount<<" region="<<region
      <<" moon="<<(moon?1:0)<<" intensity="<<directIntensity<<" shadows="<<(shadowsOn?1:0)
+     <<" sun=("<<lightDir[0]<<','<<lightDir[1]<<','<<lightDir[2]<<") stable="<<(f.directLightValid?1:0)
+     <<" shade="<<shadowStrength
      <<" camera=("<<f.cameraPosition.x<<','<<f.cameraPosition.y<<','<<f.cameraPosition.z<<")\n";
  }
 
@@ -861,7 +899,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(7,c7,1);
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);
   d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);
-  d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(14,c14,1);
+  d->SetPixelShaderConstantF(12,c12,1);
+  // Deliberately no c14 (extinction / AbsorptionPercent) here: the shadow
+  // map carries the unitless cloud amount, so DensityPercent stays an
+  // optical-thickness knob for the sky and no longer decides how dark the
+  // ground shadow is. GroundShadowPercent is the only strength control.
   d->SetPixelShaderConstantF(21,c21,1);
   DrawScreenQuad(d,m_shadowSize,m_shadowSize);
   m_shadowValid=true;

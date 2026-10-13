@@ -250,11 +250,22 @@ namespace renderer
         float swLen = sqrtf(sunWorld.x * sunWorld.x + sunWorld.y * sunWorld.y + sunWorld.z * sunWorld.z);
         if (swLen > 1e-4f) {
             sunWorld.x /= swLen; sunWorld.y /= swLen; sunWorld.z /= swLen;
+            // Only a direction with the light above the horizon is accepted.
+            // The old code clamped z up to 0.04 and renormalised instead,
+            // which did not repair a low or ambiguous result: it MANUFACTURED
+            // a sun 2.3 degrees above the horizon out of whatever x and y the
+            // frame happened to carry, and the cloud deck was then lit from
+            // that direction and its ground shadow map projected along it at
+            // seventeen times the receiver's height. Because the survivors of
+            // that clamp keep the camera's own rotation in x and y, panning
+            // the camera rotated the deck's light - the residual "light on
+            // the clouds follows me" report. Holding the last usable
+            // direction cannot rotate anything, and the end of the day is
+            // already expressed by the daylight/moonlight factors every
+            // consumer multiplies in.
+            if (sunWorld.z >= 0.04f)
+                frameContext.sunDirectionWorld = sunWorld;
         }
-        if (sunWorld.z < 0.04f) sunWorld.z = 0.04f;
-        swLen = sqrtf(sunWorld.x * sunWorld.x + sunWorld.y * sunWorld.y + sunWorld.z * sunWorld.z);
-        sunWorld.x /= swLen; sunWorld.y /= swLen; sunWorld.z /= swLen;
-        frameContext.sunDirectionWorld = sunWorld;
 
         m_valid = true;
         ++m_capturedFrames;

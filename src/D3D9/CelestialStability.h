@@ -155,6 +155,19 @@ namespace renderer
     // Keep separate world-space directions for the sun and moon. Once a
     // billboard confirms a body, camera-derived fallback constants must not
     // replace it merely because the camera turned away from the billboard.
+    //
+    // The second half of that rule is the one players still saw: while no
+    // disc has been confirmed (the tracker's pattern can miss on a client
+    // whose billboard is drawn with a shader, and it legitimately misses
+    // while the body is off screen), the direction was pulled toward the
+    // camera-derived constant every frame. The light on the deck then slid
+    // with the camera whenever the player looked into the sun - the region
+    // where the phase lobe makes the deck's shading visible at all - and
+    // froze when they looked away from it, exactly as reported. An
+    // unconfirmed source may now only NUDGE the held direction, at a rate
+    // the sky itself could produce (a few degrees per second), so no
+    // camera swing can ever turn into a lighting change of the deck, while
+    // the real, slow motion of the sun and moon is still followed.
     class CelestialDirectionStabilizer
     {
     public:
@@ -166,22 +179,72 @@ namespace renderer
             if (!std::isfinite(length) || length < 1e-4f)
                 return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
             target = target * (1.f / length);
+            const float step = std::clamp(dt, 0.f, .25f);
             if (!m_primed[body])
             {
                 m_direction[body] = target;
                 m_primed[body] = true;
+                m_confirmed[body] = confirmed != nullptr;
             }
-            else if (confirmed || !m_confirmed[body])
+            else if (confirmed)
             {
-                const float alpha = 1.f - std::exp(-std::clamp(dt, 0.f, .25f) / .35f);
+                // A confirmed direction comes from the disc's own world
+                // transform, so it is the same sun the player can see: follow
+                // it with the short blend, and let it take a real step when
+                // the game itself moves the body (a server time change).
+                const float alpha = 1.f - std::exp(-step / .35f);
                 const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
                 if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
+                m_confirmed[body] = true;
             }
-            if (confirmed) m_confirmed[body] = true;
+            else if (m_confirmed[body])
+            {
+                // The disc has been tracked at least once, so a world-space
+                // truth for this body already exists and the fallback is not
+                // needed: camera-derived constants must never replace it.
+            }
+            else
+            {
+                // Nothing has ever been confirmed for this body, so there is
+                // no truth to hold: follow the fallback, but no faster than a
+                // real body could move, so a camera swing cannot turn into a
+                // change in how the deck is lit.
+                const Vec3 held = m_direction[body];
+                const float cosAngle = std::clamp(Dot(held, target), -1.f, 1.f);
+                const float angle = std::acos(cosAngle);
+                if (!std::isfinite(angle)) return held;
+                const float maxAngle = kUnconfirmedDegreesPerSecond * kDegreesToRadians * step;
+                if (angle <= maxAngle || angle <= 1e-5f)
+                {
+                    m_direction[body] = target;
+                }
+                else if (maxAngle > 0.f)
+                {
+                    // Rotate towards it by exactly the limit, not by a chord
+                    // fraction of it: the whole point is a rate the rest of
+                    // the pipeline can rely on.
+                    Vec3 axis = Cross(held, target);
+                    if (Length(axis) < 1e-6f)
+                        axis = Cross(held, std::fabs(held.z) < .9f ? Vec3{0, 0, 1} : Vec3{1, 0, 0});
+                    const float axisLength = Length(axis);
+                    if (axisLength > 1e-6f)
+                    {
+                        const Vec3 k = axis * (1.f / axisLength);
+                        const float c = std::cos(maxAngle), s = std::sin(maxAngle);
+                        const Vec3 turned = held * c + Cross(k, held) * s + k * (Dot(k, held) * (1.f - c));
+                        if (Length(turned) > 1e-4f) m_direction[body] = Normalize(turned);
+                    }
+                }
+            }
             return m_direction[body];
         }
         void Reset() noexcept { *this = CelestialDirectionStabilizer{}; }
     private:
+        // A celestial body crosses the sky far slower than this; the value is
+        // a ceiling on how fast the deck's lighting may ever be re-aimed by a
+        // source that is not the confirmed disc itself.
+        static constexpr float kUnconfirmedDegreesPerSecond = 2.5f;
+        static constexpr float kDegreesToRadians = 3.14159265358979f / 180.f;
         Vec3 m_direction[2]{};
         bool m_primed[2]{};
         bool m_confirmed[2]{};

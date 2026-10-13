@@ -95,9 +95,15 @@ namespace renderer
         // looks like a backdrop painting.
         float aerialPerspective = .60f;
 
-        // Cloud shadows and rays share a small transmittance map on a fixed
-        // world plane. The camera only selects its texel-snapped coverage;
-        // each receiver is projected along sunlight using its own height.
+        // Cloud shadows and rays share a small map on a fixed world plane.
+        // It stores the unitless cloud amount of the column between each
+        // point and the top of the deck - the deck's own shape, projected
+        // along the sunlight - so the ground under a cloud is dimmed and the
+        // ground beside it is not, at any sun elevation.
+        // `groundShadowStrength` is how much of the light a solid column
+        // removes, and the camera only selects the map's texel-snapped
+        // coverage: each receiver is projected along sunlight using its own
+        // world height.
         bool groundShadows = true;
         float groundShadowStrength = .55f;
         float groundShadowExtent = 14000.f;
