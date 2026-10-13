@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <string>
 #include "../Core/DeviceHealth.h"
+#include "../Core/FrameClock.h"
 #include "../Core/FrameContext.h"
 
 namespace renderer
@@ -155,12 +156,9 @@ namespace renderer
         bool m_previousViewValid = false;
         bool m_previousWasMoon = false;
         float m_previousCelestialIntensity = 0.0f;
-        bool m_previousCloudShadowValid = false;
-        float m_previousCloudRayStrength = 0.f;
-        uint64_t m_previousLocalLightSignature = 0;
         std::wstring m_logPath;
         uint64_t m_renderFrames = 0;
-        ULONGLONG m_lastFogTick = 0;
+        FrameClock m_fogClock;
         float m_fogElapsed = 0;
     };
 }

@@ -1,4 +1,5 @@
 #include "CameraCapture.h"
+#include "../Core/FrameClock.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -199,7 +200,9 @@ namespace renderer
         outCapturedViewValid = true;
 
         // c9: Time and variation
-        outConstants[9][0] = float(GetTickCount64() % 1200000) * 0.001f;
+        // Performance-counter seconds: GetTickCount64 advanced this in
+        // ~15.6 ms steps, so the legacy fog detail visibly ticked.
+        outConstants[9][0] = float(std::fmod(PerformanceSeconds(), 1200.0));
         outConstants[9][1] = 0.018f;
         outConstants[9][2] = config.variation;
         outConstants[9][3] = config.lowLayer;
