@@ -1,8 +1,9 @@
-// Checks the device-loss, frame-gap, retry and location-hold rules used by the
-// Alt+Tab recovery path. Host-independent: it only includes src/Core/DeviceHealth.h.
+// Host-independent checks for device recovery, celestial stabilization, and
+// the row-vector matrix conventions used by tracked light and temporal passes.
 #include "../src/Core/DeviceHealth.h"
 #include "../src/D3D9/CelestialStability.h"
 
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 
@@ -104,6 +105,50 @@ int main() try
         noon.directionalLuminance = 0.3f;
         for (int i = 0; i < 600; ++i) sticky.Update(noon);
         Require(sticky.Update(noon).isMoon, "a dim opposite period takes over from the confirmed body");
+    }
+
+    {
+        // CelestialTracker must undo the row-vector VIEW rotation, not apply
+        // it a second time. A fixed world-space moon should produce different
+        // view directions as the camera yaws, but always recover the same
+        // world direction (the old column/row mix made the light rotate with
+        // the camera and also drove cloud-shadow elevation toward zero).
+        const Vec3 worldDirection = Normalize({.31f, -.47f, .82f});
+        constexpr float yawPitchDegrees[][2] = {
+            {-105.f, 0.f}, {-45.f, 25.f}, {0.f, 0.f}, {35.f, -40.f}, {90.f, 65.f}};
+        bool invariant = true;
+        for (const auto& angles : yawPitchDegrees)
+        {
+            const float yaw = angles[0] * 3.14159265358979f / 180.f;
+            const float pitch = angles[1] * 3.14159265358979f / 180.f;
+            const float cy = std::cos(yaw), sy = std::sin(yaw);
+            const float cp = std::cos(pitch), sp = std::sin(pitch);
+            Matrix4 yawView, pitchView;
+            yawView.m[0][0] = cy;  yawView.m[0][1] = sy;
+            yawView.m[1][0] = -sy; yawView.m[1][1] = cy;
+            pitchView.m[1][1] = cp;  pitchView.m[1][2] = sp;
+            pitchView.m[2][1] = -sp; pitchView.m[2][2] = cp;
+            const Matrix4 view = Matrix4::Multiply(yawView, pitchView);
+            const Vec3 viewDirection = TransformDirectionRowVector(worldDirection, view.m);
+            const Vec3 recovered = ViewDirectionToWorld(viewDirection, view.m);
+            invariant = invariant && Dot(recovered, worldDirection) >= .99999f;
+        }
+        Require(invariant, "confirmed celestial world direction is invariant under camera yaw and pitch");
+
+        // The temporal shader's previous-frame position transform must use
+        // these same row-vector columns plus row-three translation. A 90
+        // degree yaw and non-zero camera translation make a row/column swap
+        // obvious rather than accidentally passing under an identity view.
+        Matrix4 translatedView;
+        translatedView.m[0][0] = 0.f; translatedView.m[0][1] = 1.f;
+        translatedView.m[1][0] = -1.f; translatedView.m[1][1] = 0.f;
+        translatedView.m[3][0] = -10.f; translatedView.m[3][1] = 5.f;
+        translatedView.m[3][2] = -2.f;
+        const Vec3 viewPoint = TransformPointRowVector({2.f, 3.f, 4.f}, translatedView.m);
+        Require(std::fabs(viewPoint.x + 13.f) < 1e-5f &&
+                std::fabs(viewPoint.y - 7.f) < 1e-5f &&
+                std::fabs(viewPoint.z - 2.f) < 1e-5f,
+                "row-vector view transform uses matrix columns and translation");
     }
 
     {

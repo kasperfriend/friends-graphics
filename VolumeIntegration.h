@@ -1171,6 +1171,9 @@ bool Composite(IDirect3DDevice9* d) {
                     prevView[row][col] = tempCtx.previousViewRaw.m[row][col];
             prevView[0][3] = tempCtx.previousViewValid ? 1.f : 0.f;
             check(d->SetPixelShaderConstantF(6, prevView[0], 4));
+            const float depthRange[4]={tempCtx.viewport.MinZ,
+                                       tempCtx.viewport.MaxZ-tempCtx.viewport.MinZ,0,0};
+            check(d->SetPixelShaderConstantF(10,depthRange,1));
             if (ok) drawQuad(rayWidth, rayHeight);
 
             check(d->SetTexture(0, nullptr));
@@ -1197,8 +1200,17 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
             check(d->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));
             check(d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE));
+            check(d->SetTexture(2,depth.Get()));
+            check(d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT));
+            check(d->SetSamplerState(2,D3DSAMP_MAGFILTER,D3DTEXF_POINT));
+            check(d->SetSamplerState(2,D3DSAMP_MIPFILTER,D3DTEXF_NONE));
+            check(d->SetSamplerState(2,D3DSAMP_SRGBTEXTURE,FALSE));
+            check(d->SetSamplerState(2,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(2,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));
             float link[4]={linkedFog?1.f:0.f,shaftDebug?1.f:0.f,0,0};
+            float depthInfo[4]={constants[2][3],0,0,0};
             check(d->SetPixelShaderConstantF(0,link,1));
+            check(d->SetPixelShaderConstantF(1,depthInfo,1));
         }
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
@@ -1210,6 +1222,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (ok) drawQuad(desc.Width, desc.Height);
         check(d->SetTexture(0, nullptr));
         check(d->SetTexture(1, nullptr));
+        check(d->SetTexture(2, nullptr));
     }
 
     // Independent post pass: optional glare failures must not suppress grading.

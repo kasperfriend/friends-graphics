@@ -61,6 +61,25 @@ namespace renderer
         return (len > 1e-6f) ? (v * (1.0f / len)) : Vec3{ 0.0f, 0.0f, 0.0f };
     }
 
+    // D3D's conventional row-vector transform: p_view = p_world * view.
+    // Keeping this tiny host-independent primitive explicit avoids the
+    // row/column swaps that otherwise make camera reprojection depend on
+    // which axis the player is looking along.
+    inline Vec3 TransformDirectionRowVector(const Vec3& direction, const float matrix[4][4]) noexcept
+    {
+        return {
+            direction.x * matrix[0][0] + direction.y * matrix[1][0] + direction.z * matrix[2][0],
+            direction.x * matrix[0][1] + direction.y * matrix[1][1] + direction.z * matrix[2][1],
+            direction.x * matrix[0][2] + direction.y * matrix[1][2] + direction.z * matrix[2][2]
+        };
+    }
+
+    inline Vec3 TransformPointRowVector(const Vec3& point, const float matrix[4][4]) noexcept
+    {
+        const Vec3 direction = TransformDirectionRowVector(point, matrix);
+        return {direction.x + matrix[3][0], direction.y + matrix[3][1], direction.z + matrix[3][2]};
+    }
+
     struct Matrix4
     {
         float m[4][4]{};

@@ -23,6 +23,20 @@
 
 namespace renderer
 {
+    // Convert a direction from view space back to world space using the
+    // inverse rotation of a row-vector world-to-view matrix. For a rigid
+    // D3D view transform, that inverse is the transpose. Keeping this helper
+    // beside the host-independent celestial rules makes the matrix convention
+    // testable without a D3D device.
+    inline Vec3 ViewDirectionToWorld(const Vec3& viewDirection, const float view[4][4]) noexcept
+    {
+        return Normalize({
+            viewDirection.x * view[0][0] + viewDirection.y * view[0][1] + viewDirection.z * view[0][2],
+            viewDirection.x * view[1][0] + viewDirection.y * view[1][1] + viewDirection.z * view[1][2],
+            viewDirection.x * view[2][0] + viewDirection.y * view[2][1] + viewDirection.z * view[2][2]
+        });
+    }
+
     struct CelestialLightInput
     {
         // The tracker confirmed the disc draw this frame, and which body it was.

@@ -433,19 +433,28 @@ int main() try {
  ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
  Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));
  Check(d->CreatePixelShader((DWORD*)rayLinkCode->GetBufferPointer(),rayLinkShader.GetAddressOf()));
- auto linkedRay=[&](int opacity,bool available,bool debug){
-  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);
-  Check(d->BeginScene());Check(d->SetRenderTarget(0,back.Get()));
-  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());
+ auto linkedRay=[&](int opacity,bool available,bool debug,float rawDepth,float maxZ){
+  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);fillFloat(depth.Get(),rawDepth);
+  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+  Check(d->BeginScene());
+  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());d->SetTexture(2,depth.Get());
+  d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(2,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  d->SetSamplerState(2,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(2,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetSamplerState(2,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(2,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
   d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
-  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0};d->SetPixelShaderConstantF(0,link,1);
+  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0};float depthInfo[4]={maxZ,0,0,0};
+  d->SetPixelShaderConstantF(0,link,1);d->SetPixelShaderConstantF(1,depthInfo,1);
   struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
   Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());return pixel()&255;};
- Require(linkedRay(0,true,false)==0,"clear medium suppresses linked rays");
- Require(linkedRay(128,true,false)>120,"moderate fog reveals rays");
- Require(linkedRay(250,true,false)<15,"dense banks extinguish linked rays");
- Require(linkedRay(0,false,false)==128,"missing current fog preserves unlinked fallback");
- Require(linkedRay(0,true,true)==128,"shaft diagnostic mask bypasses fog coupling");
+ Require(linkedRay(0,true,false,1.f,1.f)==0,"clear medium suppresses linked rays");
+ Require(linkedRay(128,true,false,1.f,1.f)>120,"moderate fog reveals rays");
+ Require(linkedRay(250,true,false,1.f,1.f)<15,"dense banks extinguish linked rays");
+ Require(linkedRay(0,false,false,1.f,1.f)==128,"missing current fog preserves unlinked fallback");
+ Require(linkedRay(0,true,true,1.f,1.f)==128,"shaft diagnostic mask bypasses fog coupling");
+ Require(linkedRay(128,true,false,.5f,1.f)==0,
+         "depth-aware radial composite blocks moonlight on a foreground wall");
+ Require(linkedRay(128,false,false,.5f,1.f)==0,
+         "depth gate also blocks the unlinked fallback from bleeding through walls");
  // --- Volumetric clouds -------------------------------------------------
  // Same device, a fresh synthetic depth buffer: genuine sky (far plane) in
  // the top half, solid geometry thirty units away in the bottom half. The
@@ -626,6 +635,28 @@ int main() try {
  Require(diff(openCloudRays,blockedCloudRays)>5,"cloud gaps transmit sunlight even with the disc off screen");
  f.cloudRayStrength=0;const DWORD raysOff=render(true);
  Require(diff(openCloudRays,raysOff)>5,"cloud ray strength zero removes the new shaft contribution");
- f.cloudShadowTexture=nullptr;f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
+
+ // The circular screen-space term belongs to open sky, not to foreground
+ // surfaces that happen to be inside the fog raymarch. A tracked moon toggle
+ // must therefore have no effect on an opaque wall, while the same halo is
+ // still visible around the source in clear-sky pixels.
+ f.cloudShadowTexture=nullptr;f.cloudRayStrength=0;
+ settings.debugMode=VolumetricDebugMode::None;settings.temporalEnabled=false;
+ settings.localFogEnabled=false;settings.edgeFogEnabled=false;settings.aerialDensity=.002f;
+ settings.heightDensity=settings.mistDensity=0;settings.sunGlowStrength=3.f;settings.moonStrength=1.f;
+ f.directLightValid=true;f.directLightIsMoon=true;f.directLightIntensity=1.f;
+ f.directLightDirectionView={0,0,-1};f.sunScreenX=.5f;f.sunScreenY=.5f;
+ f.cameraPosition={0,0,0};f.celestialIntensity=0;
+ encode(40,1.f);const DWORD wallWithoutMoon=render(true);
+ f.celestialIntensity=1.f;const DWORD wallWithMoon=render(true);
+ Require(diff(wallWithMoon,wallWithoutMoon)<=1,
+         "moon halo does not paint through a foreground wall");
+ fillFloat(depth.Get(),1.f);f.celestialIntensity=0;
+ render(true);const DWORD skyWithoutMoon=pixel(74,64);
+ f.celestialIntensity=1.f;
+ render(true);const DWORD skyWithMoon=pixel(74,64);
+ Require(diff(skyWithMoon,skyWithoutMoon)>1,"moon halo remains visible through open-sky fog");
+
+ f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}

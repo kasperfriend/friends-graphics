@@ -184,6 +184,8 @@ float4 invView1:register(c3);
 float4 invView2:register(c4);
 // xyz=camera world position (this frame)
 float4 cameraPos:register(c5);
+// x=viewport MinZ, y=viewport Z range (normalizes INTZ before reconstruction)
+float4 depthRange:register(c10);
 // LAST frame's raw forward (world->view) matrix rows (row-vector
 // convention: pos_view = pos_world * M, row3 = translation)
 float4 prevView0:register(c6);
@@ -206,6 +208,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(temporal.w<.5)return c;
 
     float raw=tex2D(depthMap,uv).r;
+    raw=saturate((raw-depthRange.x)/max(depthRange.y,.001));
     if(raw>=.9999) {
         // Sky: no stable world point to reproject - same-UV clamp only.
         return lerp(c,clampedHistory(uv,c),temporal.z);
@@ -216,10 +219,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float3 worldPos=cameraPos.xyz
         +viewPos.x*invView0.xyz+viewPos.y*invView1.xyz+viewPos.z*invView2.xyz;
 
+    // The raw view matrix is stored as rows, but a row-vector world*view
+    // transform produces each output from a matrix column. Using row dots
+    // transposes the camera motion and sends shaft history to the wrong
+    // screen location whenever the camera rotates.
     float3 prevViewPos=float3(
-        dot(worldPos,prevView0.xyz)+prevView3.x,
-        dot(worldPos,prevView1.xyz)+prevView3.y,
-        dot(worldPos,prevView2.xyz)+prevView3.z);
+        worldPos.x*prevView0.x+worldPos.y*prevView1.x+worldPos.z*prevView2.x+prevView3.x,
+        worldPos.x*prevView0.y+worldPos.y*prevView1.y+worldPos.z*prevView2.y+prevView3.y,
+        worldPos.x*prevView0.z+worldPos.y*prevView1.z+worldPos.z*prevView2.z+prevView3.z);
 
     if(prevViewPos.z<=0.05) return lerp(c,clampedHistory(uv,c),temporal.z);
 
@@ -289,8 +296,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 inline const char* rayCompositePixelSource=R"HLSL(
 sampler2D rays:register(s0);
 sampler2D resolvedFog:register(s1);
+sampler2D sceneDepth:register(s2);
 // x=valid current-frame fog, y=raw diagnostic mask
 float4 fogLink:register(c0);
+// x=viewport MaxZ, used by the source-mask pass to identify clear sky
+float4 depthInfo:register(c1);
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 ray=tex2D(rays,uv);
     if(fogLink.x>.5&&fogLink.y<.5) {
@@ -300,10 +310,18 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         float visibility=4*transmission*(1-transmission);
         ray.rgb*=visibility;
     }
+    // The radial blur begins at an open-sky source, but its taps cross
+    // foreground silhouettes in screen space. Clip its output to sky as
+    // well: otherwise a moon's circular halo/shafts are additively painted
+    // over walls and characters that should occlude the source.
+    float raw=tex2D(sceneDepth,uv).r;
+    float clearThreshold=lerp(.9995,.955,step(depthInfo.x,.99));
+    float sky=smoothstep(clearThreshold,1,raw);
     // Last quantization before the additive blend onto the 8-bit scene:
     // half a level of fixed dither keeps the ray falloff from banding into
     // rings around the source (signed, so the blend can round either way).
     ray.rgb+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
+    ray.rgb*=sky;
     return ray;
 }
 )HLSL";

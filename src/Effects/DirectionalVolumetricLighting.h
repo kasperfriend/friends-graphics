@@ -154,8 +154,6 @@ namespace renderer
         float m_previousProjection[4]{};
         Matrix4 m_previousView{};
         bool m_previousViewValid = false;
-        bool m_previousWasMoon = false;
-        float m_previousCelestialIntensity = 0.0f;
         std::wstring m_logPath;
         uint64_t m_renderFrames = 0;
         FrameClock m_fogClock;

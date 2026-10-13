@@ -227,9 +227,13 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float sourceRadius=length(sourceDelta);
  float wideHalo=exp(-sourceRadius*sourceRadius*phaseTuning.x);
  float forwardHalo=exp(-sourceRadius*sourceRadius*phaseTuning.y);
- float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceScreen.w;
+ // Screen-space bloom is only a sky contribution. The raymarch also runs
+ // up to foreground geometry, so leaving this term ungated paints a perfect
+ // sun/moon-centred circle on walls through which the source is occluded.
+ float sourceOnSky=sourceScreen.w*sky;
+ float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceOnSky;
  float directionalLean=pow(saturate(cosTheta*.5+.5),6)*.08;
- float discProtection=lerp(.06,1,smoothstep(.025,.055,sourceRadius));
+ float discProtection=lerp(1,lerp(.06,1,smoothstep(.025,.055,sourceRadius)),sourceOnSky);
  // Normalized forward phase, bounded for artistic intensity and half-float stability.
  float g=.62;
  float angular=(1-g*g)/pow(max(1+g*g-2*g*cosTheta,.04),1.5);
@@ -619,26 +623,15 @@ void DirectionalVolumetricLighting::DrawScreenQuad(IDirect3DDevice9* d,uint32_t 
 
 bool DirectionalVolumetricLighting::ValidateHistory(const FrameContext& f)
 {
- // History is invalidated by the light the integrate pass actually used
- // (the stabilized direct light), not by the disc-draw signal: the disc
- // leaving the frame must not, by itself, throw temporal history away.
- //
- // Two former gates are deliberately gone. The selected-lamp set changes
- // whenever two lamps trade places at the selection limit, a native slot
- // crosses its seen/enabled grace windows, or a lamp crosses the distance
- // gate - which near a lamp post is every few frames - and the
- // cloud-shadow map appears/disappears at its low-sun elevation gate.
- // Each flip used to discard the accumulated fog for exactly one frame,
- // so the screen alternated between the smooth accumulated image and the
- // noisy single-frame march: a faint full-screen flicker while walking
- // past lamps or while the sun sat near the horizon. Neither change can
- // poison history any more: the temporal shader clamps reprojected
- // history to this frame's own neighbourhood, so a lamp that just lit
- // (or a cloud beam that just appeared) clamps the stale values into
- // this frame's range on the very frame it changes.
- const float historyIntensity=f.directLightValid?f.directLightIntensity:f.celestialIntensity;
- const bool historyMoon=f.directLightValid?f.directLightIsMoon:f.celestialIsMoon;
- if(!m_historyValid||!m_previousViewValid||!f.previousViewValid||m_previousWasMoon!=historyMoon||std::abs(m_previousCelestialIntensity-historyIntensity)>.5f)return false;
+ // The direct light and its body can change without invalidating geometry
+ // reprojection. The temporal shader clamps reprojected colour to this
+ // frame's local neighbourhood, so newly enabled moonlight or a fading sun
+ // cannot drag stale lighting into the result. Resetting on a body/intensity
+ // step discarded the history for one frame and alternated a smooth image
+ // with a noisy single-frame march across the whole screen - a visible flash.
+ // Only camera/projection discontinuities and an explicitly invalidated
+ // frame stream make the previous samples geometrically unsafe.
+ if(!m_historyValid||!m_previousViewValid||!f.previousViewValid)return false;
  float dx=f.cameraPosition.x-m_previousCamera.x,dy=f.cameraPosition.y-m_previousCamera.y,dz=f.cameraPosition.z-m_previousCamera.z;
  if(dx*dx+dy*dy+dz*dz>2500)return false;
  for(int i=0;i<4;++i)if(std::abs(f.projUnpack[i]-m_previousProjection[i])>.01f*std::max(1.f,std::abs(m_previousProjection[i])))return false;
@@ -813,7 +806,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  {
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);
  }
- m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=directIsMoon;m_previousCelestialIntensity=directIntensity;
+ m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;
  return true;
 }
 }
