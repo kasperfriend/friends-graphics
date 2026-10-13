@@ -1,5 +1,13 @@
-#include "src/Environment/LocationTuning.h"
 #pragma once
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include "src/Environment/LocationTuning.h"
 #include <unordered_set>
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
@@ -104,20 +112,18 @@ float4 waterStyle:register(c207);
 // x=long swell strength, y=sun glitter, z=Fresnel response, w=crest foam
 float4 foreverStyle:register(c208);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
-float hash21(float2 p) {
-    float3 q=frac(float3(p.x,p.y,p.x)*.1031);
-    q+=dot(q,q.yzx+33.33);
-    return frac((q.x+q.y)*q.z);
-}
-// Smooth random height and its analytical gradient; no repeating sine lattice.
+// Evaluate all four corner hashes together. Scalar float3 hashes in four
+// calls per octave consumed hundreds of PS3 slots after inlining. This
+// vector polynomial hash needs only a handful of vector ALU instructions.
 float3 noiseGradient(float2 p) {
     float2 i=floor(p),f=frac(p);
-    float a=hash21(i),b=hash21(i+float2(1,0));
-    float c=hash21(i+float2(0,1)),d=hash21(i+1);
+    float4 h=frac((dot(i,float2(127.1,311.7))+float4(0,127.1,311.7,438.8))*.1031);
+    h*=h+33.33;
+    h=frac(h*(h+h));
     float2 u=f*f*(3-2*f),du=6*f*(1-f);
-    float k=a-b-c+d;
-    return float3(a+(b-a)*u.x+(c-a)*u.y+k*u.x*u.y,
-                  du.x*((b-a)+k*u.y),du.y*((c-a)+k*u.x));
+    float k=h.x-h.y-h.z+h.w;
+    return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
+                  du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
 }
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
@@ -446,6 +452,22 @@ struct Scope {
         if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=waterTargetSurface||
            FAILED(d->GetDeviceCaps(&caps))||caps.NumSimultaneousRTs<3 ||
            !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING))return;
+        D3DSURFACE_DESC colorDesc{},maskDesc{},depthDesc{};
+        if(FAILED(current->GetDesc(&colorDesc))||FAILED(waterMaskSurface->GetDesc(&maskDesc))||
+           FAILED(waterDepthSurface->GetDesc(&depthDesc))||
+           !renderer::water::TargetsMatch(colorDesc.Width,colorDesc.Height,maskDesc.Width,maskDesc.Height)||
+           !renderer::water::TargetsMatch(colorDesc.Width,colorDesc.Height,depthDesc.Width,depthDesc.Height)||
+           colorDesc.MultiSampleType!=D3DMULTISAMPLE_NONE)return;
+        if(colorDesc.Format!=D3DFMT_A8R8G8B8&&colorDesc.Format!=D3DFMT_X8R8G8B8&&
+           !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTINDEPENDENTBITDEPTHS))return;
+        // Creating an R32F target does not guarantee that alpha blending to it
+        // is supported. An incompatible MRT can make the entire water draw fail.
+        ComPtr<IDirect3D9> api;
+        D3DDEVICE_CREATION_PARAMETERS creation{};D3DDISPLAYMODE mode{};
+        if(FAILED(d->GetDirect3D(api.GetAddressOf()))||FAILED(d->GetCreationParameters(&creation))||
+           FAILED(api->GetAdapterDisplayMode(creation.AdapterOrdinal,&mode))||
+           FAILED(api->CheckDeviceFormat(creation.AdapterOrdinal,creation.DeviceType,mode.Format,
+               D3DUSAGE_RENDERTARGET|D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING,D3DRTYPE_TEXTURE,depthDesc.Format)))return;
         // NOTFOUND means an unbound slot; other query failures cannot be safely restored.
         HRESULT maskHR=d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
         HRESULT depthHR=d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
@@ -496,7 +518,11 @@ struct Scope {
                     controls[6]=-body->viewSpaceDirection.z;
                 }
             }
-            memcpy(controls+12,reflectionData,sizeof(reflectionData));
+            // Missing INTZ (e.g. MSAA) must still render animated modern water.
+            // All-zero unpack constants produced 0/0 even with captureValid=0;
+            // multiplying that NaN by a disabled feature does not remove it.
+            if(reflectionScene&&reflectionDepth)memcpy(controls+12,reflectionData,sizeof(reflectionData));
+            else {controls[12]=1.001f;controls[13]=-.1f;controls[14]=controls[15]=1.f;controls[19]=1.f;}
             controls[16]=reflectionsEnabled&&reflectionScene&&reflectionDepth?reflectionStrength:0;
             controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=reflectionScene&&reflectionDepth?1.f:0.f;
             controls[24]=flowSpeed;controls[25]=flowRotation;
