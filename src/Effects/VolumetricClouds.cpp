@@ -273,9 +273,9 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 
 // Top-down transmittance of the deck toward the light, rendered into a
 // small map centred on the camera so the world below gets the moving cloud
-// shadows that sell the whole effect. Deliberately a separate, cheaper
-// field evaluation than the march: shadows are low frequency, so the
-// erosion octave and the per-step profile would only cost bandwidth.
+// shadows that sell the whole effect, and supplies cloud visibility to
+// atmospheric rays. Low-frequency planar approximation of the march field:
+// same weather/shape/profile/wind, without detail erosion or viewer curvature.
 const char* kCloudShadowSource = R"HLSL(
 sampler3D shapeMap:register(s1); sampler2D weatherMap:register(s3);
 float4 celestial:register(c1);
@@ -296,7 +296,9 @@ float Gradient(float h,float type) {
 }
 
 float Density(float3 p) {
- float h=saturate((length(p-centre.xyz)-shell.x)*shell.z);
+ // A local planar approximation for the low-frequency shadow field.
+ // Neither camera XY nor camera height changes the optical path.
+ float h=saturate((p.z-(shell.x+centre.z))*shell.z);
  float3 w=tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0)).rgb;
  float cov=saturate((w.r-window.x)*window.y);
  float g=Gradient(h,saturate(w.g+window.z));
@@ -304,7 +306,8 @@ float Density(float3 p) {
  float4 s=tex3Dlod(shapeMap,float4((p.xy+motion2.zw*h)*scales.x+motion.xy,p.z*scales.y,0));
  float fbm=s.g*.625+s.b*.25+s.a*.125;
  float d=saturate((s.r-fbm+1)/max(2-fbm,1e-4))*g;
- return saturate((d-1+cov)/max(cov,1e-4))*(.45+.55*cov)*lighting.x;
+ return saturate((d-1+cov)/max(cov,1e-4))*(.45+.55*cov)
+       *lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b)*lighting.x;
 }
 
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
@@ -313,14 +316,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // nothing useful left to project, so hand back "lit".
  if(light.z<=.03) return float4(1,1,1,1);
  float3 p=float3(area.xy+uv*area.z,area.w);
- float camR=p.z-centre.z, b=camR*light.z, cc=camR*camR;
- float innerDisc=b*b-cc+shell.x*shell.x;
- float outerDisc=b*b-cc+shell.y*shell.y;
- if(outerDisc<0) return float4(1,1,1,1);
- // Clamped forward: a receiver inside or above the deck would otherwise
- // start its march below itself and be shadowed by cloud that is under it.
- float entry=max(-b+(innerDisc>0?sqrt(innerDisc):0),0);
- float stepLength=min(-b+sqrt(outerDisc)-entry,(shell.y-shell.x)*2.4)*.125;
+ float base=shell.x+centre.z;
+ float entry=max((base-p.z)/light.z,0);
+ float exitDistance=(base+shell.y-shell.x-p.z)/light.z;
+ float stepLength=max(0,exitDistance-entry)*.125;
  if(stepLength<=0) return float4(1,1,1,1);
  float optical=0;
  [loop] for(int i=0;i<8;i++) optical+=Density(p+light*(entry+stepLength*(i+.5)));
@@ -341,6 +340,7 @@ float4 cameraPos:register(c2);
 float4 invView0:register(c3); float4 invView1:register(c4); float4 invView2:register(c5);
 float4 projection:register(c6);  // x=A, y=B, z=P00, w=P11
 float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow strength
+float4 lightProjection:register(c8); // xy=light XY/Z, z=cloud base, w=thickness
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
@@ -373,12 +373,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float raw=linearRaw>=.99999?1:saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
  float sky=smoothstep(depthRange.z,1,raw);
  // Reconstruct where this pixel is in the world and read the deck's
- // transmittance straight above it. Unconditionally: a texture fetch
+ // transmittance toward the sun. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
  // are masked out by the (1 - sky) term instead.
  float3 v=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*centreZ;
- float2 world=cameraPos.xy+v.x*invView0.xy+v.y*invView1.xy+v.z*invView2.xy;
- float2 shadowUv=(world-area.xy)*area.z;
+ float3 world=cameraPos.xyz+v.x*invView0.xyz+v.y*invView1.xyz+v.z*invView2.xyz;
+ // Project along the sunlight onto the fixed sea-level reference plane.
+ // This accounts for each receiver's height, not the camera's height.
+ float2 shadowUv=(world.xy-world.z*lightProjection.xy-area.xy)*area.z;
  float2 edge=abs(shadowUv-.5);
  // Fade the map out before its border instead of clamping, which would
  // smear the last texel across the whole distance.
@@ -386,7 +388,8 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // The shadow belongs to the surface, so it is applied to the surface -
  // before the cloud in front of it is composited, not to the sum. Cloud
  // between the eye and the ground is not standing in its own shadow.
- float3 lit=scene.rgb*lerp(1,tex2D(shadowMap,shadowUv).r,area.w*inside*(1-sky));
+ float below=1-smoothstep(lightProjection.z,lightProjection.z+lightProjection.w,world.z);
+ float3 lit=scene.rgb*lerp(1,tex2D(shadowMap,shadowUv).r,area.w*inside*(1-sky)*below);
  // Applied to every pixel, not just the sky: the march already stopped at
  // the depth buffer, so what is left in front of geometry belongs there.
  return float4(lit*saturate(cloud.a)+max(cloud.rgb,0),scene.a);
@@ -572,6 +575,8 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",14000),2000,80000));
+ m_settings.sunRays=read(L"SunRaysEnabled",1)!=0;
+ m_settings.sunRayStrength=std::clamp(read(L"SunRayPercent",80),0,200)*.01f;
  m_settings.debugMode=static_cast<CloudDebugMode>(std::clamp(read(L"DebugMode",0),0,4));
  m_settings.weatherCoverageBoost=0.f;
 }
@@ -580,7 +585,7 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
 {
  if(m_owner&&m_owner!=device)return;
  m_cloudSurface.Reset();m_cloudTexture.Reset();
- m_shadowSurface.Reset();m_shadowTexture.Reset();
+ m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  // A new device (or a resize, which is rare) is worth one more attempt.
  m_shadersFailed=false;
@@ -690,6 +695,7 @@ void VolumetricClouds::DrawScreenQuad(IDirect3DDevice9* d,uint32_t w,uint32_t h)
 
 bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3DSurface9* target)
 {
+ m_shadowValid=false;
  VolumetricCloudSettings settings=m_settings;
  settings.coverage=std::clamp(settings.coverage+settings.weatherCoverageBoost,0.f,1.f);
  if(!settings.enabled||settings.coverage<=0.f||settings.density<=0.f)return false;
@@ -764,20 +770,29 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  // A frame without a confirmed disc still needs a usable march direction.
  if(std::abs(lightDir[0])+std::abs(lightDir[1])+std::abs(lightDir[2])<.01f){lightDir[0]=0;lightDir[1]=0;lightDir[2]=1;}
 
+ const float directionLength=std::sqrt(lightDir[0]*lightDir[0]+lightDir[1]*lightDir[1]+lightDir[2]*lightDir[2]);
+ for(float& component:lightDir) component/=directionLength;
+
  // The shadow map is snapped to its own texel grid: without that it
  // shimmers as the camera moves, because every frame resamples the same
  // cloud at a slightly different offset.
  const float shadowExtent=std::max(settings.groundShadowExtent,100.f);
  const float shadowTexel=shadowExtent/float(std::max(m_shadowSize,1u));
- const bool shadowsOn=settings.groundShadows&&m_shadowSurface&&settings.groundShadowStrength>0.f&&lightDir[2]>.03f;
+ const bool shadowsOn=m_shadowSurface&&lightDir[2]>.03f&&
+  ((settings.groundShadows&&settings.groundShadowStrength>0.f)||(settings.sunRays&&settings.sunRayStrength>0.f));
  // Strength fades in with sun elevation and with the stabilized light
  // instead of snapping at the .03 gate: near the horizon (or when the
  // direction source changed by a degree) the whole world's cloud shadow
  // used to toggle between full strength and none between two frames.
  const float shadowStrength=settings.groundShadowStrength*CloudShadowElevationFade(lightDir[2])
   *(f.directLightValid?std::clamp(f.directLightIntensity,0.f,1.f):1.f);
- m_shadowOrigin[0]=std::floor((f.cameraPosition.x-shadowExtent*.5f)/shadowTexel)*shadowTexel;
- m_shadowOrigin[1]=std::floor((f.cameraPosition.y-shadowExtent*.5f)/shadowTexel)*shadowTexel;
+ // Centre coverage on the camera projected onto the same fixed plane.
+ const float slopeX=lightDir[0]/std::max(lightDir[2],.03f);
+ const float slopeY=lightDir[1]/std::max(lightDir[2],.03f);
+ m_shadowOrigin[0]=std::floor((f.cameraPosition.x-f.cameraPosition.z*slopeX-shadowExtent*.5f)/shadowTexel)*shadowTexel;
+ m_shadowOrigin[1]=std::floor((f.cameraPosition.y-f.cameraPosition.z*slopeY-shadowExtent*.5f)/shadowTexel)*shadowTexel;
+ m_shadowArea={m_shadowOrigin[0],m_shadowOrigin[1],1.f/shadowExtent,CloudShadowElevationFade(lightDir[2])};
+ m_lightProjection={slopeX,slopeY,settings.baseAltitude,thickness};
 
  if((++m_renderFrames%600)==0&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
@@ -831,16 +846,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShader(m_shadowShader.Get());
   d->SetTexture(1,m_shapeTexture.Get());SetSampler(d,1,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
   d->SetTexture(3,m_weatherTexture.Get());SetSampler(d,3,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
-  // The receiver plane sits at the camera's own height: cloud shadows are
-  // low frequency, and this keeps the parallax error smallest exactly
-  // where the player is looking.
-  const float c21[4]={m_shadowOrigin[0],m_shadowOrigin[1],shadowExtent,f.cameraPosition.z};
+  // A fixed reference plane: lifting/rotating the camera cannot re-light
+  // the whole world. The composite projects each receiver onto this plane.
+  const float c21[4]={m_shadowOrigin[0],m_shadowOrigin[1],shadowExtent,0.f};
   d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(7,c7,1);
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);
   d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);
   d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(21,c21,1);
   DrawScreenQuad(d,m_shadowSize,m_shadowSize);
+  m_shadowValid=true;
   d->SetTexture(1,nullptr);d->SetTexture(3,nullptr);
  }
 
@@ -912,10 +927,12 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
   const float c6c[4]={f.projUnpack[0],f.projUnpack[1],f.projUnpack[2],f.projUnpack[3]};
   const float c7c[4]={m_shadowOrigin[0],m_shadowOrigin[1],1.f/shadowExtent,
-                      shadowsOn?shadowStrength:0.f};
+                      shadowsOn&&settings.groundShadows?shadowStrength:0.f};
   d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1c,1);
   d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,inv[0],3);
   d->SetPixelShaderConstantF(6,c6c,1);d->SetPixelShaderConstantF(7,c7c,1);
+  const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
+  d->SetPixelShaderConstantF(8,c8c,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);
  }

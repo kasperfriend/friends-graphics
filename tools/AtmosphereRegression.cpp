@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <filesystem>
+#include <vector>
 #include "../src/D3D9/TrackedRenderState.h"
 #include "../src/Effects/DirectionalVolumetricLighting.h"
 #include "../src/Effects/LocalLightingRenderer.h"
@@ -103,7 +104,7 @@ int main() try {
  weathervisuals::lastNativeWeatherTick=GetTickCount()-weathervisuals::nativeWeatherHoldMs-1;weathervisuals::Present(nullptr,true);
  Require(weathervisuals::nativeWeatherMode==1&&weathervisuals::weatherSuspended,"F7 preserves detected weather across missing native draws");
  weathervisuals::Reset(d.Get());weathervisuals::nativeWeatherMode=0;weathervisuals::weatherSuspended=false;g_trackedState={};
- auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
+ auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->SetTexture(6,scene.Get()));Check(d->SetSamplerState(6,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(6,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");ComPtr<IDirect3DBaseTexture9> tex6;DWORD address6=0,srgb6=0;Check(d->GetTexture(6,tex6.GetAddressOf()));Check(d->GetSamplerState(6,D3DSAMP_ADDRESSU,&address6));Check(d->GetSamplerState(6,D3DSAMP_SRGBTEXTURE,&srgb6));Require(tex6.Get()==scene.Get()&&address6==D3DTADDRESS_MIRROR&&srgb6==TRUE,"cloud light sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
  auto diff=[](DWORD a,DWORD b){int m=0;for(int s=0;s<24;s+=8)m=std::max(m,abs(int((a>>s)&255)-int((b>>s)&255)));return m;};
  encode(120,1);DWORD standard=render(true);Require(diff(standard,0xff202020)>8,"fog visible on first resource creation");
  const float baseDensity=settings.densityScale;
@@ -468,6 +469,14 @@ int main() try {
   Check(depth->UnlockRect(0));
  }
  fill(scene.Get(),0xff202020);
+ // Resolution is independent of march quality and reallocates live.
+ const auto marchSamples=cloud.sampleCount;
+ cloud.resolutionScale=.5f;
+ Check(d->BeginScene());Require(clouds.Render(d.Get(),f,back.Get()),"half-resolution cloud pass renders");Check(d->EndScene());
+ D3DSURFACE_DESC cloudDesc{};Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));
+ Require(cloudDesc.Width==64&&cloudDesc.Height==64&&cloud.sampleCount==marchSamples,
+         "cloud resolution changes without changing march quality");
+ cloud.resolutionScale=.25f;
  // Clearing to a colour the scene never uses proves the composite really
  // re-published the scene instead of the target happening to survive.
  auto renderClouds=[&]{Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));
@@ -481,6 +490,8 @@ int main() try {
   Check(read->UnlockRect());return sum/double(n?n:1);};
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
+ Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));
+ Require(cloudDesc.Width==32&&cloudDesc.Height==32,"cloud resolution can be lowered live again");
  {
   float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));
   Require(!memcmp(sentinels,restored,sizeof(restored)),"cloud pass restores c0..c63");
@@ -546,6 +557,22 @@ int main() try {
  printf("clouds shadowed ground=%08lx\n",shadowed);
  Require((shadowed&255)<0x20&&((shadowed>>8)&255)<0x20,"an overcast deck casts its shadow on the world below");
  Require(clouds.GetShadowTexture()!=nullptr,"the shadow map is available to the rest of the renderer");
+ // A shadow field must not change when only the camera height changes.
+ ComPtr<IDirect3DSurface9> shadowRead;
+ Check(d->CreateOffscreenPlainSurface(256,256,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,shadowRead.GetAddressOf(),nullptr));
+ auto shadowBytes=[&]{
+  ComPtr<IDirect3DSurface9> surface;Check(clouds.GetShadowTexture()->GetSurfaceLevel(0,surface.GetAddressOf()));
+  Check(d->GetRenderTargetData(surface.Get(),shadowRead.Get()));D3DLOCKED_RECT r{};
+  Check(shadowRead->LockRect(&r,nullptr,D3DLOCK_READONLY));std::vector<DWORD> bytes(256*256);
+  for(int y=0;y<256;++y)memcpy(bytes.data()+y*256,static_cast<BYTE*>(r.pBits)+y*r.Pitch,256*sizeof(DWORD));
+  Check(shadowRead->UnlockRect());return bytes;
+ };
+ const auto fixedShadows=shadowBytes();
+ f.cameraPosition.z=100;Require(renderClouds(),"raised camera renders cloud shadows");
+ Require(shadowBytes()==fixedShadows,"camera height cannot change the cloud shadow field");
+ f.cameraPosition={.1f,.1f,0};Require(renderClouds(),"sub-texel camera movement renders");
+ Require(shadowBytes()==fixedShadows,"sub-texel camera movement cannot shimmer the shadow field");
+ f.cameraPosition={0,0,0};
  cloud.debugMode=CloudDebugMode::ShadowMap;
  renderClouds();
  printf("clouds shadow map mean=%.1f\n",skyMean());
@@ -576,6 +603,7 @@ int main() try {
  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff123456,1,0));
  Check(d->BeginScene());bool cloudsOff=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());
  Require(!cloudsOff&&pixel(64,20)==0xff123456,"disabled clouds draw nothing at all");
+ Require(clouds.GetShadowTexture()==nullptr,"disabled cloud pass cannot publish a stale shadow map");
  cloud.enabled=true;cloud.coverage=0;
  Check(d->BeginScene());bool clearSky=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());
  Require(!clearSky&&pixel(64,20)==0xff123456,"zero coverage skips the pass entirely");
@@ -584,5 +612,20 @@ int main() try {
  Require(renderClouds()&&clouds.GetCloudTexture()!=nullptr,"the deck rebuilds itself after a device reset");
  Require(clouds.FieldsReady(),"a device reset does not throw the generated fields away");
  clouds.Reset(d.Get());
+ // Synthetic transmittance isolates cloud-filtered shafts from cloud colour.
+ auto transmittance=texture(D3DFMT_A8R8G8B8);
+ f.cloudShadowTexture=transmittance.Get();f.cloudShadowArea={-7000,-7000,1.f/14000,1};
+ f.cloudLightProjection={0,0,900,1400};f.cloudRayStrength=.8f;
+ f.directLightValid=true;f.directLightIntensity=1;f.directLightIsMoon=false;
+ f.directLightDirectionView={0,0,1};f.celestialIntensity=0;f.sunScreenX=f.sunScreenY=-1;
+ settings.enabled=true;settings.temporalEnabled=false;settings.localFogEnabled=false;
+ settings.debugMode=VolumetricDebugMode::CelestialInscatter;settings.densityScale=1;
+ settings.aerialDensity=.002f;settings.fogWash=.55f;settings.sunGlowStrength=0;
+ encode(120,1);fill(transmittance.Get(),0xff000000);const DWORD blockedCloudRays=render(true);
+ fill(transmittance.Get(),0xffffffff);const DWORD openCloudRays=render(true);
+ Require(diff(openCloudRays,blockedCloudRays)>5,"cloud gaps transmit sunlight even with the disc off screen");
+ f.cloudRayStrength=0;const DWORD raysOff=render(true);
+ Require(diff(openCloudRays,raysOff)>5,"cloud ray strength zero removes the new shaft contribution");
+ f.cloudShadowTexture=nullptr;f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}

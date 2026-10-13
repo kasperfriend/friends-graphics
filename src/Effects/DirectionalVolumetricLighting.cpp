@@ -163,7 +163,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
 const char* kIntegrateSource = R"HLSL(
 sampler2D depthMap:register(s0); sampler2D noiseMap:register(s1); sampler2D groundState:register(s2); sampler2D waterCoverage:register(s3); sampler2D terrainHeight:register(s4);
-sampler2D localField:register(s5);
+sampler2D localField:register(s5); sampler2D cloudShadow:register(s6);
 float4 cameraPos:register(c0); float4 celestial:register(c1);
 float4 ambientAerial:register(c2); float4 directExtinction:register(c3);
 float4 projection:register(c4);
@@ -181,6 +181,20 @@ float4 layerEnable:register(c35); // x=global enabled,y=density scale,z=daylight
 float4 terrainOrigin:register(c36); // center XY, height origin, reciprocal extent
 float4 terrainControl:register(c37); // valid
 float4 fieldOrigin:register(c38); // lower-left XY, reciprocal extent
+float4 cloudArea:register(c39); // origin XY, reciprocal extent, elevation fade
+float4 cloudProjection:register(c40); // sunlight XY/Z, cloud top, reciprocal thickness
+float4 cloudRays:register(c41); // map valid, elevation-scaled ray strength
+float2 CloudLight(float3 p) {
+ float2 uv=(p.xy-p.z*cloudProjection.xy-cloudArea.xy)*cloudArea.z;
+ // Pack both smooth fades into vector arithmetic. The top and reciprocal
+ // thickness are frame constants, not work for each of the eight samples.
+ float edge=max(abs(uv.x-.5),abs(uv.y-.5));
+ float2 fade=saturate(float2((.49-edge)*(1/.09),(cloudProjection.z-p.z)*cloudProjection.w));
+ fade=fade*fade*(3-2*fade);
+ float support=fade.x*fade.y;
+ float transmission=lerp(1,tex2Dlod(cloudShadow,float4(uv,0,0)).r,support*cloudArea.w);
+ return float2(transmission,transmission*support);
+}
 float2 Ground(float3 p,float fallback) {
  float2 q=(p.xy-terrainOrigin.xy)*terrainOrigin.w+.5;
  float2 h=tex2Dlod(terrainHeight,float4(q,0,0)).rg;
@@ -301,7 +315,23 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float globalAmount=(1-exp(-max(0,globalOptical+heightOptical)*directExtinction.w))*frameTuning.z;
  T=(1-globalAmount)*(1-localAmount);
  float3 ambientSum=neutralFog*(globalAmount*(1-localAmount)+localAmount);
- float3 directSum=pow(max(directExtinction.rgb,0),2.2)*phase*celestial.w*fogAmount*frameTuning.z;
+ // Sample the moving cloud transmittance along the actual view segment,
+ // clipped by geometry/water. Unlike a radial blur this also produces rays
+ // when the sun's billboard is outside the camera frustum.
+ float2 cloudLight=float2(1,0); // transmission, supported beam
+ if(cloudRays.x>.5) {
+   cloudLight=0;
+   [loop] for(int ci=0;ci<8;++ci) {
+     float t=marchDistance*(ci+.5)*.125;
+     cloudLight+=CloudLight(cameraPos.xyz+ray*t)*.125;
+   }
+ }
+ // Rays scatter in the same medium as the rest of the atmosphere. Reuse
+ // its integrated opacity instead of computing a second Beer exponential.
+ float beamAmount=fogAmount*cloudRays.y*layerEnable.x;
+ float directScatter=phase*fogAmount*frameTuning.z*cloudLight.x
+                    +min(angular*.08,1.5)*beamAmount*cloudLight.y;
+ float3 directSum=pow(max(directExtinction.rgb,0),2.2)*celestial.w*directScatter;
  // Light Rays controls lamp scattering independently of global Fog Wash.
  float invCount=1/max((float)count,1); int debugMode=(int)frameTuning.y;
  if(debugMode==1)return optical.xxxx; if(debugMode==2)return T.xxxx;
@@ -564,6 +594,8 @@ bool DirectionalVolumetricLighting::ValidateHistory(const FrameContext& f)
  // leaving the frame must not, by itself, throw temporal history away.
  const float historyIntensity=f.directLightValid?f.directLightIntensity:f.celestialIntensity;
  const bool historyMoon=f.directLightValid?f.directLightIsMoon:f.celestialIsMoon;
+ if(m_previousCloudShadowValid!=(f.cloudShadowTexture!=nullptr)||
+    std::abs(m_previousCloudRayStrength-f.cloudRayStrength)>.001f)return false;
  if(!m_historyValid||!m_previousViewValid||!f.previousViewValid||m_previousWasMoon!=historyMoon||std::abs(m_previousCelestialIntensity-historyIntensity)>.5f||m_previousLocalLightSignature!=LocalLightManager::Instance().SelectionSignature())return false;
  float dx=f.cameraPosition.x-m_previousCamera.x,dy=f.cameraPosition.y-m_previousCamera.y,dz=f.cameraPosition.z-m_previousCamera.z;
  if(dx*dx+dy*dy+dz*dz>2500)return false;
@@ -716,7 +748,16 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   d->SetSamplerState(5,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(5,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
   d->SetSamplerState(5,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,FALSE);
   d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(5,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
-  DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD si=0;si<6;++si)d->SetTexture(si,nullptr);
+  const float cloudArea[4]={f.cloudShadowArea.x,f.cloudShadowArea.y,f.cloudShadowArea.z,f.cloudShadowArea.w};
+  const float cloudProjection[4]={f.cloudLightProjection.x,f.cloudLightProjection.y,
+    f.cloudLightProjection.z+f.cloudLightProjection.w,1.f/std::max(f.cloudLightProjection.w,1.f)};
+  const float cloudRays[4]={f.cloudShadowTexture?1.f:0.f,f.cloudRayStrength*f.cloudShadowArea.w,0,0};
+  d->SetTexture(6,f.cloudShadowTexture);
+  d->SetSamplerState(6,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(6,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
+  d->SetSamplerState(6,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(6,D3DSAMP_SRGBTEXTURE,FALSE);
+  d->SetSamplerState(6,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(6,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
+  d->SetPixelShaderConstantF(39,cloudArea,1);d->SetPixelShaderConstantF(40,cloudProjection,1);d->SetPixelShaderConstantF(41,cloudRays,1);
+  DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD si=0;si<7;++si)d->SetTexture(si,nullptr);
  }
  IDirect3DTexture9* atmosphere=m_integratedTexture.Get();bool historyOk=ValidateHistory(f);
  const bool runTemporal=settings.temporalEnabled&&(settings.debugMode==VolumetricDebugMode::None||settings.debugMode==VolumetricDebugMode::Temporal||settings.debugMode==VolumetricDebugMode::Upsampled);
@@ -727,6 +768,8 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  {
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);
  }
- m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=directIsMoon;m_previousCelestialIntensity=directIntensity;m_previousLocalLightSignature=LocalLightManager::Instance().SelectionSignature();return true;
+ m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=directIsMoon;m_previousCelestialIntensity=directIntensity;m_previousLocalLightSignature=LocalLightManager::Instance().SelectionSignature();
+ m_previousCloudShadowValid=f.cloudShadowTexture!=nullptr;m_previousCloudRayStrength=f.cloudRayStrength;
+ return true;
 }
 }

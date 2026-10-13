@@ -106,6 +106,32 @@ int main() try
         Require(sticky.Update(noon).isMoon, "a dim opposite period takes over from the confirmed body");
     }
 
+    {
+        CelestialDirectionStabilizer direction;
+        const Vec3 sun = Normalize({.6f, .2f, .8f});
+        auto stable = direction.Update({1, 0, .04f}, &sun, false, 1.f/60.f);
+        Require(Length(stable-sun)<1e-6f, "confirmed world direction primes the sun");
+        for (int i=0;i<600;++i)
+        {
+            const Vec3 fallback = i%2 ? Vec3{1,0,.04f} : Vec3{-1,0,.8f};
+            stable=direction.Update(fallback, nullptr, false, 1.f/60.f);
+            if (Length(stable-sun)>=1e-6f) throw std::runtime_error("camera fallback moved sunlight");
+        }
+        Require(Length(stable-sun)<1e-6f, "camera-dependent fallback cannot move confirmed sunlight");
+        const Vec3 moon=Normalize({-.2f,-.6f,.7f});
+        Require(Length(direction.Update({}, &moon, true, .016f)-moon)<1e-6f,
+                "moon keeps a separate confirmed direction");
+        Require(Length(direction.Update({}, nullptr, false, .016f)-sun)<1e-6f,
+                "returning to sunlight restores its own direction");
+        const Vec3 moved=Normalize({.7f,.2f,.7f});
+        stable=direction.Update({}, &moved, false, .016f);
+        Require(Length(stable-sun)<Length(moved-sun) && std::fabs(Length(stable)-1.f)<1e-5f,
+                "real celestial movement is smoothed and normalized");
+        direction.Reset();
+        Require(Length(direction.Update({0,0,1}, nullptr, false, .016f)-Vec3{0,0,1})<1e-6f,
+                "loading reset allows a fresh world direction");
+    }
+
     Require(CloudShadowElevationFade(0.0f) == 0.0f, "cloud shadows are off for a disc below the horizon");
     Require(CloudShadowElevationFade(0.03f) == 0.0f, "cloud shadows fade in from the horizon gate");
     Require(CloudShadowElevationFade(0.15f) == 1.0f, "cloud shadows reach full strength above the fade band");

@@ -155,6 +155,8 @@ namespace renderer
         bool m_previousViewValid = false;
         bool m_previousWasMoon = false;
         float m_previousCelestialIntensity = 0.0f;
+        bool m_previousCloudShadowValid = false;
+        float m_previousCloudRayStrength = 0.f;
         uint64_t m_previousLocalLightSignature = 0;
         std::wstring m_logPath;
         uint64_t m_renderFrames = 0;
