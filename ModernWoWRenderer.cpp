@@ -22,6 +22,7 @@
 #include "TuningOverlay.h"
 #include "src/Core/ShaderCache.h"
 #include "src/Core/FrameContext.h"
+#include "src/Core/DeviceHealth.h"
 #include "src/Diagnostics/RendererDiagnostics.h"
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
@@ -33,6 +34,9 @@
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Effects/GroundSurfaceCapture.h"
+
+static_assert(renderer::kD3DErrDeviceLost == D3DERR_DEVICELOST, "src/Core/DeviceHealth.h must match d3d9.h");
+static_assert(renderer::kD3DErrDeviceNotReset == D3DERR_DEVICENOTRESET, "src/Core/DeviceHealth.h must match d3d9.h");
 
 namespace
 {
@@ -58,6 +62,11 @@ LightEnableFn originalLightEnable=nullptr;
 using ClearFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
 ClearFn originalClear=nullptr;
 bool unified=false,graphicsActive=true,graphicsKeyDown=false,graphicsShowStatus=false,tuningKeyDown=false;
+// Alt+Tab / device-loss state. Only touched on the render thread. A gap longer
+// than kFrameGapMs between presents means the frame stream was interrupted.
+constexpr uint64_t kFrameGapMs = 1000;
+renderer::DeviceAvailability g_availability = renderer::DeviceAvailability::Operational;
+renderer::FrameGapDetector g_frameGap;
 
 struct Settings
 {
@@ -87,6 +96,25 @@ void Log(char const* text)
 {
     std::wofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
     out << text << '\n';
+}
+
+void SetAvailability(renderer::DeviceAvailability next)
+{
+    if (next == g_availability) return;
+    g_availability = next;
+    // Presents keep arriving while the device is lost, so the frame-gap check
+    // alone would not notice. History from either side of the transition is stale.
+    volume::InvalidateTemporalHistory();
+    Log(next == renderer::DeviceAvailability::Lost
+        ? "Direct3D device lost (Alt+Tab, mode change or driver reset): effects paused until it is restored."
+        : "Direct3D device restored: effects resumed.");
+}
+
+bool GameIsForeground()
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
 }
 
 int ReadInt(wchar_t const* key, int fallback)
@@ -129,6 +157,8 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
 
 HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 {
+    // Overlays cannot draw on a lost device; forward the call untouched.
+    if (g_availability == renderer::DeviceAvailability::Lost) return g_originalEndScene(device);
     DrawAtmosphere(device);
     g_drawingOverlay=true;
     if(unified){if(graphicsShowStatus){watereffect::DrawStatus(device,graphicsActive?"FX ON":"FX OFF",0);
@@ -145,10 +175,35 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 }
 
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
+    const uint64_t now = GetTickCount64();
+    // Every Present is a frame boundary. A long pause means the frame stream
+    // was interrupted (Alt+Tab, minimised window, loading screen), so temporal
+    // history from before the pause must not be blended into the next frame.
+    if (g_frameGap.Observe(now, kFrameGapMs)) volume::InvalidateTemporalHistory();
+
+    if (g_availability == renderer::DeviceAvailability::Lost) {
+        // No effect pass can draw while the device is lost. Skip them instead
+        // of letting each one fail (and log) every frame. Probe for recovery;
+        // a device that needs a Reset is restored by HookedReset.
+        if (SUCCEEDED(d->TestCooperativeLevel())) {
+            SetAvailability(renderer::DeviceAvailability::Operational);
+        } else {
+            // Keep the per-frame state consistent and the weather detection
+            // alive while the frame passes through untouched.
+            volume::Finish(d);
+            weathervisuals::Present(d, true);
+            return originalPresent(d, a, b, w, r);
+        }
+    }
+
     // Location IDs do not depend on the terrain-only camera layout. Cities
     // still render into the captured world depth buffer with other shaders.
     // The provider separately verifies the executable, coherent IDs and DB hierarchy.
-    renderer::EnvironmentProfileManager::Instance().Update(GetTickCount64(),renderer::DepthCapture::Instance().HasDepth());
+    {
+        const bool worldFrame = renderer::DepthCapture::Instance().HasDepth();
+        renderer::EnvironmentProfileManager::Instance().Update(now, worldFrame,
+            renderer::ShouldHoldLocation(worldFrame, GameIsForeground()));
+    }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
     // A sky that is actively raining or snowing is a covered sky. The
@@ -187,7 +242,9 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     celestialdiag::Present(d);
     nativeshadowdiag::OnPresent(d);
     renderer::RendererDiagnostics::Instance().OnFrameEnd();
-    return originalPresent(d,a,b,w,r);
+    const HRESULT presentResult = originalPresent(d,a,b,w,r);
+    SetAvailability(renderer::ClassifyDeviceResult(presentResult));
+    return presentResult;
 }
 HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     tuningoverlay::font.Reset();
@@ -209,10 +266,17 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     if(SUCCEEDED(hr)){
         renderer::g_trackedState={};
         RestoreDeviceHooksAfterReset(d);
+        SetAvailability(renderer::DeviceAvailability::Operational);
+    }
+    else {
+        // Stay paused; Present keeps probing and resumes once the device is usable.
+        SetAvailability(renderer::DeviceAvailability::Lost);
     }
     return hr;
 }
 HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
+    // While the device is lost nothing can draw; pass through without any effect work.
+    if(g_availability==renderer::DeviceAvailability::Lost)return originalClear(d,n,rect,flags,color,z,stencil);
     const bool waterNeedsDepth=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled&&
         (watereffect::reflectionsEnabled||watereffect::refractionEnabled||watereffect::depthEnabled||watereffect::foamEnabled);
     if(volume::internal||g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
@@ -342,6 +406,8 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 }
 
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
+    // While the device is lost nothing can draw; pass through without any effect work.
+    if(g_availability==renderer::DeviceAvailability::Lost)return originalDraw(d,t,start,n);
     if(volume::internal||weathervisuals::internal)return originalDraw(d,t,start,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
@@ -370,6 +436,8 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 }
 
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
+    // While the device is lost nothing can draw; pass through without any effect work.
+    if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
@@ -407,6 +475,8 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
 }
 
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
+    // While the device is lost nothing can draw; pass through without any effect work.
+    if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawUP(d,t,n,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawUP(d,t,n,v,stride);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
@@ -436,6 +506,8 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
 }
 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
+    // While the device is lost nothing can draw; pass through without any effect work.
+    if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);

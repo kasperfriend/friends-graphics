@@ -2,6 +2,7 @@
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstring>
+#include "../Core/DeviceHealth.h"
 #include "../Core/FrameContext.h"
 #include "../D3D9/ScopedRenderState.h"
 #include "../D3D9/TrackedRenderState.h"
@@ -15,13 +16,24 @@ class GroundSurfaceCapture {
     ComPtr<IDirect3DVertexShader9> vs;
     ComPtr<IDirect3DPixelShader9> ps;
     IDirect3DDevice9* owner=nullptr;
+    RetryGate retry;
     bool valid=false,terrainReady=false;
     float origin[4]{};
     ULONGLONG lastTick=0;
     static constexpr UINT Size=1024;
+    // Creation is attempted once per cooldown while it fails. Without this,
+    // every terrain draw would recompile both shaders while the device is
+    // unavailable.
     bool Ensure(IDirect3DDevice9* d) {
         if(owner==d && texture && depth && vs && ps)return true;
-        Reset();owner=d;
+        const ULONGLONG now=GetTickCount64();
+        if(!retry.Open(now))return false;
+        if(Create(d)){retry.Succeed();return true;}
+        retry.Fail(now,kOptionalPassRetryMs);
+        return false;
+    }
+    bool Create(IDirect3DDevice9* d) {
+        Release();owner=d;
         const char* vertex=R"(
 float4 mv[4]:register(c0); float4 iv[3]:register(c4);
 float4 camera:register(c7); float4 atlas:register(c8);
@@ -44,7 +56,8 @@ public:
     static GroundSurfaceCapture& Instance(){// D3D resources must not be released from CRT teardown under loader lock.
         // Reset releases them on device reset/replacement; process exit owns the final lifetime.
         static auto* instance=new GroundSurfaceCapture;return *instance;}
-    void Reset(){texture.Reset();surface.Reset();depth.Reset();vs.Reset();ps.Reset();owner=nullptr;valid=false;terrainReady=false;lastTick=0;}
+    void Release(){texture.Reset();surface.Reset();depth.Reset();vs.Reset();ps.Reset();owner=nullptr;valid=false;terrainReady=false;lastTick=0;}
+    void Reset(){Release();retry=RetryGate{};}
     IDirect3DTexture9* Texture()const{return valid&&terrainReady?texture.Get():nullptr;}
     const float* Origin()const{return origin;}
     static bool IsTerrainVertexShader(uint64_t hash) {

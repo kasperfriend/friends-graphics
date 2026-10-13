@@ -520,7 +520,7 @@ void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
 
  m_depthShader.Reset();m_integrateShader.Reset();m_temporalShader.Reset();m_upsampleShader.Reset();m_compositeShader.Reset();m_boundaryShader.Reset();m_boundaryDebugShader.Reset();m_groundHeightShader.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_targetFormat=D3DFMT_UNKNOWN;m_historyValid=false;m_previousViewValid=false;
- m_previousLocalLightSignature=0;
+ m_previousLocalLightSignature=0;m_setupRetry=RetryGate{};
 }
 
 bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* d)
@@ -575,7 +575,11 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  settings.edgeFogPower*=f.environment[DistanceFogPower];
  if(!settings.enabled||!d||!target||!f.cameraValid||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
  // Resource recreation resets shaders too; compile only after that reset.
- D3DSURFACE_DESC desc{};if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height,desc.Format)||!EnsureShaders(d))return false;
+ // A failed setup is retried after a cooldown instead of rebuilding shaders every frame.
+ const ULONGLONG setupNow=GetTickCount64();
+ if(!m_setupRetry.Open(setupNow))return false;
+ D3DSURFACE_DESC desc{};if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height,desc.Format)||!EnsureShaders(d)){m_setupRetry.Fail(setupNow,kOptionalPassRetryMs);return false;}
+ m_setupRetry.Succeed();
  if((++m_renderFrames%300)==0&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   out<<"render camera=("<<f.cameraPosition.x<<','<<f.cameraPosition.y<<','<<f.cameraPosition.z

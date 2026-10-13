@@ -51,6 +51,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Environment\MenuDiagnostics.h" />
     <ClInclude Include="src\Core\MathTypes.h" />
     <ClInclude Include="src\Core\FrameContext.h" />
+    <ClInclude Include="src\Core\DeviceHealth.h" />
     <ClInclude Include="src\Core\ShaderCache.h" />
     <ClInclude Include="src\Materials\MaterialCacheManager.h" />
     <ClInclude Include="src\Materials\TextureHashLookup.h" />

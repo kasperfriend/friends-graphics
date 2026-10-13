@@ -3,6 +3,7 @@
 #include <d3d9.h>
 #include <wrl/client.h>
 #include <string>
+#include "../Core/DeviceHealth.h"
 #include "../Core/FrameContext.h"
 
 namespace renderer
@@ -23,6 +24,7 @@ namespace renderer
     private:
         LocalLightingRenderer() = default;
         bool EnsureShaders(IDirect3DDevice9* device);
+        void NoteFailure(const std::string& reason);
         bool EnsureResources(IDirect3DDevice9* device, uint32_t width, uint32_t height, D3DFORMAT format, int quality);
         void DrawQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
         void Log(const std::string& message) const;
@@ -35,7 +37,11 @@ namespace renderer
         uint32_t m_lightHeight = 0;
         D3DFORMAT m_format = D3DFMT_UNKNOWN;
         int m_quality = -1;
-        bool m_sessionDisabled = false;
+        // Failed passes are retried after a cooldown; a transient failure (device
+        // loss, Alt+Tab) must not switch the effect off until the next reset.
+        RetryGate m_retry;
+        bool m_shaderErrorLogged = false;
+        bool m_resourceErrorLogged = false;
 
         ComPtr<IDirect3DTexture9> m_lightTexture;
         ComPtr<IDirect3DSurface9> m_lightSurface;

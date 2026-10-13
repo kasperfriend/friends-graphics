@@ -95,7 +95,7 @@ of the cloud shader, at the shipped defaults.*
 - AI Materials, generated normal maps, parallax relief, and material self-shadowing are still experimental and are not implemented as a supported release feature.
 - Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
 - Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
-- D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive even though the common paths are covered by regression tests.
+- D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive. Device-loss handling pauses the effects while the device cannot draw and resumes when it is restored, but the exclusive-fullscreen and window-switch paths have not yet been verified in the Ascension client.
 - This mod is in active development. Bugs are expected; include `ModernWoWRenderer.log`, the zone, and reproduction steps when reporting one.
 
 ## Controls
@@ -195,11 +195,12 @@ The Release build is also retained as a workflow artifact for 14 days.
 The repository includes focused regression and shader checks:
 
 ```powershell
+tools\Test-DeviceHealth.cmd
 tools\Test-Atmosphere.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 
-The tests cover fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, and embedded shader compilation. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
+The tests cover fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
 
 ## Project structure
 
