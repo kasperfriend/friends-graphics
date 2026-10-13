@@ -104,8 +104,8 @@ float4 reflectionProjection:register(c203);
 float4 reflectionControl:register(c204);
 // x=environment strength,y=max trace distance,z=base thickness,w=enabled
 float4 reflectionStyle:register(c205);
-// x=animation speed, y=counter-rotating layer strength, z=debug, w=rotation cosine.  The latter mirrors
-// the modern client's animated UV transforms without depending on its ADT data.
+// x=animation speed, y=counter-rotating layer strength, z=debug, w=rotation cosine.
+// Rotating the wave layer mirrors modern animated UVs without new ADT data.
 float4 flowControl:register(c206);
 // x=refraction, y=depth absorption, z=shore foam, w=foam depth width
 float4 waterStyle:register(c207);
@@ -128,7 +128,7 @@ float3 noiseGradient(float2 p) {
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
 // already sitting in the main depth buffer - water doesn't write that).
-// Written as opaque white; the GPU's normal alpha blend (the same one
+// Written as white with the final water alpha; the GPU's alpha blend (the same one
 // used for the colour output) turns it into a real per-pixel "how much of
 // this ended up as water" fraction, not a flat 0/1, so partially-blended
 // shore edges are partial too.
@@ -157,9 +157,9 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float2 longSlopes=swell.yz;
     float2 slopes=a.yz*.72+longSlopes*foreverStyle.x;
     float filter=rsqrt(1+16*dot(fwidth(p),fwidth(p)));
-    slopes*=filter;
-    float2 offset=slopes*controls.y;
     float flowGate=saturate(controls.y*100+controls.z*4);
+    slopes*=filter*flowGate;
+    float2 offset=slopes*controls.y;
     float3 surface=tex2D(surfaceTexture,uv1+offset+drift*.010*flowGate).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
     float3 v=safeNormalize(-viewPos);
@@ -169,7 +169,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float3 px=ddx(viewPos),py=ddy(viewPos);
     float2 ux=ddx(uv1),uy=ddy(uv1);
     float det=ux.x*uy.y-ux.y*uy.x;
-    float3 tangent=safeNormalize((px*uy.y-py*ux.y)*(det<0?-1:1));
+    float3 tangent=(px*uy.y-py*ux.y)*(det<0?-1:1);
     tangent=safeNormalize(tangent-n*dot(n,tangent));
     float3 bitangent=safeNormalize(cross(n,tangent));
     float3 wave=safeNormalize(n+controls.z*(tangent*slopes.x+bitangent*slopes.y));
@@ -285,7 +285,6 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
 
     // 3. Surface reflection according to Fresnel and SSR strength
     float reflectionAmount=saturate((.10+.65*foreverFresnel)*(reflectionStyle.x*.55+reflectionControl.x*edge*1.6));
-    reflectionAmount=max(reflectionAmount, absorption*(.15+.35*foreverFresnel)*saturate(reflectionStyle.x*.55+reflectionControl.x*edge));
     rgb=lerp(waterBody,reflected,reflectionAmount);
 
     // Direct reflection of actual local emitters on the same wave normal.

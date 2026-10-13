@@ -148,6 +148,10 @@ int main() try {
  Require(diff(resized,0xff202020)>8 && diff(resized,resizedAgain)<=1,"quality resize preserves first-frame fog");
  settings.debugMode=VolumetricDebugMode::BoundaryDepth;encode(120,.94f);DWORD boundary=render(true);
  fill(mask.Get(),0xffffffff);DWORD water=render(true);Require((boundary&255)>(water&255)+30,"water stops atmosphere at surface, not seabed");
+ // Equal linear depths must produce equal normalized boundary values, even
+ // when WoW compresses the viewport depth range to .94.
+ fill(mask.Get(),0);encode(20,.94f);DWORD sameDepthWithoutWater=render(true);
+ Require(diff(water,sameDepthWithoutWater)<=1,"water and terrain share the same normalized depth at MaxZ .94");
  fill(mask.Get(),0);settings.debugMode=VolumetricDebugMode::None;
  settings.edgeFogEnabled=true;settings.edgeFogDistance=30;settings.edgeFogPower=2;
  encode(120,.94f);DWORD edgeFog=render(false);Require(diff(edgeFog,0xff202020)>25,"world edge fog works with global and local fog disabled");
