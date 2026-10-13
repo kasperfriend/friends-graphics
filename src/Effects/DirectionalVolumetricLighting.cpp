@@ -182,14 +182,18 @@ float4 terrainOrigin:register(c36); // center XY, height origin, reciprocal exte
 float4 terrainControl:register(c37); // valid
 float4 fieldOrigin:register(c38); // lower-left XY, reciprocal extent
 float4 cloudArea:register(c39); // origin XY, reciprocal extent, elevation fade
-float4 cloudProjection:register(c40); // sunlight XY/Z, base altitude, thickness
-float4 cloudRays:register(c41); // map valid, ray strength
+float4 cloudProjection:register(c40); // sunlight XY/Z, cloud top, reciprocal thickness
+float4 cloudRays:register(c41); // map valid, elevation-scaled ray strength
 float2 CloudLight(float3 p) {
  float2 uv=(p.xy-p.z*cloudProjection.xy-cloudArea.xy)*cloudArea.z;
- float inside=1-smoothstep(.40,.49,max(abs(uv.x-.5),abs(uv.y-.5)));
- float below=1-smoothstep(cloudProjection.z,cloudProjection.z+cloudProjection.w,p.z);
- float support=inside*below;
- return float2(lerp(1,tex2Dlod(cloudShadow,float4(uv,0,0)).r,support*cloudArea.w),support);
+ // Pack both smooth fades into vector arithmetic. The top and reciprocal
+ // thickness are frame constants, not work for each of the eight samples.
+ float edge=max(abs(uv.x-.5),abs(uv.y-.5));
+ float2 fade=saturate(float2((.49-edge)*(1/.09),(cloudProjection.z-p.z)*cloudProjection.w));
+ fade=fade*fade*(3-2*fade);
+ float support=fade.x*fade.y;
+ float transmission=lerp(1,tex2Dlod(cloudShadow,float4(uv,0,0)).r,support*cloudArea.w);
+ return float2(transmission,transmission*support);
 }
 float2 Ground(float3 p,float fallback) {
  float2 q=(p.xy-terrainOrigin.xy)*terrainOrigin.w+.5;
@@ -314,22 +318,20 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // Sample the moving cloud transmittance along the actual view segment,
  // clipped by geometry/water. Unlike a radial blur this also produces rays
  // when the sun's billboard is outside the camera frustum.
- float cloudTransmission=1,cloudBeam=0;
+ float2 cloudLight=float2(1,0); // transmission, supported beam
  if(cloudRays.x>.5) {
- cloudTransmission=0;
- [loop] for(int ci=0;ci<8;++ci) {
-   float t=marchDistance*(ci+.5)*.125;
-   float2 light=CloudLight(cameraPos.xyz+ray*t);
-   cloudTransmission+=light.x*.125;
-   cloudBeam+=light.x*light.y*.125;
+   cloudLight=0;
+   [loop] for(int ci=0;ci<8;++ci) {
+     float t=marchDistance*(ci+.5)*.125;
+     cloudLight+=CloudLight(cameraPos.xyz+ray*t)*.125;
+   }
  }
- }
- float3 directSum=pow(max(directExtinction.rgb,0),2.2)*phase*celestial.w
-                 *fogAmount*frameTuning.z*cloudTransmission;
- float beamAmount=(1-exp(-marchDistance*max(ambientAerial.w,.0004)))
-                  *cloudRays.x*cloudRays.y*cloudArea.w*layerEnable.x;
- directSum+=pow(max(directExtinction.rgb,0),2.2)*min(angular*.08,1.5)
-            *celestial.w*beamAmount*cloudBeam;
+ // Rays scatter in the same medium as the rest of the atmosphere. Reuse
+ // its integrated opacity instead of computing a second Beer exponential.
+ float beamAmount=fogAmount*cloudRays.y*layerEnable.x;
+ float directScatter=phase*fogAmount*frameTuning.z*cloudLight.x
+                    +min(angular*.08,1.5)*beamAmount*cloudLight.y;
+ float3 directSum=pow(max(directExtinction.rgb,0),2.2)*celestial.w*directScatter;
  // Light Rays controls lamp scattering independently of global Fog Wash.
  float invCount=1/max((float)count,1); int debugMode=(int)frameTuning.y;
  if(debugMode==1)return optical.xxxx; if(debugMode==2)return T.xxxx;
@@ -747,8 +749,9 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   d->SetSamplerState(5,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,FALSE);
   d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(5,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
   const float cloudArea[4]={f.cloudShadowArea.x,f.cloudShadowArea.y,f.cloudShadowArea.z,f.cloudShadowArea.w};
-  const float cloudProjection[4]={f.cloudLightProjection.x,f.cloudLightProjection.y,f.cloudLightProjection.z,f.cloudLightProjection.w};
-  const float cloudRays[4]={f.cloudShadowTexture?1.f:0.f,f.cloudRayStrength,0,0};
+  const float cloudProjection[4]={f.cloudLightProjection.x,f.cloudLightProjection.y,
+    f.cloudLightProjection.z+f.cloudLightProjection.w,1.f/std::max(f.cloudLightProjection.w,1.f)};
+  const float cloudRays[4]={f.cloudShadowTexture?1.f:0.f,f.cloudRayStrength*f.cloudShadowArea.w,0,0};
   d->SetTexture(6,f.cloudShadowTexture);
   d->SetSamplerState(6,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(6,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
   d->SetSamplerState(6,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(6,D3DSAMP_SRGBTEXTURE,FALSE);
