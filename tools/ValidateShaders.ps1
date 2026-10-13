@@ -32,7 +32,7 @@ catch {
 Write-Output "Using fxc: $Fxc"
 
 $jobs = @(
-    @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource') },
+    @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource', 'volumeBlurPixelSource', 'volumeCopyPixelSource', 'volumeTemporalPixelSource', 'contactShadowPixelSource', 'rayCompositePixelSource', 'solarRadialPixelSource', 'localLightPixelSource', 'celestialMarkerPixelSource', 'postProcessPixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },

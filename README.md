@@ -197,6 +197,7 @@ The repository includes focused regression and shader checks:
 
 ```powershell
 tools\Test-DeviceHealth.cmd
+tools\Test-FrameClock.cmd
 tools\Test-Atmosphere.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```

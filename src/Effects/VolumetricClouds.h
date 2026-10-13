@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <string>
+#include "../Core/FrameClock.h"
 #include "../Core/FrameContext.h"
 
 namespace renderer
@@ -170,7 +171,7 @@ namespace renderer
         uint32_t m_shadowSize = 0;
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;
-        ULONGLONG m_lastTick = 0;
+        FrameClock m_clock;
         float m_elapsed = 0.f;
     };
 }

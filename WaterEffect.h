@@ -5,6 +5,7 @@
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/Lighting/LocalLightManager.h"
+#include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
@@ -435,7 +436,7 @@ struct Scope {
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
-            float controls[36]={float(GetTickCount64()%600000)*.001f,strength,normalStrength,specularStrength};
+            float controls[36]={float(std::fmod(renderer::PerformanceSeconds(),600.0)),strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)

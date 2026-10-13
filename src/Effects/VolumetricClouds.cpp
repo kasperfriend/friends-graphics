@@ -378,7 +378,7 @@ float4 invView0:register(c3); float4 invView1:register(c4); float4 invView2:regi
 float4 projection:register(c6);  // x=A, y=B, z=P00, w=P11
 float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow strength
 float4 lightProjection:register(c8); // xy=light XY/Z, z=cloud base, w=thickness
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
+float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
  float linearRaw=tex2D(depthMap,uv).r;
@@ -433,7 +433,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 lit=scene.rgb*lerp(1,tex2D(shadowMap,shadowUv).r,area.w*inside*(1-sky)*below);
  // Applied to every pixel, not just the sky: the march already stopped at
  // the depth buffer, so what is left in front of geometry belongs there.
- return float4(lit*saturate(cloud.a)+max(cloud.rgb,0),scene.a);
+ // Half an output level of static dither, as in the atmosphere composite:
+ // the deck's smooth sunlit gradients otherwise quantize into concentric
+ // rings around the sun, and the sky brightens/darkens a level at a time
+ // as the deck drifts. The pattern is fixed per pixel, so it cannot
+ // animate; downstream accumulation averages it to the true value.
+ float3 composited=lit*saturate(cloud.a)+max(cloud.rgb,0);
+ composited+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
+ return float4(composited,scene.a);
 })HLSL";
 
 bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
@@ -630,6 +637,7 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  // A new device (or a resize, which is rare) is worth one more attempt.
  m_shadersFailed=false;
+ m_clock.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_shadowSize=0;
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
  // an alt-tab does not pay for regenerating them. Only a different device
@@ -745,9 +753,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  D3DSURFACE_DESC desc{};
  if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)||!EnsureShaders(d)||!EnsureFields(d))return false;
 
- const ULONGLONG tick=GetTickCount64();
- const float dt=m_lastTick?std::clamp(float(tick-m_lastTick)*.001f,.001f,.1f):1.f/60.f;
- m_lastTick=tick;m_elapsed+=dt;
+ // Performance counter, not GetTickCount64 (~15.6 ms steps): the deck's
+ // wind drift integrated from the coarse clock lurched instead of
+ // gliding, pulsing the whole sky. See src/Core/FrameClock.h.
+ const float dt=m_clock.Observe(PerformanceCounter(),PerformanceFrequency());
+ m_elapsed+=dt;
 
  const float thickness=std::max(settings.thickness,20.f);
  const float featureSize=std::max(settings.featureSize,1.f);

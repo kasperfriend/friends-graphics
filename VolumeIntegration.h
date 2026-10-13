@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <unordered_set>
 #include <unordered_map>
+#include "src/Core/FrameClock.h"
 #include "src/Core/ShaderCache.h"
 #include "src/Diagnostics/RendererDiagnostics.h"
 #include "src/Diagnostics/PerformanceProfiler.h"
@@ -138,7 +139,10 @@ float celestialShadowLight = 0;
 // draw is culled, missed or covered, so clouds/fog do not blink with it.
 renderer::CelestialLightStabilizer celestialLightStabilizer;
 renderer::CelestialDirectionStabilizer celestialDirectionStabilizer;
-ULONGLONG celestialLightLastTick = 0;
+// Performance-counter clock for the celestial stabilizers below: their
+// fades are integrated from this delta, and the ~15.6 ms steps of
+// GetTickCount64 made the sky's light pulse instead of gliding.
+renderer::FrameClock celestialLightClock;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
 bool localLightDebug = false;
@@ -384,7 +388,7 @@ void Reset(IDirect3DDevice9* d) {
     shadowCacheValid = shadowAnchorValid = false;
     celestialLightStabilizer.Reset();
     celestialDirectionStabilizer.Reset();
-    celestialLightLastTick = 0;
+    celestialLightClock.Reset();
 }
 
 // A break in the presented frame stream (Alt+Tab, minimise, loading screen)
@@ -397,7 +401,7 @@ void InvalidateTemporalHistory() {
     // target instead of fading the sky in from the pre-break state.
     celestialLightStabilizer.Reset();
     celestialDirectionStabilizer.Reset();
-    celestialLightLastTick = 0;
+    celestialLightClock.Reset();
 }
 
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) {
@@ -857,11 +861,8 @@ bool Composite(IDirect3DDevice9* d) {
         // of switching back to potentially camera-dependent v[24] data.
         // Only use that fallback until a body has actually been tracked.
         {
-            const ULONGLONG lightNow = GetTickCount64();
-            const float lightDt = celestialLightLastTick
-                ? std::clamp(float(lightNow - celestialLightLastTick) * .001f, .001f, .25f)
-                : 1.f / 60.f;
-            celestialLightLastTick = lightNow;
+            const float lightDt = celestialLightClock.Observe(
+                renderer::PerformanceCounter(), renderer::PerformanceFrequency());
             renderer::CelestialLightInput lightInput;
             lightInput.discVisible = body != nullptr;
             lightInput.discIsMoon = useMoon;

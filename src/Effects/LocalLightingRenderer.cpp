@@ -73,7 +73,7 @@ sampler2D depthMap:register(s2); sampler2D waterMask:register(s3);
 float4 texel:register(c0); // xy=light texel, zw unused
 float4 tuning:register(c1); // x=debug mode
 float4 projection:register(c2);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
+float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv); float raw=tex2D(depthMap,uv).r;
  if(raw>=.99990||tex2D(waterMask,uv).r>.25)return scene;
  float receiverZ=projection.y/(raw-projection.x);
@@ -96,7 +96,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  }
  light=sum>.02?light/sum:(best<tolerance?nearest:float3(0,0,0));
  if(tuning.x>.5)return float4(light,1);
- return float4(scene.rgb+light,scene.a);
+ // Half a level of fixed dither on the way into the 8-bit scene: a lamp
+ // pool's smooth falloff otherwise quantizes into concentric rings on the
+ // ground around the light, one ring per output level. The pattern is
+ // static per pixel, so it reads as texture, not flicker.
+ return float4(scene.rgb+light+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0,scene.a);
 })HLSL";
 
 bool Compile(IDirect3DDevice9* device, const char* source, IDirect3DPixelShader9** shader, std::string& error)

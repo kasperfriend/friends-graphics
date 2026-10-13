@@ -53,7 +53,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // never by adding to `sunMask`. This is the fix for "bright cloud
         // becomes a second sun".
         float discFalloff=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*260.0);
-        float discCutoff=1.0-smoothstep(0.10,0.16,sunDist);
+        // Wide, soft truncation of the Gaussian tail: the old 0.10..0.16
+        // band ended the mask abruptly enough that the radial blur below
+        // smeared the cut into a visible ring around the disc.
+        float discCutoff=1.0-smoothstep(0.08,0.22,sunDist);
         float sunMask=discFalloff*discCutoff;
         // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
         // "100%" default) - it used to only nudge this by +-0.35 around a
@@ -288,7 +291,7 @@ sampler2D rays:register(s0);
 sampler2D resolvedFog:register(s1);
 // x=valid current-frame fog, y=raw diagnostic mask
 float4 fogLink:register(c0);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
+float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 ray=tex2D(rays,uv);
     if(fogLink.x>.5&&fogLink.y<.5) {
         float transmission=saturate(1-tex2D(resolvedFog,uv).a);
@@ -297,6 +300,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         float visibility=4*transmission*(1-transmission);
         ray.rgb*=visibility;
     }
+    // Last quantization before the additive blend onto the 8-bit scene:
+    // half a level of fixed dither keeps the ray falloff from banding into
+    // rings around the source (signed, so the blend can round either way).
+    ray.rgb+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
     return ray;
 }
 )HLSL";
@@ -305,15 +312,22 @@ inline const char* solarRadialPixelSource=R"HLSL(
 sampler2D sourceMask:register(s0);
 // xy=sun position, z=total ray reach, w=per-sample decay
 float4 radial:register(c0);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
+float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     // 28 taps (was 16): smoother falloff/less banding on long reaches,
     // still cheap at half-res.
     static const int kSamples=28;
     float2 stepUv=(radial.xy-uv)*(radial.z/float(kSamples));
+    // Every pixel used to march at exactly the same 28 phases toward the
+    // sun, so the taps landed on the same half-res texels in lockstep and
+    // the result showed discrete spokes/rings around the disc. Offset the
+    // phase per pixel with the fixed stratification hash (never animated,
+    // so this cannot flicker): the spokes become fine grain, which the
+    // separable blur and the temporal accumulation below average away.
+    float jitter=frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))));
     float illumination=1;
     float weightSum=0;
     float4 light=0;
-    float2 q=uv;
+    float2 q=uv-stepUv*(1.0-jitter);
     [unroll] for(int i=0;i<kSamples;++i) {
         q+=stepUv;
         float weight=illumination;
@@ -328,6 +342,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     // faster than bright ones, so partial-occlusion streaks (branches,
     // rooflines) read as more defined beams instead of a uniform wash.
     light.rgb=pow(saturate(light.rgb),0.72)*1.2;
+    // Half a level of dither into the 8-bit ray target: without it the
+    // smooth radial falloff quantizes into concentric rings around the
+    // source, and the 0.72-weighted temporal history toggles a level at a
+    // time trying to sit between two of them.
+    light.rgb+=(jitter-.5)/255.0;
     light.a=1;
     return light;
 }
@@ -388,7 +407,7 @@ sampler2D scene:register(s0);
 float4 postParams:register(c0);
 // xy=1/renderWidth, 1/renderHeight
 float4 renderSize:register(c1);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
+float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 c=tex2D(scene,uv);
     float3 col=c.rgb;
     if(postParams.w>.005) {
@@ -403,6 +422,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     col=col+postParams.x;
     col=(col-.5)*postParams.y+.5;
     col=pow(max(col,0.0),1.0/max(postParams.z,.01));
-    return float4(saturate(col),c.a);
+    // Gamma/contrast remapping stretches the 8-bit steps of smooth
+    // gradients (the sky around a light source first) into visible bands;
+    // half a level of fixed dither breaks them without animating.
+    col=saturate(col)+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
+    return float4(col,c.a);
 }
 )HLSL";
