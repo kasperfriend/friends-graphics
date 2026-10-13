@@ -19,8 +19,34 @@ void Check(HRESULT hr) {
 }
 void Require(bool value,const char* name) {
     if(!value)throw std::runtime_error(name);
-    std::printf("PASS %s\n",name);
+    static std::unordered_set<std::string> reported;
+    if(reported.insert(name).second)std::printf("PASS %s\n",name);
 }
+// Inject one real COM failure after stage 2 has already changed. This
+// reproduces the original partial-setup leak without maintaining a fake device.
+using SetTextureFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,IDirect3DBaseTexture9*);
+SetTextureFn realSetTexture=nullptr;
+bool failStage3=false;
+HRESULT WINAPI FailTexture3(IDirect3DDevice9* d,DWORD stage,IDirect3DBaseTexture9* texture) {
+    if(stage==3&&failStage3){failStage3=false;return D3DERR_INVALIDCALL;}
+    return realSetTexture(d,stage,texture);
+}
+struct TextureFailure {
+    void** entry;
+    explicit TextureFailure(IDirect3DDevice9* d) {
+        entry=&(*reinterpret_cast<void***>(d))[65];
+        realSetTexture=reinterpret_cast<SetTextureFn>(*entry);
+        DWORD protect=0;Require(VirtualProtect(entry,sizeof(void*),PAGE_READWRITE,&protect)!=0,"test fault hook writable");
+        *entry=reinterpret_cast<void*>(FailTexture3);DWORD ignored=0;VirtualProtect(entry,sizeof(void*),protect,&ignored);
+        failStage3=true;
+    }
+    ~TextureFailure() {
+        DWORD protect=0;
+        if(VirtualProtect(entry,sizeof(void*),PAGE_READWRITE,&protect)) {
+            *entry=reinterpret_cast<void*>(realSetTexture);DWORD ignored=0;VirtualProtect(entry,sizeof(void*),protect,&ignored);
+        }
+    }
+};
 int main() try {
     watereffect::Configure(L".\\");
     Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),"production water compiles");
@@ -113,6 +139,11 @@ int main() try {
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
     }
     restored();
+    {
+        TextureFailure failure(d.Get());
+        {watereffect::Scope scope(d.Get());Require(!scope.device&&!failStage3,"failed stage 3 bind rolls back partial setup");}
+        restored();
+    }
     // Depth/refraction/foam switches do not depend on reflections.
     watereffect::reflectionsEnabled=false;
     watereffect::reflectionScene=sentinel.Get();watereffect::reflectionDepth=sentinel.Get();

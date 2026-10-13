@@ -13,8 +13,8 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation enforces a **496-slot budget** with room below the minimum
-hardware limit. Device-creation failures log the HRESULT and device instruction
+shader validation measures **494 slots** and enforces a **496-slot budget**
+with room below the minimum hardware limit. Device-creation failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
 This is a verified failure path in the code, not a diagnosis from a capture of
@@ -45,7 +45,8 @@ the reporting player's machine. In-game confirmation still matters.
   water draw.
 - **Lifecycle:** recreate both water targets together on resize; expose only a
   freshly cleared pair; clear borrowed pointers at frame end/reset; reject
-  offscreen scene copies. Capture diagnostics no longer repeat every frame
+  offscreen scene copies. A failed first copy retries next frame, never after
+  water has already entered the scene. Capture diagnostics no longer repeat every frame
   when the counters stop changing.
 - **Atmosphere boundary:** water already has linear surface depth. Its projected
   boundary is normalized just like terrain depth, not scaled a second time by
@@ -64,7 +65,9 @@ the reporting player's machine. In-game confirmation still matters.
   water Scope and capture code. It checks shader installation, rendered magenta
   debug pixels, no-capture color, constant/texture/sampler restoration,
   independent reflection controls, capture lifetime, offscreen rejection,
-  optional MRTs, size mismatch, classifier cache isolation, and reset.
+  optional MRTs (including fractional coverage and unattenuated surface depth),
+  size mismatch, classifier cache isolation, partial-bind failure rollback,
+  and reset.
   Windows CI runs it; no HAL explicitly reports a GPU-test skip (exit 77), not
   a successful rendering test.
 - `tools/Test-Atmosphere.cmd`: includes equal-depth water/terrain boundary
