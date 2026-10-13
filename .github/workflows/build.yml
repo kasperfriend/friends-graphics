@@ -172,3 +172,5 @@ jobs:
           ./build/cloud-layer-test
           g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
           ./build/frame-clock-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
+          ./build/device-health-test

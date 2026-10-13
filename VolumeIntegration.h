@@ -845,25 +845,15 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.celestialIsMoon = false;
         }
 
-        // Stable direct light, separate from the disc signal above. The
-        // disc fields keep answering "is there a god-ray origin on screen
-        // right now" (constants[2]/sunScreen/celestialIntensity), which is
-        // genuinely a screen-space question. Cloud and atmosphere lighting
-        // must instead answer "is the sun/moon up", which does not change
-        // when the camera pans the disc out of frame, when WoW culls its
-        // billboard at the screen edge, or when our own cloud deck crosses
-        // it - all three used to toggle celestialIntensity between frames
-        // and blink the whole sky (clouds lit/unlit, ground shadowed/
-        // unshadowed). Stabilize the world direction too: retain the
-        // confirmed body's direction when its billboard is culled instead
-        // of switching back to potentially camera-dependent v[24] data.
-        // Only use that fallback until a body has actually been tracked.
+        // World lighting must not inherit `body` / `useMoon` above: those
+        // select a visible glare origin, and turning toward a daytime moon
+        // used to replace the sun's shadow projection. Scene lighting alone
+        // selects the dominant body and strength. Track each disc direction
+        // independently, even when it is not the selected glare/light source.
         {
             const float lightDt = celestialLightClock.Observe(
                 renderer::PerformanceCounter(), renderer::PerformanceFrequency());
             renderer::CelestialLightInput lightInput;
-            lightInput.discVisible = body != nullptr;
-            lightInput.discIsMoon = useMoon;
             lightInput.daylight = frameCtx.daylightFactor;
             lightInput.moonlight = frameCtx.moonlightFactor;
             lightInput.directionalLuminance =
@@ -875,10 +865,11 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.directLightIntensity = stable.intensity;
             frameCtx.directLightIsMoon = stable.isMoon;
             frameCtx.directLightValid = true;
-            const renderer::Vec3* confirmed = body && useMoon == stable.isMoon
-                ? &body->worldSpaceDirection : nullptr;
-            frameCtx.directLightDirectionWorld = celestialDirectionStabilizer.Update(
-                frameCtx.sunDirectionWorld, confirmed, stable.isMoon, lightDt);
+            const auto sunWorld = celestialDirectionStabilizer.Update(
+                sun.visible ? &sun.worldSpaceDirection : nullptr, false, lightDt);
+            const auto moonWorld = celestialDirectionStabilizer.Update(
+                moon.visible ? &moon.worldSpaceDirection : nullptr, true, lightDt);
+            frameCtx.directLightDirectionWorld = stable.isMoon ? moonWorld : sunWorld;
             const auto& world = frameCtx.directLightDirectionWorld;
             frameCtx.directLightDirectionView = {
                 renderer::Dot(world, {frameCtx.inverseView.m[0][0], frameCtx.inverseView.m[0][1], frameCtx.inverseView.m[0][2]}),
