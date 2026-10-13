@@ -24,7 +24,14 @@ void Require(bool value,const char* name) {
 int main() try {
     watereffect::Configure(L".\\");
     Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),"production water compiles");
-    ComPtr<IDirect3D9> api;api.Attach(Direct3DCreate9(D3D_SDK_VERSION));
+    // The test sits beside the built proxy DLL. Load the system runtime
+    // explicitly so the proxy cannot hook and double-apply our test scopes.
+    wchar_t systemPath[MAX_PATH]{};GetSystemDirectoryW(systemPath,MAX_PATH);
+    wcscat_s(systemPath,L"\\d3d9.dll");
+    HMODULE runtime=LoadLibraryW(systemPath);Require(runtime!=nullptr,"system D3D9 runtime loaded");
+    auto createD3D=reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(runtime,"Direct3DCreate9"));
+    Require(createD3D!=nullptr,"system Direct3DCreate9 found");
+    ComPtr<IDirect3D9> api;api.Attach(createD3D(D3D_SDK_VERSION));
     Require(bool(api),"Direct3D9 available");
     HWND window=CreateWindowW(L"STATIC",L"Water regression",WS_OVERLAPPEDWINDOW,0,0,128,128,
         nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
