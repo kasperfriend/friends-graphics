@@ -319,10 +319,15 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float base=shell.x+centre.z;
  float entry=max((base-p.z)/light.z,0);
  float exitDistance=(base+shell.y-shell.x-p.z)/light.z;
- float stepLength=max(0,exitDistance-entry)*.125;
+ // More steps than the old 8: at grazing sun angles the slant path through
+ // the deck is long, and 8 widely-spaced samples band the transmittance
+ // into concentric stripes - the "lines on the shadow near the light
+ // source" players report. 16 keeps the banding below the deck's own
+ // feature scale even when the sun is low.
+ float stepLength=max(0,exitDistance-entry)/16.f;
  if(stepLength<=0) return float4(1,1,1,1);
  float optical=0;
- [loop] for(int i=0;i<8;i++) optical+=Density(p+light*(entry+stepLength*(i+.5)));
+ [loop] for(int i=0;i<16;i++) optical+=Density(p+light*(entry+stepLength*(i+.5)));
  return exp(-optical*stepLength).xxxx;
 })HLSL";
 
@@ -383,8 +388,12 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 shadowUv=(world.xy-world.z*lightProjection.xy-area.xy)*area.z;
  float2 edge=abs(shadowUv-.5);
  // Fade the map out before its border instead of clamping, which would
- // smear the last texel across the whole distance.
- float inside=1-smoothstep(.40,.49,max(edge.x,edge.y));
+ // smear the last texel across the whole distance. The band is wide in
+ // world units (edge is a fraction of the shadow extent, so it scales with
+ // the coverage radius): a narrow band made the moving camera's coverage
+ // disk drag a hard edge across terrain, reading as the world shadow
+ // blinking in and out and the sun appearing to slide as you move.
+ float inside=1-smoothstep(.34,.49,max(edge.x,edge.y));
  // The shadow belongs to the surface, so it is applied to the surface -
  // before the cloud in front of it is composited, not to the sum. Cloud
  // between the eye and the ground is not standing in its own shadow.
@@ -574,7 +583,7 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.aerialPerspective=std::clamp(read(L"AerialPerspectivePercent",60),0,100)*.01f;
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
- m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",14000),2000,80000));
+ m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",24000),2000,80000));
  m_settings.sunRays=read(L"SunRaysEnabled",1)!=0;
  m_settings.sunRayStrength=std::clamp(read(L"SunRayPercent",80),0,200)*.01f;
  m_settings.debugMode=static_cast<CloudDebugMode>(std::clamp(read(L"DebugMode",0),0,4));
@@ -676,7 +685,7 @@ bool VolumetricClouds::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h
   m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;
   return false;
  }
- m_shadowSize=256;
+ m_shadowSize=512;
  if(FAILED(d->CreateTexture(m_shadowSize,m_shadowSize,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,m_shadowTexture.GetAddressOf(),nullptr))||
     FAILED(m_shadowTexture->GetSurfaceLevel(0,m_shadowSurface.GetAddressOf())))
  {
