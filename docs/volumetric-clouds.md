@@ -7,11 +7,11 @@ approximation - inside a `ps_3_0` instruction budget.
 
 ## Why it is built this way
 
-- **A spherical shell, not a slab.** The deck lies between `BaseAltitude` and `BaseAltitude + Thickness` on a shell
-  of radius `PlanetRadius` (42000 units, about 2.5x the real Earth-to-WoW scale ratio) centred under the camera. A
-  flat slab either ends in a visible straight edge or has to be pushed out of the way when the player flies; a shell
-  meets the horizon with a curve and can be flown into and above. The shader handles three camera regions explicitly
-  (below the deck, inside it, above it), so looking down at the tops from a flying mount works.
+- **A fixed world-height layer.** The visible deck lies between absolute world Z `BaseAltitude` and
+  `BaseAltitude + Thickness`, never an offset above the camera or local terrain. You can fly toward, through, and
+  above clouds without the layer moving out of the way. Looking around changes only the viewing ray, not the field.
+  Horizontal rays inside the deck integrate normally; outside it they miss. Horizon/distance fades hide the far
+  march limit. `PlanetRadius` is retained for legacy shadow parameters but no longer shapes the visible deck.
 - **Real 3D noise, generated once.** A 64³ RGBA Perlin-Worley shape volume, a 32³ RGB Worley detail volume and a
   512² RGBA weather map are built on the CPU from fixed seeds the first time the renderer starts and cached next to
   the dll as `CloudFields.cache`. Fixed seeds mean every player sees the same sky; the cache means the cost is paid
@@ -26,13 +26,13 @@ approximation - inside a `ps_3_0` instruction budget.
 - **Clipped by the scene, not skipped on it.** The march reconstructs the distance to whatever the client already
   drew and stops there. A sky-only pass - which is what this started as - deletes every cloud between the camera and
   a surface: fly above the deck and you get terrain with cloud shadows on it and no clouds. It also keeps the common
-  case cheap, because a ground pixel thirty units away leaves the shell before it enters it and bails on the first
+  case cheap, because a ground pixel thirty units away ends before it enters the layer and bails on the first
   test. The composite pays for this with a depth-aware upsample (below).
 - **World-anchored ground shadows.** The inexpensive shadow field uses a local planar approximation to the deck,
   integrated from a fixed sea-level reference plane. Its XY origin is snapped to texels; each terrain/object
   receiver is projected along sunlight according to its own world height. Moving the camera vertically does not
   change the cloud optical path or darken/lighten the entire world. Shadows fade out above the deck and at the map
-  border. The approximation deliberately omits high-frequency erosion and distant spherical curvature.
+  border. The ground-shadow pass is unchanged by the fixed-height cloud update and still omits high-frequency erosion.
 - **Cloud-filtered sun rays.** The atmosphere samples that same moving transmittance field at eight positions along
   each depth/water-clipped view ray. Sunlight passes through the gaps while dense clouds block it, including when
   the sun is off screen. The radial glare source separately samples the cloud buffer's alpha, never cloud brightness.
@@ -51,14 +51,14 @@ approximation - inside a `ps_3_0` instruction budget.
 
 The march itself:
 
-1. Reconstruct the world ray from `projUnpack` and the inverse view rows, and intersect the two shell radii for the
-   camera's region.
-2. Fade grazing rays near the horizon and fade the far end of the march, so neither the shell nor the march limit
+1. Reconstruct the world ray from `projUnpack` and the inverse view rows, and intersect the two fixed world-Z
+   planes, clamping entry to zero when inside the deck.
+2. Fade grazing rays near the horizon and fade the far end of the march, so neither the layer nor the march limit
    ends in a hard edge.
 3. Jitter the first step with an interleaved-gradient offset derived from `VPOS` - fixed in screen space, never a
    frame counter, so the bilinear upsample averages neighbouring phases instead of flickering.
 4. March with a **step tied to world length that grows with distance**, never the span divided by a step count: the
-   shell is 2150 units thick but 25000 units long near the horizon, and dividing the span is what turns detail into
+   layer is 2150 units thick but 25000 units long near the horizon, and dividing the span is what turns detail into
    putty. Empty space is crossed with strides three times longer; the march steps back and integrates properly as
    soon as it hits density, and returns to striding after seven empty samples.
 5. At each sample with density: a six-step Beer march toward the sun or moon whose last step is a long reach sample
@@ -132,7 +132,7 @@ the F7 menu in the first column.
 | `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
 | `DensityPercent` | 100 | Optical thickness of the cloud material (base extinction 0.022/unit). |
 | `CloudTypePercent` | 0 | -100 flattens everything into stratus, 0 is cumulus, +100 builds towering cumulonimbus. |
-| `PlanetRadius` | 42000 | How fast the deck curves away to the horizon. |
+| `PlanetRadius` | 42000 | Legacy shadow parameter; no effect on visible cloud height. |
 | `BaseAltitude` | 850 | World Z of the cloud base. |
 | `Thickness` | 2150 | Height of the layer. |
 | `FeatureSize` | 3000 | World size of one tile of the base shape volume. |
@@ -183,10 +183,9 @@ Three passes, all timed as `GpuPerfStage::VolumetricClouds`: a 256² shadow map,
 1920x1080 that is 480x270 rays) and one full-resolution composite.
 
 `tools/ValidateShaders.ps1` compiles every shader literal with `fxc` in CI and fails the build if one exceeds its
-budget. Measured on the CI runner against the 512-slot `ps_3_0` ceiling: **march 458**, shadow 116, composite 112
-(for scale, the atmosphere's integrate pass is 462). The march keeps a tenth of the budget free on purpose, and CI holds it to
-496: these shaders are compiled at runtime by whatever `d3dcompiler_47.dll` the player's Windows ships, which does
-not have to agree with the CI runner's `fxc` about instruction selection.
+budget. CI holds the march to 496 slots against the 512-slot `ps_3_0` ceiling: these shaders are compiled at
+runtime by whatever `d3dcompiler_47.dll` the player's Windows ships, which does not have to agree with the CI
+runner's `fxc` about instruction selection.
 
 Two constraints shape the march code and are worth knowing before editing it:
 
@@ -213,6 +212,18 @@ the production classes with a synthetic depth buffer - sky in the top half, geom
 - `DensityPercent` drives the integrated opacity (measured through the coverage diagnostic);
 - a noise field below the coverage threshold leaves the sky exactly as drawn;
 - the weather boost raises coverage without mutating the configured value;
-- the clearance clamp keeps the deck above a camera flown past the authored altitude;
+- a camera inside the deck sees clouds in front of distant geometry; above the deck, the overhead sky is clear;
 - disabled clouds and zero coverage do not touch the target at all;
 - `c0..c63`, the viewport and the device resources survive the pass and a device reset.
+
+`tools/CloudLayerRegression.cpp` is a portable CPU-reference check for fixed world altitude, approach distance,
+entry/exit from below/inside/above, horizontal rays, view direction changes, and scene-depth clipping:
+
+```sh
+mkdir -p build
+g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-test
+./build/cloud-layer-test
+```
+
+This checks reference math and the production height/bounds expressions; it does not replace HLSL compilation
+or an in-game flight test. Ground-shadow rendering is deliberately unchanged by this fix.
