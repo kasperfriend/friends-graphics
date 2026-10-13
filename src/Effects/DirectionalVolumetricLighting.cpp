@@ -18,6 +18,11 @@ namespace renderer
 {
 namespace
 {
+float LinearizeAtmosphereColor(float value)
+{
+    return std::pow(std::max(value, 0.f), 2.2f);
+}
+
 // Atmosphere boundary depth: scene depth everywhere, except at water
 // pixels, where it's replaced with the water SURFACE's own depth. Water
 // never writes the main depth buffer (WaterEffect samples "what's behind
@@ -306,12 +311,13 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float edge=saturate(1-perpendicular2/(radius*radius));
    float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
    float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
-   localLightSum+=pow(max(localLightColorPower[li].rgb,0),2.2)*localLightColorPower[li].w*scatter*transmission;
+   localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
  }
  float optical=max(0,globalOptical+heightOptical+localOptical)*directExtinction.w;
  float T=exp(-optical); float fogAmount=1-T;
  float day=saturate(layerEnable.z),moon=saturate(layerEnable.w);
- float3 neutralFog=pow(max(ambientAerial.rgb,0),2.2)*lerp(.55,1,saturate(day+moon*.65));
+ // RGB color constants are linearized on the CPU before upload.
+ float3 neutralFog=ambientAerial.rgb*lerp(.55,1,saturate(day+moon*.65));
  // Global wash controls distant haze only. Ground banks retain their own
  // neutral ambient scattering, including at night and away from lamps.
  float localAmount=1-exp(-max(0,localOptical)*directExtinction.w);
@@ -341,7 +347,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float beamAmount=fogAmount*cloudRays.y*layerEnable.x;
  float directScatter=phase*fogAmount*frameTuning.z*cloudLight.x
                     +min(angular*.08,1.5)*beamAmount*cloudLight.y;
- float3 directSum=pow(max(directExtinction.rgb,0),2.2)*celestial.w*directScatter;
+ float3 directSum=directExtinction.rgb*celestial.w*directScatter;
  // Light Rays controls lamp scattering independently of global Fog Wash.
  float invCount=1/max((float)count,1); int debugMode=(int)frameTuning.y;
  if(debugMode==1)return optical.xxxx; if(debugMode==2)return T.xxxx;
@@ -758,7 +764,8 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   for(DWORD s=0;s<2;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);}
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
   float intensity=directIntensity*(directIsMoon?settings.moonStrength:1.f);float c1[4]={directView.x,directView.y,directView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
-  float c2[4]={ambR,ambG,ambB,settings.aerialDensity*settings.densityScale};float c3[4]={std::clamp(ambR*1.5f,.12f,1.f),std::clamp(ambG*1.5f,.12f,1.f),std::clamp(ambB*1.5f,.12f,1.f),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
+  // Upload gamma-linearized RGB so the pixel shader avoids three pow calls.
+  float c2[4]={LinearizeAtmosphereColor(ambR),LinearizeAtmosphereColor(ambG),LinearizeAtmosphereColor(ambB),settings.aerialDensity*settings.densityScale};float c3[4]={LinearizeAtmosphereColor(std::clamp(ambR*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambG*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambB*1.5f,.12f,1.f)),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   // The integration shader uses the persistent GPU ground reference.
   float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
@@ -767,7 +774,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float localPosRadius[8][4]{};float localColorPower[8][4]{};
   const auto& localManager=LocalLightManager::Instance();const auto& localLights=localManager.Selected();
   const int localCount=std::min<int>(8,int(localLights.size()));
-  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=localLights[li].color.x;localColorPower[li][1]=localLights[li].color.y;localColorPower[li][2]=localLights[li].color.z;localColorPower[li][3]=localLights[li].intensity*localManager.IntensityScale()*f.environment[Lighting]*std::sqrt(std::max(0.f,localManager.RayScale()));}
+  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=LinearizeAtmosphereColor(localLights[li].color.x);localColorPower[li][1]=LinearizeAtmosphereColor(localLights[li].color.y);localColorPower[li][2]=LinearizeAtmosphereColor(localLights[li].color.z);localColorPower[li][3]=localLights[li].intensity*localManager.IntensityScale()*f.environment[Lighting]*std::sqrt(std::max(0.f,localManager.RayScale()));}
   float localDebug[4]={float(localManager.DebugMode()),float(localCount),0,0};
   // Keep the authored distance/height atmosphere and the local bank as
   // independent layers.  Day/night factors only tint the medium; they never
