@@ -315,11 +315,20 @@ namespace renderer
         if (candidates.size() > limit) candidates.resize(limit);
         m_selected = std::move(candidates);
 
-        uint64_t signature = 1469598103934665603ull;
+        // The selection is a SET: the integrate shader sums over the lights,
+        // so the order they were picked in cannot change a single pixel.
+        // Folding the ids in pick order still made the signature flip
+        // whenever two equally-scored lamps swapped places as the player
+        // walked, and every flip threw the atmosphere's temporal history
+        // away - the low-resolution fog then comes back at full noise for a
+        // few frames, which is the distant fog flickering as you pass a lamp
+        // post. Hash each id, then combine them commutatively.
+        uint64_t signature = uint64_t(m_selected.size()) * 0x9e3779b97f4a7c15ull;
         for (const auto& light : m_selected)
         {
-            signature ^= light.stableId;
-            signature *= 1099511628211ull;
+            uint64_t id = light.stableId;
+            id ^= id >> 33; id *= 0xff51afd7ed558ccdull; id ^= id >> 33;
+            signature += id;
         }
         m_selectionSignature = signature;
 

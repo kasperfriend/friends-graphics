@@ -380,7 +380,20 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
    prevUv=float2(.5+.5*pv.x/pv.z*prevProjection.z,.5-.5*pv.y/pv.z*prevProjection.w);
    float oldRaw=tex2D(historyDepth,prevUv).r;
    float oldZ=oldRaw>=.9999?100000:prevProjection.y/(oldRaw-prevProjection.x);
-   if(abs(oldZ-pv.z)>max(2.0,pv.z*.035))return cur;
+   // Compare the history against what is at that SAME screen position in
+   // this frame, not against the depth the reprojection predicts for this
+   // pixel. The depth this pass reads is one point sample per low-resolution
+   // texel, so a reprojection that lands anywhere but exactly on a texel
+   // centre moves up or down a surface whose depth changes by a large
+   // fraction of itself across one texel - which is the whole far field on
+   // ground seen at a grazing angle. The old test then rejected most of the
+   // distant fog on every frame the camera moved, so it never accumulated
+   // and its per-frame noise crawled over the ground. One aligned fetch
+   // compares like with like, and still rejects a history that belongs to
+   // something that is no longer there.
+   float nowRaw=tex2D(currentDepth,prevUv).r;
+   float nowZ=nowRaw>=.9999?100000:projection.y/max(nowRaw-projection.x,1e-5);
+   if(abs(oldZ-nowZ)>max(2.0,nowZ*.035))return cur;
  }
  if(any(prevUv<0)||any(prevUv>1))return cur;
  float2 ts=temporal.xy; float4 lo=cur,hi=cur,v;
