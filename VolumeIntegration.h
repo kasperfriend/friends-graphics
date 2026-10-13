@@ -1172,7 +1172,8 @@ bool Composite(IDirect3DDevice9* d) {
             prevView[0][3] = tempCtx.previousViewValid ? 1.f : 0.f;
             check(d->SetPixelShaderConstantF(6, prevView[0], 4));
             const float depthRange[4]={tempCtx.viewport.MinZ,
-                                       tempCtx.viewport.MaxZ-tempCtx.viewport.MinZ,0,0};
+                                       tempCtx.viewport.MaxZ-tempCtx.viewport.MinZ,
+                                       tempCtx.viewport.MaxZ,0};
             check(d->SetPixelShaderConstantF(10,depthRange,1));
             if (ok) drawQuad(rayWidth, rayHeight);
 
