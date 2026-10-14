@@ -68,6 +68,9 @@ inline std::vector<Item> items={
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
  {KIND_TOGGLE,L"Water",L"Enabled","WATER",0,1,1,1},
  {KIND_TOGGLE,L"Water",L"WavesEnabled","WAVES",0,1,1,1},
+ // Lifts and slides the surface itself, so a crest is a form the light falls across rather
+ // than a normal map pretending to be one. Off leaves the shading intact on a flat sheet.
+ {KIND_TOGGLE,L"Water",L"GeometryWavesEnabled","WAVE GEOMETRY",0,1,1,1},
  {KIND_TOGGLE,L"Water",L"ReflectionsEnabled","REFLECTIONS",0,1,1,1},
  {KIND_SLIDER,L"Water",L"ReflectionPercent","SSR STRENGTH",0,150,2,80},
  {KIND_SLIDER,L"Water",L"EnvironmentPercent","SKY REFLECTION",0,150,2,45},
@@ -80,6 +83,9 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"ShoreFoamPercent","FOAM AMOUNT",0,60,1,28},
  {KIND_SLIDER,L"Water",L"SpecularPercent","WATER SHINE",0,400,5,115},
  {KIND_SLIDER,L"Water",L"WaveScalePercent","WAVE SIZE",25,400,5,100},
+ // Percent of the shipped sea: 0 flat, 100 the reference look, 300 a gale. Scaled by the
+ // wave size above and by the zone's own sea state, and clamped steep enough to never fold.
+ {KIND_SLIDER,L"Water",L"GeometryWavePercent","WAVE HEIGHT",0,300,5,100},
  {KIND_SLIDER,L"Water",L"WaveSofteningPercent","WAVE FADE",0,400,5,100},
  {KIND_SLIDER,L"Water",L"ClarityPercent","WATER CLARITY",5,200,5,100},
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WIND",0,200,5,100},

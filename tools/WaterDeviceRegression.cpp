@@ -37,6 +37,16 @@ struct WaterSettings {
         base=directory.wstring()+L"\\";
         Check(WritePrivateProfileStringW(L"Water",L"Enabled",L"0",
             (directory/L"ModernWoWRenderer.ini").c_str())?S_OK:E_FAIL);
+        // Geometry waves OFF for this fixture, in both files ReadTuning consults (the
+        // graphics effects one first, then the renderer one). It ships ON, and the
+        // production vertex stage this test drives lifts water off the far clip plane the
+        // quad below is parked on: every readback here measures colour, and a displaced
+        // vertex would measure an empty target instead. Asserted after the reload rather
+        // than assumed, because ReloadTuning is the same path the menu takes.
+        Check(WritePrivateProfileStringW(L"Water",L"GeometryWavesEnabled",L"0",
+            (directory/L"GraphicsEffects.ini").c_str())?S_OK:E_FAIL);
+        Check(WritePrivateProfileStringW(L"Water",L"GeometryWavesEnabled",L"0",
+            (directory/L"ModernWoWRenderer.ini").c_str())?S_OK:E_FAIL);
         renderer::locationtuning::Sync(base,{},false);
         renderer::locationtuning::editZone=false;
         Require(renderer::locationtuning::Save(L"Water",L"Enabled",0),"write initially disabled live water");
@@ -58,6 +68,10 @@ void TestWaterSettings(WaterSettings& settings) {
     Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),
         "production shaders prepared even when startup and live water are OFF");
     Require(!watereffect::effectEnabled&&!watereffect::NeedsScene(),"starting OFF does not request water capture");
+    // The pin the fixture wrote above, read back through the production reload: the same
+    // key, the same file order, the same clamp a player's edit would take.
+    watereffect::ReloadTuning();
+    Require(!watereffect::geometryWavesEnabled,"geometry waves are off for the flat quad this fixture measures");
     const auto* ps=watereffect::code.data();const auto* vs=watereffect::vertexCode.data();
     settings.Set(true);
     Require(watereffect::code.data()==ps&&watereffect::vertexCode.data()==vs,"live enable needs no shader recompile or restart");
@@ -295,9 +309,13 @@ int main() try {
     DWORD samplers[2][6]{};
     for(unsigned slot=0;slot<2;++slot)for(unsigned i=0;i<6;++i)
         Check(d->GetSamplerState(2+slot,samplerStates[i],&samplers[slot][i]));
-    // OriginalVS reuses the production vertex ABI. Keep its displacement zero
-    // so OFF readbacks exercise visible native pixels, not clipped geometry.
-    float savedPS[36],savedVS[4]={71,0,73,74},savedLights[68];
+    // OriginalVS is the production vertex stage, so it reads the production wave ABI:
+    // c200 is (amplitude, lateral, sigma, cell). Both displacement terms are held at zero
+    // here, because this fixture's quad sits exactly on the far clip plane and a lifted or
+    // slid vertex is a clipped pixel - the OFF readbacks below have to measure colour on
+    // visible native geometry, not an empty target. z and w stay distinctive sentinels so
+    // the restore check still compares against something no real draw would write.
+    float savedPS[36],savedVS[4]={0,0,73,74},savedLights[68];
     for(unsigned i=0;i<36;++i)savedPS[i]=float(i+1);
     for(unsigned i=0;i<68;++i)savedLights[i]=float(i+80);
     Check(d->SetPixelShaderConstantF(200,savedPS,9));Check(d->SetVertexShaderConstantF(200,savedVS,1));

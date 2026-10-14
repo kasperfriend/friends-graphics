@@ -72,7 +72,20 @@ $budgets = @{
     # machine keeps the client's own water until the device is reset.
     # The margin absorbs a different SDK's instruction selection; growth beyond it should
     # have to say so here, in a diff, exactly as before.
-    'source'                = 560 # Water: 542 used, 18 spare
+    #
+    # Round three of the water work adds a third swell train (the ten yard one the pixel
+    # stage shades and the mesh does not), the Gerstner pinch and the Jacobian the shading
+    # slope is divided by, the whitecap mask and the foam's damping of the mirror and the
+    # sun road, and the back-lit in-scatter term. Counted by hand against the cut-price
+    # table above - twelve slots for the train, six for the pinch, eight for the whitecaps,
+    # five for the back-light, four for the coupling, minus six for the flow gate and the
+    # crest slope dot that went away - that is roughly forty slots on top of the measured
+    # 542, so the budget moves to 608 and keeps the same ~24 slots of margin for another
+    # SDK's instruction selection. This file was written without fxc available (no Windows
+    # toolchain in the environment it was authored in), so the number is an estimate: the
+    # Windows job compiles the shader and prints the real count, and whoever runs it next
+    # replaces 608 with measured-plus-margin, exactly as 560 replaced 496.
+    'source'                = 608 # Water: ~582 estimated, 26 spare - RE-MEASURE with fxc
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512

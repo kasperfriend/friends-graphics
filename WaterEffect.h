@@ -24,14 +24,19 @@ using Microsoft::WRL::ComPtr;
 // when water starts off, so F7/F12 and location changes can enable it live.
 // effectEnabled is the single live switch; active is the F9/F11 master switch.
 bool enabled=false, active=true, keyDown=false, hotkey=true;
-bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=false,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,foamEnabled=true,sunGlintEnabled=true;
+bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=true,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,foamEnabled=true,sunGlintEnabled=true;
 float strength=.003f;
 float normalStrength=.16f, specularStrength=.55f;
 float reflectionStrength=.70f,environmentStrength=.24f,reflectionDistance=120.f,reflectionThickness=1.8f;
 float flowSpeed=1.f,flowRotation=.32f;
 float refractionStrength=.12f,absorptionStrength=.18f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
-float geometryWaveAmplitude=.10f;
+// Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
+// of a real amplitude in world yards rather than an amplitude itself, so the number a
+// player sets means the same thing at every wave size and in every zone: see
+// BuildGeometryWaves in src/Water/WaveField.h, which folds the wave size and the sea state
+// into it and clamps the Gerstner steepness so a wave can never fold over itself.
+float geometryWavePercent=100.f;
 // Size of one ripple lattice cell and how fast its detail fades when a pixel
 // spans more than a cell. Both are world-space (yards), because the wave field
 // is anchored to the terrain rather than to a tile's uv.
@@ -96,52 +101,92 @@ float4 modelView[4]:register(c5);
 float4 uvAX:register(c9);float4 uvAY:register(c10);float4 uvAOffset:register(c12);
 float4 uvBX:register(c13);float4 uvBY:register(c14);float4 uvBOffset:register(c16);
 float4 lightDirection:register(c33);float4 ambient:register(c34);float4 diffuse:register(c35);
-// x=time (unused here: the flow phase carries animation), y=world-space
-// displacement amplitude, z=long-wave strength,
-// w=radians per lattice cell for the long swell train (0 keeps the surface flat).
+// x=peak lift in world yards, y=peak slide toward a crest in yards (Gerstner's Q*A),
+// z=sigma, the dimensionless pinch the pixel stage sharpens its slope by, w=one
+// lattice cell in yards. Zero amplitude is flat water, which is how WAVES OFF and a
+// zone authored calm both arrive here: the stage collapses to the client's surface.
 float4 waveControl:register(c200);
 // Rows of the world->lattice matrix; the same value c209 carries to the PS.
 float4 waveLattice:register(c201);
-// zw of the pixel shader's c210: the swell's own phase, in cells. Sharing that one
-// number is what keeps a displaced crest and the light on it on the same wave, and
-// because both trains' periods divide the pixel shader's 64-cell wrap, the wrapped
-// phase costs this stage nothing - the displacement needs no anchor of its own.
+// xyz=the phase of each swell train, in cells ALONG ITS OWN DIRECTION and wrapped into
+// its own wavelength: the pixel shader's c210.zw and c211.z, verbatim. Sharing those
+// numbers is what keeps a displaced crest and the light on it on the same wave, and
+// because each is reduced into a period of its own train, the wrap costs this stage
+// nothing - the displacement needs no anchor of its own.
 float4 wavePhase:register(c202);
+// The two longest swell trains, spelled exactly as src/Water/WaveField.h carries them:
+// unit directions in lattice space, k = 2pi over the wavelength in cells, and the share
+// of the authored amplitude each one lifts. The ten yard train is shaded but NOT
+// displaced - the client's liquid grid is about four yards apart, and lifting a wave
+// that short on it is what facets - so the pixel stage carries three trains and this
+// stage carries the two the mesh can actually hold.
+static const float2 kDirA=float2(1.0,0.0);
+static const float2 kDirB=float2(-0.4695,0.8829);
+static const float kRadA=0.39269908;
+static const float kRadB=0.78539816;
+static const float kWeightA=1.0;
+static const float kWeightB=0.5;
 struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
-    // The view rows are the world->view rotation, so its transpose (the world
-    // axis directions, below) maps a view position back onto the terrain plane.
-    // worldRel is the distance from the camera in WORLD axes: small and exact at
-    // any world coordinate, identical for two neighbouring tiles - which is what
-    // keeps a wave field from restarting at every tile edge - and it does not
-    // turn when the camera turns. The camera's own position is added by the
-    // pixel shader as a constant phase, so this is the only coordinate a wave
-    // field is ever built from.
-    float3 axisX=float3(modelView[0].x,modelView[1].x,modelView[2].x);
-    float3 axisY=float3(modelView[0].y,modelView[1].y,modelView[2].y);
+    // The world axes, in view space. This stage builds p as sum_j modelView[j]*pos[j],
+    // so the matrix it applies is the transpose of the array as written, and world axis
+    // i therefore arrives in view space as modelView[i].xyz - the same convention the
+    // normal transform four lines below has always used. Reading the components ACROSS
+    // the rows instead (float3(modelView[0].x,modelView[1].x,modelView[2].x)) yields the
+    // view axis expressed in WORLD coordinates; dotting that with a view-space position
+    // applies the camera's rotation twice over, so the coordinate that was supposed to
+    // be world-anchored turned when the camera turned and slid when it moved. That one
+    // transposition is also why the displacement below used
+    // float3(modelView[0].z,modelView[1].z,modelView[2].z) - the view direction, not the
+    // up axis - so geometry waves pushed water toward and away from the camera instead of
+    // lifting it, and the surface could only read as curves drawn on a flat plane.
+    float3 axisX=modelView[0].xyz;
+    float3 axisY=modelView[1].xyz;
+    float3 axisZ=modelView[2].xyz;
+    // worldRel is the distance from the camera in WORLD axes: small and exact at any
+    // world coordinate, identical for two neighbouring tiles - which is what keeps a wave
+    // field from restarting at every tile edge - and it does not turn when the camera
+    // turns. The camera's own position is added by the pixel shader as a constant phase
+    // read from THIS draw's own matrix, so this is the only coordinate a wave field is
+    // ever built from, and neither half can be a frame or a camera behind the other.
     float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));
-    // Geometry waves ride the same world-anchored field as the shading normals,
-    // so a displaced crest and its highlight stay on the same wave. The
-    // displacement is applied after the view transform, along the world up axis,
-    // because a tile's uv restarts every 533 units and would stamp identical
+    float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw));
+    // Gerstner waves: lift the surface, then slide it toward the coming crest. The slide
+    // is the part that makes water read as a body moving in three dimensions - crests
+    // pinch and steepen, troughs open out and flatten - and it is why the same amplitude
+    // looks like a sea rather than like a sine viewed from the side. Both come from the
+    // trains the pixel stage shades, from the shared phase above, so a crest that is
+    // lifted is a crest that is lit.
+    float thetaA=kRadA*(dot(kDirA,cell)+wavePhase.x);
+    float thetaB=kRadB*(dot(kDirB,cell)+wavePhase.y);
+    float sinA,cosA,sinB,cosB;
+    sincos(thetaA,sinA,cosA);
+    sincos(thetaB,sinB,cosB);
+    float lift=waveControl.x*(kWeightA*sinA+kWeightB*sinB);
+    float2 slide=waveControl.y*(kWeightA*cosA*kDirA+kWeightB*cosB*kDirB);
+    // slide is in lattice axes; waveControl.w turns the scaled lattice rows back into the
+    // unit world directions they were built from, and the same three axes carry the result
+    // into view space. Displacement happens after the view transform and along the world
+    // up axis, because a tile's uv restarts every 533 units and would stamp identical
     // square bumps onto every tile.
-    float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw))+wavePhase.zw;
-    float2 arg=cell*float2(waveControl.w,waveControl.w*2.0);
-    p.xyz+=waveControl.y*(sin(arg.x)+sin(arg.y)*.55)*(.55+.45*waveControl.z)*
-        float3(modelView[0].z,modelView[1].z,modelView[2].z);
+    float2 lateral=waveControl.w*(slide.x*waveLattice.xy+slide.y*waveLattice.zw);
+    p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;
     o.pos=projection[0]*p.x+projection[1]*p.y+projection[2]*p.z+projection[3]*p.w;
     o.fog=min(pow(max(p.z*fogParams.x+fogParams.y,0),fogParams.z),1);
     o.uv1=uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy;
     o.uv0=uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy;
     float3 n=modelView[0].xyz*normal.x+modelView[1].xyz*normal.y+modelView[2].xyz*normal.z;
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
+    // viewPos is the DISPLACED point, so the surface depth the atmosphere marches to and
+    // the column the absorption measures are the water the player can actually see;
+    // worldRel is the undisplaced lattice coordinate, which is what the pixel stage must
+    // evaluate the field at so its shading lands on the vertex that was moved.
     o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=rel;
-    // The wave gradient is expressed in world axes; the same two axis vectors
-    // rotate it into view space here so the pixel shader only has to scale them
-    // by the wave slope: no screen-space approximation and no per-triangle
-    // winding flip in the shading normal.
+    // The wave gradient is expressed in world axes; the same three axis vectors rotate it
+    // into view space here so the pixel shader only has to scale them by the wave slope:
+    // no screen-space approximation and no per-triangle winding flip in the shading normal.
     o.waveTangent=axisX*waveLattice.x+axisY*waveLattice.y;
     o.waveBitangent=axisX*waveLattice.z+axisY*waveLattice.w;
     return o;
@@ -156,7 +201,10 @@ sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
 sampler2D sceneDepth:register(s3);
 float4 fogColor:register(c4);
-float4 controls:register(c200); // x=unused,y=ripple uv offset,z=normal response,w=specular
+// x=sigma, the Gerstner pinch coefficient the vertex stage displaced with (its lateral
+// slide over one lattice cell): it is what turns the shading slope into the slope of the
+// surface that is actually there. y=ripple uv offset,z=normal response,w=specular.
+float4 controls:register(c200);
 float4 lightDirection:register(c201); // xyz=direction toward the sun/moon
 float4 lightColor:register(c202);
 // x=depth unpack A,y=depth unpack B with the viewport MaxZ folded in, so a
@@ -172,16 +220,23 @@ float4 flowControl:register(c206);
 float4 waterStyle:register(c207);
 // x=long swell strength, y=sun glitter, z=Fresnel response, w=crest foam
 float4 foreverStyle:register(c208);
-// Rows of the world->lattice matrix, scaled by 1/cell and rotated with the flow.
+// Rows of the world->lattice matrix, scaled by 1/cell. The orientation is FIXED: it used
+// to turn with the flow clock, and rotating a world-anchored basis rotates the whole sea
+// about the world ORIGIN, which at ten thousand yards out is a translation of hundreds of
+// yards per second. Wave directions come from the trains below instead.
 float4 waveLattice:register(c209);
-// xy=ripple phase, zw=long swell phase, in cells, wrapped into the lattice.
+// xy=chop phase in cells, wrapped into the noise lattice; zw=the phase of swell trains A
+// and B, in cells along their own directions, wrapped into their own wavelengths.
 float4 wavePhase:register(c210);
-// xy=drift of the client's detail map in its uv, z=radians per cell for the long
-// swell train (the secondary train is exactly twice as frequent).
+// xy=drift of the client's detail map in its uv, z=the phase of swell train C (same
+// units as c210.zw), w=the wave gate: 0 with WAVES off, so no slope, no distortion, no
+// roughness and no foam survives a switch that is supposed to remove the waves.
 float4 waveFlow:register(c211);
-// xyz=world up in view space, w=wind strength: how much sea state this body of
-// water is authored to carry. Everything that whips up foam or breaks a reflection
-// is scaled by it, so a river authored calm stays glass.
+// xyz=world up in view space, taken from THIS draw's own matrix (a frame-captured camera
+// is a frame behind, and the client's reflection pass is a different camera entirely),
+// w=wind strength: how much sea state this body of water is actually in. Everything that
+// whips up foam, breaks a reflection or decides what the sky is, is scaled by it, so a
+// river authored calm stays glass and a coast in a squall does not.
 float4 upWind:register(c212);
 // x=how deep light reaches (per view column), y=specular roughness gain,
 // z=sheen floor, w=shoal foam gain
@@ -213,6 +268,27 @@ float3 noiseGradient(float2 p) {
     return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
                   du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
 }
+// The swell: three ANALYTIC, DIRECTIONAL sine trains on that one lattice. Directions are
+// unit vectors in lattice space and are deliberately far from perpendicular (0, 118 and
+// -64 degrees): two axis-aligned trains at 16 and 8 cells - what this used to be - make a
+// crossing pattern of straight lines, which is exactly the "wave curves drawn on a flat
+// plane" reading. Three oblique trains make a sea, where every crest is the sum of three
+// things moving in different directions and no two lines are parallel.
+// The numbers are spelled here, in the vertex stage and in src/Water/WaveField.h, and
+// tools/WaterRegression.cpp holds all three spellings to each other: a wavelength that
+// moves in one place and not the others slides a lit crest off a displaced one.
+static const float2 kDirA=float2(1.0,0.0);
+static const float2 kDirB=float2(-0.4695,0.8829);
+static const float2 kDirC=float2(0.4384,-0.8988);
+static const float kRadA=0.39269908;   // 2pi over 16 cells: the forty yard swell
+static const float kRadB=0.78539816;   // 2pi over 8 cells: twenty yards
+static const float kRadC=1.57079633;   // 2pi over 4 cells: ten yards, shaded only
+static const float kWgtA=1.0;
+static const float kWgtB=0.5;
+static const float kWgtC=0.26;
+// 1/(2*sum of the weights): maps the summed swell onto 0..1 for the crest masks, so the
+// mask thresholds stay authored in fractions of the largest wave this sea can make.
+static const float kSwellToUnit=0.28409091;
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
 // already sitting in the main depth buffer - water doesn't write that).
@@ -230,28 +306,47 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     float4 base=tex2D(baseTexture,uv0);
-    // One world-anchored lattice carries both scales. The long swell is analytic -
-    // rounded forms, exact slopes for free, and the same waves the vertex stage
-    // displaces, so a crest and the light on it cannot drift apart - and only the
-    // chop on top of it is noise.
+    // One world-anchored lattice carries every scale. The swell is analytic - rounded
+    // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
+    // crest and the light on it cannot drift apart - and only the chop on top of it is
+    // noise.
     float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
     float2 footprint=fwidth(plane);
     // Fade the unresolved octave by the pixel's own footprint. The swell is never
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
-    float2 swellArg=(plane+wavePhase.zw)*float2(waveFlow.z,waveFlow.z*2.0);
-    float2 swellCos=cos(swellArg);
-    float swell=sin(swellArg.x)+sin(swellArg.y)*.55;
-    float2 swellSlope=float2(swellCos.x*waveFlow.z,swellCos.y*waveFlow.z*1.1)*foreverStyle.x;
-    float3 ripple=noiseGradient(plane+wavePhase.xy+float2(swell*.71,swell*.37));
-    float flowGate=saturate(controls.y*100+controls.z*4);
-    float2 slopes=(ripple.yz*.72*filter+swellSlope)*flowGate;
+    float thetaA=kRadA*(dot(kDirA,plane)+wavePhase.z);
+    float thetaB=kRadB*(dot(kDirB,plane)+wavePhase.w);
+    float thetaC=kRadC*(dot(kDirC,plane)+waveFlow.z);
+    float sinA,cosA,sinB,cosB,sinC,cosC;
+    sincos(thetaA,sinA,cosA);
+    sincos(thetaB,sinB,cosB);
+    sincos(thetaC,sinC,cosC);
+    float swell=kWgtA*sinA+kWgtB*sinB+kWgtC*sinC;
+    // The exact gradient of that height field, in lattice axes, times the authored swell
+    // response: the same slope the geometry was lifted by, so shading and silhouette agree.
+    float2 swellSlope=((kWgtA*kRadA*cosA)*kDirA+(kWgtB*kRadB*cosB)*kDirB
+                      +(kWgtC*kRadC*cosC)*kDirC)*foreverStyle.x;
+    // One minus the Gerstner Jacobian: how hard the surface is pinching at this point.
+    // It is the same number the vertex stage's slide was clamped by, so dividing the
+    // shading slope by it sharpens normals exactly where the water is really steepening -
+    // crests tighten and catch the light, troughs open out and go flat - and it is zero
+    // on water that was authored flat, where there is nothing to sharpen.
+    float pinch=controls.x*(kWgtA*kRadA*sinA+kWgtB*kRadB*sinB+kWgtC*kRadC*sinC);
+    float jacobian=max(1.0-pinch,.3);
+    // The chop rides the swell instead of scrolling over it: sampling the noise at a
+    // coordinate the swell itself offsets is what ties the small ripples to the big
+    // forms, so they travel together and the surface reads as one body of water.
+    float3 ripple=noiseGradient(plane+wavePhase.xy+swell*float2(.62,.33));
+    // waveFlow.w is the wave gate. With WAVES off there is no slope, no refraction
+    // distortion, no roughness and no foam, whatever the field would have said.
+    float2 slopes=(ripple.yz*.72*filter+swellSlope)*waveFlow.w;
     // The chop's sampled VALUE fades with the footprint too, not only its slope:
     // unresolved value noise aliases into a fixed screen-aligned grid, which is what
     // read as square patterns on distant water. The swell keeps its value, so crest
     // masks and the sun road stay alive at range.
-    float2 detail=float2(lerp(.5,ripple.x,filter),swell*.3225+.5);
+    float2 detail=float2(lerp(.5,ripple.x,filter),swell*kSwellToUnit+.5);
     float2 offset=slopes*controls.y;
     float3 surface=tex2D(surfaceTexture,uv1+offset+waveFlow.xy).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
@@ -259,10 +354,14 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float3 n=safeNormalize(viewNormal);
     // Water can be drawn from either side. Orient the normal and mirror the wave
     // tilt with it; the tilt comes from the real world-space gradient of the field,
-    // rotated into view space by the vertex shader.
+    // rotated into view space by the vertex shader. It is the NEGATIVE gradient: for a
+    // height field the normal is (-dh/dx,-dh/dy,1), and adding the gradient instead -
+    // which is what this line used to do - lit every wave face as though it leaned the
+    // other way, so highlights sat in the troughs. Invisible while the surface was
+    // flat, obvious the moment the geometry started lifting crests.
     float flip=dot(n,v)<0?-1:1;
     n*=flip;
-    float2 tilt=slopes*(controls.z*flip);
+    float2 tilt=-slopes*(controls.z/jacobian)*flip;
     float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
     float3 l=safeNormalize(-lightDirection.xyz);
     float sunElev=dot(l,upWind.xyz);
@@ -322,10 +421,41 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // own, and .17 (1.2/4pi, folded) puts the forward peak near 1.3 and the side lobe near .08.
     float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
         *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0);
+    // A crest thin enough to see through glows when the source is behind it. The lobe
+    // above scatters in every direction; this is the half of it that needs a swell to
+    // exist at all - looking into the light at the top of a wave - and it is the single
+    // strongest cue that water is a volume rather than a surface with a picture on it.
+    // Both gates matter: facing away from the light, or in a trough, there is no glow.
+    float backlit=saturate(-dot(v,l)*1.7-.45)*saturate(detail.y*1.7-.45);
+    inScatter*=1+2.2*backlit;
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
-    float crest=saturate(.55+detail.x*.45+dot(slopes,float2(.18,-.12)));
+    // Foam lives on the crest of a wave and in the chop that breaks it, so it is gated on
+    // the swell's own height rather than on a slope projected down one arbitrary direction.
+    float crest=saturate(.42+detail.y*.6+detail.x*.3);
     float rough=saturate(bodyStyle.z+length(slopes)*bodyStyle.y);
+    // WHITECAPS: foam on the EDGES of the waves. Three things have to agree before a wave
+    // breaks - it has to be at its peak, the Gerstner surface has to be pinching there
+    // (the same number that sharpened the normal above, so foam appears exactly where the
+    // geometry is steepening), and the chop has to be there to tear the line into streaks
+    // instead of painting a stripe along every wave in the sea. `pinch` is zero on water
+    // that was authored flat, so a calm zone shows no white line at all however high its
+    // wind is, and a storm shows one on every third crest.
+    float wind=upWind.w;
+    float breaking=saturate(pinch*2.4);
+    float capBand=detail.y*1.06+breaking*.30+(detail.x-.5)*.26;
+    float whitecap=smoothstep(.86,1.02,capBand)*wind;
+    // Foam where the bottom comes up fast is the one cue available for a river hitting a
+    // rock: the depth buffer is the only geometry this pass can read.
+    float shoal=saturate(length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))*bodyStyle.w-.3);
+    float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter);
+    float foamAmount=(shore*waterStyle.z*(.35+.65*wind)
+        +(crestMask*.45+whitecap*1.15+shoal*.6)*wind*foreverStyle.w)*crest;
+    // Foam is not a decal on the water, it is a different surface: it does not mirror the
+    // sky and it does not carry the sun road. Adding it to the roughness here spreads the
+    // reflection toward the sky term and widens the glint lobe, and the two multipliers
+    // below take the rest of the mirror away, all before either is computed.
+    rough=saturate(rough+foamAmount*1.4);
     // What the surface reflects at grazing angles is the sky, not a flat fog
     // colour: horizon first, then a darker zenith, with the sun or moon disc in it -
     // the one clearly visible tell of the new renderer on open water. A wave face
@@ -455,21 +585,21 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             saturate(dot(wave,toLight))*reach*reach/(1+distance*distance*.035);
     }
     rgb+=localReflection*localControl.y;
-    float reflectionAmount=saturate(fresnel*(1.0-.5*rough)*(reflectionStyle.x*.5+reflectionControl.x*hit*1.5));
+    // Foam takes the mirror with it: a whitecap is a matte, air-filled surface, so it
+    // keeps a fraction of the sky sheen and none of the sharp screen-space hit.
+    float reflectionAmount=saturate(fresnel*(1.0-.5*rough)*(reflectionStyle.x*.5+reflectionControl.x*hit*1.5))
+        *(1-saturate(foamAmount*.85));
     rgb=lerp(rgb,reflected,reflectionAmount);
     // 4. Celestial reflection path, then foam. Wind decides how much of any of it
     // exists: an authored calm river shows no white line at all, an authored sea
-    // whips up on crest shoulders and where the flow shallows over a bar.
-    float pathEnergy=saturate(celestialPath*controls.w*.0992);   // .62 * (1/2pi), folded
+    // whips up on the crest edges and where the flow shallows over a bar. The masks
+    // themselves were built with the wave field above, before anything they had to
+    // suppress was computed.
+    float pathEnergy=saturate(celestialPath*controls.w*.0992)*(1-saturate(foamAmount));   // .62 * (1/2pi), folded
     rgb+=sheenColor*pathEnergy*(.35+.65*fresnel);
-    float wind=upWind.w;
-    float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter);
-    // Foam where the bottom comes up fast is the one cue available for a river
-    // hitting a rock: the depth buffer is the only geometry this pass can read.
-    float shoal=saturate(length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))*bodyStyle.w-.3);
-    float waveFoam=(crestMask*.8+shoal*.6)*wind;
-    float foamAmount=(shore*waterStyle.z*(.35+.65*wind)+waveFoam*foreverStyle.w)*crest;
-    rgb+=(deepTint.rgb*.3+float3(.42,.48,.43))*foamAmount*(.6+.4*saturate(NoL))*deepTint.a;
+    // Lit with a wrapped diffuse, so foam on the shaded side of a crest is still visible
+    // against the water it sits on, and scaled by the authored foam brightness.
+    rgb+=(deepTint.rgb*.3+float3(.42,.48,.43))*foamAmount*(.55+.45*saturate(NoL+.25))*deepTint.a;
     if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
@@ -496,7 +626,7 @@ void ReloadTuning(){
     // Match the menu's source and default exactly. An obsolete Enabled=0 in
     // ModernWoWRenderer.ini must not veto a live (including per-location) ON.
     effectEnabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",1,tuningIni.c_str())!=0;
-    wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",0)!=0;
+    wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",1)!=0;
     reflectionsEnabled=ReadTuning(L"ReflectionsEnabled",1)!=0;refractionEnabled=ReadTuning(L"RefractionEnabled",1)!=0;
     depthEnabled=ReadTuning(L"DepthEnabled",1)!=0;foamEnabled=ReadTuning(L"FoamEnabled",1)!=0;sunGlintEnabled=ReadTuning(L"SunGlintEnabled",1)!=0;
     strength=std::clamp(ReadTuning(L"RipplePermille",18),0,50)*.001f;
@@ -516,7 +646,7 @@ void ReloadTuning(){
     sunGlintStrength=std::clamp(ReadTuning(L"SunGlintPercent",160),0,400)*.01f;
     fresnelStrength=std::clamp(ReadTuning(L"FresnelPercent",100),0,200)*.01f;
     crestFoamStrength=std::clamp(ReadTuning(L"CrestFoamPercent",20),0,100)*.01f;
-    geometryWaveAmplitude=std::clamp(ReadTuning(L"GeometryWavePercent",10),0,35)*.01f;
+    geometryWavePercent=float(std::clamp(ReadTuning(L"GeometryWavePercent",100),0,300));
     waveScalePercent=std::clamp(ReadTuning(L"WaveScalePercent",100),25,400)*1.f;
     clarityPercent=float(std::clamp(ReadTuning(L"ClarityPercent",100),5,200));
     windStrengthPercent=float(std::clamp(ReadTuning(L"WindStrengthPercent",100),0,200));
@@ -745,13 +875,11 @@ struct Scope {
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,3)))return;
             // Relative time avoids both uptime-sized float precision loss and
-            // the old discontinuous wave jump every ten minutes.
-            // Relative time avoids both uptime-sized float precision loss and
             // the old discontinuous wave jump every ten minutes. It is integrated by the sea clock
             // rather than read from the counter, because wave travel speed is now something that
             // changes, and multiplying an absolute clock by a changing speed moves every crest.
             const double elapsed=seaMotion_.Time();
-            float controls[68]={float(elapsed),strength,normalStrength,specularStrength};
+            float controls[68]={0.f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
@@ -803,33 +931,61 @@ struct Scope {
             // The wave field itself is built in world space. Its phase carries
             // the camera position (so the pattern is nailed to the terrain and
             // not to a tile's uv or to the viewport) and the flow animation,
-            // both reduced in double and wrapped into the lattice period so the
-            // shader never evaluates a coordinate large enough to lose the
-            // fraction bits that keep noise from collapsing into squares.
+            // both reduced in double and wrapped into a period so the shader
+            // never evaluates a coordinate large enough to lose the fraction
+            // bits that keep noise from collapsing into squares.
             const auto& waveFrame=renderer::FrameContext::Current();
+            // The anchor comes from THIS draw's own model->view matrix, read back from the
+            // vertex constants the shader is about to use. A frame-captured camera cannot
+            // serve here: it is captured on the first draw of the frame that carries the
+            // perspective constants, so a water tile drawn before it is anchored to LAST
+            // frame's camera and the sea slides backwards by exactly the distance the
+            // player moved, and the client's own reflection pass renders water under a
+            // mirrored camera that the capture never sees at all. Reading the draw is also
+            // what makes the vertex stage's camera-relative coordinate and this phase two
+            // halves of one anchor instead of two approximations of one.
+            float modelView[4][4]{};
+            auto anchor=SUCCEEDED(d->GetVertexShaderConstantF(5,&modelView[0][0],4))
+                ? renderer::water::AnchorFromModelView(modelView) : renderer::water::DrawAnchor{};
+            if(!anchor.valid) {
+                // No rigid basis on this draw (an unfilled constant register, a fixture):
+                // fall back to the captured camera, which is at least the right world, and
+                // to the captured up axis - taken across the columns, which is the same
+                // convention the vertex stage uses for world +Z in view space.
+                anchor.camera[0]=waveFrame.cameraPosition.x;
+                anchor.camera[1]=waveFrame.cameraPosition.y;
+                anchor.valid=waveFrame.cameraValid;
+                const bool viewValid=waveFrame.viewRawValid;
+                anchor.up[0]=viewValid?waveFrame.viewRaw.m[0][2]:0.f;
+                anchor.up[1]=viewValid?waveFrame.viewRaw.m[1][2]:0.f;
+                anchor.up[2]=viewValid?waveFrame.viewRaw.m[2][2]:1.f;
+            }
             // The clock above already contains the flow speed, so it arrives here as 1: passing it
             // twice would scale the same field by speed squared, and weather would look like a jump
             // in travel rather than an increase of it. Weather also puts a cross-chop on the swell
             // by taking the authored flow rotation further across it.
             const float seaCounter=std::clamp(flowRotation*(1.f+seaShear),0.f,1.f);
             const auto wave=renderer::water::BuildWaveField(elapsed,1.f,seaCounter,
-                waveScalePercent,waveFrame.cameraPosition.x,waveFrame.cameraPosition.y,
-                waveFrame.cameraValid,wavesEnabled);
+                waveScalePercent,anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled);
+            // Geometry waves: the lift and the slide toward the crest, with the steepness
+            // already clamped fold-safe on the CPU, so no slider combination can turn a
+            // wave inside out. `sigma` goes to the pixel stage whether or not the mesh is
+            // being displaced, because the crest sharpening and the whitecap mask are
+            // properties of the sea and not of the toggle.
+            const auto geometry=renderer::water::BuildGeometryWaves(geometryWavePercent,
+                waveScalePercent,seaAgitation,geometryWavesEnabled,wavesEnabled);
+            controls[0]=geometry.sigma;
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
             controls[38]=wave.lattice[2];controls[39]=wave.lattice[3];
-            controls[40]=wave.phase[0];controls[41]=wave.phase[1];
-            controls[42]=wave.phase[2];controls[43]=wave.phase[3];
+            controls[40]=wave.ripplePhase[0];controls[41]=wave.ripplePhase[1];
+            controls[42]=wave.swellPhase[0];controls[43]=wave.swellPhase[1];
             controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
-            controls[46]=renderer::water::kSwellRadians;controls[47]=0.f;
-            // Per-body authoring. The up axis comes from the same frame the vertex
-            // stage used, so the sky gradient, the sun elevation and the wind term
-            // point the right way for this draw - including a reflected water pass,
-            // which runs under the reflection camera rather than the player's.
-            const auto& viewMatrix=waveFrame.viewRaw.m;
-            const bool viewValid=waveFrame.viewRawValid;
-            controls[48]=viewValid?viewMatrix[2][0]:0.f;
-            controls[49]=viewValid?viewMatrix[2][1]:0.f;
-            controls[50]=viewValid?viewMatrix[2][2]:1.f;
+            controls[46]=wave.swellPhase[2];controls[47]=wavesEnabled?1.f:0.f;
+            // Per-body authoring. The up axis comes from the draw's own matrix, so the sky
+            // gradient, the sun elevation and the wind term point the right way for this
+            // draw - including a reflected water pass, which runs under the reflection
+            // camera rather than the player's.
+            controls[48]=anchor.up[0];controls[49]=anchor.up[1];controls[50]=anchor.up[2];
             controls[51]=seaWind;   // authored WIND, scaled by how much wind the water is actually in
             // Light penetration is authored as "how far light reaches" instead of an
             // absorption coefficient, which is how the reference describes it: 200 is a
@@ -853,13 +1009,14 @@ struct Scope {
             controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
             controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
             controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
-            // The vertex stage gets the pixel shader's swell phase verbatim, plus the
-            // angular frequency of its train, so displaced crests are the same waves the
-            // shading lights. Registers: c200 controls, c201 lattice, c202 phase.
-            float vertexControls[12]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,
-                wavesEnabled?swellStrength:0,renderer::water::kSwellRadians,
+            // The vertex stage gets the pixel shader's swell phases verbatim, so displaced
+            // crests are the same waves the shading lights, plus its own lift/slide pair and
+            // the cell length that turns lattice axes back into world directions.
+            // Registers: c200 control, c201 lattice, c202 phase.
+            float vertexControls[12]={geometry.amplitude,geometry.lateral,geometry.sigma,
+                geometry.cellYards,
                 wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
-                wave.phase[2],wave.phase[3],0.f,0.f};
+                wave.swellPhase[0],wave.swellPhase[1],wave.swellPhase[2],0.f};
             if(cachedShaderDevice != d) {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
