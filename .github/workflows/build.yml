@@ -138,8 +138,16 @@ jobs:
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
-          & cmd.exe /c tools\Test-Environment.cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = & cmd.exe /c tools\Test-Environment.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Environment regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Environment regression results::$flat"
 
       - name: Weather motion regressions
         if: matrix.configuration == 'Release'
