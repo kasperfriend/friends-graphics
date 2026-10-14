@@ -17,6 +17,7 @@
 #include "src/Core/FrameContext.h"
 #include "src/Water/WaterMaterial.h"
 #include "src/Water/WaveField.h"
+#include "src/Water/WaterSeaState.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
@@ -35,6 +36,25 @@ float geometryWaveAmplitude=.10f;
 // spans more than a cell. Both are world-space (yards), because the wave field
 // is anchored to the terrain rather than to a tile's uv.
 float waveScalePercent=100.f,waveSofteningPercent=100.f;
+// Per-body authoring, exactly the three controls the reference renderer exposes:
+// movement (flow, wave size, wind), look (clarity, absorption colour, deep colour,
+// water tint) and reflection (SSR strength, sheen, the reflected sun/moon disc).
+// Every one of them is read per area first, so a murky swamp and a clear mountain
+// lake can differ without a code change.
+float clarityPercent=100.f,windStrengthPercent=100.f,roughnessPercent=100.f;
+float sheenPercent=50.f,shoalFoamPercent=100.f,sunDiscPercent=40.f,foamBrightPercent=100.f;
+float sparklePercent=100.f;
+unsigned waterColourTint=0x808080u,deepColour=0x0e2a28u,absorptionColour=0xff8c6bu;
+// The sea state: what this zone asked for and what the sky is doing, eased once per frame in
+// Present() and multiplied into the controls below. It is the identity when a zone is untuned and
+// the weather is clear, which is what lets `ZoneWaves` default to on.
+float seaAgitation=1.f,seaMotion=1.f,seaShear=0.f,seaWind=1.f;
+float weatherResponse=1.f,weatherEaseSeconds=14.f;
+bool zoneWavesEnabled=true;
+renderer::water::SeaWeather seaWeather;
+renderer::water::SeaStateFilter seaFilter;
+renderer::water::SeaMotionClock seaMotion_;
+renderer::FrameClock seaFrameClock;
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
@@ -76,15 +96,17 @@ float4 modelView[4]:register(c5);
 float4 uvAX:register(c9);float4 uvAY:register(c10);float4 uvAOffset:register(c12);
 float4 uvBX:register(c13);float4 uvBY:register(c14);float4 uvBOffset:register(c16);
 float4 lightDirection:register(c33);float4 ambient:register(c34);float4 diffuse:register(c35);
-// x=time, y=world-space displacement amplitude, z=long-wave strength,
-// w=geometry wave cycles per wave lattice cell (0 keeps the surface flat).
+// x=time (unused here: the flow phase carries animation), y=world-space
+// displacement amplitude, z=long-wave strength,
+// w=radians per lattice cell for the long swell train (0 keeps the surface flat).
 float4 waveControl:register(c200);
 // Rows of the world->lattice matrix; the same value c209 carries to the PS.
 float4 waveLattice:register(c201);
-// xy=this draw's camera position in lattice cells, added back before the sines so
-// the wave is nailed to the terrain rather than sliding across it as the camera
-// moves. Unwrapped on purpose: see WaveField.h.
-float4 waveAnchor:register(c202);
+// zw of the pixel shader's c210: the swell's own phase, in cells. Sharing that one
+// number is what keeps a displaced crest and the light on it on the same wave, and
+// because both trains' periods divide the pixel shader's 64-cell wrap, the wrapped
+// phase costs this stage nothing - the displacement needs no anchor of its own.
+float4 wavePhase:register(c202);
 struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
@@ -105,10 +127,9 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     // displacement is applied after the view transform, along the world up axis,
     // because a tile's uv restarts every 533 units and would stamp identical
     // square bumps onto every tile.
-    float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw))+waveAnchor.xy;
-    float phaseA=cell.x*6.28318*waveControl.w+waveControl.x*.72;
-    float phaseB=cell.y*6.28318*waveControl.w*.63-waveControl.x*.43;
-    p.xyz+=waveControl.y*(sin(phaseA)+sin(phaseB)*.55)*(.55+.45*waveControl.z)*
+    float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw))+wavePhase.zw;
+    float2 arg=cell*float2(waveControl.w,waveControl.w*2.0);
+    p.xyz+=waveControl.y*(sin(arg.x)+sin(arg.y)*.55)*(.55+.45*waveControl.z)*
         float3(modelView[0].z,modelView[1].z,modelView[2].z);
     o.pos=projection[0]*p.x+projection[1]*p.y+projection[2]*p.z+projection[3]*p.w;
     o.fog=min(pow(max(p.z*fogParams.x+fogParams.y,0),fogParams.z),1);
@@ -141,9 +162,9 @@ float4 lightColor:register(c202);
 // x=depth unpack A,y=depth unpack B with the viewport MaxZ folded in, so a
 // captured depth costs one subtraction and one divide; z,w=screen scale.
 float4 reflectionProjection:register(c203);
-// x=SSR strength,y=1/width,z=1/height,w=viewport depth maximum
+// x=SSR strength
 float4 reflectionControl:register(c204);
-// x=environment strength,y=max trace distance,z=base thickness,w=enabled
+// x=environment strength,y=max trace distance,z=base thickness,w=capture valid
 float4 reflectionStyle:register(c205);
 // x=wave anti-alias gain, yz=refraction uv scale, w=debug mode
 float4 flowControl:register(c206);
@@ -153,10 +174,25 @@ float4 waterStyle:register(c207);
 float4 foreverStyle:register(c208);
 // Rows of the world->lattice matrix, scaled by 1/cell and rotated with the flow.
 float4 waveLattice:register(c209);
-// xy=ripple phase, zw=long swell phase, both wrapped into the lattice period.
+// xy=ripple phase, zw=long swell phase, in cells, wrapped into the lattice.
 float4 wavePhase:register(c210);
-// xy=drift of the client's own detail map in its uv, z=swell/octave ratio.
+// xy=drift of the client's detail map in its uv, z=radians per cell for the long
+// swell train (the secondary train is exactly twice as frequent).
 float4 waveFlow:register(c211);
+// xyz=world up in view space, w=wind strength: how much sea state this body of
+// water is authored to carry. Everything that whips up foam or breaks a reflection
+// is scaled by it, so a river authored calm stays glass.
+float4 upWind:register(c212);
+// x=how deep light reaches (per view column), y=specular roughness gain,
+// z=sheen floor, w=shoal foam gain
+float4 bodyStyle:register(c213);
+// rgb=water tint (0x808080 is neutral, it multiplies the client's own colour),
+// a=gain on the reflected sun/moon disc
+float4 waterTint:register(c214);
+// rgb=the colour light converges to at depth, a=foam brightness
+float4 deepTint:register(c215);
+// rgb=per-channel absorption bias (a red-heavy value kills red first), w=sparkle gain
+float4 absorbTint:register(c216);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
 // Analytic value noise on one rotated lattice, evaluated for all four corner
 // hashes at once. Every hash argument is folded into a bounded range first:
@@ -194,32 +230,47 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     float4 base=tex2D(baseTexture,uv0);
-    // One rotated, world-anchored lattice carries both octaves: the fine ripple
-    // that disturbs the reflection and the long swell that moves the normal.
+    // One world-anchored lattice carries both scales. The long swell is analytic -
+    // rounded forms, exact slopes for free, and the same waves the vertex stage
+    // displaces, so a crest and the light on it cannot drift apart - and only the
+    // chop on top of it is noise.
     float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
     float2 footprint=fwidth(plane);
-    // Fade the unresolved octave by the pixel's own footprint.
+    // Fade the unresolved octave by the pixel's own footprint. The swell is never
+    // faded: a forty yard wave is still resolvable at any distance a lake can be
+    // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
-    float3 swell=noiseGradient(plane*waveFlow.z+wavePhase.zw);
-    float3 ripple=noiseGradient(plane+wavePhase.xy+float2(swell.x,swell.x*.71));
+    float2 swellArg=(plane+wavePhase.zw)*float2(waveFlow.z,waveFlow.z*2.0);
+    float2 swellCos=cos(swellArg);
+    float swell=sin(swellArg.x)+sin(swellArg.y)*.55;
+    float2 swellSlope=float2(swellCos.x*waveFlow.z,swellCos.y*waveFlow.z*1.1)*foreverStyle.x;
+    float3 ripple=noiseGradient(plane+wavePhase.xy+float2(swell*.71,swell*.37));
     float flowGate=saturate(controls.y*100+controls.z*4);
-    float2 slopes=(ripple.yz*.72+swell.yz*foreverStyle.x)*filter*flowGate;
-    // The sample VALUE has to fade with the footprint too, not only its slope:
-    // unresolved value noise aliases into a fixed screen-aligned grid, which is
-    // exactly what read as square patterns on distant water.
-    float2 detail=lerp(.5,float2(ripple.x,swell.x),filter);
+    float2 slopes=(ripple.yz*.72*filter+swellSlope)*flowGate;
+    // The chop's sampled VALUE fades with the footprint too, not only its slope:
+    // unresolved value noise aliases into a fixed screen-aligned grid, which is what
+    // read as square patterns on distant water. The swell keeps its value, so crest
+    // masks and the sun road stay alive at range.
+    float2 detail=float2(lerp(.5,ripple.x,filter),swell*.3225+.5);
     float2 offset=slopes*controls.y;
     float3 surface=tex2D(surfaceTexture,uv1+offset+waveFlow.xy).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
     float3 v=safeNormalize(-viewPos);
     float3 n=safeNormalize(viewNormal);
     // Water can be drawn from either side. Orient the normal and mirror the wave
-    // tilt with it; the tilt comes from the real world-space gradient of the
-    // field, rotated into view space by the vertex shader.
+    // tilt with it; the tilt comes from the real world-space gradient of the field,
+    // rotated into view space by the vertex shader.
     float flip=dot(n,v)<0?-1:1;
     n*=flip;
     float2 tilt=slopes*(controls.z*flip);
     float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
+    float3 l=safeNormalize(-lightDirection.xyz);
+    float sunElev=dot(l,upWind.xyz);
+    // A wave has to change the BODY of the water, not only its highlight. What makes
+    // a swell read as a rounded form is a lit back and a shaded face, and the
+    // hemisphere it sees: both are differences against the geometric normal, so flat
+    // water and an authored zero-strength sea stay exactly as the client drew them.
+    rgb*=1+controls.z*(1.9*(dot(wave,l)-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
     float depthScale=1/max(viewPos.z,.05);
@@ -242,28 +293,107 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // genuinely deep, not "not water" - treat it as maximum depth instead.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
-    float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz:float2(0,0));
+    float column=min(effectiveDepth,400.0);
+    // Shallow water barely bends the world; the deeper the column, the further the
+    // refracted sample is pulled. This is what keeps a bar and a shoreline crisp
+    // while open water shimmers.
+    float bend=waterStyle.x*saturate(column*.05+.25);
+    float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
     // Reject distortion across foreground silhouettes, rather than pulling
     // a bridge/character into the water. Missing depth keeps the native body.
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
     refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
     float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
-    float3 deepTint=fogColor.rgb*.1596+float3(.0155,.0651,.0837);
-    float absorption=captureValid*(1-exp(-effectiveDepth*waterStyle.y*.14));
+    // Beer-Lambert per channel, with the authored deep colour as the asymptote:
+    // "clear mountain lake" and "murky swamp" are then one number apart (Clarity)
+    // instead of a re-tune of every term. Red dies first, which is why a deep pool
+    // reads teal rather than as a darker grey.
+    float3 transmittance=exp(-bodyStyle.x*waterStyle.y*column*absorbTint.rgb);
+    float absorption=captureValid*(1-transmittance.g);
+    // Light scattering back out of the column is what makes a crest glow when the
+    // source is behind it. Without it water is a surface pasted onto the world;
+    // a Henyey-Greenstein lobe forwards that glow into the sun, which is where the
+    // reference shots put it.
+    float g=.3+.34*saturate(sunElev);
+    float phaseDen=max(1+g*g-2*g*dot(-v,l),1e-3);
+    // The lobe is divided by 4*pi as well as normalized in exponent: a (1-g^2)/den^2 phase
+    // function peaks at 18x on a face turned toward the sun, and the CPU preview showed what
+    // that did to a whole sea - one flat pale wash. The 3/2 exponent is the HG function's
+    // own, and .17 (1.2/4pi, folded) puts the forward peak near 1.3 and the side lobe near .08.
+    float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
+        *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0);
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
     float crest=saturate(.55+detail.x*.45+dot(slopes,float2(.18,-.12)));
-    float3 l=safeNormalize(-lightDirection.xyz);
-    float ndh=saturate(dot(wave,safeNormalize(l+v)));
-    float ndl=saturate(dot(wave,l));
-    // One rough specular lobe with wave breakup creates the sun road. The
-    // previous shader evaluated three overlapping lobes, a halo and another
-    // copy of the same path; besides washing out water, it exceeded PS3 limits.
-    float foreverFresnel=pow(1-saturate(dot(wave,v)),2);
-    float fresnel=saturate(.08+foreverStyle.z*(.10+.62*foreverFresnel));
-    float pathBreakup=.18+.82*saturate(detail.x*.7+detail.y*.3);
-    float celestialPath=pow(ndh,64)*pathBreakup*foreverStyle.y*fresnel*ndl;
-
+    float rough=saturate(bodyStyle.z+length(slopes)*bodyStyle.y);
+    // What the surface reflects at grazing angles is the sky, not a flat fog
+    // colour: horizon first, then a darker zenith, with the sun or moon disc in it -
+    // the one clearly visible tell of the new renderer on open water. A wave face
+    // tilted far enough to look down leaves rayUp at zero, so it reflects the bright
+    // horizon band instead of the seabed, which is also what the reference does.
+    float3 ray=safeNormalize(reflect(-v,wave));
+    float rayUp=saturate(dot(ray,upWind.xyz));
+    float3 sky=lerp(fogColor.rgb,fogColor.rgb*.5+float3(.015,.045,.11)*saturate(sunElev*2+.25),
+                    rayUp*rayUp);
+    sky+=max(lightColor.rgb,0)*pow(saturate(dot(ray,l)),160)*waterTint.a;
+    // 2. Screen-space reflections against the pre-water copy, perturbed by the
+    // wave normal. Eight steps: the extra four bought a marginally sharper hit
+    // and cost the whole frame budget of two other terms.
+    float3 environment=sky;
+    float3 reflected=environment;
+    float hit=0;
+    if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
+        float3 hitColor=environment;
+        [loop] for(int stepIndex=0;stepIndex<8;++stepIndex) {
+            float q=(stepIndex+1)/8.0;
+            float traceDistance=.45+q*q*reflectionStyle.y;
+            float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
+            float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z/max(samplePosition.z,.05),
+                                   .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
+            float inside=step(.05,samplePosition.z)*saturate(min(min(sampleUV.x,sampleUV.y),
+                                      min(1-sampleUV.x,1-sampleUV.y))*8);
+            float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
+            float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
+            float difference=samplePosition.z-sceneZ;
+            float thickness=reflectionStyle.z+traceDistance*.05;
+            // A ray leaving the surface can only hit something in front of it, so
+            // one narrow band replaces the confidence-maximisation this used to run per
+            // step: the first sample inside the band wins and later steps cannot
+            // overwrite it, which is the right answer for a surface this smooth.
+            float confidence=inside*step(-thickness,difference)*step(difference,thickness*.5);
+            hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,confidence*(1-hit));
+            hit=max(hit,confidence);
+        }
+        reflected=lerp(environment,hitColor,saturate(hit*1.8));
+    }
+    // Rough water does not lose reflection energy, it spreads it out. Mixing the
+    // sharp screen-space hit back toward the smooth sky by the wave's own roughness
+    // is the cheap stand-in for the blurred mip chain this pass cannot sample.
+    reflected=lerp(reflected,environment,saturate(rough*1.6));
+    // Real Schlick with water's index of refraction (F0 = 0.02). This is the term
+    // that decides whether water reads as glass or as a mirror, and the hand-tuned
+    // curve it replaces was the one thing that could not be authored per body.
+    float3 H=safeNormalize(v+l);
+    float NoV=max(dot(wave,v),1e-4);
+    float foreverFresnel=saturate(1-NoV);
+    float fresnel=(.02+.98*pow(foreverFresnel,5.0))*foreverStyle.z;
+    // One GGX lobe, widened by the sun's own angular disc. That widening is what
+    // stretches a low sun into the long shimmering band in the reference while a
+    // high sun keeps a short tight one - and it costs nothing per step. This shader
+    // used to evaluate three overlapping lobes plus a halo, which washed water out
+    // and exceeded PS3 limits; one lobe plus a breakup mask is all it needed.
+    float NoH=saturate(dot(wave,H));
+    float NoL=dot(wave,l);
+    // The exponent IS the roughness and the sun's height: a low source smears the
+    // road wide, a high one keeps it short and tight, and chop broadens it further.
+    // That replaces a full Smith visibility chain, which cost eight slots to describe
+    // a falloff the lobe width already produces.
+    float sharpness=lerp(26.0,230.0,saturate(sunElev*1.8))/(1.0+rough*7.0)*absorbTint.w;
+    // (sharpness+2) is the lobe's own energy normalization: pow(NoH,n) integrates to
+    // 2*pi/(n+2), so without it a low sun smears a dim band and a high sun - where n is
+    // large - faded to nothing. The CPU preview showed a whole sea with no sun road at all.
+    float celestialPath=pow(NoH,sharpness)*(sharpness+2.0)*fresnel*saturate(NoL)
+        *(.12+.88*saturate(detail.x*.75+detail.y*.25))*foreverStyle.y;
     // March from this water point toward the sun/moon through the captured
     // pre-water depth buffer. Buildings and terrain suppress direct glint,
     // while ambient sky reflection remains visible under cover.
@@ -275,63 +405,42 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             float3 lightSample=viewPos+wave*.18+l*traceDistance;
             float2 lightUV=float2(.5+.5*lightSample.x*reflectionProjection.z/max(lightSample.z,.05),
                                   .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
-            float inside=step(0,lightUV.x)*step(lightUV.x,1)*step(0,lightUV.y)*step(lightUV.y,1)*step(.05,lightSample.z);
+            float inside=step(.05,lightSample.z)*saturate(min(min(lightUV.x,lightUV.y),
+                                    min(1-lightUV.x,1-lightUV.y))*8);
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
-            float delta=lightSample.z-blockerZ;
-            float thickness=2.0+traceDistance*.10;
-            float blocked=inside*step(blockerZ,99999)*step(.12,delta)*step(delta,thickness);
+            // Anything nearer than the sample point occludes the source: a single
+            // sided band where the old version tested a thickness window on top of
+            // an in-range test, which cost three more slots to say the same thing.
+            float blocked=inside*step(blockerZ+1.5,lightSample.z);
             lightVisibility*=1.0-blocked;
         }
     }
     celestialPath*=lightVisibility;
     float3 sheenColor=max(lightColor.rgb,0);
-    rgb*=1+controls.z*.6*(dot(wave,l)-dot(n,l));
-
-    // 1. Water body: bottom refracted scene + depth absorption
+    // 1. Water body: refracted bottom, absorbed and scattered through the column.
     float3 waterBody=rgb;
+    // Gated on the capture, exactly as before: without a depth/colour copy there is
+    // no column to absorb through, and inventing one would break the promise that an
+    // unmatched or uncaptured water pixel keeps the client's own colour.
     if(captureValid>.5) {
-        float3 bottom=lerp(rgb,refracted,depthValid*saturate(waterStyle.x));
-        waterBody=lerp(bottom,deepTint,saturate(absorption*(.85-.22*fresnel)));
+        // Refraction strength scales the BLEND, never the colour: with refraction off
+        // this has to fall back to the client's own pixels, not to a black bottom.
+        float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;
+        float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));
+        // And the depth transition stays independent of it, so a lake with refraction
+        // switched off still gets dark the further the bottom is away.
+        waterBody=lerp(body,deepTint.rgb+inScatter,saturate(absorption*(.85-.22*fresnel)));
     }
-
-    // 2. Screen-Space Reflections (SSR) with wave normal perturbation
-    float3 environment=lerp(fogColor.rgb,max(sheenColor,.08),.28);
-    float3 reflected=environment;
-    float hit=0;
-    if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
-        float3 ray=safeNormalize(reflect(-v,wave));
-        float3 hitColor=environment;
-        float bestConfidence=0;
-        [loop] for(int stepIndex=0;stepIndex<12;++stepIndex) {
-            float q=(stepIndex+1)/12.0;
-            float traceDistance=.45+q*q*reflectionStyle.y;
-            float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
-            float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z/max(samplePosition.z,.05),
-                                   .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
-            // border is already zero outside the viewport; don't compute the
-            // same four inside tests a second time for every SSR step.
-            float inside=step(.05,samplePosition.z);
-            float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
-            float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
-            float difference=samplePosition.z-sceneZ;
-            float thickness=reflectionStyle.z+traceDistance*.05;
-            float range=saturate(1-abs(difference)/max(thickness,.01));
-            float sided=step(-thickness*.28,difference);
-            float border=saturate(min(min(sampleUV.x,sampleUV.y),min(1-sampleUV.x,1-sampleUV.y))*8);
-            float confidence=inside*step(sceneZ,99999)*sided*range*border;
-            float replace=step(bestConfidence+.0001,confidence);
-            hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,replace);
-            bestConfidence=max(bestConfidence,confidence);
-        }
-        hit=saturate(bestConfidence*1.8);
-        reflected=lerp(environment,hitColor,hit);
-    }
-
-    // 3. Surface reflection according to Fresnel and SSR strength
-    float reflectionAmount=saturate((.10+.65*foreverFresnel)*(reflectionStyle.x*.55+reflectionControl.x*hit*1.6));
-    rgb=lerp(waterBody,reflected,reflectionAmount);
-
+    // Per-body colour authoring multiplies rather than replaces, so the zone's own
+    // painted water survives tinted instead of being overwritten: 0x808080 neutral.
+    // The CPU uploads the bytes divided by 128, so the register already carries 1.0 at
+    // neutral and there is no gain to apply here. Doubling it (as an earlier revision of
+    // this line did) puts every authored colour a stop high and clips the bright ones:
+    // `tools/WaterDeviceRegression.cpp` renders a captured 128 gray through the whole
+    // shader and requires 128 back, which is where that doubling showed up as 255.
+    waterBody*=waterTint.rgb;
+    rgb=waterBody;
     // Direct reflection of actual local emitters on the same wave normal.
     // This does not depend on SSR finding an opaque flame in scene depth.
     float3 localReflection=0;
@@ -346,13 +455,21 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             saturate(dot(wave,toLight))*reach*reach/(1+distance*distance*.035);
     }
     rgb+=localReflection*localControl.y;
-
-    // 4. Celestial reflection path & shore/crest foam
-    float pathEnergy=saturate(celestialPath*controls.w*.62);
-    rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
-    float waveFoam=smoothstep(.70,.91,detail.x*.7+detail.y*.3+length(swell.yz)*.10*filter);
-    float foamAmount=(shore*waterStyle.z+waveFoam*foreverStyle.w)*crest;
-    rgb+=float3(.42,.48,.43)*foamAmount;
+    float reflectionAmount=saturate(fresnel*(1.0-.5*rough)*(reflectionStyle.x*.5+reflectionControl.x*hit*1.5));
+    rgb=lerp(rgb,reflected,reflectionAmount);
+    // 4. Celestial reflection path, then foam. Wind decides how much of any of it
+    // exists: an authored calm river shows no white line at all, an authored sea
+    // whips up on crest shoulders and where the flow shallows over a bar.
+    float pathEnergy=saturate(celestialPath*controls.w*.0992);   // .62 * (1/2pi), folded
+    rgb+=sheenColor*pathEnergy*(.35+.65*fresnel);
+    float wind=upWind.w;
+    float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter);
+    // Foam where the bottom comes up fast is the one cue available for a river
+    // hitting a rock: the depth buffer is the only geometry this pass can read.
+    float shoal=saturate(length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))*bodyStyle.w-.3);
+    float waveFoam=(crestMask*.8+shoal*.6)*wind;
+    float foamAmount=(shore*waterStyle.z*(.35+.65*wind)+waveFoam*foreverStyle.w)*crest;
+    rgb+=(deepTint.rgb*.3+float3(.42,.48,.43))*foamAmount*(.6+.4*saturate(NoL))*deepTint.a;
     if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
@@ -361,7 +478,19 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     result_.mask.a=result_.color.a;
     return result_;
 }
+
 )HLSL";
+// 0xRRGGBB or decimal, per-area scoped like every other water key. Colours are the
+// only values that need text rather than an integer, so they parse here rather than
+// growing a colour type in the shared tuning reader.
+unsigned ReadTuningColour(const wchar_t* key,unsigned fallback){
+    wchar_t value[64]{};
+    renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());
+    if(!value[0])GetPrivateProfileStringW(L"Water",key,L"",value,std::size(value),mainIni.c_str());
+    if(!value[0])return fallback;
+    const auto parsed=wcstol(value,nullptr,value[0]==L'0'&&(value[1]==L'x'||value[1]==L'X')?16:10);
+    return parsed<0?fallback:unsigned(parsed)&0xffffffu;
+}
 int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"Water",key,fallback,mainIni.c_str());}
 void ReloadTuning(){
     // Match the menu's source and default exactly. An obsolete Enabled=0 in
@@ -389,12 +518,29 @@ void ReloadTuning(){
     crestFoamStrength=std::clamp(ReadTuning(L"CrestFoamPercent",20),0,100)*.01f;
     geometryWaveAmplitude=std::clamp(ReadTuning(L"GeometryWavePercent",10),0,35)*.01f;
     waveScalePercent=std::clamp(ReadTuning(L"WaveScalePercent",100),25,400)*1.f;
+    clarityPercent=float(std::clamp(ReadTuning(L"ClarityPercent",100),5,200));
+    windStrengthPercent=float(std::clamp(ReadTuning(L"WindStrengthPercent",100),0,200));
+    roughnessPercent=float(std::clamp(ReadTuning(L"WaveRoughnessPercent",100),0,200));
+    sheenPercent=float(std::clamp(ReadTuning(L"SheenPercent",50),0,100));
+    shoalFoamPercent=float(std::clamp(ReadTuning(L"ShoalFoamPercent",100),0,300));
+    sunDiscPercent=float(std::clamp(ReadTuning(L"SunDiscPercent",40),0,100));
+    foamBrightPercent=float(std::clamp(ReadTuning(L"FoamBrightnessPercent",100),0,200));
+    sparklePercent=float(std::clamp(ReadTuning(L"SparklePercent",100),25,200));
+    waterColourTint=ReadTuningColour(L"WaterColour",0x808080u);
+    deepColour=ReadTuningColour(L"DeepColour",0x0e2a28u);
+    absorptionColour=ReadTuningColour(L"AbsorptionColour",0xff8c6bu);
     waveSofteningPercent=float(std::clamp(ReadTuning(L"WaveSofteningPercent",100),0,400));
     // 0=off, 1=solid magenta (confirms this pixel is our water shader),
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
     waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
+    // Sea state. `WeatherResponsePercent` is a percent of what this zone's own weather damping
+    // allows; the ease time is the clouds' shape (95% in one time constant) so a squall arrives at
+    // the same rate in the sky and on the water.
+    weatherResponse=std::clamp(ReadTuning(L"WeatherResponsePercent",100),0,200)*.01f;
+    weatherEaseSeconds=float(std::clamp(ReadTuning(L"WeatherEaseSeconds",14),1,120));
+    zoneWavesEnabled=ReadTuning(L"ZoneWaves",1)!=0;
     if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
@@ -422,8 +568,35 @@ void Configure(const std::wstring& base) {
     enabled=true;
     log<<"water backend ready; live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
 }
+// Once per frame, from the same weather observation the cloud deck reads (see the call site in
+// ModernWoWRenderer.cpp), so water and sky cannot disagree about whether it is raining. Water does
+// not read the client's weather memory itself: one reader, many reactions.
+void FeedWeather(int kind,float strength) noexcept {
+    seaWeather.kind=std::clamp(kind,0,3);
+    seaWeather.strength=std::isfinite(strength)?std::clamp(strength,0.f,1.f):0.f;
+}
+// The zone's own wave energy, as authored for the current map/zone/area. `ZoneWaves=0` pins it to
+// 1, which is the pre-zone behaviour: a global WIND/WAVE SIZE setup with no per-area sea state.
+float ZoneAgitation() noexcept {
+    if(!zoneWavesEnabled)return 1.f;
+    const float value=renderer::FrameContext::Current().environment[renderer::WaterAgitation];
+    return std::isfinite(value)?std::clamp(value,0.f,4.f):1.f;
+}
 void Present() {
     if(!enabled)return;
+    // One eased sea state per frame, before any draw reads it. The delta comes from the
+    // performance-counter clock rather than from absolute time, because at high refresh rates a
+    // naive delta alternates between zero and a whole timer tick and anything integrated from it
+    // pulses (src/Core/FrameClock.h). The zone's WeatherIntensityMultiplier scales how hard the
+    // weather lands here as well as how wet the sky gets, which is deliberate: a sheltered valley
+    // that damps storms should not whip its own water up in them.
+    const float dt=seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency());
+    const renderer::water::SeaTuning tuning{ZoneAgitation(),
+        weatherResponse*std::clamp(renderer::FrameContext::Current().environment[renderer::Weather],0.f,4.f),
+        windStrengthPercent*.01f};
+    const auto sea=seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds);
+    seaAgitation=sea.agitation;seaMotion=sea.motion;seaShear=sea.shear;seaWind=sea.wind;
+    seaMotion_.Observe(dt,flowSpeed*seaMotion);
     const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
     DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
@@ -433,10 +606,16 @@ void Present() {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
-            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed<<'\n';
+            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed
+            <<" sea="<<seaAgitation<<","<<seaMotion<<","<<seaShear<<" weather="<<seaWeather.kind
+            <<','<<seaWeather.strength<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
+    // A device reset drops the eased sea state rather than letting it interpolate across a change
+    // of settings or a mode switch. The wave clock keeps running: snapping it would move every
+    // crest at once, which is the jump the clock exists to avoid.
+    seaFilter.Forget();
     if(cachedShaderDevice == d) {
         cachedReplacementPS.Reset();
         cachedReplacementVS.Reset();
@@ -466,7 +645,7 @@ struct Scope {
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
     // c200..c211 for the pixel shader, c200..c201 for the vertex shader.
-    float old[48]{},oldVertexControls[12]{},oldLocalLights[68]{};bool localLightsSaved=false;
+    float old[68]{},oldVertexControls[12]{},oldLocalLights[68]{};bool localLightsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -561,15 +740,18 @@ struct Scope {
             if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
-            if(FAILED(d->GetPixelShaderConstantF(200,old,12)))return;
+            if(FAILED(d->GetPixelShaderConstantF(200,old,17)))return;
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,3)))return;
             // Relative time avoids both uptime-sized float precision loss and
             // the old discontinuous wave jump every ten minutes.
-            static const double animationStart=renderer::PerformanceSeconds();
-            const double elapsed=renderer::PerformanceSeconds()-animationStart;
-            float controls[48]={float(elapsed),strength,normalStrength,specularStrength};
+            // Relative time avoids both uptime-sized float precision loss and
+            // the old discontinuous wave jump every ten minutes. It is integrated by the sea clock
+            // rather than read from the counter, because wave travel speed is now something that
+            // changes, and multiplying an absolute clock by a changing speed moves every crest.
+            const double elapsed=seaMotion_.Time();
+            float controls[68]={float(elapsed),strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
@@ -614,9 +796,10 @@ struct Scope {
             controls[25]=haveCapture?refractGain*reflectionData[5]:0.f;
             controls[26]=haveCapture?refractGain*reflectionData[6]:0.f;
             controls[27]=waterDebugMode;
-            controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength:0;controls[31]=shoreFoamWidth;
-            controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
-            controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
+            controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength*(.7f+.3f*seaAgitation):0;controls[31]=shoreFoamWidth;
+            controls[1]=wavesEnabled?strength*seaAgitation:0;
+            controls[2]=wavesEnabled?normalStrength*std::clamp(std::sqrt(seaAgitation),0.f,2.5f):0;
+            controls[32]=wavesEnabled?swellStrength*seaAgitation:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength*seaAgitation:0;
             // The wave field itself is built in world space. Its phase carries
             // the camera position (so the pattern is nailed to the terrain and
             // not to a tile's uv or to the viewport) and the flow animation,
@@ -624,7 +807,12 @@ struct Scope {
             // shader never evaluates a coordinate large enough to lose the
             // fraction bits that keep noise from collapsing into squares.
             const auto& waveFrame=renderer::FrameContext::Current();
-            const auto wave=renderer::water::BuildWaveField(elapsed,flowSpeed,flowRotation,
+            // The clock above already contains the flow speed, so it arrives here as 1: passing it
+            // twice would scale the same field by speed squared, and weather would look like a jump
+            // in travel rather than an increase of it. Weather also puts a cross-chop on the swell
+            // by taking the authored flow rotation further across it.
+            const float seaCounter=std::clamp(flowRotation*(1.f+seaShear),0.f,1.f);
+            const auto wave=renderer::water::BuildWaveField(elapsed,1.f,seaCounter,
                 waveScalePercent,waveFrame.cameraPosition.x,waveFrame.cameraPosition.y,
                 waveFrame.cameraValid,wavesEnabled);
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
@@ -632,11 +820,46 @@ struct Scope {
             controls[40]=wave.phase[0];controls[41]=wave.phase[1];
             controls[42]=wave.phase[2];controls[43]=wave.phase[3];
             controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
-            controls[46]=renderer::water::kSwellRatio;controls[47]=0.f;
+            controls[46]=renderer::water::kSwellRadians;controls[47]=0.f;
+            // Per-body authoring. The up axis comes from the same frame the vertex
+            // stage used, so the sky gradient, the sun elevation and the wind term
+            // point the right way for this draw - including a reflected water pass,
+            // which runs under the reflection camera rather than the player's.
+            const auto& viewMatrix=waveFrame.viewRaw.m;
+            const bool viewValid=waveFrame.viewRawValid;
+            controls[48]=viewValid?viewMatrix[2][0]:0.f;
+            controls[49]=viewValid?viewMatrix[2][1]:0.f;
+            controls[50]=viewValid?viewMatrix[2][2]:1.f;
+            controls[51]=seaWind;   // authored WIND, scaled by how much wind the water is actually in
+            // Light penetration is authored as "how far light reaches" instead of an
+            // absorption coefficient, which is how the reference describes it: 200 is a
+            // clear mountain lake, 5 is swamp soup. 0.088 per view unit of column puts
+            // the first e-fold near thirty yards at the shipped default.
+            controls[52]=.088f*(100.f/clarityPercent);
+            controls[53]=.25f*roughnessPercent*.01f;
+            controls[54]=.02f+.06f*sheenPercent*.01f;
+            controls[55]=shoalFoamPercent*.01f;
+            // Tint is a multiply (0x808080 neutral) so the zone's own painted water
+            // survives coloured rather than replaced; the deep colour is absolute,
+            // because it is what the column converges to, and the absorption triple is
+            // per-channel rate: a red-heavy value kills red first, which is why a deep
+            // pool reads teal rather than as a darker grey.
+            const auto byte=[&](unsigned colour,unsigned shift,float divisor) {
+                return float((colour>>shift)&255u)/divisor;
+            };
+            controls[56]=byte(waterColourTint,16,128.f);controls[57]=byte(waterColourTint,8,128.f);
+            controls[58]=byte(waterColourTint,0,128.f);controls[59]=sunDiscPercent*.004f;
+            controls[60]=byte(deepColour,16,255.f);controls[61]=byte(deepColour,8,255.f);
+            controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
+            controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
+            controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
+            // The vertex stage gets the pixel shader's swell phase verbatim, plus the
+            // angular frequency of its train, so displaced crests are the same waves the
+            // shading lights. Registers: c200 controls, c201 lattice, c202 phase.
             float vertexControls[12]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,
-                wavesEnabled?swellStrength:0,1.f/renderer::water::kGeometryWaveCells,
+                wavesEnabled?swellStrength:0,renderer::water::kSwellRadians,
                 wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
-                wave.anchor[0],wave.anchor[1],0.f,0.f};
+                wave.phase[2],wave.phase[3],0.f,0.f};
             if(cachedShaderDevice != d) {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
@@ -683,7 +906,7 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,12))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,3))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,17))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,3))){Restore();return;}
             {
                 float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();
@@ -711,7 +934,7 @@ struct Scope {
         if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
         device->SetPixelShader(original.Get());
         device->SetVertexShader(originalVertex.Get());
-        device->SetPixelShaderConstantF(200,old,12);
+        device->SetPixelShaderConstantF(200,old,17);
         device->SetVertexShaderConstantF(200,oldVertexControls,3);
         if(extraState) {
             const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,

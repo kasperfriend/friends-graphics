@@ -203,6 +203,9 @@ Resolution order:
 New environment keys: `CloudCoverageMultiplier` (0–2), `CloudTypeOffset` (-1–1),
 `CloudFeatureSizeMultiplier` and `CloudThicknessMultiplier` (.25–4),
 `CloudDetailMultiplier` (0–2), `CloudEvolutionMultiplier` (0–4).
+Water shares this layer: `WaterAgitationMultiplier` (0-4, default 1) is a zone's own sea state,
+documented in `docs/water-rendering.md`; a zone line that names only it keeps its cloud climate.
+
 Multipliers default to 1, type offset to 0. Missing keys in old configs preserve
 manual tuning; existing installations must merge the shipped climate sections
 into their environment file to get these curated assignments. Reload with F12.

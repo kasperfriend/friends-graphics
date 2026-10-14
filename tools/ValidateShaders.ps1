@@ -40,7 +40,9 @@ $jobs = @(
     @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') }
 )
 
-# ps_3_0 allows 512 instruction slots. The budgeted shaders are the ones
+# A ps_3_0 device has to support at least 512 instruction slots and may report more, up to
+# 32768, through D3DCAPS9.MaxPixelShader30InstructionSlots; fxc enforces neither number, so
+# compiling here says nothing about creating on a player's card. The budgeted shaders are the ones
 # with a raymarch loop, where an innocent-looking edit can unroll past the
 # limit on a real driver long after it still compiles here.
 # The cloud march is held below the ceiling rather than at it: these
@@ -51,7 +53,26 @@ $jobs = @(
 # machine.
 $budgets = @{
     'precipitationHLSL'      = 496 # Weather must fit baseline PS3 hardware too
-    'source'                = 496 # Water: driver creation must work on 512-slot PS3 devices
+    # Water: the volume rewrite measures 542 slots (fxc /O3 on this runner, 2026-10-14).
+    # That is above the 512 instruction slots a ps_3_0 *device* is required to support,
+    # which is what the old 496 budget existed to stay under (496 kept 16 slots of margin
+    # for another SDK's instruction selection). It is not a bytecode-format limit: a ps_3_0
+    # shader may run as long as D3DCAPS9.MaxPixelShader30InstructionSlots allows, up to
+    # 32768, and fxc assembles 542 without a word of complaint. Nothing in the client caps
+    # it either - this shader is created on the game's own device by us - so the ceiling is
+    # per-device and stated by the driver.
+    # The cuts were priced one shader per candidate before this number moved (table in
+    # docs/water-rendering.md): SSR march 69, sun-road march 51, analytic swell 37, scatter
+    # lobe 17, sky gradient 15, wave-lit body 13, shoal derivative 11 - and the SSR step
+    # count 0, because those loops are [loop], so steps buy frame time and no slots. Every
+    # route to 496 cost a visible term of the new shading, so the ceiling moved instead of
+    # the look. The consequence is a fallback, not a break: on a device reporting 512 slots,
+    # CreatePixelShader fails, WaterEffect logs "water shader creation failed hr=... PS30
+    # slots=512; keeping native water" having written no device state at all, and that
+    # machine keeps the client's own water until the device is reset.
+    # The margin absorbs a different SDK's instruction selection; growth beyond it should
+    # have to say so here, in a diff, exactly as before.
+    'source'                = 560 # Water: 542 used, 18 spare
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512

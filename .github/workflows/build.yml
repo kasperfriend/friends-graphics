@@ -221,6 +221,15 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
           ./build/device-health-test
 
+      # The shader text is only compiled on the Windows runner, so the GLSL
+      # spellings fxc rejects are checked here, where a shader change can be
+      # tested before it is pushed.
+      - name: Embedded shader source regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/ShaderSourceRegression.cpp -o build/shader-source-test
+          ./build/shader-source-test
+
       - name: Build and run portable overlay regressions
         run: |
           mkdir -p build
