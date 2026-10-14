@@ -350,6 +350,16 @@ int main() try
         Require(mirror.find("* (sharpness + 2.f) * fresnel") != std::string::npos
                 && mirror.find(".17f / (phaseDen * std::sqrt(phaseDen))") != std::string::npos,
                 "the CPU preview carries both normalizations, so it stays a mirror");
+        // The authored water colour is a multiply whose documented neutral (0x808080) is uploaded
+        // as exactly 1.0, so a scale factor on this line silently doubles the shipped look. The
+        // device sweep's 128-gray pass-through check caught it in review; this pin is the copy of
+        // that contract the Linux suite can hold, on both the shader and the mirror.
+        Require(shader.find("waterBody*=waterTint.rgb;") != std::string::npos
+                && shader.find("waterTint.rgb*2.0") == std::string::npos,
+                "the authored tint multiplies with no scale of its own, so 0x808080 stays neutral");
+        Require(mirror.find("Mul(waterBody, tint)") != std::string::npos
+                && mirror.find("Mul(tint, 2.f)") == std::string::npos,
+                "the CPU preview applies the same unit-scale tint as the shader");
     }
     return 0;
 }

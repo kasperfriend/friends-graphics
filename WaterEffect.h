@@ -433,8 +433,11 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
         waterBody=lerp(body,deepTint.rgb+inScatter,saturate(absorption*(.85-.22*fresnel)));
     }
     // Per-body colour authoring multiplies rather than replaces, so the zone's own
-    // painted water survives tinted instead of being overwritten: 0x808080 neutral.
-    waterBody*=waterTint.rgb*2.0;
+    // painted water survives tinted instead of being overwritten. The upload is
+    // byte/128, so the documented neutral 0x808080 arrives as exactly 1.0 and
+    // 0xFF is a 2x tint; the identity case has to stay the identity, which is
+    // what the device sweep's 128-gray pass-through check holds this line to.
+    waterBody*=waterTint.rgb;
     rgb=waterBody;
     // Direct reflection of actual local emitters on the same wave normal.
     // This does not depend on SSR finding an opaque flame in scene depth.

@@ -161,6 +161,14 @@ that need text rather than an integer, so `ReadTuningColour` parses `0xRRGGBB` o
 this header rather than growing a colour type in the shared tuning reader. `WATER CLARITY`,
 `WIND` and `SUN SPARKLE` are on the F7 overlay; the rest are file-only for now.
 
+The tint's neutral is a contract, not a comment: the upload divides by 128, so `0x808080`
+arrives as exactly `1.0` and the shader multiplies by it with no scale of its own. A `*2.0` on
+that line doubled the shipped look and was caught by `tools/Test-Water.cmd` before release -
+the sweep renders the complete production shader with every effect off against a copied
+128-gray scene and requires the neutral authored colour to return it unchanged, in sRGB output
+both off and on. `tools/WaterRegression.cpp` pins the same identity for the shader and the CPU
+mirror, so the Linux suite keeps the half of that contract it can see.
+
 ### Sea state: the zone and the weather
 
 The keys above decide what a body of water looks like. This decides how much of it there is.

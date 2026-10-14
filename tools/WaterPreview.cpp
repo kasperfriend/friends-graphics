@@ -733,7 +733,10 @@ int main(int argc, char** argv)
                         V3 body = Lerp(rgb, bottom, validDepth * Saturate(refractionStrength));
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));
                     }
-                    waterBody = Mul(waterBody, Mul(tint, 2.f));
+                    // byte/128 upload: the neutral 0x808080 is 1.0, so the tint
+                    // multiplies with no scale of its own (the device sweep's
+                    // 128-gray pass-through check is the production side of this).
+                    waterBody = Mul(waterBody, tint);
                     rgb = waterBody;
                     rgb = Lerp(rgb, reflected, Saturate(fresnel * (1.f - .5f * rough)
                         * (environmentStrength * .5f + ssrStrength * hit * 1.5f)));
