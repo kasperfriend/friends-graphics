@@ -98,6 +98,11 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
   one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 
+![Water: a river, an open sea at a low sun, a windward coast and a moonlit lake](Screenshots/water-forever-look.png)
+
+*The four bodies the look was tuned against - rendered by `tools/WaterPreview.cpp`, the CPU mirror of the water
+shader, at the shipped defaults.*
+
 ### Native shadows and post-processing
 
 - Softness and strength controls enhance the client-created cascaded shadow maps.

@@ -171,13 +171,69 @@ read `c[13]`, `c[16]`, `c[19]`, `c[20]`, `c[23]` and `c[28..30]` as before; thos
 are the
 cheapest available proof that the ABI did not shift.
 
+### Looking at changes without a GPU
+
+`tools/WaterPreview.cpp` is a CPU mirror of the water pixel shader - the same wave field from `src/Water/WaveField.h`,
+the same hash from `src/Water/WaterNoise.h`, the same refraction, absorption, in-scatter, reflection, foam and alpha
+terms in the same order - that renders a PNG with `g++ -O2 -std=c++20 -pthread`. Every tuning decision in this round was
+made by looking at its output first, because the shader itself can only be compiled in CI.
+
+```sh
+g++ -O2 -std=c++20 -pthread tools/WaterPreview.cpp -o build/waterpreview
+build/waterpreview --out Screenshots/water-forever-look.png --grid 2 --supersample 2
+build/waterpreview --out build/sea.png --scene sea --wind 140 --sparkle 150 --stats
+build/waterpreview --scene coast --debug 2
+build/waterpreview --scene lake --probe 240 260
+```
+
+`--grid 2` renders the four built-in bodies - a slow river, an open sea at a low sun, a windward coast with a headland,
+and a moonlit lake - into one contact sheet, each panel labelled with the wind, clarity, swell and sun numbers it was
+drawn with, so a frame cannot be mistaken for another one later. `--debug 0|1|2` is the same channel numbering as
+`[Water] WaterDebugMode`, so a frame from here can be read against a client log. `--no-reflect`, `--no-refract`,
+`--no-depth` and `--no-foam` zero the corresponding strengths the way the ini keys do, which is how a term gets proved
+to be the one responsible. `--probe x y` prints every intermediate for one pixel: view depth, column, transmittance,
+absorption, Fresnel, roughness, reflection hit, foam, alpha, the wave normal and whether the result is NaN.
+`--supersample 2` renders each panel at double size and resolves it linearly, which is the only honest way to judge the
+octave the anti-alias gain exists to resolve, and it is what a 2x backbuffer does in the game.
+
+The order of the two passes is the point of the file. Pass one produces a pre-water scene copy with a view-depth
+buffer; pass two shades water against that buffer. A previewer that shaded water in isolation would not see a raw sky
+painted as refraction, a refraction pulled across a foreground silhouette, or foam on the wrong side of a shoreline -
+and those are the defects this feature has historically had.
+
+It is a mirror, not the game, and three differences are structural. There is no driver filtering, mip selection or
+sRGB round trip: the DLL samples captured bytes, here the copy is computed and encoded once at the end. There are no
+client detail maps (the 512 ripple and surface textures): the analytic chop stands in for both of the shader's octaves
+and the painted surface tone is a flat colour, so a near field reads smoother and brighter than the shader's and
+absolute levels are not comparable - structure is. There is no vertex stage: geometry waves displace the surface by
+evaluating the same sine pair per pixel instead of interpolating it across a tessellated grid.
+
+What it found in its first three renderings were two defects that no portable test could have caught:
+
+- In-scatter used `(1-g^2)/den^2` with a `.5` gain - a Henyey-Greenstein phase function with the wrong exponent and no
+  normalization, so a face turned toward the sun multiplied the water body by about nine. An open sea rendered as one
+  flat pale wash. It is now `(1-g^2)*.17/(den*sqrt(den))`, the lobe's own 3/2 exponent with `1.2/4pi` folded into the
+  gain: a forward peak near 1.3 and a side lobe near 0.08.
+- The sun glint had no compensation for its own width. `pow(NoH,n)` integrates to `2*pi/(n+2)`, so as `n` rose the
+  road dimmed, and with these slopes it was simply absent: no sparkle anywhere in any frame. The term is now
+  multiplied by `(n+2)` and the output gain `.62` became `.0992`, which is the same fold.
+
+Both were found by looking at a picture, and neither changed a line of the CPU-side code that the regressions
+exercise.
+
+`tools/PreviewSheet.h` holds the PNG writer and the 5x7 label font that both previewers use; `tools/CloudPreview.cpp`
+writes byte-identical output through it. The committed sheet is the tool's own PNG re-encoded losslessly - same pixels,
+a tenth of the bytes - and the renderer is deterministic, so the command above reproduces it exactly.
+
 ### Verification
 
-Portable regressions cover the wave field, the material gate and the shared fog register, and
-the device test renders the complete shader on the software HAL. Neither can judge *look*: the
-colour, wave scale and foam amounts were taken from the reference screenshots, but the numbers
-behind them (how much the crest lights up, how fast red dies per yard, how bright the disc is)
-are first-pass values and the intended workflow is the F11 capture plus an in-game pass. The
+Portable regressions cover the wave field, the material gate, the shared fog register and the two
+look normalizations as shader text, and the device test renders the complete shader on the software
+HAL. The numbers behind the look - how much a crest lights up, how fast red dies per yard, how
+bright the disc is - were set against `tools/WaterPreview.cpp` above, which says more about them
+than a reference screenshot can and less than an in-game pass does: the frames carry no client
+detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
+in-game pass. The
 slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
 cannot run fxc, so "it fits in 496 slots" is a CI result there, not a local one.
 
@@ -325,7 +381,11 @@ the reporting player's machine. In-game confirmation still matters.
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
   exceeds 496 static instruction slots or its instruction count cannot be read.
 - `tools/WaterRegression.cpp`: portable material, independent-capture toggle
-  combinations, and target-size policy tests (included in Linux CI).
+  combinations, and target-size policy tests (included in Linux CI). It also pins the in-scatter
+  and sun-glint normalizations as shader text - in the production literal and in the CPU mirror -
+  so a cut made to fit instruction slots cannot quietly take the look with it.
+- `tools/WaterPreview.cpp`: not a test, but the thing the look was tuned against (see "Looking at
+  changes without a GPU"). It needs no device and builds with the same compiler invocation.
 - `tools/Test-Water.cmd`: builds a D3D9 regression executable using the actual
   water Scope and capture code. It checks shader installation, rendered magenta
   debug pixels, no-capture color, constant/texture/sampler restoration,

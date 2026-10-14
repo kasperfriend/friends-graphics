@@ -3,10 +3,34 @@
 #include "../src/Water/WaveField.h"
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <initializer_list>
+#include <string>
+#include <vector>
 
 using namespace renderer::water;
+
+// Read a source file that sits next to this test or next to the object it builds. The two
+// normalizations below live only in shader text, and text is the only thing a portable test can
+// hold a production shader to without a D3D9 device.
+static std::string ReadAlongside(const char* name)
+{
+    const std::string here(__FILE__);
+    const size_t slash = here.find_last_of("/\\");
+    std::vector<std::string> candidates;
+    if (slash != std::string::npos) candidates.push_back(here.substr(0, slash + 1) + name);
+    candidates.push_back(name);
+    candidates.push_back(std::string("tools/") + name);
+    for (const std::string& path : candidates)
+    {
+        std::ifstream in(path);
+        if (in) return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    return {};
+}
+
 void Require(bool value, const char* name)
 {
     if (!value) throw std::runtime_error(name);
@@ -186,6 +210,25 @@ int main() try
                 "a missing camera falls back to the origin-anchored field, not to garbage");
         Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.phase[2]),
                 "the anchor fallback stays usable by both shader stages");
+    }
+    {
+        const std::string shader = ReadAlongside("../WaterEffect.h");
+        Require(bool(shader.size() > 4096), "production water shader source is readable");
+        // The in-scatter lobe must stay the normalized Henyey-Greenstein one. An earlier shape,
+        // (1-g^2)/den^2 with no normalization, put a nine-times multiplier on water facing the sun
+        // and washed a whole sea pale; it was cut for instruction slots and the look went with it.
+        Require(shader.find("absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))") != std::string::npos,
+                "in-scatter keeps the normalized HG lobe, not a bare squared denominator");
+        // The glint keeps the compensation for its own width, and the output gain keeps the half
+        // of the fold that belongs there: both halves together are one normalization, not two.
+        Require(shader.find("pow(NoH,sharpness)*(sharpness+2.0)*fresnel") != std::string::npos,
+                "sun glint is compensated for its own lobe width");
+        Require(shader.find("celestialPath*controls.w*.0992") != std::string::npos,
+                "the glint's output gain does not double-count the normalization");
+        const std::string mirror = ReadAlongside("WaterPreview.cpp");
+        Require(mirror.find("* (sharpness + 2.f) * fresnel") != std::string::npos
+                && mirror.find(".17f / (phaseDen * std::sqrt(phaseDen))") != std::string::npos,
+                "the CPU preview carries both normalizations, so it stays a mirror");
     }
     return 0;
 }

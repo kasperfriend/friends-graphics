@@ -305,8 +305,12 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // reference shots put it.
     float g=.3+.34*saturate(sunElev);
     float phaseDen=max(1+g*g-2*g*dot(-v,l),1e-3);
-    float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)/(phaseDen*phaseDen)
-        *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0)*.5;
+    // The lobe is divided by 4*pi as well as normalized in exponent: a (1-g^2)/den^2 phase
+    // function peaks at 18x on a face turned toward the sun, and the CPU preview showed what
+    // that did to a whole sea - one flat pale wash. The 3/2 exponent is the HG function's
+    // own, and .17 (1.2/4pi, folded) puts the forward peak near 1.3 and the side lobe near .08.
+    float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
+        *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0);
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
     float crest=saturate(.55+detail.x*.45+dot(slopes,float2(.18,-.12)));
@@ -374,7 +378,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // That replaces a full Smith visibility chain, which cost eight slots to describe
     // a falloff the lobe width already produces.
     float sharpness=mix(26.0,230.0,saturate(sunElev*1.8))/(1.0+rough*7.0)*absorbTint.w;
-    float celestialPath=pow(NoH,sharpness)*fresnel*saturate(NoL)
+    // (sharpness+2) is the lobe's own energy normalization: pow(NoH,n) integrates to
+    // 2*pi/(n+2), so without it a low sun smears a dim band and a high sun - where n is
+    // large - faded to nothing. The CPU preview showed a whole sea with no sun road at all.
+    float celestialPath=pow(NoH,sharpness)*(sharpness+2.0)*fresnel*saturate(NoL)
         *(.12+.88*saturate(detail.x*.75+detail.y*.25))*foreverStyle.y;
     // March from this water point toward the sun/moon through the captured
     // pre-water depth buffer. Buildings and terrain suppress direct glint,
@@ -437,7 +444,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // 4. Celestial reflection path, then foam. Wind decides how much of any of it
     // exists: an authored calm river shows no white line at all, an authored sea
     // whips up on crest shoulders and where the flow shallows over a bar.
-    float pathEnergy=saturate(celestialPath*controls.w*.62);
+    float pathEnergy=saturate(celestialPath*controls.w*.0992);   // .62 * (1/2pi), folded
     rgb+=sheenColor*pathEnergy*(.35+.65*fresnel);
     float wind=upWind.w;
     float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter);
