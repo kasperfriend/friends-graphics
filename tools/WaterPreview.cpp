@@ -302,16 +302,25 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     WaveState w;
     const V2 plane{ worldX * field.lattice[0] + worldY * field.lattice[1],
                     worldX * field.lattice[2] + worldY * field.lattice[3] };
-    // A low-frequency anchored warp makes the three swell trains wander. The
-    // same coordinate and chain-rule gradient are evaluated in both shaders.
+    // A low-frequency anchored warp makes the six swell trains wander, and a broader
+    // envelope groups them into sets. The same coordinate and chain-rule gradient are
+    // evaluated in both shaders.
     const WaveWarpSample warp = WarpWavePlane(field, plane.x, plane.y);
+    const GroupSample group = GroupEnvelope(field, plane.x, plane.y);
     const SwellSample trains = EvaluateSwell(warp.plane.x, warp.plane.y, field.swellPhase);
-    const float swell = trains.height;
+    float swell = trains.height;
     const float alongWarp = trains.slope[0] * kWaveWarpDirectionX
         + trains.slope[1] * kWaveWarpDirectionY;
-    const V2 swellSlope{
+    V2 swellSlope{
         (trains.slope[0] + alongWarp * kWaveWarpAmplitude * warp.gradientX) * c.swell * .01f,
         (trains.slope[1] + alongWarp * kWaveWarpAmplitude * warp.gradientY) * c.swell * .01f };
+    // The envelope multiplies the sea and its own gradient tilts it: the shader's
+    // product rule, spelled the same way, so a set's flank is a slope of the water and
+    // not merely a dimmer highlight.
+    const float gain = group.gain;
+    swellSlope = V2{ swellSlope.x * gain + swell * group.gradientX,
+                     swellSlope.y * gain + swell * group.gradientY };
+    swell *= gain;
     // One pixel spans this many lattice cells: the shader's fwidth(plane).
     const float filter = 1.f / std::sqrt(1.f + c.softening * .16f
         * (footprint.x * footprint.x + footprint.y * footprint.y));
@@ -322,8 +331,8 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // The shader's waveFlow.w gate, which the DLL fills from WAVES rather than from the
     // strengths: the preview has no such switch, so it derives the same 0/1 from them.
     const float flowGate = Saturate(strength * 100.f + normalResponse * 4.f);
-    w.slopes = V2{ (ripple.dx * .72f * filter + swellSlope.x) * flowGate,
-                   (ripple.dy * .72f * filter + swellSlope.y) * flowGate };
+    w.slopes = V2{ (ripple.dx * .72f * filter * gain + swellSlope.x) * flowGate,
+                   (ripple.dy * .72f * filter * gain + swellSlope.y) * flowGate };
     w.detail = Mix(.5f, ripple.value, filter);
     // Long foam tongues inherit the broad crest-scale breakup while chop tears
     // their edges into smaller, moving flecks. Both fields are already sampled
@@ -332,7 +341,7 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
-    w.pinch = geometry.sigma * trains.pinch;
+    w.pinch = geometry.sigma * gain * trains.pinch;
     w.jacobian = std::max(1.f - w.pinch, .3f);
     const V3 axisX{ field.lattice[0], field.lattice[1], 0.f }, axisY{ field.lattice[2], field.lattice[3], 0.f };
     // A height field's normal is the NEGATIVE gradient, divided by the Jacobian: the same
@@ -343,19 +352,23 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
                              -(axisX.y * w.slopes.x * tilt + axisY.y * w.slopes.y * tilt), 1.f });
     // The vertex stage's Gerstner lift and slide, from the two trains a four yard grid can
     // carry. This preview has no vertex stage, so it displaces the shaded point directly.
-    const float thetaA = kTwoPi / kTrainCells[0]
-        * (kTrainDirX[0] * warp.plane.x + kTrainDirY[0] * warp.plane.y + field.swellPhase[0]);
-    const float thetaB = kTwoPi / kTrainCells[1]
-        * (kTrainDirX[1] * warp.plane.x + kTrainDirY[1] * warp.plane.y + field.swellPhase[1]);
-    w.height = geometry.amplitude * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB));
+    // SwellTheta is the one spelling of "k times the projected coordinate, the wrapped
+    // phase and this train's own start", shared with the vertex stage and the CPU field,
+    // so the lifted crest and the lit crest are the same crest by construction. The lift
+    // and the slide ride the grouping envelope with the shading: a wave the set has
+    // dimmed is a wave the sea has flattened, in three dimensions as well as in light.
+    const float thetaA = SwellTheta(0, warp.plane.x, warp.plane.y, field.swellPhase);
+    const float thetaB = SwellTheta(1, warp.plane.x, warp.plane.y, field.swellPhase);
+    w.height = geometry.amplitude * gain
+        * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB));
     const V2 baseSlide{
         kTrainWeight[0] * std::cos(thetaA) * kTrainDirX[0]
             + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1],
         kTrainWeight[0] * std::cos(thetaA) * kTrainDirY[0]
             + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1] };
     const float slideAlongWarp=baseSlide.x*kWaveWarpDirectionX+baseSlide.y*kWaveWarpDirectionY;
-    const V2 slide{ geometry.lateral * (baseSlide.x+slideAlongWarp*kWaveWarpAmplitude*warp.gradientX),
-                    geometry.lateral * (baseSlide.y+slideAlongWarp*kWaveWarpAmplitude*warp.gradientY) };
+    const V2 slide{ geometry.lateral * gain * (baseSlide.x+slideAlongWarp*kWaveWarpAmplitude*warp.gradientX),
+                    geometry.lateral * gain * (baseSlide.y+slideAlongWarp*kWaveWarpAmplitude*warp.gradientY) };
     // Lattice axes to world axes: the lattice rows are the world directions scaled by
     // 1/cell, so one cell length turns them back into unit vectors.
     w.lateral = V2{ (slide.x * field.lattice[0] + slide.y * field.lattice[2]) * geometry.cellYards,

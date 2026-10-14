@@ -220,6 +220,11 @@ inline void Draw(IDirect3DDevice9* d){
  label(x+12,y+6,"Modern WoW Renderer",0xff8effbb,x+w-310);
  label(x+w-295,y+6,"Drag title to move  /  F7 to close",0xffb5cbd6,x+w-42);
  box(layout.Close(),0xff263f4b);label(x+w-28,y+6,"X",0xffdce5ea,x+w-10);
+ // Four lines, no more: the "Settings for:" scope row is laid out below them, so a fifth
+ // environment line would be drawn under a widget. Anything the player has to be told
+ // about a missing location therefore has to fit ON line 1, which is why
+ // CompactDebugLines composes "Location unavailable: <cause>  |  Map/Zone/Area: <ids>"
+ // rather than spreading the diagnosis over a line nobody renders.
  for(size_t i=0;i<environmentLines.size()&&i<4;++i)
   label(x+12,y+38+22*float(i),environmentLines[i],i?0xffb5cbd6:0xffffdc82,x+w-12);
  const auto& manager=renderer::EnvironmentProfileManager::Instance();

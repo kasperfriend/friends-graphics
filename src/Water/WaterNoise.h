@@ -83,4 +83,30 @@ namespace renderer::water
         return { { cellX + warp * kWaveWarpDirectionX,
                    cellY + warp * kWaveWarpDirectionY }, noise.value, gradientX, gradientY };
     }
+
+    struct GroupSample
+    {
+        float gain = 1.f;      // the swell's amplitude here: kGroupBase..kGroupMax
+        float gradientX = 0.f; // d(gain)/d(lattice cell): the product rule the shading needs
+        float gradientY = 0.f;
+    };
+
+    // The grouping envelope, at one lattice point. The vertex stage samples this and
+    // passes the triple to the pixels, which is why the gradient is pre-scaled by the
+    // field's own frequency and depth here: the pixel stage then only has to add
+    // `height * gradient` to the swell's slope, and a set's edge tilts the normal
+    // exactly as much as the envelope actually moves the water.
+    inline GroupSample GroupEnvelope(const WaveField& field, float cellX, float cellY)
+    {
+        const float qx = (cellX * kGroupCos + cellY * kGroupSin) * kGroupFrequency + field.groupPhase[0];
+        const float qy = (-cellX * kGroupSin + cellY * kGroupCos) * kGroupFrequency + field.groupPhase[1];
+        const NoiseSample noise = NoiseGradient(qx, qy);
+        // Back through the same rotation the sample went through, so both gradients are
+        // in lattice-cell axes - which is the space the swell's slope lives in and the
+        // only reason the pixel stage can add the two together at all.
+        const float scale = kGroupFrequency * kGroupDepth;
+        return { kGroupBase + kGroupDepth * noise.value,
+                 scale * (noise.dx * kGroupCos - noise.dy * kGroupSin),
+                 scale * (noise.dx * kGroupSin + noise.dy * kGroupCos) };
+    }
 }

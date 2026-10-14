@@ -151,8 +151,10 @@ int main() try
             Require(std::fabs(field.ripplePhase[0])<=kLatticeWrap&&
                     std::fabs(field.ripplePhase[1])<=kLatticeWrap&&
                     std::fabs(field.warpPhase[0])<=kLatticeWrap&&
-                    std::fabs(field.warpPhase[1])<=kLatticeWrap,
-                    "chop and domain-warp phases stay inside their own noise wraps");
+                    std::fabs(field.warpPhase[1])<=kLatticeWrap&&
+                    std::fabs(field.groupPhase[0])<=kLatticeWrap&&
+                    std::fabs(field.groupPhase[1])<=kLatticeWrap,
+                    "chop, domain-warp and grouping phases stay inside their own noise wraps");
             for (int train=0;train<kTrainCount;++train)
                 Require(field.swellPhase[train]>=0.f&&field.swellPhase[train]<kTrainCells[train],
                         "each swell train wraps its phase into its own wavelength");
@@ -324,13 +326,50 @@ int main() try
     // directional train's phase with the lattice's 64-cell wrap instead would slide it by
     // k*64*direction.x and put the lit crest on a different wave than the displaced one -
     // the artefact class this whole field exists to remove.
-    static_assert(kTrainCount==3,"the swell is three trains: the two the mesh can hold, and one the shading only");
+    // Six trains, not three. Three sinusoids in commensurate wavelengths are a comb, and a
+    // comb is what "lines of waves going and going" is: forty yard crests at a fixed spacing,
+    // repeating forever within the few hundred yards a player can see. Six wavelengths that
+    // are NOT octaves of each other, in six directions, each starting at an irregular point of
+    // its own, interfere into a surface that does not repeat inside anything a player can see.
+    // Two of the six are displaced (the mesh pitch, below); four shade the crest.
+    static_assert(kTrainCount==6,"the swell is six trains: two the mesh can hold, four for the shading");
     static_assert(kGeometryTrainCount==2,"the vertex stage carries the two longest trains only");
     for (int train=0;train<kTrainCount;++train)
         Require(std::fabs(kTrainRadians[train]*kTrainCells[train]-kTwoPi)<1e-4f&&
                 std::fabs(kTrainDirX[train]*kTrainDirX[train]+kTrainDirY[train]*kTrainDirY[train]-1.f)<1e-4f,
                 "every swell train is 2pi over its own cell count, in a unit direction");
-    Require(kMaxPinch>1.1f&&kMaxPinch<1.3f,"the train table's steepness budget is the one the clamp assumes");
+    // Three of these tables were the bug. Wavelengths that are octaves of each other realign
+    // into one comb every few crests; directions within a few degrees of each other (or of the
+    // exact opposite, which is the same pair of crests) do the same; and six crests crossing
+    // lattice zero at once read as a line drawn across the sea. So: strictly decreasing,
+    // deliberately non-doubling wavelengths, no two trains parallel or anti-parallel, weights
+    // that fall away, and a start offset that is inside its own wavelength and shared by
+    // nothing else.
+    for (int train=1;train<kTrainCount;++train) {
+        Require(kTrainCells[train]<kTrainCells[train-1],"the swell table runs long to short");
+        Require(kTrainWeight[train]<kTrainWeight[train-1],"each shorter train carries less of the height");
+        const double ratio=double(kTrainCells[train-1])/double(kTrainCells[train]);
+        Require(std::fabs(ratio-2.f)>.15f&&std::fabs(ratio-1.f)>.15f,
+                "no two neighbouring trains are an octave or a unison apart, so crests do not realign");
+        Require(kTrainPhaseCells[train]>0.f&&kTrainPhaseCells[train]<kTrainCells[train],
+                "every train but the first starts partway along its own wavelength");
+    }
+    for (int a=0;a<kTrainCount;++a)
+    for (int b=a+1;b<kTrainCount;++b) {
+        const double across=std::fabs(double(kTrainDirX[a])*kTrainDirY[b]-double(kTrainDirY[a])*kTrainDirX[b]);
+        Require(across>.12,"no two swell trains run parallel, which is a comb with two teeth");
+        const double apart=std::fabs(kTrainCells[a]-kTrainCells[b]);
+        Require(apart>.2f,"no two swell trains share a wavelength");
+    }
+    Require(kMaxPinch>1.4f&&kMaxPinch<1.6f,"the six-train pinch budget is the one the shading clamp assumes");
+    Require(kGeometryPinch>kTrainWeight[0]*kTrainRadians[0]&&kGeometryPinch<kMaxPinch,
+            "the mesh folds against the two trains it displaces, not the six it shades");
+    // The envelope multiplies the slide as well as the lift, so the worst Jacobian the mesh
+    // can be handed is the shipped steepness at the TOP of a set, not at its average. Written
+    // against kGeometryPinch (not kMaxPinch) because the four short trains never move a
+    // triangle; 1 - that is how far the shading's .3 floor can be trusted to stay honest.
+    Require(kGerstnerSigmaMax*kGeometryPinch*kGroupMax<1.f,"the Gerstner mesh cannot fold at the top of a set");
+    Require(kGroupBase>0.f&&kGroupBase+kGroupDepth<=1.15f,"grouping only ever dims a patch, never doubles it");
     auto trainAngle=[](const WaveField& field,int train,float relativeX,float relativeY) {
         const float cellX=relativeX*field.lattice[0]+relativeY*field.lattice[1];
         const float cellY=relativeX*field.lattice[2]+relativeY*field.lattice[3];
@@ -410,8 +449,8 @@ int main() try
         const float cell=kRippleCellYards*(scale>1.f?scale:100.f)*.01f;
         Require(std::isfinite(waves.amplitude)&&std::isfinite(waves.lateral)&&std::isfinite(waves.sigma),
                 "no authored wave height, size or sea state produces a NaN");
-        Require(waves.sigma<=kGerstnerSigmaMax&&waves.sigma*kMaxPinch<1.f,
-                "the Gerstner steepness stays below the fold, whatever is authored");
+        Require(waves.sigma<=kGerstnerSigmaMax&&waves.sigma*kGeometryPinch*kGroupMax<1.f,
+                "the Gerstner steepness stays below the fold, whatever is authored or enveloped");
         Require(waves.amplitude<=1.2f*cell+1e-4f,
                 "a wave never lifts higher than the cell it is drawn on");
         Require(waves.lateral==waves.sigma*cell||waves.lateral==0.f,
@@ -453,7 +492,8 @@ int main() try
         // The pinch the pixel stage divides its slope by is never so large that a crest
         // sharpens into a spike: the Jacobian is floored in the shader, and the coefficient
         // that reaches it is bounded here.
-        Require(kGerstnerSigma*kMaxPinch<.7f,"a fully pinched crest still leaves most of its Jacobian");
+        Require(kGerstnerSigma*kGeometryPinch*kGroupMax<.7f,
+            "a fully pinched crest at the top of a set still leaves most of its Jacobian");
     }
     // ---- zone and weather driven sea state ----------------------------------------------
     {
@@ -643,28 +683,53 @@ int main() try
         // normal, which is the negative gradient of the height field the geometry lifted.
         Require(vertex.find("p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;")!=std::string::npos,
                 "geometry waves lift the surface along world up and slide it toward the crest");
-        Require(vertex.find("float2 warpedDirA=kDirA+3.2*dot(kDirA,float2(.6,.8))*warpGradient;")
+        Require(vertex.find("float2 warpedDirA=kDirA+5.0*dot(kDirA,float2(.6,.8))*warpGradient;")
                     !=std::string::npos&&
-                vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB);")
+                vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB)*gain;")
                     !=std::string::npos,
-                "the Gerstner slide follows the domain-warped crest with its chain-rule direction");
-        Require(pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*3.2)*foreverStyle.x;")
+                "the Gerstner slide follows the domain-warped crest with its chain-rule direction, inside the set");
+        Require(pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*5.0)*foreverStyle.x;")
                     !=std::string::npos,
                 "pixel normals apply the full chain rule through the same crest warp");
+        // The author's swell response is applied BEFORE the envelope: `foreverStyle.x` is
+        // the WAVE/FOREGROUND slider and it belongs on the wave itself, while the envelope
+        // belongs on the sea. Multiplying them in either order is the same product, but only
+        // one of them survives a `swellSlope*gain+swell*dgain` product rule - differentiating
+        // an envelope that already carries the slider would scale the slider by dgain too.
+        Require(pixel.find("swellSlope=swellSlope*gain+swell*waveGroup.yz;")!=std::string::npos&&
+                pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*5.0)*foreverStyle.x;")
+                    <pixel.find("swellSlope=swellSlope*gain+swell*waveGroup.yz;"),
+                "the slope differentiates the envelope (product rule) after the slider, not before");
+        Require(pixel.find("swell*=gain;")!=std::string::npos&&
+                pixel.find("float2 slopes=(ripple.yz*.72*filter*gain+swellSlope)*waveFlow.w;")!=std::string::npos,
+                "the swell height and the chop on top of it ride the same set");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
+                vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
+                vertex.find("float4 waveGroup:TEXCOORD8")!=std::string::npos&&
                 vertex.find("o.waveWarp=waveWarp;")!=std::string::npos&&
+                vertex.find("o.waveGroup=float4(waveGroup.x,groupGradient.x,groupGradient.y,0);")!=std::string::npos&&
                 pixel.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
+                pixel.find("float4 waveGroup:TEXCOORD8")!=std::string::npos&&
                 pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
-                code.find("SetPixelShaderConstantF(200,controls,17)")!=std::string::npos&&
-                code.find("SetVertexShaderConstantF(200,vertexControls,4)")!=std::string::npos,
-                "the vertex stage anchors the broad warp and interpolates it to pixels without resampling");
+                pixel.find("noiseGradient(groupCoord)")==std::string::npos&&
+                code.find("SetPixelShaderConstantF(200,controls,18)")!=std::string::npos&&
+                code.find("SetVertexShaderConstantF(200,vertexControls,5)")!=std::string::npos,
+                "the vertex stage anchors the warp AND the set envelope and interpolates both to pixels without resampling");
+        // The save/restore window has to grow with the register block or a native water draw
+        // that runs after ours keeps OUR constants: 18 float4 of pixels (c200..c217) and 5 of
+        // vertices (c200..c204), which is also what the Get* calls must fetch.
+        for (const char* spelling : {"GetPixelShaderConstantF(200,old,18)","GetVertexShaderConstantF(200,oldVertexControls,5)",
+                                     "SetPixelShaderConstantF(200,old,18)","SetVertexShaderConstantF(200,oldVertexControls,5)",
+                                     "float controls[72]=","float vertexControls[20]=","float old[72]{},oldVertexControls[20]{}"})
+            Require(code.find(spelling)!=std::string::npos,
+                    "the constant window is exactly as wide as the two stages declare");
         Require(pixel.find("float2 tilt=-slopes*(controls.z/jacobian)*flip;")!=std::string::npos,
                 "a crest leans toward the light it catches: the normal is the negative gradient");
         Require(pixel.find("float jacobian=max(1.0-pinch,.3);")!=std::string::npos&&
-                pixel.find("float pinch=controls.x*(kWgtA*kRadA*sinA+kWgtB*kRadB*sinB+kWgtC*kRadC*sinC);")
+                pixel.find("float pinch=controls.x*gain*(dot(kWgt01*kRad01,sin01)+dot(kWgt4*kRad4,sin4));")
                     !=std::string::npos,
-                "the shading sharpens by the Gerstner Jacobian, and never divides by zero");
+                "the shading sharpens by the Gerstner Jacobian, enveloped, and never divides by zero");
         // One train table, three spellings: the vertex stage, the pixel stage, and the CPU
         // header that builds the phases. A wavelength that moves in one and not the others
         // slides a lit crest off a displaced one, so the spellings are held to each other.
@@ -672,18 +737,72 @@ int main() try
         // stage's alone, because the client's liquid grid is about four yards apart and
         // lifting a wave that short on it is what facets. That split is deliberate, so it is
         // pinned in both directions rather than left to a reader to notice.
-        for (const char* spelling : {"0.39269908","0.78539816","-0.4695,0.8829"})
+        // The two trains BOTH stages carry: 40 yards along the wind and 29 yards at -34
+        // degrees. Everything after them is shaded only, because the client's liquid grid is
+        // about four yards apart and displacing an eleven yard wave on it is what facets.
+        for (const char* spelling : {"0.39269908","0.54636394","0.8290376","-0.5591929","4.255"})
             Require(vertex.find(spelling)!=std::string::npos&&pixel.find(spelling)!=std::string::npos,
                     "both shader stages carry the same swell train table");
-        for (const char* spelling : {"1.57079633","0.4384,-0.8988","0.28409091"})
+        // The four shading-only trains, and their starts: present in the pixel stage, absent
+        // from the vertex stage. That split is the whole geometry/shading budget, so it is
+        // pinned in both directions rather than left to a reader to notice.
+        for (const char* spelling : {"0.78539816","1.08330781","1.42799666","1.84799568",
+                                     "0.9335804","0.9925462","0.3583679","0.7313537",
+                                     "0.075","5.68","2.822"})
             Require(pixel.find(spelling)!=std::string::npos&&vertex.find(spelling)==std::string::npos,
-                    "the ten yard train and its crest normalization are the pixel stage's alone");
-        Require(header.find("kTrainCells[kTrainCount] = {16.f, 8.f, 4.f}")!=std::string::npos&&
-                header.find("kTrainDirX[kTrainCount] = {1.f, -.4695f, .4384f}")!=std::string::npos&&
-                header.find("kTrainDirY[kTrainCount] = {0.f, .8829f, -.8988f}")!=std::string::npos&&
-                header.find("kTrainRadians[kTrainCount] = {kTwoPi / 16.f, kTwoPi / 8.f, kTwoPi / 4.f}")
+                    "the four short trains stay out of the displaced pair");
+        Require(header.find("kTrainCells[kTrainCount] = {16.f, 11.5f, 8.f, 5.8f, 4.4f, 3.4f}")
+                    !=std::string::npos&&
+                header.find("kTrainDirX[kTrainCount] = {1.f, .8290376f, .9335804f, .6819984f, .1218693f, -.3420201f}")
+                    !=std::string::npos&&
+                header.find("kTrainDirY[kTrainCount] = {0.f, -.5591929f, .3583679f, .7313537f, .9925462f, .9396926f}")
+                    !=std::string::npos&&
+                header.find("kTrainWeight[kTrainCount] = {1.f, .62f, .34f, .19f, .12f, .075f}")
+                    !=std::string::npos&&
+                header.find("kTwoPi / 16.f, kTwoPi / 11.5f, kTwoPi / 8.f, kTwoPi / 5.8f, kTwoPi / 4.4f, kTwoPi / 3.4f")
+                    !=std::string::npos&&
+                header.find("{0.f, .37f * 11.5f, .71f * 8.f, .19f * 5.8f, .55f * 4.4f, .83f * 3.4f}")
                     !=std::string::npos,
-                "the CPU header carries the same wavelengths and directions");
+                "the CPU header carries the same six wavelengths, directions, weights and starts");
+        // The shader's hand-written starts are the header's fractions of each train's own
+        // wavelength, spelled as literals because HLSL has no table to read. If one of them
+        // stops being the other, a crest the vertex stage lifted is no longer the crest the
+        // pixel stage lights, and the offset is invisible in a still frame.
+        const float starts[kTrainCount]={0.f,4.255f,5.68f,1.102f,2.42f,2.822f};
+        const float weightSum=kTrainWeight[0]+kTrainWeight[1]+kTrainWeight[2]
+            +kTrainWeight[3]+kTrainWeight[4]+kTrainWeight[5];
+        for (int train=0;train<kTrainCount;++train) {
+            Require(std::fabs(kTrainPhaseCells[train]-starts[train])<1e-3f,
+                "each train's start is the same fraction of its own wavelength in every copy");
+        }
+        Require(std::fabs(kSwellToUnit-1.f/(2.f*weightSum))<1e-5f&&
+                std::fabs(1.f/(2.f*weightSum)-.21321962f)<1e-6f,
+                "the crest normalization both stages carry is the table's own weight sum");
+        // The grouping envelope's three numbers, in both stages and in the header: a gain
+        // whose constants disagree between stages is a set that dims the shading but not the
+        // geometry, which is exactly the artefact class this round was cut for.
+        Require(vertex.find("float gain=kGroupBase+kGroupDepth*waveGroup.x;")!=std::string::npos&&
+                pixel.find("float gain=kGroupBase+kGroupDepth*waveGroup.x;")!=std::string::npos&&
+                vertex.find("static const float kGroupBase=0.52;")!=std::string::npos&&
+                pixel.find("static const float kGroupDepth=0.62;")!=std::string::npos&&
+                vertex.find("static const float kGroupScale=0.01347826;")!=std::string::npos&&
+                // The pixel stage must NOT own that scale: the gradient it uses was already
+                // rotated, scaled by the frequency and by the depth in the vertex stage, which
+                // is the only place the envelope's noise is sampled. A second scaling here
+                // would differentiate the set twice and lean every crest the wrong way.
+                pixel.find("kGroupScale")==std::string::npos,
+                "both stages build the same gain, and only the sampler scales its gradient");
+        Require(std::fabs(kGroupFrequency*kGroupDepth-.01347826f)<1e-7f&&
+                std::fabs(kGroupBase+kGroupDepth-kGroupMax)<1e-6f&&kGroupMax<=1.15f,
+                "the envelope's shader literals are the header's frequency, depth and ceiling");
+        // One warp, one frequency, one amplitude, three copies: the bend a crest gets in the
+        // geometry has to be the bend its normal is chain-ruled through.
+        for (const char* spelling : {"(waveWarp.x-.5)*5.0","warp*float2(.6,.8)","+5.0*dot(kDirA,float2(.6,.8))"})
+            Require(code.find(spelling)!=std::string::npos,
+                "the domain warp's scale is spelled the same way in both stages");
+        Require(header.find("inline constexpr float kWaveWarpAmplitude = 5.f;")!=std::string::npos&&
+                header.find("inline constexpr float kWaveWarpFrequency = .05f;")!=std::string::npos,
+                "the header agrees with both stages about how far and how often the sea bends");
         // Foam at the edges of waves, and only when the water is active: the pinch says a
         // crest is breaking, the authored wind says whether this body can foam at all, and
         // the foam then takes the mirror and the sun road with it - a whitecap scatters.
@@ -721,6 +840,14 @@ int main() try
                 && mirror.find("EvaluateSwell(warp.plane.x, warp.plane.y, field.swellPhase)") != std::string::npos
                 && mirror.find("BuildGeometryWaves(c.geometryWaves") != std::string::npos,
                 "the CPU preview applies the same anchored warp before evaluating the swell");
+        // The set, mirrored on the CPU the same way: sampled once per displaced vertex,
+        // multiplied into height/pinch, and differentiated into the slope. A preview that
+        // skipped it would be a picture of water the client stopped drawing.
+        Require(mirror.find("GroupEnvelope(field, plane.x, plane.y)") != std::string::npos
+                && mirror.find("const float gain = ") != std::string::npos
+                && mirror.find("geometry.sigma * gain * trains.pinch") != std::string::npos,
+                "the CPU preview samples the same grouping envelope and carries it into pinch")
+        ;
         Require(mirror.find("kWaveWarpAmplitude * warp.gradientX") != std::string::npos
                 && mirror.find("slideAlongWarp*kWaveWarpAmplitude*warp.gradientY") != std::string::npos,
                 "the CPU preview uses the shader's warp gradient for normals and vertex slides");

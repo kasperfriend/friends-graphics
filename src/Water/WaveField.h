@@ -55,21 +55,57 @@ namespace renderer::water
 
     // ---- the swell trains ---------------------------------------------------
     // One table, three readings of it: the vertex stage displaces the two long
-    // ones (the client's liquid grid is ~4 yards apart, so a ten yard wave is the
-    // shortest it can carry without faceting), the pixel stage shades all three
+    // ones (the client's liquid grid is ~4 yards apart, so an eleven yard wave is
+    // the shortest it can carry without faceting), the pixel stage shades all six
     // and wraps its phases against them, and this header advances them. Directions
     // are unit vectors in lattice space, wavelengths are in cells, weights are the
     // share of the authored amplitude each train carries. Both shaders spell the
     // same numbers as literals; tools/WaterRegression.cpp pins the spelling.
-    inline constexpr int kTrainCount = 3;
-    inline constexpr float kTrainDirX[kTrainCount] = {1.f, -.4695f, .4384f};   // 0 deg, 118 deg, -64 deg
-    inline constexpr float kTrainDirY[kTrainCount] = {0.f, .8829f, -.8988f};
-    inline constexpr float kTrainCells[kTrainCount] = {16.f, 8.f, 4.f};        // 40, 20 and 10 yards
-    inline constexpr float kTrainWeight[kTrainCount] = {1.f, .5f, .26f};
-    inline constexpr float kTrainRadians[kTrainCount] = {kTwoPi / 16.f, kTwoPi / 8.f, kTwoPi / 4.f};
-    // The two trains the mesh is dense enough to carry. Everything above index 2
+    //
+    // Why six and not three: three sinusoids of comparable height are a rhythm, and
+    // a rhythm is precisely what "line by line of waves going and going" was. Three
+    // crests can only interfere so much - the forty yard train repeated after one
+    // 40 yard step along the dominant train and the eye finds the seam immediately.
+    // A real wind sea is a broad BAND of wavenumbers, each with its own direction and
+    // its own speed, and what a player sees as "the waves" is the interference of
+    // that band: crests that grow, weaken, curve into one another and disappear. Six
+    // trains whose wavelengths are in a ~1.35 ratio (never an integer one), in six
+    // directions no two of which share a crest line, produce exactly that - and every
+    // adjacent PAIR of them beats, which is where the grouping below gets its scale
+    // for free.
+    //
+    // The weights follow the sea rather than the eye: what stays roughly constant
+    // across a developed wind sea is the SLOPE of each component (w * k), not its
+    // height, so the heights fall off with the wavelength and the long train still
+    // owns the silhouette while the short ones own the texture. Summed slope is kept
+    // near the one this table has always carried (see kMaxPinch), because that number
+    // is the crest steepness the shading divides its Jacobian by.
+    inline constexpr int kTrainCount = 6;
+    // 0, -34, 21, 47, 83 and 110 degrees. A crest line has no direction, so what has
+    // to be spread is the angle MODULO A HALF TURN: six lines across 180 degrees with
+    // gaps of 21, 26, 36, 27, 36 and 34 degrees are far enough apart that no two share
+    // a crest, and irregularly enough that the fan is not itself a pattern. The first
+    // version of this table ran the two shortest trains at -71 and 104 degrees - five
+    // degrees apart in line space, i.e. one comb with two teeth, which is exactly the
+    // artefact the whole table exists to remove. The regression test computes the
+    // cross products and refuses that, so the mistake cannot come back.
+    inline constexpr float kTrainDirX[kTrainCount] = {1.f, .8290376f, .9335804f, .6819984f, .1218693f, -.3420201f};
+    inline constexpr float kTrainDirY[kTrainCount] = {0.f, -.5591929f, .3583679f, .7313537f, .9925462f, .9396926f};
+    inline constexpr float kTrainCells[kTrainCount] = {16.f, 11.5f, 8.f, 5.8f, 4.4f, 3.4f};  // 40 down to 8.5 yards
+    inline constexpr float kTrainWeight[kTrainCount] = {1.f, .62f, .34f, .19f, .12f, .075f};
+    inline constexpr float kTrainRadians[kTrainCount] =
+        {kTwoPi / 16.f, kTwoPi / 11.5f, kTwoPi / 8.f, kTwoPi / 5.8f, kTwoPi / 4.4f, kTwoPi / 3.4f};
+    // Where each train starts along its own direction, in CELLS of that train. Six
+    // trains whose crests all cross lattice zero at the same instant look like one
+    // comb being dragged over the water; a fixed offset per train - an irregular
+    // fraction of its own wavelength, so it survives the phase wrap untouched - puts
+    // each crest somewhere else, and the interference of six of them is a surface
+    // that never repeats inside the distance a player can see.
+    inline constexpr float kTrainPhaseCells[kTrainCount] =
+        {0.f, .37f * 11.5f, .71f * 8.f, .19f * 5.8f, .55f * 4.4f, .83f * 3.4f};
+    // The two trains the mesh is dense enough to carry. Everything above index 1
     // is normal-mapped only, exactly like a real renderer splits simulation from
-    // detail: displacing a ten yard wave on a four yard grid is what facets.
+    // detail: displacing an eleven yard wave on a four yard grid is what facets.
     inline constexpr int kGeometryTrainCount = 2;
 
     // ---- how fast a wave of a given length should travel ---------------------
@@ -93,26 +129,63 @@ namespace renderer::water
     // A cross-current, as a fraction of the shortest train's own speed, advecting
     // each train by the projection of its direction onto the current. The current
     // runs across the dominant wind (train 0), so the long swell keeps its clean
-    // speed while the two shorter trains shear against it and against each other.
+    // speed while the shorter trains shear against it and against each other.
     // That is what stops the surface reading as a still mirror with noise on top,
     // and it is what [Water] FlowRotationPercent and the weather shear both drive.
+    // With six trains the shear is doing more work than it used to: six directions
+    // across one current means six different speeds, so the crests slide through each
+    // other instead of marching as one comb, which is the difference between a
+    // "pattern of waves" and a sea.
     inline constexpr float kCrossCurrent = .55f;
 
     inline constexpr float kUvDriftU = .0019f;        // native detail map creep, uv/s
     inline constexpr float kUvDriftV = -.0011f;
 
-    // A low-frequency, world-anchored domain warp makes the long swell wander
-    // instead of laying down three perfectly repeatable sine trains. Its two
-    // inputs use the same bounded value-noise lattice as the fine chop, but at
-    // roughly one sample per 35 yards; a small displacement in lattice cells
-    // bends a crest over several dozen yards without turning it into noisy chop.
-    // Keep these constants in step with the compact HLSL copy in WaterEffect.h.
-    inline constexpr float kWaveWarpFrequency = .07142857f; // 1 / 14 lattice cells
+    // A low-frequency, world-anchored domain warp makes the swell wander instead of
+    // laying down six perfectly repeatable sine trains. Its input uses the same
+    // bounded value-noise lattice as the fine chop, at one sample per 50 yards, and
+    // it displaces the crest ALONG the wave field rather than sideways out of it:
+    // a bend of five cells over a twenty cell wavelength moves a forty yard crest
+    // fifteen yards sideways here and back again there, which stretches the spacing
+    // in one place and doubles crests up in the next. That is the second half of the
+    // fix for "lines of waves going and going" - the first being the six trains -
+    // because a bent train has no constant wavelength left to read as a rhythm.
+    // The pixel stage gets the bend AND its gradient from the vertex stage, so the
+    // chain rule below keeps the shading normal on the crest the geometry was lifted
+    // by. Keep these constants in step with the compact HLSL copies in WaterEffect.h.
+    inline constexpr float kWaveWarpFrequency = .05f;        // 1 / 20 lattice cells
     inline constexpr float kWaveWarpCos = .8253356f;         // cos(.6 radians)
     inline constexpr float kWaveWarpSin = .5646425f;         // sin(.6 radians)
     inline constexpr float kWaveWarpDirectionX = .6f;        // unit displacement direction
     inline constexpr float kWaveWarpDirectionY = .8f;
-    inline constexpr float kWaveWarpAmplitude = 3.2f;       // maximum displacement in lattice cells
+    inline constexpr float kWaveWarpAmplitude = 5.f;        // maximum displacement in lattice cells
+
+    // ---- wave grouping: the envelope that decides whether THIS patch has waves ----
+    // A real sea is not uniformly rough. Wind waves grow in a generating area and
+    // arrive as SETS - five or six tall crests, then a stretch of almost flat water -
+    // because a band of wavenumbers carries its energy in a modulated envelope. One
+    // more low-frequency noise field, sampled at one place per 115 yards, supplies
+    // that envelope, and everything that makes a wave look like a wave is multiplied
+    // by it: the lift and the slide in the vertex stage, the shading slope and the
+    // Gerstner pinch in the pixel stage, the chop riding on top of the swell, and
+    // therefore the whitecaps, which are exactly where the set is. A gain that only
+    // ever goes DOWN from the authored amplitude (the ceiling is a hair over one) is
+    // deliberate: the crest masks, the foam thresholds and the fold-safe steepness
+    // are all authored against the table's own maximum, and a sheltered patch of a
+    // coast should look sheltered rather than like a second sea state.
+    inline constexpr float kGroupFrequency = 1.f / 46.f;     // one sample per 115 yards
+    inline constexpr float kGroupCos = .9702957f;            // cos(.242 radians): across the warp's rotation
+    inline constexpr float kGroupSin = .2419219f;
+    // The field's own lattice offset, so the grouping hash lands on different corners
+    // than the warp does despite sharing the wrap. Folded into the CPU phase, which
+    // keeps it out of both shader stages.
+    inline constexpr float kGroupOffsetX = 19.7f;
+    inline constexpr float kGroupOffsetY = 41.3f;
+    inline constexpr float kGroupBase = .52f;                // the flattest a set gets
+    inline constexpr float kGroupDepth = .62f;               // base + depth = the tallest
+    // The gain the envelope can reach, which every fold-safe clamp below has to
+    // survive: the Gerstner Jacobian and the shading pinch are both multiplied by it.
+    inline constexpr float kGroupMax = kGroupBase + kGroupDepth;
 
     struct WaveField
     {
@@ -129,12 +202,17 @@ namespace renderer::water
         // transformed and wrapped in the warp's own noise period (not copied
         // from ripplePhase, whose 64-cell wrap belongs to an unscaled sample).
         float warpPhase[2] = {0.f, 0.f};
+        // The same camera contribution for the wave-grouping field: its own
+        // rotation, its own spatial frequency, its own lattice offset, and its own
+        // wrap. Only the vertex stage samples this field; it passes the value and its
+        // gradient to the pixels, so the phase never reaches the pixel shader at all.
+        float groupPhase[2] = {0.f, 0.f};
         // Phase of each swell train, in cells ALONG THAT TRAIN'S OWN DIRECTION and
         // wrapped into that train's own wavelength. Wrapping per train rather than
         // per lattice axis is what lets a directional wave share one small number
         // between the stages: a shift of one wavelength is one full turn of the
         // sine, so it cannot be seen, whatever the direction.
-        float swellPhase[kTrainCount] = {0.f, 0.f, 0.f};
+        float swellPhase[kTrainCount] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
         // Drift of the client's own water detail texture, in its uv space.
         float uvDrift[2] = {0.f, 0.f};
         // Nothing else is needed: the camera's own coordinate is inside the phases,
@@ -258,6 +336,18 @@ namespace renderer::water
         field.warpPhase[0] = float(WrapPeriod(warp0, double(kLatticeWrap)));
         field.warpPhase[1] = float(WrapPeriod(warp1, double(kLatticeWrap)));
 
+        // The grouping envelope is a third noise field, with its own rotation, its own
+        // spatial frequency and its own lattice offset, so its hash lands on different
+        // corners than the warp's despite sharing the wrap. It is anchored the same way
+        // for the same reason: a set that is not nailed to the world slides past the
+        // player instead of arriving and leaving, and a sliding envelope is a repeating
+        // pattern with the volume turned down. The offset is folded into the phase rather
+        // than added in the shader, which keeps it out of both stages' register budgets.
+        const double group0 = (cam0 * kGroupCos + cam1 * kGroupSin) * kGroupFrequency + double(kGroupOffsetX);
+        const double group1 = (-cam0 * kGroupSin + cam1 * kGroupCos) * kGroupFrequency + double(kGroupOffsetY);
+        field.groupPhase[0] = float(WrapPeriod(group0, double(kLatticeWrap)));
+        field.groupPhase[1] = float(WrapPeriod(group1, double(kLatticeWrap)));
+
         // Speeds in cells per second. Dividing the dispersion speed by the cell is
         // what makes a body of water authored twice the size carry waves that
         // travel faster rather than waves that merely look bigger: the wavelength
@@ -294,24 +384,50 @@ namespace renderer::water
         float pinch = 0.f;              // sum of weight*k*sin: times sigma this is 1 - the Jacobian
     };
 
+    // The angle of one train at one lattice point, in radians. Both shader stages and
+    // this header spell the same expression: k over the train's own wavelength, times
+    // the coordinate projected onto the train's own direction, plus the wrapped phase
+    // and the train's fixed start. Keeping it in one place is what makes a displaced
+    // crest and the light on it the same crest.
+    inline float SwellTheta(int train, float cellX, float cellY, const float phase[kTrainCount]) noexcept
+    {
+        return kTrainRadians[train]
+            * (kTrainDirX[train] * cellX + kTrainDirY[train] * cellY + phase[train] + kTrainPhaseCells[train]);
+    }
+
     // The largest value `pinch` can reach, which is what makes the fold-safe clamp
-    // below a statement about the table rather than a guess.
+    // below a statement about the table rather than a guess. Both budgets are summed
+    // over the table itself, so they cannot drift off it the way three hand-written
+    // terms used to.
     inline constexpr float kMaxPinch = kTrainWeight[0] * kTrainRadians[0]
-        + kTrainWeight[1] * kTrainRadians[1] + kTrainWeight[2] * kTrainRadians[2];
+        + kTrainWeight[1] * kTrainRadians[1] + kTrainWeight[2] * kTrainRadians[2]
+        + kTrainWeight[3] * kTrainRadians[3] + kTrainWeight[4] * kTrainRadians[4]
+        + kTrainWeight[5] * kTrainRadians[5];
+
+    // The same sum over the trains the MESH carries. This is the one the Gerstner
+    // surface actually folds against: the vertex stage slides the two long trains only,
+    // so the four short ones steepen the shading without ever turning a triangle
+    // inside out, and the fold clamp is written against this number, not the other.
+    inline constexpr float kGeometryPinch = kTrainWeight[0] * kTrainRadians[0]
+        + kTrainWeight[1] * kTrainRadians[1];
 
     // The largest |height| the table can reach is the sum of its weights, so this divisor
     // maps a swell sample into -0.5..0.5 and a crest-reading `swell01` into 0..1 with calm
     // water exactly at 0.5. Both stages multiply by it, so a whitecap threshold means the
-    // same thing at any wave size and any sea state.
-    inline constexpr float kSwellToUnit = 1.f / (2.f * (kTrainWeight[0] + kTrainWeight[1] + kTrainWeight[2]));
+    // same thing at any wave size and any sea state. The grouping envelope above can push a
+    // crest kGroupMax past that maximum - by one seventh of the authored wave - and the
+    // crest masks saturate there, which is the intended reading: the tallest crest of a set
+    // is over the whitecap threshold, and the water at the end of it is under it.
+    inline constexpr float kSwellToUnit = 1.f
+        / (2.f * (kTrainWeight[0] + kTrainWeight[1] + kTrainWeight[2]
+            + kTrainWeight[3] + kTrainWeight[4] + kTrainWeight[5]));
 
     inline SwellSample EvaluateSwell(float cellX, float cellY, const float phase[kTrainCount]) noexcept
     {
         SwellSample out;
         for (int train = 0; train < kTrainCount; ++train)
         {
-            const float theta = kTrainRadians[train]
-                * (kTrainDirX[train] * cellX + kTrainDirY[train] * cellY + phase[train]);
+            const float theta = SwellTheta(train, cellX, cellY, phase);
             const float sine = std::sin(theta), cosine = std::cos(theta);
             out.height += kTrainWeight[train] * sine;
             const float slope = kTrainWeight[train] * kTrainRadians[train] * cosine;
@@ -329,11 +445,17 @@ namespace renderer::water
     // a shaded picture of a wave and water that reads as a body moving in three
     // dimensions. `sigma` is the dimensionless steepness both stages share
     // (lateral/cell); the surface folds - crests tear into loops - once
-    // sigma*kMaxPinch reaches 1, so it is clamped well below that and the clamp,
-    // not the shader, is what guarantees a wave can never turn inside out.
+    // sigma*kGeometryPinch reaches 1 AT FULL GROUPING, so it is clamped well below
+    // that and the clamp, not the shader, is what guarantees a wave can never turn
+    // inside out.
     inline constexpr float kGeometryWaveYards = .75f;  // WAVE HEIGHT 100 at the shipped wave size
     inline constexpr float kGerstnerSigma = .45f;      // the shipped crest shape
-    inline constexpr float kGerstnerSigmaMax = .55f;   // fold safety: Jacobian never below ~.34
+    // 1 - .55*kGeometryPinch*kGroupMax is the flattest the mesh can be asked to get.
+    // The grouping envelope multiplies the lift AND the slide, so the ceiling the clamp
+    // is written against has the envelope's own maximum in it: a crest at the top of a
+    // set is steeper than the same crest between sets, and the fold limit has to hold on
+    // the tall one.
+    inline constexpr float kGerstnerSigmaMax = .55f;   // fold safety: Jacobian never below ~.54
 
     struct GeometryWaves
     {

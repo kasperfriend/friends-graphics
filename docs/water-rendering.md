@@ -265,6 +265,26 @@ from the same matrix the displacement uses. `watereffect::Scope`'s save/restore 
 size - seventeen pixel registers and three vertex registers - because nothing new was added,
 only rearranged.
 
+Round 4 grew both stages by the minimum: the vertex stage gained `c204` (the grouping field's
+camera anchor) and one interpolant, and the pixel stage gained `c217` (the four shading-only
+trains' phases, in one contiguous `float4`). The scope now saves and restores eighteen pixel and
+five vertex registers, `controls` is 72 floats and `vertexControls` is 20.
+
+| register | contents, as of round 4 |
+|---|---|
+| `c200` (VS) | amplitude, slide, sigma, one cell in yards |
+| `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
+| `c202` (VS) | xy = the phases of the two displaced trains; the PS's `c210.zw`, verbatim |
+| `c203` (VS) | xy = the domain warp's camera anchor, wrapped in the warp's own period |
+| `c204` (VS) | xy = the grouping field's camera anchor; never reaches the pixel stage |
+| `c210` (PS) | chop phase (xy), then the displaced pair's phases (zw) |
+| `c211` (PS) | texture creep (xy), unused (z), the wave gate (w) |
+| `c217` (PS) | the phases of the four trains only the shading carries |
+
+The grouping value and its gradient arrive as `TEXCOORD8`, the warp and its gradient as
+`TEXCOORD7`; the pixel shader samples no low-frequency noise at all, which is what keeps a set
+nailed to the terrain for one multiply and one `dot`.
+
 ### Looking at changes without a GPU
 
 `tools/WaterPreview.cpp` is a CPU mirror of the water pixel shader - the same wave field from `src/Water/WaveField.h`,
@@ -458,6 +478,107 @@ shading, the broad domain warp and its gradient moved to the vertex stage and ar
 through `TEXCOORD7`; the liquid mesh resolves this 35-yard-scale field smoothly, while the fine
 chop remains per pixel. That kept the same warped crest and chain-rule normal and measured **597**
 slots. `tools/ValidateShaders.ps1` now budgets 621 (597 measured plus 24 slots of compiler margin).
+
+## Full rework round 4: the comb, and the sets (2026-10-14)
+
+The report after round 3 was not "the water is flat" any more. It was: *the waves still go in
+lines - I can clearly see line by line of waves going and going*, with a repeating pattern a
+player can count. Round 3 had fixed the sea following the camera, its pace, and its mass. It had
+not fixed the shape of the surface, and the reason is worth writing down because it is not
+obvious from a screenshot.
+
+### What was actually being seen
+
+A probe along a screen row in the mid-distance measured crest after crest at a spacing of exactly
+forty yards - train B's wavelength, in the 40/20/10 table - in perfectly straight lines, and the
+blob that the domain warp produced travelled with the camera. Three things produced that, in order
+of how much of the complaint each one owns:
+
+1. **Three sinusoids are a rhythm.** With weights 1/.5/.26 the forty-yard train carries the
+   silhouette, and the pixel stage is the only place the ten yard train exists at all: the client's
+   liquid grid is about four yards apart, so the vertex stage displaces the two long trains and the
+   short one contributes nothing to a crest. Two displaced trains a factor of two apart realign
+   every other crest, which IS a comb. The far field was worse than a comb: the chop's
+   `filter=rsqrt(1+footprint)` term fades the six-octave noise to almost nothing at distance, so
+   distant water was ONE sine at 40 yards with nothing on top of it. Straight, evenly spaced,
+   repeating: exactly the report.
+2. **The warp was too weak to bend a comb.** 3.2 cells of displacement at a 1/14-cell (35 yard)
+   scale bends a forty-yard crest by a few yards over its own length - visible as a wobbling line,
+   still a line. A wave that keeps its wavelength is a wave that keeps its spacing, however much it
+   curves.
+3. **Nothing decided where the waves were.** The amplitude was the same in every square yard of
+   the body, so the pattern had no reason not to repeat: a real sea arrives in SETS, five or six
+   tall crests and then flat water, because a band of wavenumbers carries its energy in a
+   modulated envelope.
+
+### What changed
+
+* **Six trains, in a table, with a start of their own.** Wavelengths 16, 11.5, 8, 5.8, 4.4 and
+  3.4 cells (40 down to 8.5 yards at the shipped wave size) - a ratio of about 1.35 between
+  neighbours and never an integer one - in six directions whose crest lines are never closer than
+  21 degrees, with weights 1/.62/.34/.19/.12/.075 falling off so that the summed SLOPE stays at
+  the value the shading's Jacobian was authored against, and a fixed phase offset per train
+  (`.37`, `.71`, `.19`, `.55`, `.83` of that train's own wavelength) so no two crests cross
+  lattice zero together. Two of the six are displaced, all six are shaded, exactly as before:
+  the mesh budget did not change.
+* **One stronger warp instead of two weak ones.** `.05` frequency (one sample per 50 yards) and
+  `5.f` cells of amplitude, displacing the crest ALONG the field. Five cells of bend on an
+  eleven-cell wavelength moves a crest fifteen yards sideways and back, which stretches the
+  spacing here and doubles crests up there: a bent train has no constant wavelength left to read
+  as a rhythm. The second decorrelated warp and the vortices from the previous round were cut -
+  they could not break a comb and they cost slots to prove it.
+* **A grouping envelope.** A third world-anchored noise field at one sample per 115 yards produces
+  a gain in `.52 .. 1.14`, and it multiplies the lift, the Gerstner slide, the shading slope, the
+  pinch, the chop riding on the swell and therefore the whitecaps. It is sampled ONCE, in the
+  vertex stage, and handed to the pixels through `TEXCOORD8` with its gradient. The slope carries
+  it by the product rule - `dh = gain*dswell + swell*dgain` - so the flank of a set tilts the
+  water as well as dimming it, which is the difference between waves that fade out and waves that
+  run out. A ceiling just over 1 is deliberate: every fold-safe clamp, foam threshold and crest
+  mask is authored against the table's own maximum, and a gain that only ever goes down cannot
+  invent a second sea state in a sheltered bay.
+* **`detail.x` (the foam pattern) is NOT enveloped,** and the authored swell response
+  (`foreverStyle.x`) is applied BEFORE the gain: it is a slider on the wave, and differentiating an
+  envelope that already carried the slider would scale the slider by `dgain` too.
+
+What did not move is the core the task asked to keep: one world-anchored lattice, phases computed
+in double on the CPU from the draw's own matrix, per-train deep-water dispersion, the same analytic
+trains displaced and shaded, the client's detail map creeping underneath, and the Gerstner slide
+that makes a crest read as a body.
+
+### Registers, and the slot budget
+
+The pixel stage grew one register (`c217`, the four shading-only trains' phases in one contiguous
+`float4` rather than gathered across three) and the vertex stage one (`c204`, the grouping field's
+anchor), so `watereffect::Scope` now saves and restores 18 pixel registers and 5 vertex ones. The
+`controls` array is 72 floats and `vertexControls` is 20.
+
+The pixel shader measured 597 of a 621-slot budget before this round. Six trains in two batches
+(2 as `float2`, 4 as `float4`) plus the envelope should land around ten slots higher: the batches
+cost roughly one `mad`, three arithmetic, two `sincos`, one `dot` and four accumulate each, and the
+chain rule lost a per-pixel gradient re-derivation to the interpolant it now reads. **The number
+has not been measured here** - `fxc` is a Windows tool and this round was authored on Linux - so
+the budget in `tools/ValidateShaders.ps1` was deliberately left at 621 and CI will report the real
+count. If it comes back over, the first things to cut are the four short trains' slope terms (the
+heights matter more to the silhouette than their exact slopes do), not the envelope.
+
+### Verification
+
+* `tools/WaterRegression.cpp` holds the table to the properties that make it a sea: wavelengths
+  strictly decreasing and never an octave or a unison apart, no two trains parallel IN LINE SPACE
+  (a crest line has no direction, so the test takes the cross product and checks it modulo a half
+  turn), weights falling, each start inside its own train's wavelength, and every literal the
+  shaders spell equal to the header's - including the `0.01347826` in both stages being exactly
+  `kGroupFrequency * kGroupDepth`, and the fold clamp being written against `kGeometryPinch *
+  kGroupMax` rather than the unhistoried `kMaxPinch`. The first version of the direction table put
+  the two shortest trains at -71 and 104 degrees, which is five degrees apart in line space - one
+  comb with two teeth - and that test is what caught it.
+* The CPU mirror (`tools/WaterPreview.cpp`) carries the same warp, gain, product rule, pinch and
+  chop scaling, so the published frames are of the water the client draws. Before/after frames at
+  the same camera (`build/look-before.png`, `build/look-after.png`, not committed) show the
+  mid-distance changing from evenly spaced parallel bands into crossing crests at several angles
+  with visibly grouped heights.
+* Still open, in `TODO.md`: the `fxc` slot count, and a look in-world - a CPU mirror can prove the
+  numbers agree and cannot prove the water looks right at 40 feet above a harbour.
 
 ## Shader budget raised for the volume rework (2026-10-14)
 

@@ -246,6 +246,15 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/ShaderSourceRegression.cpp -o build/shader-source-test
           ./build/shader-source-test
 
+      # "Location unavailable" is the one F7 line a player reads without a log, so the
+      # cause text, the "never sampled" ids and the rule that a rejected profile file must
+      # still configure the provider are pinned here - all of it compiles without windows.h.
+      - name: Location diagnosis regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/LocationStatusRegression.cpp -o build/location-status-test
+          ./build/location-status-test
+
       - name: Build and run portable overlay regressions
         run: |
           mkdir -p build
