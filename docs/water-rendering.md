@@ -1,5 +1,89 @@
 # Water rendering audit
 
+## Full rework round 1: square patterns and tiles of native water (2026-10-14)
+
+Two reported symptoms, both reproducible from the code:
+
+**1. Square patterns in the replacement water.** The procedural wave field was
+built from the liquid material's own uv (`flowingUv`, then `dot(uv,·)*float2(14,31)`)
+and hashed with `frac(dot(i,float2(127.1,311.7))*0.1031)`. Both are wrong at
+ordinary world scale:
+
+- uv coordinates that grow with the world position, multiplied by ~300 and then
+  reduced with `frac`, leave only a few float32 fraction bits. The noise
+  quantises onto its own lattice, i.e. flat axis-aligned squares, and the more
+  distant the water the larger the squares.
+- `fwidth()` of that same coordinate fed the level-of-detail fade, so the fade
+  became garbage exactly where the pattern was already degenerate.
+- Only the noise *slope* was faded with distance, not the sampled value, so the
+  unresolved octave aliased into a fixed screen-aligned grid inside the sun
+  glitter and crest foam.
+- Anything derived from a tile's uv restarts at the tile edge, so detail was
+  framed by hard squares even before precision failed.
+
+The field is now evaluated from the position relative to the camera, recovered in
+the vertex shader from **this draw's** view matrix (so it also works for the
+client's reflection camera and never depends on frame-lagged capture), with the
+camera's own world position added as a phase computed in double on the CPU
+(`src/Water/WaveField.h`). The noise wraps its lattice indices modulo 64, which
+makes reducing that phase into the period a free and invisible operation: every
+coordinate the pixel shader floors stays small at any world coordinate, the
+pattern is nailed to the terrain, and geometry waves now ride the same field so
+a displaced crest and its highlight stay on one wave. The vertex stage cannot use
+the wrapped phase (it drives two sines with different periods, and folding one of
+them would slide it by a third of a wave every 64 cells), so it receives the
+camera's lattice coordinate as its own unwrapped constant and adds it before the
+sines. Without that constant the displacement is a function of the distance from
+the camera, and the bumps visibly swim over the terrain as you move. The hash arguments are
+bounded by construction (largest index 4095, before that: unbounded), the swell
+octave gets its own phase and a sheared travel direction instead of sharing the
+ripple's, and the sampled value fades with the pixel footprint together with the
+slope. The wave normal no longer comes from screen-space derivatives of the uv
+and a winding-dependent sign flip: the vertex shader hands the pixel shader the
+world axis directions rotated into the lattice, so the tilt follows the real
+gradient. Two shader lookups and four derivative instructions were removed to pay
+for it, and the viewport `MaxZ` is folded into the depth unpack so each of the
+three ray loops costs one subtraction and one divide instead of an extra divide.
+
+**2. Square patches of fully native water.** Replacement, scene capture,
+classification and ground capture all consult `water::IsMaterial`. For the
+captured canonical layout (8x64 lookup + 512x512 surface) that is shader
+agnostic, but every other surface size first demanded a **documented vertex
+shader and a documented pixel shader**. The client picks liquid vertex variants
+by camera distance and shadow quality - `src/Core/ShaderCache.cpp` records
+exactly that failure for `0x48a82796bd612aeb`, "water tiles very close to the
+camera ... fell through unclassified and rendered with none of our effects" - so
+any undocumented vertex variant leaves a whole tile native while its neighbours
+are replaced. Three changes:
+
+- The pixel shader is the material. A documented liquid pixel shader plus the
+  liquid two-texture signature is now enough, with the vertex shader left free;
+  the previous both-roles requirement is what made tiles depend on a hash list
+  that can never be complete.
+- `0x70faf83955e2b668`, the fourth vertex variant confirmed from live logs and
+  recorded in `TODO.md` but never added to `WaterPolicy.h`, is now listed, so it
+  also counts as water for the atmosphere/shadow classifier at any surface size.
+- Both fog paths (`DistanceFog.h`, `src/Effects/EnvironmentFogCapture.h`) keyed
+  their fog-curve register on **one** of the four liquid vertex shaders, so tiles
+  drawn with a sibling variant kept the native distance fade while their
+  neighbours were rescaled - a hard square seam across one continuous surface.
+  They now share `water::FogConstantRegister()`, and the existing shape guard
+  still rejects any variant that does not actually hold a fog curve there.
+
+Draws carrying the liquid texture signature that is *not* approved are now
+reported once per distinct signature in `WaterEffect.log` as
+`liquid material not covered by the captured water shaders: ... vs=0x... ps=0x...`
+with the frame counter `liquidLayoutsIgnored`. Detection stays fail-closed, but
+the next unmatched water family becomes identifiable from a player's log instead
+of from a screenshot.
+
+`tools/WaterRegression.cpp` covers the widened and still-rejected identities
+(including the precipitation and UI shaders that must stay out), the shared fog
+register, and the wave field: same terrain point from five very different camera
+positions must land on the same lattice coordinate, phases must stay inside the
+wrap, and the constants must remain finite after 100000 s of animation.
+
+
 ## Additional safety sweep (2026-10-14)
 
 Three further defects were found in code:

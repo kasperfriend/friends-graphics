@@ -83,10 +83,14 @@ of the cloud shader, at the shipped defaults.*
 
 ### Water
 
-See [water rendering, verification and troubleshooting](docs/water-rendering.md).
+See [water rendering, verification and troubleshooting](docs/water-rendering.md), and
+[the plan for the next water pass](docs/water-forever-round2-plan.md) for what the shading
+model is being moved to and which parts of it a `ps_3_0` shader can and cannot carry.
 
 - Screen-space reflections and environment fallback reflections.
 - Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
+- Waves are evaluated on a world-anchored lattice, not on a tile's texture coordinates, so
+  one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 
 ### Native shadows and post-processing

@@ -7,9 +7,28 @@
 
 namespace renderer::water
 {
-    inline bool IsMaterial(IDirect3DDevice9* device)
+    // One structural reading of the draw, shared by replacement, capture,
+    // classification and diagnostics so no path can disagree about what liquid
+    // is. `candidate` names the draws that carry the liquid texture signature
+    // but are not approved; that is the only way a water family missing from
+    // the captured shader lists becomes visible in a player's log.
+    struct Observation
     {
-        if (!device) return false;
+        bool liquid = false;
+        bool candidate = false;
+        bool vertexShaderBound = false;
+        bool pixelShaderBound = false;
+        unsigned width[2] = {0, 0};
+        unsigned height[2] = {0, 0};
+        uint64_t vsHash = 0;
+        uint64_t psHash = 0;
+    };
+
+    inline Observation Observe(IDirect3DDevice9* device)
+    {
+        Observation out;
+        if (!device) return out;
+
         D3DSURFACE_DESC desc[2]{};
         for (unsigned slot = 0; slot < 2; ++slot)
         {
@@ -17,13 +36,20 @@ namespace renderer::water
             if (FAILED(device->GetTexture(slot, texture.GetAddressOf())) || !texture ||
                 texture->GetType() != D3DRTYPE_TEXTURE ||
                 FAILED(static_cast<IDirect3DTexture9*>(texture.Get())->GetLevelDesc(0, &desc[slot])))
-                return false;
+                return out;
+            out.width[slot] = desc[slot].Width;
+            out.height[slot] = desc[slot].Height;
         }
+        out.candidate = IsLiquidCandidate(desc[0].Width, desc[0].Height,
+                                          desc[1].Width, desc[1].Height);
+        // The canonical layout is the supported liquid signature on its own, so
+        // unknown shader variants keep working and nothing is hashed per draw.
         if (IsMaterialLayout(desc[0].Width, desc[0].Height, desc[1].Width, desc[1].Height))
-            return true;
-        if (!IsRippleLookup(desc[0].Width, desc[0].Height) ||
-            !desc[1].Width || desc[1].Width != desc[1].Height)
-            return false;
+        {
+            out.liquid = true;
+            return out;
+        }
+        if (!out.candidate) return out;
 
         // StateBlock::Apply can bypass SetShader hooks. Only use the mirror's
         // hashes when its identities match the shaders ACTUALLY bound now.
@@ -31,14 +57,19 @@ namespace renderer::water
         Microsoft::WRL::ComPtr<IDirect3DPixelShader9> ps;
         if (FAILED(device->GetVertexShader(vs.GetAddressOf())) || !vs ||
             FAILED(device->GetPixelShader(ps.GetAddressOf())) || !ps)
-            return false;
-        const auto& tracked = g_trackedState;
+            return out;
+        out.vertexShaderBound = true;
+        out.pixelShaderBound = true;
         auto& cache = ShaderCache::Instance();
-        const auto vsHash = tracked.currentVS == vs.Get() && tracked.vsHash
-            ? tracked.vsHash : cache.GetShaderHash(vs.Get());
-        const auto psHash = tracked.currentPS == ps.Get() && tracked.psHash
-            ? tracked.psHash : cache.GetShaderHash(ps.Get());
-        return IsMaterialLayout(desc[0].Width, desc[0].Height,
-                                desc[1].Width, desc[1].Height, vsHash, psHash);
+        out.vsHash = g_trackedState.currentVS == vs.Get() && g_trackedState.vsHash
+            ? g_trackedState.vsHash : cache.GetShaderHash(vs.Get());
+        out.psHash = g_trackedState.currentPS == ps.Get() && g_trackedState.psHash
+            ? g_trackedState.psHash : cache.GetShaderHash(ps.Get());
+        out.liquid = IsMaterialLayout(desc[0].Width, desc[0].Height,
+                                      desc[1].Width, desc[1].Height,
+                                      out.vsHash, out.psHash);
+        return out;
     }
+
+    inline bool IsMaterial(IDirect3DDevice9* device) { return Observe(device).liquid; }
 }

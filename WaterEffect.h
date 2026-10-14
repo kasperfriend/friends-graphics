@@ -16,6 +16,7 @@
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
 #include "src/Water/WaterMaterial.h"
+#include "src/Water/WaveField.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
@@ -30,6 +31,10 @@ float flowSpeed=1.f,flowRotation=.32f;
 float refractionStrength=.12f,absorptionStrength=.18f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 float geometryWaveAmplitude=.10f;
+// Size of one ripple lattice cell and how fast its detail fades when a pixel
+// spans more than a cell. Both are world-space (yards), because the wave field
+// is anchored to the terrain rather than to a tile's uv.
+float waveScalePercent=100.f,waveSofteningPercent=100.f;
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
@@ -55,7 +60,7 @@ inline bool NeedsScene() {
         reflectionsEnabled, refractionEnabled, depthEnabled, foamEnabled, sunGlintEnabled);
 }
 bool showStatus=false;
-unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0;
+unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
 inline void ReportFailure(const char* operation,HRESULT hr) {
@@ -71,22 +76,54 @@ float4 modelView[4]:register(c5);
 float4 uvAX:register(c9);float4 uvAY:register(c10);float4 uvAOffset:register(c12);
 float4 uvBX:register(c13);float4 uvBY:register(c14);float4 uvBOffset:register(c16);
 float4 lightDirection:register(c33);float4 ambient:register(c34);float4 diffuse:register(c35);
-// x=time, y=world-space displacement amplitude, z=long-wave strength
+// x=time, y=world-space displacement amplitude, z=long-wave strength,
+// w=geometry wave cycles per wave lattice cell (0 keeps the surface flat).
 float4 waveControl:register(c200);
-struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;};
+// Rows of the world->lattice matrix; the same value c209 carries to the PS.
+float4 waveLattice:register(c201);
+// xy=this draw's camera position in lattice cells, added back before the sines so
+// the wave is nailed to the terrain rather than sliding across it as the camera
+// moves. Unwrapped on purpose: see WaveField.h.
+float4 waveAnchor:register(c202);
+struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
-    float phaseA=(uv0.x*.83+uv0.y*.56)*6.28318+waveControl.x*.72;
-    float phaseB=(uv0.x*-.47+uv0.y*.91)*6.28318-waveControl.x*.43;
-    pos.z+=waveControl.y*(sin(phaseA)+sin(phaseB)*.55)*(.55+.45*waveControl.z);
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
+    // The view rows are the world->view rotation, so its transpose (the world
+    // axis directions, below) maps a view position back onto the terrain plane.
+    // worldRel is the distance from the camera in WORLD axes: small and exact at
+    // any world coordinate, identical for two neighbouring tiles - which is what
+    // keeps a wave field from restarting at every tile edge - and it does not
+    // turn when the camera turns. The camera's own position is added by the
+    // pixel shader as a constant phase, so this is the only coordinate a wave
+    // field is ever built from.
+    float3 axisX=float3(modelView[0].x,modelView[1].x,modelView[2].x);
+    float3 axisY=float3(modelView[0].y,modelView[1].y,modelView[2].y);
+    float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));
+    // Geometry waves ride the same world-anchored field as the shading normals,
+    // so a displaced crest and its highlight stay on the same wave. The
+    // displacement is applied after the view transform, along the world up axis,
+    // because a tile's uv restarts every 533 units and would stamp identical
+    // square bumps onto every tile.
+    float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw))+waveAnchor.xy;
+    float phaseA=cell.x*6.28318*waveControl.w+waveControl.x*.72;
+    float phaseB=cell.y*6.28318*waveControl.w*.63-waveControl.x*.43;
+    p.xyz+=waveControl.y*(sin(phaseA)+sin(phaseB)*.55)*(.55+.45*waveControl.z)*
+        float3(modelView[0].z,modelView[1].z,modelView[2].z);
     o.pos=projection[0]*p.x+projection[1]*p.y+projection[2]*p.z+projection[3]*p.w;
     o.fog=min(pow(max(p.z*fogParams.x+fogParams.y,0),fogParams.z),1);
     o.uv1=uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy;
     o.uv0=uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy;
     float3 n=modelView[0].xyz*normal.x+modelView[1].xyz*normal.y+modelView[2].xyz*normal.z;
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
-    o.viewPos=p.xyz;o.viewNormal=n;return o;
+    o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=rel;
+    // The wave gradient is expressed in world axes; the same two axis vectors
+    // rotate it into view space here so the pixel shader only has to scale them
+    // by the wave slope: no screen-space approximation and no per-triangle
+    // winding flip in the shading normal.
+    o.waveTangent=axisX*waveLattice.x+axisY*waveLattice.y;
+    o.waveBitangent=axisX*waveLattice.z+axisY*waveLattice.w;
+    return o;
 }
 )HLSL";
 const char* source=R"HLSL(
@@ -98,29 +135,41 @@ sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
 sampler2D sceneDepth:register(s3);
 float4 fogColor:register(c4);
-float4 controls:register(c200);
-float4 lightDirection:register(c201); // xyz=direction, w=flow rotation sine
+float4 controls:register(c200); // x=unused,y=ripple uv offset,z=normal response,w=specular
+float4 lightDirection:register(c201); // xyz=direction toward the sun/moon
 float4 lightColor:register(c202);
-// c203=(projection A,B,scaleX,scaleY)
+// x=depth unpack A,y=depth unpack B with the viewport MaxZ folded in, so a
+// captured depth costs one subtraction and one divide; z,w=screen scale.
 float4 reflectionProjection:register(c203);
 // x=SSR strength,y=1/width,z=1/height,w=viewport depth maximum
 float4 reflectionControl:register(c204);
 // x=environment strength,y=max trace distance,z=base thickness,w=enabled
 float4 reflectionStyle:register(c205);
-// x=animation speed, y=counter-rotating layer strength, z=debug, w=rotation cosine.
-// Rotating the wave layer mirrors modern animated UVs without new ADT data.
+// x=wave anti-alias gain, yz=refraction uv scale, w=debug mode
 float4 flowControl:register(c206);
 // x=refraction, y=depth absorption, z=shore foam, w=foam depth width
 float4 waterStyle:register(c207);
 // x=long swell strength, y=sun glitter, z=Fresnel response, w=crest foam
 float4 foreverStyle:register(c208);
+// Rows of the world->lattice matrix, scaled by 1/cell and rotated with the flow.
+float4 waveLattice:register(c209);
+// xy=ripple phase, zw=long swell phase, both wrapped into the lattice period.
+float4 wavePhase:register(c210);
+// xy=drift of the client's own detail map in its uv, z=swell/octave ratio.
+float4 waveFlow:register(c211);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
-// Evaluate all four corner hashes together. Scalar float3 hashes in four
-// calls per octave consumed hundreds of PS3 slots after inlining. This
-// vector polynomial hash needs only a handful of vector ALU instructions.
+// Analytic value noise on one rotated lattice, evaluated for all four corner
+// hashes at once. Every hash argument is folded into a bounded range first:
+// multiplying a raw lattice index by a large constant (the previous
+// dot(i,float2(127.1,311.7))) ran out of float32 fraction bits at ordinary
+// world distances, the noise collapsed onto its own lattice and hardened into
+// flat axis-aligned squares. Indices here are wrapped to [0,64), so the largest
+// argument is 4095 and .x/.y/.z never depend on where in the world you stand.
+// .x is the value, .y/.z its exact partial derivatives.
 float3 noiseGradient(float2 p) {
-    float2 i=floor(p),f=frac(p);
-    float4 h=frac((dot(i,float2(127.1,311.7))+float4(0,127.1,311.7,438.8))*.1031);
+    float2 i=floor(p),f=p-i;
+    i-=floor(i*(1.0/64.0))*64.0;
+    float4 h=frac((i.x+i.y*64.0+float4(0,1,64,65))*.1031);
     h*=h+33.33;
     h=frac(h*(h+h));
     float2 u=f*f*(3-2*f),du=6*f*(1-f);
@@ -139,49 +188,45 @@ float3 noiseGradient(float2 p) {
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
 struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
-WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3) {
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     float4 base=tex2D(baseTexture,uv0);
-    float time=controls.x*flowControl.x;
-    float2 drift=float2(time*.19,-time*.11);
-    // Preserve WoW's two material UV transforms and add a slower
-    // counter-rotating component.  This keeps a coherent current instead of
-    // making the reflection look like a stationary mirror with noisy normals.
-    // Uniform trigonometry is evaluated once per draw on the CPU, not per pixel.
-    float s=lightDirection.w,c=flowControl.w;
-    float2 rotated=float2(c*uv0.x-s*uv0.y,s*uv0.x+c*uv0.y);
-    float2 flowingUv=lerp(uv1,rotated,flowControl.y);
-    float2 p=float2(dot(flowingUv,float2(.91,.41)),dot(flowingUv,float2(-.41,.91)))*float2(14,31);
-    float3 swell=noiseGradient(p*.055+drift*.085);
-    float3 a=noiseGradient(p+drift+float2(swell.x,swell.x*.71));
-    float2 longSlopes=swell.yz;
-    float2 slopes=a.yz*.72+longSlopes*foreverStyle.x;
-    float filter=rsqrt(1+16*dot(fwidth(p),fwidth(p)));
+    // One rotated, world-anchored lattice carries both octaves: the fine ripple
+    // that disturbs the reflection and the long swell that moves the normal.
+    float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
+    float2 footprint=fwidth(plane);
+    // Fade the unresolved octave by the pixel's own footprint.
+    float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
+    float3 swell=noiseGradient(plane*waveFlow.z+wavePhase.zw);
+    float3 ripple=noiseGradient(plane+wavePhase.xy+float2(swell.x,swell.x*.71));
     float flowGate=saturate(controls.y*100+controls.z*4);
-    slopes*=filter*flowGate;
+    float2 slopes=(ripple.yz*.72+swell.yz*foreverStyle.x)*filter*flowGate;
+    // The sample VALUE has to fade with the footprint too, not only its slope:
+    // unresolved value noise aliases into a fixed screen-aligned grid, which is
+    // exactly what read as square patterns on distant water.
+    float2 detail=lerp(.5,float2(ripple.x,swell.x),filter);
     float2 offset=slopes*controls.y;
-    float3 surface=tex2D(surfaceTexture,uv1+offset+drift*.010*flowGate).rgb;
+    float3 surface=tex2D(surfaceTexture,uv1+offset+waveFlow.xy).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
     float3 v=safeNormalize(-viewPos);
     float3 n=safeNormalize(viewNormal);
-    // Water can be drawn from either side. Orient only the added lighting normal.
-    n*=dot(n,v)<0?-1:1;
-    float3 px=ddx(viewPos),py=ddy(viewPos);
-    float2 ux=ddx(uv1),uy=ddy(uv1);
-    float det=ux.x*uy.y-ux.y*uy.x;
-    float3 tangent=(px*uy.y-py*ux.y)*(det<0?-1:1);
-    tangent=safeNormalize(tangent-n*dot(n,tangent));
-    float3 bitangent=safeNormalize(cross(n,tangent));
-    float3 wave=safeNormalize(n+controls.z*(tangent*slopes.x+bitangent*slopes.y));
+    // Water can be drawn from either side. Orient the normal and mirror the wave
+    // tilt with it; the tilt comes from the real world-space gradient of the
+    // field, rotated into view space by the vertex shader.
+    float flip=dot(n,v)<0?-1:1;
+    n*=flip;
+    float2 tilt=slopes*(controls.z*flip);
+    float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
-    float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z/max(viewPos.z,.05),
-                           .5-.5*viewPos.y*reflectionProjection.w/max(viewPos.z,.05));
+    float depthScale=1/max(viewPos.z,.05);
+    float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z*depthScale,
+                           .5-.5*viewPos.y*reflectionProjection.w*depthScale);
     float behindRaw=tex2Dlod(sceneDepth,float4(screenUV,0,0)).r;
-    float behindZ=behindRaw>=.9999?100000:reflectionProjection.y/(behindRaw/max(reflectionControl.w,.001)-reflectionProjection.x);
+    float behindZ=behindRaw>=.9999?100000:reflectionProjection.y/(behindRaw-reflectionProjection.x);
     // Foreground geometry is not a deep seabed. Never turn negative
     // separation into absorption/foam on the wrong side of a shoreline.
     float waterDepth=max(behindZ-viewPos.z,0);
@@ -197,19 +242,17 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // genuinely deep, not "not water" - treat it as maximum depth instead.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
-    float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*waterStyle.x*120;
-    float2 refractUV=screenUV+(depthValid?refractOffset:float2(0,0));
+    float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz:float2(0,0));
     // Reject distortion across foreground silhouettes, rather than pulling
     // a bridge/character into the water. Missing depth keeps the native body.
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
-    float surfaceRaw=(reflectionProjection.x+reflectionProjection.y/max(viewPos.z,.05))*reflectionControl.w;
-    refractUV=lerp(screenUV,refractUV,step(surfaceRaw,refractRaw));
+    refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
     float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
-    float3 deepTint=lerp(fogColor.rgb*.42,float3(.025,.105,.135),.62);
+    float3 deepTint=fogColor.rgb*.1596+float3(.0155,.0651,.0837);
     float absorption=captureValid*(1-exp(-effectiveDepth*waterStyle.y*.14));
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
-    float crest=saturate(.55+a.x*.45+dot(slopes,float2(.18,-.12)));
+    float crest=saturate(.55+detail.x*.45+dot(slopes,float2(.18,-.12)));
     float3 l=safeNormalize(-lightDirection.xyz);
     float ndh=saturate(dot(wave,safeNormalize(l+v)));
     float ndl=saturate(dot(wave,l));
@@ -218,7 +261,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // copy of the same path; besides washing out water, it exceeded PS3 limits.
     float foreverFresnel=pow(1-saturate(dot(wave,v)),2);
     float fresnel=saturate(.08+foreverStyle.z*(.10+.62*foreverFresnel));
-    float pathBreakup=.18+.82*saturate(a.x*.7+swell.x*.3);
+    float pathBreakup=.18+.82*saturate(detail.x*.7+detail.y*.3);
     float celestialPath=pow(ndh,64)*pathBreakup*foreverStyle.y*fresnel*ndl;
 
     // March from this water point toward the sun/moon through the captured
@@ -234,7 +277,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
                                   .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
             float inside=step(0,lightUV.x)*step(lightUV.x,1)*step(0,lightUV.y)*step(lightUV.y,1)*step(.05,lightSample.z);
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
-            float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw/max(reflectionControl.w,.001)-reflectionProjection.x);
+            float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
             float delta=lightSample.z-blockerZ;
             float thickness=2.0+traceDistance*.10;
             float blocked=inside*step(blockerZ,99999)*step(.12,delta)*step(delta,thickness);
@@ -255,7 +298,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // 2. Screen-Space Reflections (SSR) with wave normal perturbation
     float3 environment=lerp(fogColor.rgb,max(sheenColor,.08),.28);
     float3 reflected=environment;
-    float hit=0,edge=0;
+    float hit=0;
     if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
         float3 ray=safeNormalize(reflect(-v,wave));
         float3 hitColor=environment;
@@ -270,7 +313,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             // same four inside tests a second time for every SSR step.
             float inside=step(.05,samplePosition.z);
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
-            float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw/max(reflectionControl.w,.001)-reflectionProjection.x);
+            float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
             float thickness=reflectionStyle.z+traceDistance*.05;
             float range=saturate(1-abs(difference)/max(thickness,.01));
@@ -282,12 +325,11 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             bestConfidence=max(bestConfidence,confidence);
         }
         hit=saturate(bestConfidence*1.8);
-        edge=hit;
-        reflected=lerp(environment,hitColor,edge);
+        reflected=lerp(environment,hitColor,hit);
     }
 
     // 3. Surface reflection according to Fresnel and SSR strength
-    float reflectionAmount=saturate((.10+.65*foreverFresnel)*(reflectionStyle.x*.55+reflectionControl.x*edge*1.6));
+    float reflectionAmount=saturate((.10+.65*foreverFresnel)*(reflectionStyle.x*.55+reflectionControl.x*hit*1.6));
     rgb=lerp(waterBody,reflected,reflectionAmount);
 
     // Direct reflection of actual local emitters on the same wave normal.
@@ -308,11 +350,11 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // 4. Celestial reflection path & shore/crest foam
     float pathEnergy=saturate(celestialPath*controls.w*.62);
     rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
-    float waveFoam=smoothstep(.70,.91,a.x*.7+swell.x*.3+length(longSlopes)*.10);
+    float waveFoam=smoothstep(.70,.91,detail.x*.7+detail.y*.3+length(swell.yz)*.10*filter);
     float foamAmount=(shore*waterStyle.z+waveFoam*foreverStyle.w)*crest;
     rgb+=float3(.42,.48,.43)*foamAmount;
-    if(flowControl.z>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
-    if(flowControl.z>.5){result_.color=float4(1,0,1,1);return result_;}
+    if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
+    if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
     result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
@@ -346,12 +388,14 @@ void ReloadTuning(){
     fresnelStrength=std::clamp(ReadTuning(L"FresnelPercent",100),0,200)*.01f;
     crestFoamStrength=std::clamp(ReadTuning(L"CrestFoamPercent",20),0,100)*.01f;
     geometryWaveAmplitude=std::clamp(ReadTuning(L"GeometryWavePercent",10),0,35)*.01f;
+    waveScalePercent=std::clamp(ReadTuning(L"WaveScalePercent",100),25,400)*1.f;
+    waveSofteningPercent=float(std::clamp(ReadTuning(L"WaveSofteningPercent",100),0,400));
     // 0=off, 1=solid magenta (confirms this pixel is our water shader),
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
     waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
-    if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" debug="<<waterDebugMode<<'\n';}
+    if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
@@ -389,8 +433,8 @@ void Present() {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
-            <<" shaderFailure="<<shaderCreationFailed<<'\n';
-    frameMatches=frameCandidates=frameSceneMatches=0;
+            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed<<'\n';
+    frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
     if(cachedShaderDevice == d) {
@@ -421,7 +465,8 @@ struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
-    float old[36]{},oldVertexControls[4]{},oldLocalLights[68]{};bool localLightsSaved=false;
+    // c200..c211 for the pixel shader, c200..c201 for the vertex shader.
+    float old[48]{},oldVertexControls[12]{},oldLocalLights[68]{};bool localLightsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -480,22 +525,51 @@ struct Scope {
         if(FAILED(hr)){RestoreTargets();ReportFailure("water MRT binding",hr);}
     }
 
+    // One line per distinct unapproved liquid signature, bounded so an
+    // unfamiliar shader family cannot flood the log or cost per-draw time.
+    static void ReportNearMiss(const renderer::water::Observation& observation) {
+        ++frameNearMisses;
+        static std::unordered_set<std::string> reported;
+        if(reported.size()>=32)return;
+        char line[224];
+        std::snprintf(line,sizeof(line),
+            "liquid material not covered by the captured water shaders: slot0=%ux%u slot1=%ux%u"
+            " vs=0x%016llx ps=0x%016llx vertexShader=%d pixelShader=%d;"
+            " add the shader identity if this is real water",
+            observation.width[0],observation.height[0],observation.width[1],observation.height[1],
+            static_cast<unsigned long long>(observation.vsHash),
+            static_cast<unsigned long long>(observation.psHash),
+            observation.vertexShaderBound?1:0,observation.pixelShaderBound?1:0);
+        if(reported.insert(line).second&&!logPath.empty())
+            std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
+    }
+
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         try {
-            if(!renderer::water::IsMaterial(d))return;
+            const auto observation=renderer::water::Observe(d);
+            if(!observation.liquid) {
+                // A draw carrying the liquid two-texture signature that the
+                // captured shader families do not cover is exactly how a whole
+                // 533-unit tile stays native water. Report each distinct
+                // signature once: these are the hashes a new water family has
+                // to be added to, and no other log line names them.
+                if(observation.candidate)ReportNearMiss(observation);
+                return;
+            }
             ++frameCandidates;
             if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
-            if(FAILED(d->GetPixelShaderConstantF(200,old,9)))return;
+            if(FAILED(d->GetPixelShaderConstantF(200,old,12)))return;
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
-            if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
+            if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,3)))return;
             // Relative time avoids both uptime-sized float precision loss and
             // the old discontinuous wave jump every ten minutes.
             static const double animationStart=renderer::PerformanceSeconds();
-            float controls[36]={float(renderer::PerformanceSeconds()-animationStart),strength,normalStrength,specularStrength};
+            const double elapsed=renderer::PerformanceSeconds()-animationStart;
+            float controls[48]={float(elapsed),strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
@@ -516,21 +590,53 @@ struct Scope {
                     controls[6]=-body->viewSpaceDirection.z;
                 }
             }
+            const bool haveCapture=reflectionScene&&reflectionDepth;
+            // Viewport MaxZ is folded into the depth unpack pair here, so
+            // recovering a captured depth is one subtraction and one divide
+            // instead of a divide and an extra multiply at every lookup (three
+            // ray loops and the surface test each did that per pixel).
+            const float depthRange=haveCapture&&reflectionData[7]>1e-4f?reflectionData[7]:1.f;
             // Missing INTZ (e.g. MSAA) must still render animated modern water.
             // All-zero unpack constants produced 0/0 even with captureValid=0;
             // multiplying that NaN by a disabled feature does not remove it.
-            if(reflectionScene&&reflectionDepth)memcpy(controls+12,reflectionData,sizeof(reflectionData));
-            else {controls[12]=1.001f;controls[13]=-.1f;controls[14]=controls[15]=1.f;controls[19]=1.f;}
-            controls[16]=reflectionsEnabled&&reflectionScene&&reflectionDepth?reflectionStrength:0;
-            controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=reflectionScene&&reflectionDepth?1.f:0.f;
-            controls[24]=flowSpeed;controls[25]=flowRotation;
-            controls[26]=waterDebugMode;
-            const float flowAngle=controls[0]*flowSpeed*.035f;
-            controls[7]=std::sin(flowAngle);controls[27]=std::cos(flowAngle);
+            controls[12]=(haveCapture?reflectionData[0]:1.001f)*depthRange;
+            controls[13]=(haveCapture?reflectionData[1]:-.1f)*depthRange;
+            controls[14]=haveCapture?reflectionData[2]:1.f;
+            controls[15]=haveCapture?reflectionData[3]:1.f;
+            controls[19]=depthRange;
+            controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
+            controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=haveCapture?1.f:0.f;
+            // x=anti-alias gain for the wave octave. yz=refraction offset, in uv:
+            // the wave slope is unitless, the captured scene is in pixels, so the
+            // conversion happens once per draw here rather than per pixel.
+            controls[24]=waveSofteningPercent*.16f;
+            const float refractGain=(refractionEnabled?refractionStrength:0.f)*120.f;
+            controls[25]=haveCapture?refractGain*reflectionData[5]:0.f;
+            controls[26]=haveCapture?refractGain*reflectionData[6]:0.f;
+            controls[27]=waterDebugMode;
             controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength:0;controls[31]=shoreFoamWidth;
             controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
             controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
-            float vertexControls[4]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,wavesEnabled?swellStrength:0,0};
+            // The wave field itself is built in world space. Its phase carries
+            // the camera position (so the pattern is nailed to the terrain and
+            // not to a tile's uv or to the viewport) and the flow animation,
+            // both reduced in double and wrapped into the lattice period so the
+            // shader never evaluates a coordinate large enough to lose the
+            // fraction bits that keep noise from collapsing into squares.
+            const auto& waveFrame=renderer::FrameContext::Current();
+            const auto wave=renderer::water::BuildWaveField(elapsed,flowSpeed,flowRotation,
+                waveScalePercent,waveFrame.cameraPosition.x,waveFrame.cameraPosition.y,
+                waveFrame.cameraValid,wavesEnabled);
+            controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
+            controls[38]=wave.lattice[2];controls[39]=wave.lattice[3];
+            controls[40]=wave.phase[0];controls[41]=wave.phase[1];
+            controls[42]=wave.phase[2];controls[43]=wave.phase[3];
+            controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
+            controls[46]=renderer::water::kSwellRatio;controls[47]=0.f;
+            float vertexControls[12]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,
+                wavesEnabled?swellStrength:0,1.f/renderer::water::kGeometryWaveCells,
+                wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
+                wave.anchor[0],wave.anchor[1],0.f,0.f};
             if(cachedShaderDevice != d) {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
@@ -577,7 +683,7 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,9))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,1))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,12))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,3))){Restore();return;}
             {
                 float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();
@@ -605,8 +711,8 @@ struct Scope {
         if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
         device->SetPixelShader(original.Get());
         device->SetVertexShader(originalVertex.Get());
-        device->SetPixelShaderConstantF(200,old,9);
-        device->SetVertexShaderConstantF(200,oldVertexControls,1);
+        device->SetPixelShaderConstantF(200,old,12);
+        device->SetVertexShaderConstantF(200,oldVertexControls,3);
         if(extraState) {
             const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
                 D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};

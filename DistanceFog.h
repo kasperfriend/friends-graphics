@@ -4,6 +4,7 @@
 #include "src/Core/ShaderCache.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/D3D9/TrackedRenderState.h"
+#include "src/Water/WaterPolicy.h"
 namespace distancefog {
 bool enabled=false,active=true,keyDown=false,showStatus=false,hotkey=true,effectEnabled=true;
 float distanceScale=1.2f,powerScale=1.08f;
@@ -39,11 +40,15 @@ struct Scope {
             // Registers verified from captured shader instructions, not guessed globally.
             switch(hash) {
             case 0xb598fbc887a39675ull:case 0x512e5caf066afb4bull:case 0xbd0060eb34ea4a7cull:reg=12;break;
-            case 0x206d861fd0a721ddull:reg=4;break;
+            // Every documented liquid vertex shader feeds the same fog curve to
+            // c4. Listing only one of them rescaled the distance fade on some
+            // tiles and not on their neighbours, which drew hard squares across
+            // one continuous body of water. The shape guard below still rejects a
+            // variant whose register holds something else.
+            default:reg=renderer::water::FogConstantRegister(hash);if(!reg)return;break;
             case 0xd8f18d8080e6bb3aull:reg=8;break;
             case 0x17a93e12ce3e0fd1ull:case 0x2361bbcb97cae46ull:case 0x2e3dc5694f4a01afull:
             case 0x5f2c6b3af8c6e543ull:case 0xd6dc2873a70922e9ull:case 0xf6a1996937ab5dc7ull:case 0xff32338728131932ull:reg=30;break;
-            default:return;
             }
             if(FAILED(d->GetVertexShaderConstantF(reg,original,1)))return;
             for(float f:original)if(!std::isfinite(f))return;
