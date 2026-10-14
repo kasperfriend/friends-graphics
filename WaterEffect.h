@@ -17,6 +17,7 @@
 #include "src/Core/FrameContext.h"
 #include "src/Water/WaterMaterial.h"
 #include "src/Water/WaveField.h"
+#include "src/Water/WaterSeaState.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
@@ -44,6 +45,16 @@ float clarityPercent=100.f,windStrengthPercent=100.f,roughnessPercent=100.f;
 float sheenPercent=50.f,shoalFoamPercent=100.f,sunDiscPercent=40.f,foamBrightPercent=100.f;
 float sparklePercent=100.f;
 unsigned waterColourTint=0x808080u,deepColour=0x0e2a28u,absorptionColour=0xff8c6bu;
+// The sea state: what this zone asked for and what the sky is doing, eased once per frame in
+// Present() and multiplied into the controls below. It is the identity when a zone is untuned and
+// the weather is clear, which is what lets `ZoneWaves` default to on.
+float seaAgitation=1.f,seaMotion=1.f,seaShear=0.f,seaWind=1.f;
+float weatherResponse=1.f,weatherEaseSeconds=14.f;
+bool zoneWavesEnabled=true;
+renderer::water::SeaWeather seaWeather;
+renderer::water::SeaStateFilter seaFilter;
+renderer::water::SeaMotionClock seaMotion_;
+renderer::FrameClock seaFrameClock;
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
@@ -519,6 +530,12 @@ void ReloadTuning(){
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
     waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
+    // Sea state. `WeatherResponsePercent` is a percent of what this zone's own weather damping
+    // allows; the ease time is the clouds' shape (95% in one time constant) so a squall arrives at
+    // the same rate in the sky and on the water.
+    weatherResponse=std::clamp(ReadTuning(L"WeatherResponsePercent",100),0,200)*.01f;
+    weatherEaseSeconds=float(std::clamp(ReadTuning(L"WeatherEaseSeconds",14),1,120));
+    zoneWavesEnabled=ReadTuning(L"ZoneWaves",1)!=0;
     if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
@@ -546,8 +563,35 @@ void Configure(const std::wstring& base) {
     enabled=true;
     log<<"water backend ready; live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
 }
+// Once per frame, from the same weather observation the cloud deck reads (see the call site in
+// ModernWoWRenderer.cpp), so water and sky cannot disagree about whether it is raining. Water does
+// not read the client's weather memory itself: one reader, many reactions.
+void FeedWeather(int kind,float strength) noexcept {
+    seaWeather.kind=std::clamp(kind,0,3);
+    seaWeather.strength=std::isfinite(strength)?std::clamp(strength,0.f,1.f):0.f;
+}
+// The zone's own wave energy, as authored for the current map/zone/area. `ZoneWaves=0` pins it to
+// 1, which is the pre-zone behaviour: a global WIND/WAVE SIZE setup with no per-area sea state.
+float ZoneAgitation() noexcept {
+    if(!zoneWavesEnabled)return 1.f;
+    const float value=renderer::FrameContext::Current().environment[renderer::WaterAgitation];
+    return std::isfinite(value)?std::clamp(value,0.f,4.f):1.f;
+}
 void Present() {
     if(!enabled)return;
+    // One eased sea state per frame, before any draw reads it. The delta comes from the
+    // performance-counter clock rather than from absolute time, because at high refresh rates a
+    // naive delta alternates between zero and a whole timer tick and anything integrated from it
+    // pulses (src/Core/FrameClock.h). The zone's WeatherIntensityMultiplier scales how hard the
+    // weather lands here as well as how wet the sky gets, which is deliberate: a sheltered valley
+    // that damps storms should not whip its own water up in them.
+    const float dt=seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency());
+    const renderer::water::SeaTuning tuning{ZoneAgitation(),
+        weatherResponse*std::clamp(renderer::FrameContext::Current().environment[renderer::Weather],0.f,4.f),
+        windStrengthPercent*.01f};
+    const auto sea=seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds);
+    seaAgitation=sea.agitation;seaMotion=sea.motion;seaShear=sea.shear;seaWind=sea.wind;
+    seaMotion_.Observe(dt,flowSpeed*seaMotion);
     const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
     DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
@@ -557,10 +601,16 @@ void Present() {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
-            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed<<'\n';
+            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed
+            <<" sea="<<seaAgitation<<","<<seaMotion<<","<<seaShear<<" weather="<<seaWeather.kind
+            <<','<<seaWeather.strength<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
+    // A device reset drops the eased sea state rather than letting it interpolate across a change
+    // of settings or a mode switch. The wave clock keeps running: snapping it would move every
+    // crest at once, which is the jump the clock exists to avoid.
+    seaFilter.Forget();
     if(cachedShaderDevice == d) {
         cachedReplacementPS.Reset();
         cachedReplacementVS.Reset();
@@ -691,8 +741,11 @@ struct Scope {
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,3)))return;
             // Relative time avoids both uptime-sized float precision loss and
             // the old discontinuous wave jump every ten minutes.
-            static const double animationStart=renderer::PerformanceSeconds();
-            const double elapsed=renderer::PerformanceSeconds()-animationStart;
+            // Relative time avoids both uptime-sized float precision loss and
+            // the old discontinuous wave jump every ten minutes. It is integrated by the sea clock
+            // rather than read from the counter, because wave travel speed is now something that
+            // changes, and multiplying an absolute clock by a changing speed moves every crest.
+            const double elapsed=seaMotion_.Time();
             float controls[68]={float(elapsed),strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
@@ -738,9 +791,10 @@ struct Scope {
             controls[25]=haveCapture?refractGain*reflectionData[5]:0.f;
             controls[26]=haveCapture?refractGain*reflectionData[6]:0.f;
             controls[27]=waterDebugMode;
-            controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength:0;controls[31]=shoreFoamWidth;
-            controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
-            controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
+            controls[28]=refractionEnabled?refractionStrength:0;controls[29]=depthEnabled?absorptionStrength:0;controls[30]=foamEnabled?shoreFoamStrength*(.7f+.3f*seaAgitation):0;controls[31]=shoreFoamWidth;
+            controls[1]=wavesEnabled?strength*seaAgitation:0;
+            controls[2]=wavesEnabled?normalStrength*std::clamp(std::sqrt(seaAgitation),0.f,2.5f):0;
+            controls[32]=wavesEnabled?swellStrength*seaAgitation:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength*seaAgitation:0;
             // The wave field itself is built in world space. Its phase carries
             // the camera position (so the pattern is nailed to the terrain and
             // not to a tile's uv or to the viewport) and the flow animation,
@@ -748,7 +802,12 @@ struct Scope {
             // shader never evaluates a coordinate large enough to lose the
             // fraction bits that keep noise from collapsing into squares.
             const auto& waveFrame=renderer::FrameContext::Current();
-            const auto wave=renderer::water::BuildWaveField(elapsed,flowSpeed,flowRotation,
+            // The clock above already contains the flow speed, so it arrives here as 1: passing it
+            // twice would scale the same field by speed squared, and weather would look like a jump
+            // in travel rather than an increase of it. Weather also puts a cross-chop on the swell
+            // by taking the authored flow rotation further across it.
+            const float seaCounter=std::clamp(flowRotation*(1.f+seaShear),0.f,1.f);
+            const auto wave=renderer::water::BuildWaveField(elapsed,1.f,seaCounter,
                 waveScalePercent,waveFrame.cameraPosition.x,waveFrame.cameraPosition.y,
                 waveFrame.cameraValid,wavesEnabled);
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
@@ -766,7 +825,7 @@ struct Scope {
             controls[48]=viewValid?viewMatrix[2][0]:0.f;
             controls[49]=viewValid?viewMatrix[2][1]:0.f;
             controls[50]=viewValid?viewMatrix[2][2]:1.f;
-            controls[51]=windStrengthPercent*.01f;
+            controls[51]=seaWind;   // authored WIND, scaled by how much wind the water is actually in
             // Light penetration is authored as "how far light reaches" instead of an
             // absorption coefficient, which is how the reference describes it: 200 is a
             // clear mountain lake, 5 is swamp soup. 0.088 per view unit of column puts
