@@ -160,6 +160,78 @@ that need text rather than an integer, so `ReadTuningColour` parses `0xRRGGBB` o
 this header rather than growing a colour type in the shared tuning reader. `WATER CLARITY`,
 `WIND` and `SUN SPARKLE` are on the F7 overlay; the rest are file-only for now.
 
+### Sea state: the zone and the weather
+
+The keys above decide what a body of water looks like. This decides how much of it there is.
+Water was already procedural and already moving - `BuildWaveField` is an analytic sum of sine
+trains advected across the surface by `FlowSpeedPercent` and `FlowRotationPercent`, and the vertex
+stage displaces the same field the pixel stage lights - but it moved the same amount in a mountain
+pond as off the coast of Stranglethorn, and it did not care whether it was raining. Both are now
+inputs.
+
+The model is one pure, device-free function, `renderer::water::TargetSeaState(zone, weather)` in
+`src/Water/WaterSeaState.h`, shared by the DLL and the previewer so a PNG here and a frame in the
+game cannot disagree about what a setting does. Two things feed it:
+
+- `WaterAgitationMultiplier` in **EnvironmentProfiles.ini**, which is the same per-zone layer the
+  cloud climates ride (`[Zone.33] Profile=CloudLush WaterAgitationMultiplier=1.45` keeps the Lush
+  climate and retunes one water number, because `ResolveEnvironment` inherits the chain and then
+  applies the section's own keys). All 88 authored zones carry a value: 1.4-1.5 on the open seas,
+  1.45 for Stranglethorn, 1.15-1.3 for the high coasts and fjords, 0.45 in Elwynn, 0.3 in
+  Undercity. `[Default]` is 1.0, which is what makes the feature shippable switched on: a zone
+  nobody authored is exactly the old water. A value outside 0-4 fails the whole F12 reload rather
+  than being clamped, in company with every other key in that file.
+- live weather, taken from the observation the clouds already make. `ModernWoWRenderer.cpp` calls
+  `watereffect::FeedWeather(nativeWeatherMode, intensity)` on the line after
+  `volume::cloudWeatherStrength`, so rain closes the sky and roughens the water in the same frame
+  instead of only one of them agreeing that it is raining.
+
+`[Water] WeatherResponsePercent` (0-200, default 100) is how far weather is allowed to push a
+zone, `WeatherEaseSeconds` (1-120, default 14) how long it takes to get there, and `ZoneWaves`
+(0/1) the switch that pins every zone to 1.0 if a value in the profile file is disputed. The easing
+is the cloud weather easing's own shape, `Response = -expm1(-3*dt/seconds)` - 95% of a step in one
+time constant - with the drain at twice the build, so open water settles rather than snapping flat.
+`dt` is clamped to 0.1 s per frame, so a loading screen cannot teleport the sea state. A zone that
+damps storms with `WeatherIntensityMultiplier` also damps what those storms do to its water:
+`Present()` multiplies the response by `Environment[Weather]`. That coupling is deliberate, and it
+is documented at `[Default]` in the profile file, where an author meets both numbers.
+
+The five outputs are multiplied into floats the CPU already uploads. There is no new constant
+register, no HLSL edit, and the slot budget is untouched:
+
+| output | where it lands |
+| --- | --- |
+| `agitation` = `clamp(zone*(1+.95*push), .12, 2.6)` | `controls[1]` wave amplitude, `[32]` swell, `[35]` crest foam, `[30] *= .7+.3*agitation` shore foam |
+| normal response | `controls[2] = NormalPercent * clamp(sqrt(agitation), 0, 2.5)` |
+| `shear` = `clamp(.25*push + (agitation-1)*.12, 0, 1)` | `BuildWaveField(elapsed, 1, clamp(flowRotation*(1+shear), 0, 1))`, a cross-chop over the swell |
+| `wind` = `clamp(authoredWind*(.45+.55*agitation), 0, 2.5)` | `controls[51]`, the wind the shader shades and foams against |
+| `motion` = `clamp(1+(agitation-1)*.55+.8*push, .08, 3)` | `SeaMotionClock`, which supplies `elapsed` |
+
+`push` is `response * amount`, where `amount` is the current weather's intensity and `response` is
+`WeatherResponsePercent * WeatherIntensityMultiplier`. `motion` is the reason a clock exists at all:
+wave phase is `elapsed * speed`, so multiplying an absolute clock by a *changing* speed moves every
+crest the instant weather eases - one visible jump per frame while a squall arrives. `SeaMotionClock`
+accumulates `dt * speed` instead, so a speed change alters future travel only. It never wraps and it
+ignores a non-finite step.
+
+`Reset()` forgets the eased state, so reloading settings or changing zones cannot interpolate across
+the change. An authored `WindStrengthPercent` of 0 keeps a river foamless in any weather, because
+every wind-derived term here is a multiplier on what the zone asked for. `WaterEffect.log` prints the
+eased state every 600 frames (`sea=agitation,motion,shear weather=kind,strength`), which is how a
+report of "nothing changed in Stormwind" becomes a number rather than an argument.
+
+On the F7 Water tab: `WAVE SPEED`, `WEATHER RESPONSE` and `PER-ZONE SEA STATE`, next to the existing
+`WIND`, `WATER CLARITY` and `SUN SPARKLE`, and saved per location like the rest.
+
+`tools/WaterRegression.cpp` asserts the identity case (untuned zone, clear sky: every multiplier 1,
+no shear), the ordering (an exposed coast in calm air is rougher than a sheltered pond in a
+downpour), the clamps, that a NaN never reaches a constant, the easing rate and its framerate
+independence, that the drain is slower than the build, that the clock does not jump when speed
+changes, and that the shipped 88-zone file stays inside the accepted range.
+`tools/CloudClimateRegression.cpp` parses the same file with the real resolver and asserts that a
+water-only zone line keeps its climate, which is the cheapest proof that two features sharing one
+authoring layer do not collide. In-game, this has not been looked at yet.
+
 ### Constant ABI
 
 The pixel shader's water block grew from twelve registers to seventeen (`c212` world-up and
@@ -184,6 +256,7 @@ build/waterpreview --out Screenshots/water-forever-look.png --grid 2 --supersamp
 build/waterpreview --out build/sea.png --scene sea --wind 140 --sparkle 150 --stats
 build/waterpreview --scene coast --debug 2
 build/waterpreview --scene lake --probe 240 260
+build/waterpreview --out build/weather.png --matrix --scene sea --grid 2 --supersample 2
 ```
 
 `--grid 2` renders the four built-in bodies - a slow river, an open sea at a low sun, a windward coast with a headland,
@@ -195,6 +268,14 @@ to be the one responsible. `--probe x y` prints every intermediate for one pixel
 absorption, Fresnel, roughness, reflection hit, foam, alpha, the wave normal and whether the result is NaN.
 `--supersample 2` renders each panel at double size and resolves it linearly, which is the only honest way to judge the
 octave the anti-alias gain exists to resolve, and it is what a 2x backbuffer does in the game.
+
+`--matrix` draws one sea four times - a sheltered zone and an exposed one, each in calm air and in a
+rainstorm - which is how the sea state gets looked at without a client; `--agitation 1.45 --weather
+rain --weather-strength 95 --response 60` set the same four numbers by hand. The panels share a
+clock and a camera, so anything that differs between them is the model and not the moment. The
+preview calls `TargetSeaState` itself rather than copying its arithmetic, and the labels print the
+zone's authored value and the sky as inputs rather than as results. The four-body sheet above is
+byte-identical before and after this feature, which is the same identity the game relies on.
 
 The order of the two passes is the point of the file. Pass one produces a pre-water scene copy with a view-depth
 buffer; pass two shades water against that buffer. A previewer that shaded water in isolation would not see a raw sky
