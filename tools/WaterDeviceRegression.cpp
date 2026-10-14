@@ -22,6 +22,68 @@ void Require(bool value,const char* name) {
     static std::unordered_set<std::string> reported;
     if(reported.insert(name).second)std::printf("PASS %s\n",name);
 }
+// Isolated settings, not the repository's shipped Enabled=1 files. Exercise
+// the same Save -> ReloadTuning path as F7 with a stale startup Enabled=0.
+struct WaterSettings {
+    std::filesystem::path directory;
+    std::wstring base;
+    WaterSettings() {
+        directory=std::filesystem::absolute(std::filesystem::path("build") /
+            ("water-settings-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64())));
+        std::filesystem::create_directories(directory);
+        base=directory.wstring()+L"\\";
+        Check(WritePrivateProfileStringW(L"Water",L"Enabled",L"0",
+            (directory/L"ModernWoWRenderer.ini").c_str())?S_OK:E_FAIL);
+        renderer::locationtuning::Sync(base,{},false);
+        renderer::locationtuning::editZone=false;
+        Require(renderer::locationtuning::Save(L"Water",L"Enabled",0),"write initially disabled live water");
+    }
+    void Set(bool on) {
+        Require(renderer::locationtuning::Save(L"Water",L"Enabled",on?1:0),"save water through menu settings path");
+        watereffect::ReloadTuning();
+        Require(watereffect::effectEnabled==on,"live water follows saved toggle");
+        Require(watereffect::enabled,"live OFF never disables backend readiness or hook eligibility");
+        Require(watereffect::NeedsScene()==(on&&watereffect::active),"capture follows live and master switches");
+    }
+    ~WaterSettings() {
+        std::error_code error;
+        std::filesystem::remove_all(directory,error);
+    }
+};
+void TestWaterSettings(WaterSettings& settings) {
+    watereffect::Configure(settings.base);
+    Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),
+        "production shaders prepared even when startup and live water are OFF");
+    Require(!watereffect::effectEnabled&&!watereffect::NeedsScene(),"starting OFF does not request water capture");
+    const auto* ps=watereffect::code.data();const auto* vs=watereffect::vertexCode.data();
+    settings.Set(true);
+    Require(watereffect::code.data()==ps&&watereffect::vertexCode.data()==vs,"live enable needs no shader recompile or restart");
+    settings.Set(false);settings.Set(true);
+    // Missing live key uses the menu's ON default, not the legacy startup OFF.
+    Require(WritePrivateProfileStringW(L"Water",L"Enabled",nullptr,
+        renderer::locationtuning::baseFile.c_str())!=0,"remove live key to test defaults");
+    watereffect::ReloadTuning();
+    Require(watereffect::effectEnabled&&renderer::locationtuning::ReadEditorInt(
+        L"Water",L"Enabled",1,renderer::locationtuning::baseFile.c_str())==1,
+        "menu and renderer agree on default with stale startup OFF");
+    settings.Set(false);
+    renderer::locationtuning::Sync(settings.base,{571,65,4164,true},true);
+    settings.Set(true);
+    Require(GetPrivateProfileIntW(L"Water",L"Enabled",1,renderer::locationtuning::baseFile.c_str())==0,
+        "location enable leaves global OFF untouched");
+    renderer::locationtuning::Sync(settings.base,{571,65,4165,true},true);
+    watereffect::ReloadTuning();
+    Require(watereffect::enabled&&!watereffect::effectEnabled&&!watereffect::NeedsScene(),"leaving enabled area restores global OFF without disabling backend");
+    renderer::locationtuning::Sync(settings.base,{571,65,4164,true},true);
+    watereffect::ReloadTuning();
+    Require(watereffect::effectEnabled&&watereffect::NeedsScene(),"returning to enabled area enables water without restart");
+    renderer::locationtuning::Sync(settings.base,{},false);
+    settings.Set(true);
+    watereffect::active=false;
+    settings.Set(true);
+    Require(!watereffect::active,"water edits do not override F11 master OFF");
+    watereffect::active=true;
+}
 // Inject one real COM failure after stage 2 has already changed. This
 // reproduces the original partial-setup leak without maintaining a fake device.
 using SetTextureFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,IDirect3DBaseTexture9*);
@@ -48,8 +110,8 @@ struct TextureFailure {
     }
 };
 int main() try {
-    watereffect::Configure(L".\\");
-    Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),"production water compiles");
+    WaterSettings settings;
+    TestWaterSettings(settings);
     // The test sits beside the built proxy DLL. Load the system runtime
     // explicitly so the proxy cannot hook and double-apply our test scopes.
     wchar_t systemPath[MAX_PATH]{};GetSystemDirectoryW(systemPath,MAX_PATH);
@@ -98,7 +160,9 @@ int main() try {
     DWORD samplers[2][6]{};
     for(unsigned slot=0;slot<2;++slot)for(unsigned i=0;i<6;++i)
         Check(d->GetSamplerState(2+slot,samplerStates[i],&samplers[slot][i]));
-    float savedPS[36],savedVS[4]={71,72,73,74},savedLights[68];
+    // OriginalVS reuses the production vertex ABI. Keep its displacement zero
+    // so OFF readbacks exercise visible native pixels, not clipped geometry.
+    float savedPS[36],savedVS[4]={71,0,73,74},savedLights[68];
     for(unsigned i=0;i<36;++i)savedPS[i]=float(i+1);
     for(unsigned i=0;i<68;++i)savedLights[i]=float(i+80);
     Check(d->SetPixelShaderConstantF(200,savedPS,9));Check(d->SetVertexShaderConstantF(200,savedVS,1));
@@ -201,10 +265,13 @@ int main() try {
     ComPtr<IDirect3DSurface9> back,readback;Check(d->GetRenderTarget(0,back.GetAddressOf()));
     Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,readback.GetAddressOf(),nullptr));
     bool wroteMRT=false;
-    auto pixel=[&](float debug) {
+    auto pixel=[&](float debug,bool modern=true) {
         watereffect::waterDebugMode=debug;
         Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
-        {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"production draw uses modern shader");wroteMRT=scope.maskBound&&scope.depthBound;Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
+        {watereffect::Scope scope(d.Get());
+            Require(scope.device==(modern?d.Get():nullptr),"production draw follows live water and master switches");
+            wroteMRT=scope.maskBound&&scope.depthBound;
+            Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
         Check(d->EndScene());Check(d->GetRenderTargetData(back.Get(),readback.Get()));
         D3DLOCKED_RECT r{};Check(readback->LockRect(&r,nullptr,D3DLOCK_READONLY));
         DWORD value=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64];Check(readback->UnlockRect());return value;
@@ -251,9 +318,15 @@ int main() try {
         {watereffect::Scope scope(d.Get());Require(!scope.maskBound&&!scope.depthBound,"mismatched resize pair not bound");}
         restored();watereffect::waterTargetSurface=watereffect::waterMaskSurface=watereffect::waterDepthSurface=nullptr;
     } else std::puts("SKIP optional R32F MRT checks: unsupported format");
-    watereffect::effectEnabled=false;
-    {watereffect::Scope scope(d.Get());Require(scope.device==nullptr,"feature disabled leaves native draw untouched");}
-    watereffect::effectEnabled=true;
+    settings.Set(false);
+    const DWORD nativePixel=pixel(1,false);
+    Require((nativePixel&0xffffff)!=0xff00ff&&(nativePixel&0xffffff)!=0,"menu OFF renders visible native water");restored();
+    settings.Set(true);
+    Require((pixel(1)&0xffffff)==0xff00ff,"menu ON reaches framebuffer despite legacy startup OFF");restored();
+    watereffect::active=false;
+    Require(pixel(1,false)==nativePixel,"master OFF still renders native water");restored();
+    watereffect::active=true;
+    Require((pixel(1)&0xffffff)==0xff00ff,"master ON restores live enabled water");restored();
     watereffect::Reset(d.Get());Require(!watereffect::cachedReplacementPS&&!watereffect::cachedReplacementVS,"reset releases cached shaders");
     {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"replacement recreated after reset");}
     restored();watereffect::Reset(d.Get());

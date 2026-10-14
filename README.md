@@ -166,6 +166,10 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 
 The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.
 
+Water uses the live `[Water] Enabled` setting above, including location overrides.
+An old water `Enabled` entry in `ModernWoWRenderer.ini` is ignored; it no longer
+prevents F7 from enabling water. F11 still controls the whole graphics package.
+
 ## Building locally
 
 Requirements:

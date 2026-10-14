@@ -1,4 +1,30 @@
-# Water rendering audit (2026-10-13)
+# Water rendering audit
+
+## Follow-up: live toggle blocked by startup configuration (2026-10-14)
+
+The shader-budget fix did not address a separate enable path. `Configure` read
+`[Water] Enabled` from `ModernWoWRenderer.ini` with a default of **0**, then
+returned before loading tuning or compiling either shader. The F7 menu reads
+and writes `GraphicsEffects.ini`/location overrides (default **1**), and calls
+`ReloadTuning`, which only changed `effectEnabled`. Thus a stale startup OFF
+or a missing startup key left `enabled=false` and empty bytecode even when
+the menu showed ON. Water-only draw/depth hooks could also be omitted.
+
+Water now prepares its backend at startup independently of the live toggle.
+`enabled` means backend readiness; `effectEnabled` follows the same live key
+and default as the menu. The obsolete startup water `Enabled` key is ignored.
+Use `[Water] Enabled=0` in `GraphicsEffects.ini` (or F7) to disable water; F11
+still controls the complete graphics package. OFF does not capture or replace
+water draws, but leaves the backend ready for a later ON or location change.
+
+The device regression now uses isolated settings with legacy startup OFF and
+live OFF, rather than relying on the shipped all-ON files. It checks backend
+preparation, menu Save/reload, missing-key defaults, location transitions and
+master OFF before GPU setup (also on headless runners), then verifies native
+OFF and magenta replacement ON pixels on a D3D9 device. This reproduces the
+configuration failure path; it is not a capture from the reporting client.
+
+## Previous shader-budget correction (2026-10-13)
 
 ## Why an enabled setting could still show native water
 
@@ -76,9 +102,9 @@ the reporting player's machine. In-game confirmation still matters.
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
-   restart. Keep `[Water] Enabled=1` in both `ModernWoWRenderer.ini` (startup
-   gate) and the effective `GraphicsEffects.ini`/location settings. Check F11
-   has not disabled the graphics package.
+   restart. Enable WATER in F7 or set `[Water] Enabled=1` in the effective
+   `GraphicsEffects.ini`/location settings. No startup water gate is required.
+   Check F11 has not disabled the graphics package.
 2. Set `WaterDebugMode=1` in the effective water settings and press F12. Supported
    water should turn magenta. Return it to `0` afterward. Mode `2` isolates glint.
 3. Inspect `WaterEffect.log`: `compile`, `vertex_compile`, and `replacement active`
