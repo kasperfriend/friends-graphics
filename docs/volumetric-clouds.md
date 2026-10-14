@@ -108,14 +108,24 @@ Absorption is 38 instead, which decouples self-shadowing strength from view opac
 Direct lighting deliberately does **not** come from whether the sun/moon disc was drawn this frame. That is a
 screen-space event - WoW culls the billboard outside the frustum and the tracker can miss frames at the screen
 edge - so gating the deck's light on it lit and unlit the whole sky as the camera panned, and the ground shadow
-toggled with it. The compositor now builds a stabilized direct-light signal (`CelestialLightStabilizer`): a
-confirmed disc sets it, the view-independent daylight/moonlight state keeps it up while the disc is off screen or
-behind the deck itself, brief dropouts are held, real transitions (sunset) fade over a fraction of a second, and
-only the radial god-ray/glare origin stays gated on the disc being on screen. World-space rays do not require
-an on-screen disc. The confirmed world direction is also retained separately for each body when its billboard is
-culled; camera-derived fallback constants cannot replace it. Confirmed direction updates are gently smoothed.
-Cloud-shadow strength additionally fades
-in with sun elevation instead of snapping at the horizon gate.
+toggled with it. The compositor builds a stabilized direct-light signal (`CelestialLightStabilizer`) from
+**scene lighting only**. Daylight/moonlight factors and directional luminance select the dominant body and
+strength, with hysteresis at twilight and a short fade for real lighting transitions. A visible disc cannot
+switch the world light to the other body or force it on in a dark scene. Only the radial god-ray/glare origin
+uses the visible-disc selection; world-space rays do not require an on-screen disc.
+
+World directions are tracked independently for both bodies, including when the other body supplies the glare.
+Each confirmed direction is retained when its billboard is culled; actual direction updates are gently
+smoothed. Before a body has been observed, lighting uses a fixed overhead approximation, replaced by its
+first valid tracked direction. This is deliberately approximate until acquisition: the old camera-derived
+light constant is not a safe world-space source. Even rate-limiting it to 2.5 degrees per second let a stationary
+player's camera turn steer the light all the way to the horizon and remove ground shadows within 40 seconds.
+Cloud-shadow strength additionally fades in with sun elevation instead of snapping at the horizon gate.
+
+`tools/DeviceHealthRegression.cpp` covers every sun/moon visibility combination in daytime and at night,
+long off-screen intervals, initial acquisition, invalid observations, and real day/night transitions. It runs
+in the portable cloud CI job. The D3D9 atmosphere regression additionally checks that camera yaw/pitch and
+legacy disc signals leave the world shadow texture unchanged with wind and evolution frozen.
 
 ## Settings
 

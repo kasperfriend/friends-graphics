@@ -20,6 +20,7 @@
 #include "../src/Lighting/LocalLightManager.h"
 #include "../src/D3D9/DepthCapture.h"
 #include "../src/D3D9/DepthCapturePolicy.h"
+#include "../src/D3D9/CelestialStability.h"
 #include "../WeatherVisuals.h"
 using Microsoft::WRL::ComPtr;
 using namespace renderer;
@@ -148,6 +149,10 @@ int main() try {
  Require(diff(resized,0xff202020)>8 && diff(resized,resizedAgain)<=1,"quality resize preserves first-frame fog");
  settings.debugMode=VolumetricDebugMode::BoundaryDepth;encode(120,.94f);DWORD boundary=render(true);
  fill(mask.Get(),0xffffffff);DWORD water=render(true);Require((boundary&255)>(water&255)+30,"water stops atmosphere at surface, not seabed");
+ // Equal linear depths must produce equal normalized boundary values, even
+ // when WoW compresses the viewport depth range to .94.
+ fill(mask.Get(),0);encode(20,.94f);DWORD sameDepthWithoutWater=render(true);
+ Require(diff(water,sameDepthWithoutWater)<=1,"water and terrain share the same normalized depth at MaxZ .94");
  fill(mask.Get(),0);settings.debugMode=VolumetricDebugMode::None;
  settings.edgeFogEnabled=true;settings.edgeFogDistance=30;settings.edgeFogPower=2;
  encode(120,.94f);DWORD edgeFog=render(false);Require(diff(edgeFog,0xff202020)>25,"world edge fog works with global and local fog disabled");
@@ -400,7 +405,7 @@ int main() try {
  Check(D3DCompile(waterShader.data(),waterShader.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,waterCode.GetAddressOf(),error.GetAddressOf()));
  Check(d->CreatePixelShader((DWORD*)waterCode->GetBufferPointer(),waterPS.GetAddressOf()));Require(bool(waterPS),"complete production water shader accepted by D3D9");
  auto beginLocal=waterShader.find("    float3 localReflection=0;"),endLocal=waterShader.find("    // 4. Celestial",beginLocal);
- std::string reflectionShader="float4 localPosition[8]:register(c180);float4 localColor[8]:register(c188);float4 localControl:register(c196);float3 safeNormalize(float3 v){return normalize(v);}float4 main():COLOR0{float3 rgb=0,viewPos=float3(0,0,5),wave=float3(0,0,-1),v=wave;"+waterShader.substr(beginLocal,endLocal-beginLocal)+"return float4(rgb,1);}";
+ std::string reflectionShader="float4 localPosition[8]:register(c180);float4 localColor[8]:register(c188);float4 localControl:register(c196);float3 safeNormalize(float3 v){return normalize(v);}float4 main():COLOR0{float3 rgb=0,viewPos=float3(0,0,5),wave=float3(0,0,-1),v=wave;float foreverFresnel=pow(1-saturate(dot(wave,v)),2);"+waterShader.substr(beginLocal,endLocal-beginLocal)+"return float4(rgb,1);}";
  {std::ofstream out("build/water-reflection-test.hlsl");out<<reflectionShader;}
  waterCode.Reset();waterPS.Reset();Check(D3DCompile(reflectionShader.data(),reflectionShader.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,waterCode.GetAddressOf(),nullptr));Check(d->CreatePixelShader((DWORD*)waterCode->GetBufferPointer(),waterPS.GetAddressOf()));
  auto reflectedLight=[&](float radius,float enabled){float lights[17][4]{};lights[0][3]=radius;lights[8][0]=10;lights[8][1]=5;lights[8][2]=1;lights[8][3]=1;lights[16][0]=1;lights[16][1]=enabled;
@@ -694,6 +699,41 @@ int main() try {
  printf("clouds direct lighting unlit=%.1f lit=%.1f\n",unlitDirect,litDirect);
  Require(litDirect>unlitDirect+20,"stabilized light lights the deck");
  Require(renderClouds()&&((pixel(64,110)>>8)&255)<0x20,"stabilized light restores the cloud shadow");
+ // Freeze the scene light/field, then rotate the camera and change which
+ // legacy glare source is visible. Exercise the same independent body
+ // updates as the compositor before comparing the actual GPU shadow map.
+ {
+  const Matrix4 savedView=f.inverseView;
+  const Vec3 sun=Normalize({.6f,.2f,.8f}),moon=Normalize({-.8f,-.2f,.01f});
+  CelestialLightStabilizer light;
+  CelestialDirectionStabilizer direction;
+  direction.Update(&sun,false,.016f);direction.Update(&moon,true,.016f);
+  CelestialLightInput sceneLight;sceneLight.daylight=.8f;sceneLight.directionalLuminance=.8f;
+  f.directLightDirectionWorld=direction.Update(nullptr,false,sceneLight.deltaSeconds);
+  Require(renderClouds(),"angled world light casts cloud shadows");
+  const auto stableMap=shadowBytes();
+  for(int i=0;i<8;++i){
+   const float yaw=float(i)*.78539816f,pitch=float(i-4)*.15f;
+   Matrix4 yawRotation,pitchRotation;
+   yawRotation.m[0][0]=std::cos(yaw);yawRotation.m[0][1]=std::sin(yaw);
+   yawRotation.m[1][0]=-std::sin(yaw);yawRotation.m[1][1]=std::cos(yaw);
+   pitchRotation.m[1][1]=std::cos(pitch);pitchRotation.m[1][2]=std::sin(pitch);
+   pitchRotation.m[2][1]=-std::sin(pitch);pitchRotation.m[2][2]=std::cos(pitch);
+   f.inverseView=Matrix4::Multiply(savedView,Matrix4::Multiply(yawRotation,pitchRotation));
+   const bool sunVisible=(i&1)!=0,moonVisible=(i&2)!=0;
+   f.celestialIsMoon=moonVisible&&!sunVisible;
+   f.celestialIntensity=(sunVisible||moonVisible)?1.f:0.f;
+   f.sunDirectionWorld=f.celestialIsMoon?moon:Vec3{std::cos(yaw),std::sin(yaw),0};
+   const auto stable=light.Update(sceneLight);
+   const auto sunWorld=direction.Update(sunVisible?&sun:nullptr,false,sceneLight.deltaSeconds);
+   const auto moonWorld=direction.Update(moonVisible?&moon:nullptr,true,sceneLight.deltaSeconds);
+   f.directLightIntensity=stable.intensity;f.directLightIsMoon=stable.isMoon;
+   f.directLightDirectionWorld=stable.isMoon?moonWorld:sunWorld;
+   Require(renderClouds(),"rotated camera renders world cloud shadows");
+   Require(shadowBytes()==stableMap,"yaw/pitch and visible glare source cannot change the world shadow texture");
+  }
+  f.inverseView=savedView;f.celestialIntensity=1;f.celestialIsMoon=false;
+ }
  f.directLightValid=false;
  f.sunDirectionWorld={0,0,1};cloud.groundShadows=false;
  cloud.enabled=false;

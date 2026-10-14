@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 
 using namespace renderer;
@@ -55,56 +56,83 @@ int main() try
     }
 
     {
-        // The disc-draw signal blinking must not blink the sky lighting.
+        // Strength/body selection has no screen-space inputs. Day/night
+        // transitions still work, including a bright, cool-tinted noon.
         CelestialLightStabilizer light;
         CelestialLightInput frame;
         frame.deltaSeconds = 1.0f / 60.0f;
         frame.daylight = 0.8f;
-        frame.discVisible = true;
-        Require(light.Update(frame).intensity == 1.0f, "confirmed disc primes direct light at full strength");
-        // Disc culled by the camera turn / missed for a frame, still day:
-        // the clouds stay lit at exactly the same strength.
-        frame.discVisible = false;
-        Require(light.Update(frame).intensity == 1.0f, "off-screen disc keeps clouds lit during the day");
-        for (int i = 0; i < 120; ++i) light.Update(frame);
+        Require(light.Update(frame).intensity == 1.0f, "daylight primes direct light without a visible disc");
+        for (int i = 0; i < 600; ++i) light.Update(frame);
         Require(light.Update(frame).intensity == 1.0f, "direct light does not decay while daylight remains");
-        // Day ends: the light fades out over frames instead of stepping,
-        // and is gone once the transition has had time to settle.
         frame.daylight = 0.0f;
         const float fading = light.Update(frame).intensity;
         Require(fading > 0.0f && fading < 1.0f, "sunset fades direct light instead of stepping it off");
         for (int i = 0; i < 600; ++i) light.Update(frame);
-        Require(light.Update(frame).intensity == 0.0f, "direct light is off once night has settled");
-        // A tracker dropout at night must not resurrect the sun, and a
-        // confirmed moon selects the moon instead of the sun.
-        frame.moonlight = 0.6f;
-        frame.daylight = 0.0f;
+        Require(light.Update(frame).intensity == 0.0f, "direct light is off once darkness has settled");
+        frame.moonlight = 0.65f;
+        frame.directionalLuminance = 0.3f;
         for (int i = 0; i < 600; ++i) light.Update(frame);
         auto night = light.Update(frame);
         Require(night.intensity == 1.0f && night.isMoon, "moonlight period selects the moon for direct light");
-        frame.discVisible = true;
-        frame.discIsMoon = false;
-        auto disc = light.Update(frame);
-        Require(disc.intensity == 1.0f && !disc.isMoon, "a confirmed disc overrides the day/night guess");
+        frame.moonlight = 0.9f;
+        frame.directionalLuminance = 1.0f;
+        Require(!light.Update(frame).isMoon, "bright cool-tinted noon selects sunlight regardless of past discs");
+        frame.moonlight = 0.0f;
+        Require(light.Update(frame).intensity == 1.0f, "bright untinted light survives zero day/night factors");
+        frame.directionalLuminance = 0.3f;
+        frame.daylight = 0.3f;
+        frame.moonlight = 0.4f;
+        Require(!light.Update(frame).isMoon, "twilight hysteresis retains sunlight inside the band");
+        frame.moonlight = 0.8f;
+        Require(light.Update(frame).isMoon, "a real moonlight period takes over from sunlight");
+        frame.daylight = 0.9f;
+        frame.moonlight = 0.1f;
+        Require(!light.Update(frame).isMoon, "dawn restores sunlight without needing a visible sun");
+        light.Reset();
+        frame = {};
+        Require(!light.Primed() && light.Update(frame).intensity == 0.0f, "reset clears direct-light history");
+    }
 
-        // A confirmed body is sticky: tint heuristics alone must not flip
-        // a bright noon to moonlight (which would step the moon-strength
-        // scaling in full view), while a genuinely dim opposite period can.
-        CelestialLightStabilizer sticky;
-        CelestialLightInput noon;
-        noon.deltaSeconds = 1.0f / 60.0f;
-        noon.discVisible = true;
-        noon.daylight = 0.8f;
-        sticky.Update(noon);
-        noon.discVisible = false;
-        noon.daylight = 0.0f;
-        noon.moonlight = 0.9f;
-        noon.directionalLuminance = 1.0f;
-        for (int i = 0; i < 600; ++i) sticky.Update(noon);
-        Require(!sticky.Update(noon).isMoon, "bright noon is not reclassified as moonlight");
-        noon.directionalLuminance = 0.3f;
-        for (int i = 0; i < 600; ++i) sticky.Update(noon);
-        Require(sticky.Update(noon).isMoon, "a dim opposite period takes over from the confirmed body");
+    {
+        // Exercise the compositor's separate visible-disc and world-light
+        // paths. Previously a daytime moon became the dominant world light
+        // whenever the camera culled the sun (and vice versa at night).
+        const Vec3 sun = Normalize({.6f, .2f, .8f});
+        const Vec3 moon = Normalize({-.8f, -.2f, .01f});
+        for (bool night : {false, true})
+        {
+            CelestialLightStabilizer light;
+            CelestialDirectionStabilizer direction;
+            direction.Update(&sun, false, .016f);
+            direction.Update(&moon, true, .016f);
+            CelestialLightInput scene;
+            scene.daylight = night ? 0.f : .8f;
+            scene.moonlight = night ? .8f : 0.f;
+            scene.directionalLuminance = night ? .3f : .8f;
+            const Vec3 expected = night ? moon : sun;
+            for (unsigned visible = 0; visible < 4; ++visible)
+            {
+                // Long enough to catch delayed/held changes, not just a
+                // one-frame blink. Both, either, or neither disc can be seen.
+                for (int i = 0; i < 2400; ++i)
+                {
+                    const bool sunVisible = (visible & 1) != 0;
+                    const bool moonVisible = (visible & 2) != 0;
+                    const bool glareIsMoon = moonVisible && (night || !sunVisible);
+                    const auto stable = light.Update(scene);
+                    const auto sunWorld = direction.Update(sunVisible ? &sun : nullptr, false, scene.deltaSeconds);
+                    const auto moonWorld = direction.Update(moonVisible ? &moon : nullptr, true, scene.deltaSeconds);
+                    const auto world = stable.isMoon ? moonWorld : sunWorld;
+                    if (stable.isMoon != night || stable.intensity != 1.f || Length(world - expected) > 1e-5f ||
+                        std::fabs(CloudShadowElevationFade(world.z) - CloudShadowElevationFade(expected.z)) > 1e-5f)
+                        throw std::runtime_error("visible glare body changed world cloud shadows");
+                    if (visible == 2 && !night && !glareIsMoon)
+                        throw std::runtime_error("test must exercise a daytime moon glare origin");
+                }
+            }
+        }
+        Require(true, "sun/moon/both/neither visible cannot switch world-light kind, direction or shadow strength");
     }
 
     {
@@ -154,65 +182,50 @@ int main() try
     {
         CelestialDirectionStabilizer direction;
         const Vec3 sun = Normalize({.6f, .2f, .8f});
-        auto stable = direction.Update({1, 0, .04f}, &sun, false, 1.f/60.f);
+        auto stable = direction.Update(&sun, false, 1.f/60.f);
         Require(Length(stable-sun)<1e-6f, "confirmed world direction primes the sun");
         for (int i=0;i<600;++i)
         {
-            const Vec3 fallback = i%2 ? Vec3{1,0,.04f} : Vec3{-1,0,.8f};
-            stable=direction.Update(fallback, nullptr, false, 1.f/60.f);
+            stable=direction.Update(nullptr, false, 1.f/60.f);
             if (Length(stable-sun)>=1e-6f) throw std::runtime_error("camera fallback moved sunlight");
         }
         Require(Length(stable-sun)<1e-6f, "camera-dependent fallback cannot move confirmed sunlight");
         const Vec3 moon=Normalize({-.2f,-.6f,.7f});
-        Require(Length(direction.Update({}, &moon, true, .016f)-moon)<1e-6f,
+        Require(Length(direction.Update(&moon, true, .016f)-moon)<1e-6f,
                 "moon keeps a separate confirmed direction");
-        Require(Length(direction.Update({}, nullptr, false, .016f)-sun)<1e-6f,
+        Require(Length(direction.Update(nullptr, false, .016f)-sun)<1e-6f,
                 "returning to sunlight restores its own direction");
         const Vec3 moved=Normalize({.7f,.2f,.7f});
-        stable=direction.Update({}, &moved, false, .016f);
+        stable=direction.Update(&moved, false, .016f);
         Require(Length(stable-sun)<Length(moved-sun) && std::fabs(Length(stable)-1.f)<1e-5f,
                 "real celestial movement is smoothed and normalized");
         direction.Reset();
-        Require(Length(direction.Update({0,0,1}, nullptr, false, .016f)-Vec3{0,0,1})<1e-6f,
+        Require(Length(direction.Update(nullptr, false, .016f)-Vec3{0,0,1})<1e-6f,
                 "loading reset allows a fresh world direction");
     }
 
     {
-        // Before the tracker has ever confirmed a body there is no world-space
-        // truth to hold, and the fallback is derived from the frame's own
-        // light constant - so it moves with the camera. It may steer the deck
-        // only as fast as a real body could: a camera swing is not a sunset.
+        // Before confirmation, no camera-derived source may steer the
+        // shadows. The old rate cap reached the horizon after 36 seconds.
         CelestialDirectionStabilizer direction;
-        const Vec3 start = Normalize({0, 0, 1});
-        direction.Update(start, nullptr, false, 1.f/60.f);
-        const Vec3 swung = Normalize({1, 0, 0});          // 90 degrees in one frame
-        const float moved = std::acos(std::clamp(Dot(direction.Update(swung, nullptr, false, 1.f/60.f), start), -1.f, 1.f));
-        Require(moved < 3.f * 3.14159265358979f / 180.f,
-                "a camera-sized swing of the fallback barely moves the light");
-        // The limit is exact: ten seconds of a 90-degree-wrong fallback moves
-        // the light by ten seconds of the fastest real celestial motion, and
-        // no more, however long the source keeps insisting.
-        for (int i = 0; i < 600; ++i) direction.Update(swung, nullptr, false, 1.f/60.f);
-        const Vec3 arrived = direction.Update(swung, nullptr, false, 1.f/60.f);
-        const float travelled = std::acos(std::clamp(Dot(arrived, start), -1.f, 1.f)) * 180.f / 3.14159265358979f;
-        Require(travelled > 22.f && travelled < 28.f,
-                "a wrong fallback can only steer the light at the celestial rate");
-
-        // One frame of the limit is the threshold: a disagreement inside it is
-        // resolved at once, so an honest source is not lagged by the cap.
-        CelestialDirectionStabilizer close;
-        const Vec3 near = Normalize({0.f, .0003f, 1.f});   // ~0.017 degrees away
-        close.Update(start, nullptr, false, 1.f/60.f);
-        Require(std::acos(std::clamp(Dot(close.Update(near, nullptr, false, 1.f/60.f), near), -1.f, 1.f)) < 1e-4f,
-                "a fallback inside one frame of the celestial rate is followed at once");
-
-        // A real, slow drift of the same source is followed as it happens.
-        CelestialDirectionStabilizer drift;
-        drift.Update(start, nullptr, false, 1.f/60.f);
-        const Vec3 target = Normalize({.2f, 0, 1});
-        for (int i = 0; i < 600; ++i) drift.Update(target, nullptr, false, 1.f/60.f);
-        const float driftAngle = std::acos(std::clamp(Dot(drift.Update(target, nullptr, false, 1.f/60.f), start), -1.f, 1.f));
-        Require(driftAngle > .01f, "slow real celestial motion is still tracked before confirmation");
+        for (int i = 0; i < 7200; ++i)
+        {
+            for (bool moon : {false, true})
+                if (Length(direction.Update(nullptr, moon, 1.f/60.f) - Vec3{0,0,1}) > 1e-6f)
+                    throw std::runtime_error("unconfirmed world light drifted");
+        }
+        Require(true, "unconfirmed light stays world-fixed for minutes, not just one frame");
+        const Vec3 zero{};
+        Require(Length(direction.Update(&zero, false, .016f) - Vec3{0,0,1}) < 1e-6f,
+                "invalid observation does not prime a body");
+        const Vec3 actual = Normalize({.5f, -.2f, .8f});
+        Require(Length(direction.Update(&actual, false, .016f) - actual) < 1e-6f,
+                "first actual disc replaces the unconfirmed approximation");
+        Require(Length(direction.Update(&zero, false, .016f) - actual) < 1e-6f,
+                "invalid observation cannot replace a confirmed world direction");
+        const Vec3 invalid{std::numeric_limits<float>::quiet_NaN(), 0, 1};
+        Require(Length(direction.Update(&invalid, false, .016f) - actual) < 1e-6f,
+                "non-finite observation cannot poison cloud shadows");
     }
 
     Require(CloudShadowElevationFade(0.0f) == 0.0f, "cloud shadows are off for a disc below the horizon");

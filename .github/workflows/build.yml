@@ -93,6 +93,38 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Water device regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Water.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          # Preserve compiler/GPU diagnostics in API-readable annotations too.
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Water regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Water regression results::$flat"
+
+      - name: Weather motion regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Weather.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          # Preserve compiler/GPU diagnostics in API-readable annotations too.
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Weather regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Weather regression results::$flat"
+
       - name: Verify output
         shell: pwsh
         run: |
@@ -172,6 +204,10 @@ jobs:
           ./build/cloud-layer-test
           g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
           ./build/frame-clock-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/WaterRegression.cpp -o build/water-test
+          ./build/water-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
+          ./build/device-health-test
 
   overlay-regression:
     name: F7 tabs, dragging and resizing

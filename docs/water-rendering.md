@@ -1,0 +1,99 @@
+# Water rendering audit (2026-10-13)
+
+## Why an enabled setting could still show native water
+
+`WaterEffect.h` compiles HLSL at startup, but creates the D3D9 shaders only on
+an identified liquid draw. A successful `D3DCompile` does **not** mean that the
+player's device accepts the shader. The old water shader was documented at
+1,552 instruction slots, versus the 512 slots guaranteed for PS 3.0. Failed
+`CreatePixelShader` calls simply returned, leaving native water installed and
+retrying on every water tile without logging the cause.
+
+The replacement now uses real loops for SSR and light occlusion, a vectorized
+noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
+specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
+foam, celestial glint, and local-light reflections in the same pass. Windows
+shader validation measures **494 slots** and enforces a **496-slot budget**
+with room below the minimum hardware limit. Device-creation failures log the HRESULT and device instruction
+limit once, and retry after reset rather than on every tile.
+
+This is a verified failure path in the code, not a diagnosis from a capture of
+the reporting player's machine. In-game confirmation still matters.
+
+## Other corrections
+
+- **Independent switches:** scene/depth capture is requested by any of
+  reflections, refraction, depth tint, shore foam, or sun-glint occlusion.
+  Turning reflections off no longer removes the others. Water can borrow depth
+  and camera capture when `[Volume] Enabled=0`, without enabling atmosphere.
+- **No capture:** valid fallback projection constants prevent `0/0` and NaNs
+  when INTZ is unavailable (notably with MSAA). Waves, environment reflection,
+  glint and crest foam still render; screen-space features require capture.
+- **Refraction off really means off:** zero distortion and zero scene-color
+  mixing. Absorption remains independent. Foreground depth is no longer treated
+  as a deep seabed, and distorted samples crossing a foreground silhouette are
+  rejected. Missing seafloor depth uses deep tint rather than refracted sky.
+- **Material identity:** replacement, capture and classification share the
+  supported two-texture signature (slot 0: 8x64; slot 1: 512x512). Classification
+  tests this before its shader-pipeline cache so another material cannot poison
+  the result. A ripple lookup by itself is not sufficient; it also occurs on
+  weather. Unknown liquid layouts are intentionally not guessed at.
+- **Transactional state:** query the actual bound shaders; restore constants,
+  extra textures and samplers even after partially failed setup. Optional water
+  MRTs are bound as a pair, validated for size/capabilities, and restore write
+  masks and viewport. An unsupported R32F blend target must not break the main
+  water draw.
+- **Lifecycle:** recreate both water targets together on resize; expose only a
+  freshly cleared pair; clear borrowed pointers at frame end/reset; reject
+  offscreen scene copies. A failed first copy retries next frame, never after
+  water has already entered the scene. Capture diagnostics no longer repeat every frame
+  when the counters stop changing.
+- **Atmosphere boundary:** water already has linear surface depth. Its projected
+  boundary is normalized just like terrain depth, not scaled a second time by
+  WoW's viewport MaxZ (commonly .94).
+- **Animation:** elapsed time is relative to first use, without a discontinuous
+  ten-minute wrap. Disabling waves also removes wave-driven refraction offsets.
+  Crest foam strength no longer depends on the shore-foam strength slider.
+
+## Tests
+
+- `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
+  exceeds 496 static instruction slots or its instruction count cannot be read.
+- `tools/WaterRegression.cpp`: portable material, independent-capture toggle
+  combinations, and target-size policy tests (included in Linux CI).
+- `tools/Test-Water.cmd`: builds a D3D9 regression executable using the actual
+  water Scope and capture code. It checks shader installation, rendered magenta
+  debug pixels, no-capture color, constant/texture/sampler restoration,
+  independent reflection controls, capture lifetime, offscreen rejection,
+  optional MRTs (including fractional coverage and unattenuated surface depth),
+  size mismatch, classifier cache isolation, partial-bind failure rollback,
+  and reset.
+  Windows CI runs it; no HAL explicitly reports a GPU-test skip (exit 77), not
+  a successful rendering test.
+- `tools/Test-Atmosphere.cmd`: includes equal-depth water/terrain boundary
+  comparison at MaxZ=.94, in addition to the existing water/fog regressions.
+
+## In-game verification / troubleshooting
+
+1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
+   restart. Keep `[Water] Enabled=1` in both `ModernWoWRenderer.ini` (startup
+   gate) and the effective `GraphicsEffects.ini`/location settings. Check F11
+   has not disabled the graphics package.
+2. Set `WaterDebugMode=1` in the effective water settings and press F12. Supported
+   water should turn magenta. Return it to `0` afterward. Mode `2` isolates glint.
+3. Inspect `WaterEffect.log`: `compile`, `vertex_compile`, and `replacement active`
+   distinguish compilation and installation. Periodic candidate/replacement
+   counters distinguish unmatched materials from failed installation. Shader
+   failures include the HRESULT and `PS30 slots` capability.
+4. For SSR/refraction/depth tint, use in-game **Multisampling 1x** and restart;
+   INTZ capture cannot replace multisampled depth. `WaterReflection.log` records
+   the first pre-water scene copy. Missing capture must not disable basic water.
+5. Check a coast, a shallow canal, under a bridge, sun/moon glint, and a nearby
+   lamp. Test reflections off with refraction/depth/foam on, atmosphere off,
+   F11 off/on, window resize, and Alt+Tab. Native lava/slime and unsupported
+   texture layouts must not become water.
+6. If magenta never appears, enable `[Diagnostics] Enabled=1` and use F8 to
+   capture one frame, then include `WaterEffect.log`, `WaterReflection.log`,
+   `VolumeEffects.log`, and `WaterDiagnostics/<timestamp>/` with the report.
+   This identifies different material layouts without broadly replacing
+   unrelated transparent geometry.

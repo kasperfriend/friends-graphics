@@ -359,6 +359,9 @@ void Finish(IDirect3DDevice9* d) {
     renderer::DepthCapture::Instance().OnFrameEnd(d);
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
+    watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+    auto& frame = renderer::FrameContext::Current();
+    frame.waterMaskTexture = frame.waterDepthTexture = nullptr;
 }
 
 void Reset(IDirect3DDevice9* d) {
@@ -424,7 +427,7 @@ inline bool HasActiveEffects() {
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
-    if (!enabled || !active || internal) return;
+    if (internal || (!(enabled && active) && !watereffect::NeedsScene())) return;
     if (!renderer::DepthCapture::Instance().BeforeClear(d, count, rects, flags, z)) return;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
     renderer::RendererDiagnostics::Instance().OnFrameBegin();
@@ -452,41 +455,46 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         // depth-based reconstruction unreliable right at the water plane.
         // Sized to the real render target, cleared fresh every frame before
         // any water draws happen.
+        watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+        frameCtx.waterMaskTexture = frameCtx.waterDepthTexture = nullptr;
         D3DSURFACE_DESC targetDesc{};
         if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
-            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
-                resources.waterMaskHeight != targetDesc.Height || !resources.waterMaskSurface) {
-                resources.waterMask.Reset(); resources.waterMaskSurface.Reset();
-                resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
-                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)) &&
-                    SUCCEEDED(resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf()))) {
-                    resources.waterMaskOwner = d;
-                    resources.waterMaskWidth = targetDesc.Width;
-                    resources.waterMaskHeight = targetDesc.Height;
-                }
+            const bool sizeChanged = resources.waterMaskOwner != d ||
+                !renderer::water::TargetsMatch(targetDesc.Width, targetDesc.Height,
+                                               resources.waterMaskWidth, resources.waterMaskHeight);
+            if (sizeChanged) {
+                // Invalidate the pair BEFORE updating dimensions. Previously
+                // the mask updated the shared dimensions first, leaving the
+                // depth texture at its old size after a window resize.
+                resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+                resources.waterDepthSurface.Reset(); resources.waterDepth.Reset();
+                resources.waterMaskOwner = d;
+                resources.waterMaskWidth = targetDesc.Width;
+                resources.waterMaskHeight = targetDesc.Height;
             }
-            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
-                resources.waterMaskHeight != targetDesc.Height || !resources.waterDepthSurface) {
-                resources.waterDepth.Reset(); resources.waterDepthSurface.Reset();
-                D3DFORMAT depthFmt = D3DFMT_R32F;
-                if (FAILED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr))) {
-                    depthFmt = D3DFMT_A16B16G16R16F;
-                    d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr);
-                }
-                if (resources.waterDepth)
+            if (!resources.waterMaskSurface) {
+                resources.waterMask.Reset();
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)))
+                    resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf());
+            }
+            if (!resources.waterDepthSurface) {
+                resources.waterDepth.Reset();
+                // R32F keeps all three MRTs at 32 bits per pixel. A 64-bit
+                // fallback is invalid on devices without independent MRT bit depths.
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_R32F, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr)))
                     resources.waterDepth->GetSurfaceLevel(0, resources.waterDepthSurface.GetAddressOf());
             }
-            if (resources.waterMaskSurface) {
-                d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0);
+            // A mask without matching, freshly cleared depth would stop air at
+            // stale water. Expose both or neither, and fail without disabling water.
+            if (resources.waterMaskSurface && resources.waterDepthSurface &&
+                SUCCEEDED(d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0)) &&
+                SUCCEEDED(d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0))) {
+                watereffect::waterTargetSurface = target.Get();
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
-                frameCtx.waterMaskTexture = resources.waterMask.Get();
-            }
-            if (resources.waterDepthSurface) {
-                d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0);
                 watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
+                frameCtx.waterMaskTexture = resources.waterMask.Get();
                 frameCtx.waterDepthTexture = resources.waterDepth.Get();
             }
         }
@@ -845,25 +853,15 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.celestialIsMoon = false;
         }
 
-        // Stable direct light, separate from the disc signal above. The
-        // disc fields keep answering "is there a god-ray origin on screen
-        // right now" (constants[2]/sunScreen/celestialIntensity), which is
-        // genuinely a screen-space question. Cloud and atmosphere lighting
-        // must instead answer "is the sun/moon up", which does not change
-        // when the camera pans the disc out of frame, when WoW culls its
-        // billboard at the screen edge, or when our own cloud deck crosses
-        // it - all three used to toggle celestialIntensity between frames
-        // and blink the whole sky (clouds lit/unlit, ground shadowed/
-        // unshadowed). Stabilize the world direction too: retain the
-        // confirmed body's direction when its billboard is culled instead
-        // of switching back to potentially camera-dependent v[24] data.
-        // Only use that fallback until a body has actually been tracked.
+        // World lighting must not inherit `body` / `useMoon` above: those
+        // select a visible glare origin, and turning toward a daytime moon
+        // used to replace the sun's shadow projection. Scene lighting alone
+        // selects the dominant body and strength. Track each disc direction
+        // independently, even when it is not the selected glare/light source.
         {
             const float lightDt = celestialLightClock.Observe(
                 renderer::PerformanceCounter(), renderer::PerformanceFrequency());
             renderer::CelestialLightInput lightInput;
-            lightInput.discVisible = body != nullptr;
-            lightInput.discIsMoon = useMoon;
             lightInput.daylight = frameCtx.daylightFactor;
             lightInput.moonlight = frameCtx.moonlightFactor;
             lightInput.directionalLuminance =
@@ -875,10 +873,11 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.directLightIntensity = stable.intensity;
             frameCtx.directLightIsMoon = stable.isMoon;
             frameCtx.directLightValid = true;
-            const renderer::Vec3* confirmed = body && useMoon == stable.isMoon
-                ? &body->worldSpaceDirection : nullptr;
-            frameCtx.directLightDirectionWorld = celestialDirectionStabilizer.Update(
-                frameCtx.sunDirectionWorld, confirmed, stable.isMoon, lightDt);
+            const auto sunWorld = celestialDirectionStabilizer.Update(
+                sun.visible ? &sun.worldSpaceDirection : nullptr, false, lightDt);
+            const auto moonWorld = celestialDirectionStabilizer.Update(
+                moon.visible ? &moon.worldSpaceDirection : nullptr, true, lightDt);
+            frameCtx.directLightDirectionWorld = stable.isMoon ? moonWorld : sunWorld;
             const auto& world = frameCtx.directLightDirectionWorld;
             frameCtx.directLightDirectionView = {
                 renderer::Dot(world, {frameCtx.inverseView.m[0][0], frameCtx.inverseView.m[0][1], frameCtx.inverseView.m[0][2]}),
@@ -1452,7 +1451,7 @@ bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
 }
 
 void BeforeDraw(IDirect3DDevice9* d) {
-    if (!enabled || !active || internal || owner != d || composed) return;
+    if (internal || owner != d || composed || (!(enabled && active) && !watereffect::NeedsScene())) return;
 
     bool isUi = (renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                  renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull);
@@ -1476,6 +1475,9 @@ void BeforeDraw(IDirect3DDevice9* d) {
         }
     }
 
+    // Water can borrow depth/camera capture with the atmosphere switched off.
+    // Do not accidentally enable atmosphere/postprocessing in that mode.
+    if (!enabled || !active) return;
     if (!ready && isUi) { composed=PostProcessWithoutCamera(d); return; }
     if (!ready || !isUi) return;
 
