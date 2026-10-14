@@ -126,35 +126,64 @@ int main() try
                           moving.lattice[1]*moving.lattice[3])<1e-5f,
                 "the two lattice axes stay perpendicular");
     }
-    // The vertex shader's geometry waves: they get the camera's own lattice
-    // coordinate as a constant, added before the sines. Two properties matter -
-    // a crest must land on the same terrain point from any camera (otherwise the
-    // displacement swims as you move, which is what the per-tile uv version did),
-    // and the anchor must keep BOTH octaves in step, so it is deliberately not
-    // reduced into the noise wrap.
-    for (float camera : {-46321.f, -13.5f, 0.f, 977.25f, 51000.f})
+    // The vertex stage displaces the very waves the pixel shader lights, from one
+    // shared number: the swell phase in lattice cells. That is only legal because
+    // every train's period divides the wrap the shader applies to its lattice
+    // indices - if it stopped doing so, a wrapped phase would slide the displaced
+    // crest off the lit one every 64 cells, which is exactly the artefact class
+    // this whole field exists to remove.
+    static_assert(int(kLatticeWrap) % int(kSwellCells) == 0,
+        "the long swell period must divide the lattice wrap");
+    static_assert(int(kLatticeWrap) % int(kSwellShortCells) == 0,
+        "the secondary swell period must divide the lattice wrap");
+    Require(std::fabs(kSwellRadians*kSwellCells-6.2831853f)<1e-4f&&
+            std::fabs(kSwellRadians*kSwellShortCells*2.0f-6.2831853f)<1e-4f,
+            "one swell train is 2pi over its cell count, the other twice as frequent");
+    // (1) Translation invariance, measured where a tile is actually visible: the
+    // reference camera sits on the water it is testing, and each other camera sees
+    // the same point from up to six hundred yards away.
+    for (float offset : {-600.f, -133.f, 0.f, 271.f, 640.f})
+    for (float counter : {0.f, .32f, 1.f})
     {
-        const auto field=BuildWaveField(0.0,1.f,.32f,100.f,camera,camera*2.f,true,true);
-        const float worldX=4213.f, worldY=-7781.f;
-        const auto anchored=BuildWaveField(0.0,1.f,.32f,100.f,0.f,0.f,true,true);
-        // The shader sees the position RELATIVE to the camera, and adds this
-        // constant back: (world - camera) * lattice + camera * lattice = world.
-        const float fromCamera=(worldX-camera)*field.lattice[0]+(worldY-camera*2.f)*field.lattice[1]+field.anchor[0];
-        const float fromOrigin=worldX*anchored.lattice[0]+worldY*anchored.lattice[1];
-        Require(std::fabs(fromCamera-fromOrigin)<2e-2f,
-                "a displaced crest stays on the same terrain point for every camera");
-        // At t=0 nothing has drifted, so the wrapped phase and the raw anchor are
-        // the same number: the pixel and vertex shaders share one lattice.
-        Require(distance(field.anchor[0],field.phase[0])<1e-3f&&
-                distance(field.anchor[1],field.phase[1])<1e-3f,
-                "the vertex and pixel shaders agree on the wave anchor");
-        Require(std::fabs(field.anchor[0])>=kLatticeWrap||std::fabs(camera)<kLatticeWrap,
-                "the geometry anchor is not folded into the noise wrap");
+        const auto field=BuildWaveField(17.5,1.f,counter,100.f,4213.f+offset,-7781.f+offset*.5f,true,true);
+        const auto reference=BuildWaveField(17.5,1.f,counter,100.f,4213.f,-7781.f,true,true);
+        const float relativeX=4213.f-(4213.f+offset), relativeY=-7781.f-(-7781.f+offset*.5f);
+        const auto argum=[](const WaveField& field,float relativeX,float relativeY) {
+            return (relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.phase[2])*kSwellRadians;
+        };
+        const float argX=argum(field,relativeX,relativeY);
+        const float argRef=argum(reference,0.f,0.f);
+        // sin() is what the shader feeds, and arguments that differ by a whole
+        // number of turns are the same wave. Both sides are wrapped with floor (NOT
+        // by taking an absolute value first: |a| and |b| are not congruent when the
+        // signs differ, which is how an earlier version of this check invented a
+        // failure), and compared circularly.
+        const auto turn=[](float value){return value-6.2831853f*std::floor(value/6.2831853f);};
+        const float waveA=turn(argX),waveB=turn(argRef);
+        const float apart=std::fabs(waveA-waveB);
+        Require(std::fmin(apart,6.2831853f-apart)<1e-2f,
+                "the shared swell phase lands the same wave under every camera");
+    }
+    // (2) And the argument the vertex stage evaluates stays inside a range where
+    // float32 still has fraction bits to spare even at the far corner of a
+    // continent, because the camera's own coordinate is subtracted first.
+    {
+        const auto far=BuildWaveField(41.25,1.f,.32f,100.f,46321.f,-51000.f,true,true);
+        const float arg=std::fabs((421.f*far.lattice[0]-307.f*far.lattice[1]+far.phase[2])*kSwellRadians);
+        Require(arg<160.f,"the geometry wave argument stays small at any world coordinate");
+        const float ripple=std::fabs(421.f*far.lattice[0]-307.f*far.lattice[1]+far.phase[0]);
+        Require(ripple<=kLatticeWrap*2.f,"the shading argument never leaves the wrapped lattice twice over");
+        Require(std::isfinite(arg)&&std::isfinite(far.phase[3]),
+                "the swell phase is finite for hours of flow and any camera");
     }
     {
         const auto blind=BuildWaveField(9.0,1.f,.32f,100.f,12000.f,9000.f,false,true);
-        Require(blind.anchor[0]==0.f&&blind.anchor[1]==0.f,
-                "no camera position means no geometry anchor, but still a finite field");
+        const auto origin=BuildWaveField(9.0,1.f,.32f,100.f,0.f,0.f,true,true);
+        // A frame without a captured camera cannot be nailed to the terrain, so the
+        // field degrades to exactly what a camera at the origin would see: still
+        // animated, still bounded, no reliance on a position it does not have.
+        Require(blind.phase[0]==origin.phase[0]&&blind.phase[3]==origin.phase[3],
+                "a missing camera falls back to the origin-anchored field, not to garbage");
         Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.phase[2]),
                 "the anchor fallback stays usable by both shader stages");
     }

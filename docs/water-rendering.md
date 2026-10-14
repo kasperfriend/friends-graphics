@@ -84,6 +84,104 @@ positions must land on the same lattice coordinate, phases must stay inside the
 wrap, and the constants must remain finite after 100000 s of animation.
 
 
+## Full rework round 2: the reference look (2026-10-14)
+
+Round 1 made the waves physically anchored; this round is about what the surface is made
+of. The reported target was the new renderer's water, which the panel describes as three
+authored controls - movement, look and reflection - with waves that scale with the size of
+the body, a river that foams where it meets a rock, and depth as an optical property rather
+than a fade. Three things about the old shading kept us from reading as that, and all three
+were structural rather than a matter of tuning numbers:
+
+- **A wave only moved the highlight.** The body of the water was `surface + colour * base`
+  with a small normal-driven bump, so a swell had no lit back and no shaded face. Rounded
+  forms are the single loudest thing in a reference frame, so the shading normal now modulates
+  the body directly, against the geometric normal, in both the light direction and the
+  hemisphere it sees. Flat water and a zero-strength sea are untouched by construction: the
+  terms are differences.
+- **The "environment" was fog.** Reflections at grazing angles mixed toward `fogColor`, which
+  is why open water read as a dark sheet with a bright smudge on it. The surface now reflects
+  a horizon-to-zenith sky built from the scene's own fog and light colour, with the sun/moon
+  disc mirrored in it, and the screen-space hit is mixed toward that sky by the wave's own
+  roughness - the cheap stand-in for a blurred mip chain this pass cannot sample.
+- **Depth was one scalar.** `absorption` was a single 0..1 fade, so "murky swamp" and "clear
+  mountain lake" were the same water at a different alpha. Absorption is now per channel
+  (Beer-Lambert over the measured column), the deep colour is what the column converges to,
+  and light scattered back out of the column is what makes a crest glow when the source is
+  behind it. Refraction strength still scales the *blend* and never the colour - with
+  refraction off the water must fall back to the client's pixels, not to a black bottom - and
+  the depth transition stays independent of it, which is the contract an earlier regression
+  broke.
+
+Two more things moved because the references showed them: the refracted sample is pulled
+further the deeper the column is (shallow water and a bar stay crisp while open water
+shimmers), and foam is authored rather than automatic - wind strength gates crest and shoal
+foam, and a shoal term reads the depth gradient, which is the only geometry this pass can
+see, so a river running over a bar whips up and a calm canal does not.
+
+**The swell is no longer noise.** The long waves are two analytic sine trains on the same
+world-anchored lattice, at 16 and 8 cells, which gives exact slopes for free and - because
+both periods divide the shader's 64-cell wrap (`kSwellCells`, `kSwellShortCells`,
+`kLatticeWrap`) - lets the vertex
+stage displace *the same* waves the pixel shader lights, from one shared constant phase. A
+displaced crest and its highlight cannot drift apart, distant water keeps its large forms
+(only the chop fades with the pixel footprint), and dropping the second `noiseGradient` call
+paid for most of the new shading. `src/Water/WaveField.h` documents the wrap arithmetic;
+`tools/WaterRegression.cpp` asserts it with a `static_assert` so changing a period without
+changing the wrap fails the build rather than sliding the waves apart by eye.
+
+### What the reference does that this pass cannot
+
+The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
+texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
+GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
+state without spending a render pass, and **496 instruction slots** enforced by
+`tools/ValidateShaders.ps1` (driver creation itself fails above 512 on PS3-class hardware, the
+failure documented in this file's shader-budget history). So each of those has a substitute
+here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
+toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent carries both
+the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
+wide, a high sun keeps it tight, which is the behaviour the disc-widened lobe produced. The
+SSR march takes the first convincing hit instead of maximising confidence per step, and the
+sun-visibility march uses a single sided band. Both were measured against the frame budget,
+not the slot budget: with `[loop]` the instruction count is static, so cutting *steps* buys
+time per pixel and nothing at all in slots - which is worth remembering before trading steps
+away again.
+
+### Authoring
+
+Every value above is a `[Water]` key, read per area first (`LocationGraphics.ini`, the same
+scope the enable switch uses), so zones differ without a code change: `ClarityPercent`,
+`WindStrengthPercent`, `SparklePercent`, `WaveRoughnessPercent`, `SheenPercent`,
+`ShoalFoamPercent`, `FoamBrightnessPercent`, `SunDiscPercent`, and the three colours
+(`WaterColour` multiplies the zone's own painted water with `0x808080` neutral, `DeepColour`
+is the asymptote, `AbsorptionColour` is the per-channel rate). Colours are the only values
+that need text rather than an integer, so `ReadTuningColour` parses `0xRRGGBB` or decimal in
+this header rather than growing a colour type in the shared tuning reader. `WATER CLARITY`,
+`WIND` and `SUN SPARKLE` are on the F7 overlay; the rest are file-only for now.
+
+### Constant ABI
+
+The pixel shader's water block grew from twelve registers to seventeen (`c212` world-up and
+wind, `c213` body style, `c214` water tint, `c215` deep colour and foam brightness, `c216`
+absorption colour and sparkle gain) and the vertex stage's from two to three (`c202` carries
+the swell phase). `watereffect::Scope` saves and restores all of it. The client's own water
+constants keep their old float indices, which is what lets `tools/WaterDeviceRegression.cpp`
+read `c[13]`, `c[16]`, `c[19]`, `c[20]`, `c[23]` and `c[28..30]` as before; those assertions
+are the
+cheapest available proof that the ABI did not shift.
+
+### Verification
+
+Portable regressions cover the wave field, the material gate and the shared fog register, and
+the device test renders the complete shader on the software HAL. Neither can judge *look*: the
+colour, wave scale and foam amounts were taken from the reference screenshots, but the numbers
+behind them (how much the crest lights up, how fast red dies per yard, how bright the disc is)
+are first-pass values and the intended workflow is the F11 capture plus an in-game pass. The
+slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
+cannot run fxc, so "it fits in 496 slots" is a CI result there, not a local one.
+
+
 ## Additional safety sweep (2026-10-14)
 
 Three further defects were found in code:
