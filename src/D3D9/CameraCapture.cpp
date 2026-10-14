@@ -39,6 +39,21 @@ namespace renderer
                 if (!std::isfinite(f))
                     return false;
 
+        // Only a draw covering the whole render target can be the scene camera
+        // whose light this frame's sky and fog are built from. A target/portrait
+        // draw qualifies on every check above - rigid view, standard projection -
+        // but renders into a small viewport with a close-up camera of its own, and
+        // latching it is the reported "click an NPC and the world brightens":
+        // the frame inherited the portrait's light direction and daylight factors.
+        IDirect3DSurface9* renderTarget = nullptr;
+        D3DSURFACE_DESC targetDesc{};
+        const bool fullFrame = SUCCEEDED(device->GetRenderTarget(0, &renderTarget)) && renderTarget &&
+            SUCCEEDED(renderTarget->GetDesc(&targetDesc)) &&
+            vp.X == 0 && vp.Y == 0 && vp.Width == targetDesc.Width && vp.Height == targetDesc.Height;
+        if (renderTarget) renderTarget->Release();
+        if (!fullFrame)
+            return false;
+
         // Verify standard WoW perspective projection and rigid world-view
         if (v[4][0] <= 0.0f || v[5][1] <= 0.0f || v[6][2] <= 1.0f || v[7][2] >= 0.0f ||
             fabsf(v[6][3] - 1.0f) > 0.001f || fabsf(v[7][3]) > 0.001f)
@@ -56,6 +71,14 @@ namespace renderer
                     return false;
             }
         }
+
+        // Even at full frame, the first qualifying draw is not automatically
+        // this frame's camera - the gate holds the last accepted one and asks
+        // whether this candidate can be it. A rejection is not an overwrite:
+        // nothing below runs, the previous camera's factors stay in place, and
+        // the real scene draw that follows in the same frame still latches.
+        if (!m_cameraGate.Accept(v[3], v, vp.Width, vp.Height))
+            return false;
 
         // Swap BEFORE overwriting: whatever viewRaw held (last successful
         // capture's forward view) becomes previousViewRaw for this frame's

@@ -22,6 +22,7 @@
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/CelestialStability.h"
+#include "src/D3D9/CameraContinuity.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -833,12 +834,31 @@ bool Composite(IDirect3DDevice9* d) {
         // else reading these (currently only the debug-only, off-by-default
         // DirectionalVolumetricLighting path) can't disagree with it by
         // still carrying the old v[24]-derived value.
+        // The tracker's worldSpaceDirection is derived from the disc draw's own
+        // matrices. For the sun that is harmless - its billboard lives in world
+        // space - but the moon billboard is camera-relative by construction
+        // (near-identity WORLD, direction carried in the VIEW translation), so
+        // converting with the draw's own VIEW yields a direction expressed
+        // against the camera, not the world. Fed into the cloud deck, that is
+        // "look at the moon and the cloud lighting follows the camera". Convert
+        // the reported view-space direction with this frame's captured scene
+        // camera instead (CameraCapture gated it, so it is the real one); only
+        // when no camera was captured fall back to the tracker's derivation.
+        auto celestialWorldDirection = [&frameCtx](const renderer::CelestialBody& celestial) {
+            if (frameCtx.viewRawValid) {
+                const renderer::Vec3& view = celestial.viewSpaceDirection;
+                float world[3];
+                renderer::ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &view.x, world);
+                return renderer::Vec3{world[0], world[1], world[2]};
+            }
+            return celestial.worldSpaceDirection;
+        };
         if (body) {
             frameCtx.sunScreenX = body->screenX;
             frameCtx.sunScreenY = body->screenY;
             frameCtx.sunStrength = constants[2][2];
             frameCtx.sunDirectionView = body->viewSpaceDirection;
-            frameCtx.sunDirectionWorld = body->worldSpaceDirection;
+            frameCtx.sunDirectionWorld = celestialWorldDirection(*body);
             // Source kind and visibility come from CelestialTracker. The
             // atmosphere owns the sun/moon intensity ratio, so keep this a
             // normalized visibility signal instead of applying moon strength
@@ -873,10 +893,15 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.directLightIntensity = stable.intensity;
             frameCtx.directLightIsMoon = stable.isMoon;
             frameCtx.directLightValid = true;
+            // Directions enter the stabilizer already in world space, converted
+            // above: stabilizing the tracker's camera-relative moon vector here
+            // only made the camera tracking smoother, not smaller.
+            const renderer::Vec3 sunDirectionWorld = celestialWorldDirection(sun);
+            const renderer::Vec3 moonDirectionWorld = celestialWorldDirection(moon);
             const auto sunWorld = celestialDirectionStabilizer.Update(
-                sun.visible ? &sun.worldSpaceDirection : nullptr, false, lightDt);
+                sun.visible ? &sunDirectionWorld : nullptr, false, lightDt);
             const auto moonWorld = celestialDirectionStabilizer.Update(
-                moon.visible ? &moon.worldSpaceDirection : nullptr, true, lightDt);
+                moon.visible ? &moonDirectionWorld : nullptr, true, lightDt);
             frameCtx.directLightDirectionWorld = stable.isMoon ? moonWorld : sunWorld;
             const auto& world = frameCtx.directLightDirectionWorld;
             frameCtx.directLightDirectionView = {

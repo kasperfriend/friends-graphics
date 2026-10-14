@@ -21,6 +21,15 @@
   of wobbling a line; and a world-anchored grouping envelope multiplies the lift, the slide, the
   shading slope, the pinch, the chop and the whitecaps together, so water arrives in sets instead
   of at constant height everywhere. Live comparison against a 3.3.5 sea remains.
+- [x] Break the lines that survived at range: two shorter trains (2.55 and 1.95 cells, at 65 and
+  128 degrees, on their own pixel register c218) now cross the coarse crest families at the
+  scale distance resolves, the crest warp rose to 6.5 cells, and a finer counter-phased chop
+  octave removes the last regular pattern standing. `tools/WaterRegression.cpp` measures it:
+  along the dominant train's own crest line the field must keep varying (0.71 of its overall
+  spread today, 0.00 for a lone sine). Zones also author their own water colours now
+  (`WaterColour`/`DeepColour`/`AbsorptionColour` in EnvironmentProfiles.ini - azure Booty Bay,
+  darker Duskwood/Plaguelands/Felwood, icy Winterspring/Icecrown), resolved and blended by the
+  same area/zone machinery as the agitation they sit next to. Live comparison remains.
 - [x] Stop whole liquid tiles from staying native: the documented water *pixel* shader plus the two-texture signature identifies the material at any surface size, the fourth live-confirmed vertex variant is listed, and both fog paths share the water register table instead of naming one variant. Unmatched liquid layouts are now reported by hash in `WaterEffect.log`.
 
 

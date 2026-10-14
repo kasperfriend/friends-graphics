@@ -533,20 +533,26 @@ of how much of the complaint each one owns:
 
 ### What changed
 
-* **Six trains, in a table, with a start of their own.** Wavelengths 16, 11.5, 8, 5.8, 4.4 and
-  3.4 cells (40 down to 8.5 yards at the shipped wave size) - a ratio of about 1.35 between
-  neighbours and never an integer one - in six directions whose crest lines are never closer than
-  21 degrees, with weights 1/.62/.34/.19/.12/.075 falling off so that the summed SLOPE stays at
-  the value the shading's Jacobian was authored against, and a fixed phase offset per train
-  (`.37`, `.71`, `.19`, `.55`, `.83` of that train's own wavelength) so no two crests cross
-  lattice zero together. Two of the six are displaced, all six are shaded, exactly as before:
-  the mesh budget did not change.
+* **Eight trains, in a table, with a start of their own.** Wavelengths 16, 11.5, 8, 5.8, 4.4,
+  3.4, 2.55 and 1.95 cells (40 down to about 5 yards at the shipped wave size) - a ratio of
+  about 1.35 between neighbours and never an integer one - in eight directions whose crest
+  lines are never closer than 18 degrees, with weights 1/.62/.34/.19/.12/.075/.052/.036 falling
+  off so that the summed SLOPE stays at the value the shading's Jacobian was authored against,
+  and a fixed phase offset per train (`.37`, `.71`, `.19`, `.55`, `.83`, `.63`, `.29`, `.63` of
+  that train's own wavelength) so no two crests cross lattice zero together. Two of the eight
+  are displaced, all eight are shaded, exactly as before: the mesh budget did not change. The
+  two shortest trains are the newest addition (October 2026): with only six, the surviving
+  crest families regrouped into lines at range, because nothing crossed the coarse bands at
+  the scale the eye resolves far away; the pair at 65 and 128 degrees crosses them there.
 * **One stronger warp instead of two weak ones.** `.05` frequency (one sample per 50 yards) and
-  `5.f` cells of amplitude, displacing the crest ALONG the field. Five cells of bend on an
-  eleven-cell wavelength moves a crest fifteen yards sideways and back, which stretches the
-  spacing here and doubles crests up there: a bent train has no constant wavelength left to read
-  as a rhythm. The second decorrelated warp and the vortices from the previous round were cut -
-  they could not break a comb and they cost slots to prove it.
+  `6.5` cells of amplitude (5.0 until October 2026), displacing the crest ALONG the field. Six
+  and a half cells of bend on an eleven-cell wavelength moves a crest twenty yards sideways and
+  back, which stretches the spacing here and doubles crests up there: a bent train has no
+  constant wavelength left to read as a rhythm. The second decorrelated warp and the vortices
+  from the previous round were cut - they could not break a comb and they cost slots to prove it.
+  A second, finer chop octave rides the same wind from October 2026 - sampled half an octave
+  above the main chop and advanced against the swell's own phase - because at distance the
+  coarse chop was the last regular pattern left standing.
 * **A grouping envelope.** A third world-anchored noise field at one sample per 115 yards produces
   a gain in `.52 .. 1.14`, and it multiplies the lift, the Gerstner slide, the shading slope, the
   pinch, the chop riding on the swell and therefore the whitecaps. It is sampled ONCE, in the
@@ -571,7 +577,10 @@ that makes a crest read as a body.
 The pixel stage grew one register (`c217`, the four shading-only trains' phases in one contiguous
 `float4` rather than gathered across three) and the vertex stage one (`c204`, the grouping field's
 anchor), so `watereffect::Scope` now saves and restores 18 pixel registers and 5 vertex ones. The
-`controls` array is 72 floats and `vertexControls` is 20.
+`controls` array is 72 floats and `vertexControls` is 20. October 2026 added `c218` for the two
+shortest trains' phases - a third `sincos` batch costs less than regathering their projections
+from the two registers beside them - taking the save/restore window to 19 registers and
+`controls` to 76 floats.
 
 Before this round the pixel shader measured 597 slots of a 621-slot budget, and the estimate in
 this document was "about ten slots higher". The measured answer was **642**, and getting there
@@ -586,7 +595,8 @@ taught two things that are worth keeping because neither is visible in the sourc
   reasons. `tools/WaterRegression.cpp` now counts the `Output` fields and the pixel stage's
   parameters and refuses any other number, because a limit that only fxc knows about is a limit
   that gets discovered an hour later in a Windows job log.
-* Six trains cost 45 slots, not ten. Two vectorised `sincos` batches, a chain rule and a
+* Six trains cost 45 slots, not ten (eight, with the third batch, cost more again - see the
+  fxc count in CI). Two vectorised `sincos` batches, a chain rule and a
   differentiated envelope all fold into one instruction per lane, so the price per train is
   invisible to a reader counting terms in the source. The estimate was not paranoid enough. The
   four short trains' slope terms remain the first thing to cut if this shader ever needs to
@@ -622,6 +632,15 @@ under it keeps native water because `CreatePixelShader` fails.
   the same camera (`build/look-before.png`, `build/look-after.png`, not committed) show the
   mid-distance changing from evenly spaced parallel bands into crossing crests at several angles
   with visibly grouped heights.
+* "Waves in lines" is now a measured regression, not an eyeball claim: `WaterRegression` walks
+  the crest line of the dominant train (where a lone sine is exactly constant) and requires the
+  field to vary along it by a real fraction of how much it varies everywhere (0.71 measured,
+  0.30 required, 0.00 for a lone train). Crests that march cannot pass it; crests that grow,
+  double and die do. Per-zone colours are resolved beside the agitation profile they already
+  had - `WaterColour`/`DeepColour`/`AbsorptionColour` in `EnvironmentProfiles.ini`, with
+  `[Area.35]` Booty Bay authored azure over its teal Stranglethorn zone - and
+  `tools/CloudClimateRegression.cpp` holds the layering (area over zone, unauthored zones keep
+  the global `[Water]` colours, borders blend instead of stepping).
 * Still open, in `TODO.md`: the `fxc` slot count, and a look in-world - a CPU mirror can prove the
   numbers agree and cannot prove the water looks right at 40 feet above a harbour.
 

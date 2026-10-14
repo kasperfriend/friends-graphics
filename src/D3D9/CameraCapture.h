@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <cstdint>
 #include "../Core/FrameContext.h"
+#include "CameraContinuity.h"
 
 namespace renderer
 {
@@ -46,10 +47,15 @@ namespace renderer
             m_cameraCaptureShaderHash = 0;
             m_smoothedSunX = -1.0f;
             m_smoothedSunY = -1.0f;
+            m_cameraGate.Reset();
         }
 
     private:
         CameraCapture() = default;
+        // Which camera the captured light belongs to. Frames that merely look
+        // like scene draws (a target portrait's close-up camera) must not
+        // re-light the world; see CameraContinuityGate.
+        CameraContinuityGate m_cameraGate;
         bool m_valid = false;
         uint32_t m_capturedFrames = 0;
         uint64_t m_cameraCaptureShaderHash = 0;

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <string_view>
 #include <set>
 #include <charconv>
 #include <vector>
@@ -10,6 +11,19 @@ namespace {
 std::string Trim(std::string s) {auto a=s.find_first_not_of(" \t\r\n");return a==s.npos?"":s.substr(a,s.find_last_not_of(" \t\r\n")-a+1);}
 bool Number(const std::string& s,float& v) {try {size_t n=0;v=std::stof(s,&n);return n==s.size()&&std::isfinite(v);}catch(...) {return false;}}
 bool Id(const std::string& s,uint32_t& id) {auto r=std::from_chars(s.data(),s.data()+s.size(),id);return !s.empty()&&r.ec==std::errc()&&r.ptr==s.data()+s.size();}
+// 0xRRGGBB (or bare RRGGBB hex), the same spelling [Water] colours use in
+// GraphicsEffects.ini. Anything else is a typo that would otherwise become a
+// colour nobody authored, so it fails the whole reload like any bad value.
+bool Colour(const std::string& s,uint32_t& colour) {
+    const std::string_view hex=s.starts_with("0x")||s.starts_with("0X")?std::string_view(s).substr(2):std::string_view(s);
+    if(hex.empty()||hex.size()>6)return false;
+    uint32_t value=0;auto r=std::from_chars(hex.data(),hex.data()+hex.size(),value,16);
+    if(r.ec!=std::errc()||r.ptr!=hex.data()+hex.size())return false;
+    colour=value;return true;
+}
+std::array<float,3> ColourChannels(uint32_t colour,float divisor) {
+    return {float(colour>>16&255)/divisor,float(colour>>8&255)/divisor,float(colour&255)/divisor};
+}
 }
 bool ParseEnvironmentConfiguration(const std::string& text,EnvironmentConfiguration& out,std::string& error) {
     EnvironmentConfiguration next;std::istringstream input(text);std::string line,section;EnvironmentProfile* profile=nullptr;
@@ -37,6 +51,10 @@ bool ParseEnvironmentConfiguration(const std::string& text,EnvironmentConfigurat
         if(profile) {
             if(key=="Name")continue;
             if(key=="Profile") {profile->profile=value;continue;}
+            if(key=="WaterColour"||key=="DeepColour"||key=="AbsorptionColour") {
+                uint32_t colour;if(!Colour(value,colour))return fail("Invalid water colour (expected 0xRRGGBB)");
+                (key=="WaterColour"?profile->waterTint:key=="DeepColour"?profile->waterDeep:profile->waterAbsorption)=colour;continue;
+            }
             size_t index=0;for(;index<ParameterCount;++index)if(key==EnvironmentKeys[index])break;
             float number;
             if(index==ParameterCount||!Number(value,number)||number<EnvironmentMinimum[index]||number>EnvironmentMaximum[index])return fail("Unknown environment parameter or out-of-range value");
@@ -68,6 +86,13 @@ EnvironmentResolution ResolveEnvironment(const EnvironmentConfiguration& c,const
         while(!name.empty()&&name!="Default"&&seen.insert(name).second) {auto i=c.named.find(name);if(i==c.named.end())break;chain.push_back(&i->second);name=i->second.profile;}
         for(auto i=chain.rbegin();i!=chain.rend();++i)for(size_t k=0;k<ParameterCount;++k)if((*i)->values[k])result.state.values[k]=*(*i)->values[k];
         for(size_t k=0;k<ParameterCount;++k)if(p.values[k])result.state.values[k]=*p.values[k];
+        auto colours=[&](const EnvironmentProfile& source) {
+            if(source.waterTint) {result.state.water.tint=ColourChannels(*source.waterTint,128.f);result.state.water.authored=true;}
+            if(source.waterDeep) {result.state.water.deep=ColourChannels(*source.waterDeep,255.f);result.state.water.authored=true;}
+            if(source.waterAbsorption) {result.state.water.absorption=ColourChannels(*source.waterAbsorption,128.f);result.state.water.authored=true;}
+        };
+        for(auto i=chain.rbegin();i!=chain.rend();++i)colours(**i);
+        colours(p);
         if(!p.profile.empty()&&p.profile!="Default")result.profile=p.profile;
     };
     if(!c.enabled)return result;
@@ -78,6 +103,19 @@ EnvironmentResolution ResolveEnvironment(const EnvironmentConfiguration& c,const
 }
 ResolvedEnvironmentState BlendEnvironment(const ResolvedEnvironmentState& a,const ResolvedEnvironmentState& b,float t) {
     ResolvedEnvironmentState result;t=std::clamp(t,0.f,1.f);t=t*t*(3-2*t);
-    for(size_t k=0;k<ParameterCount;++k)result.values[k]=a.values[k]+(b.values[k]-a.values[k])*t;return result;
+    for(size_t k=0;k<ParameterCount;++k)result.values[k]=a.values[k]+(b.values[k]-a.values[k])*t;
+    // Crossing a zone border eases the water colour with everything else instead of
+    // stepping it at the boundary line. A side that authored nothing carries the
+    // shipped defaults (ResolvedWaterColours), so blending toward it is a fade back
+    // to global water, not a fade toward black.
+    if(a.water.authored||b.water.authored) {
+        result.water.authored=true;
+        for(size_t k=0;k<3;++k) {
+            result.water.tint[k]=a.water.tint[k]+(b.water.tint[k]-a.water.tint[k])*t;
+            result.water.deep[k]=a.water.deep[k]+(b.water.deep[k]-a.water.deep[k])*t;
+            result.water.absorption[k]=a.water.absorption[k]+(b.water.absorption[k]-a.water.absorption[k])*t;
+        }
+    }
+    return result;
 }
 }
