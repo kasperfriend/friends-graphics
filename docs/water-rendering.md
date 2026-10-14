@@ -136,7 +136,7 @@ The comparison implementation runs a Tessendorf FFT wave simulation and an advec
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
 state without spending a render pass, and **560 instruction slots** enforced by
-`tools/ValidateShaders.ps1` (the shader measures 543; the budget was raised from 496 for this
+`tools/ValidateShaders.ps1` (the shader measures 542; the budget was raised from 496 for this
 rework rather than cut a visible term - see "Shader budget raised for the volume rework" below,
 which also records what a 512-slot device does). So each of those has a substitute
 here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
@@ -357,7 +357,8 @@ one of the larger visible savings. Nothing reached 496 without giving up a term 
 exists to add, so the budget was raised to **560** and the trade is recorded at the number in
 `tools/ValidateShaders.ps1`.
 
-The consequence is explicit rather than hidden: on a device reporting
+The shader measures 542 slots as it ships - the neutral-tint identity fix the device sweep
+required saved one more. The consequence is explicit rather than hidden: on a device reporting
 `MaxPixelShader30InstructionSlots = 512`, `CreatePixelShader` fails, `WaterEffect` logs
 `water shader creation failed hr=... PS30 slots=512; keeping native water until device reset`
 and the client's own water is drawn for that session. Water effects therefore require a GPU

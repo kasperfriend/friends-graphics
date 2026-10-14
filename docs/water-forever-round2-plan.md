@@ -115,7 +115,8 @@ into the same reciprocal as the existing `1/(1+distance*distance*k)` local-light
 Windows job reports a budget failure, cut the SSR steps first, then the in-scattering isotropic
 term, and never the shoreline shading.
 
-**Measured outcome (2026-10-14).** The estimate was low: the rework landed at **543 slots**, and
+**Measured outcome (2026-10-14).** The estimate was low: the rework landed at **543 slots**
+(542 once the neutral-tint identity fix landed), and
 two of the three fallbacks above bought nothing. The SSR step reduction saves **zero** slots -
 the march loops are `[loop]`, so fxc counts the body once and steps only cost frame time - and
 the sky gradient was already the 4-band form, worth 15 slots rather than a fix for the overflow.
