@@ -50,6 +50,7 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
+    'precipitationHLSL'      = 496 # Weather must fit baseline PS3 hardware too
     'source'                = 496 # Water: driver creation must work on 512-slot PS3 devices
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512

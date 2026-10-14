@@ -19,6 +19,8 @@
 #include "src/Materials/TextureHashLookup.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/TrackedRenderState.h"
+#include "src/Core/FrameContext.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -92,11 +94,23 @@ float4 windParams : register(c2);
 float4 screenParams : register(c3);
 // c4: light color / tint (rgb), w=depthOcclusionEnabled
 float4 lightColor : register(c4);
+// c5: x=viewport MinZ, y=reciprocal viewport depth range
+float4 depthRange : register(c5);
+
+float WeatherHash(float2 cell)
+{
+    float3 p=frac(float3(cell.x,cell.y,cell.x)*.1031);
+    p+=dot(p,p.yzx+33.33);
+    return frac((p.x+p.y)*p.z);
+}
 
 float GetLinearDepth(float raw)
 {
-    float d = clamp(raw, 0.00001, 0.99999);
-    return projection.y / (d - projection.x);
+    // INTZ contains viewport-scaled depth (WoW commonly uses MaxZ=.94).
+    // Cleared sky must stay far away, including the no-depth fallback.
+    if (raw >= .99999) return 100000.0;
+    float d = saturate((raw-depthRange.x)*depthRange.y);
+    return projection.y / min(d - projection.x, -.000001);
 }
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
@@ -136,9 +150,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (isSnow > 0.5)
         {
             // Snow: sinusoidal drift
-            layerUV.x += sin(t * 1.6 + layerUV.y * 3.5) * 0.12 + windOffset.x * 0.5;
-            layerUV.y += t * layerSpeeds[i] * 0.6;
-            float4 snowSamp = tex2D(weatherTex, frac(layerUV));
+            layerUV.x += sin(t * 1.6 + layerUV.y * 3.5) * 0.12 - windOffset.x * 0.5;
+            // Screen V grows downwards. Subtract travel from the sampled UV
+            // to move the visible flake down, not up.
+            layerUV.y -= t * layerSpeeds[i] * 0.6;
+            float4 snowSamp = tex2D(weatherTex, frac(layerUV * 12.0));
             float flake = snowSamp.a * snowSamp.r;
             accum += float3(0.92, 0.95, 1.0) * flake * layerWeights[i] * occlusion;
             totalAlpha += flake * layerWeights[i] * occlusion;
@@ -146,8 +162,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         else if (isSand > 0.5)
         {
             // Sandstorm: rapid dusty drift
-            layerUV.x += windOffset.x * 3.0 + t * 2.0;
-            layerUV.y += sin(layerUV.x * 2.0) * 0.05 + windOffset.y;
+            layerUV.x -= windOffset.x * 3.0 + t * 2.0;
+            layerUV.y += sin(layerUV.x * 2.0) * 0.05 - windOffset.y;
             float4 sandSamp = tex2D(mistTex, frac(layerUV * 0.5));
             float dust = sandSamp.a * 0.6;
             accum += float3(0.85, 0.75, 0.55) * dust * layerWeights[i] * occlusion;
@@ -155,15 +171,23 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
         else
         {
-            // Rain: vertical streaks along wind vector
-            layerUV.x += windOffset.x;
-            layerUV.y += t * layerSpeeds[i] * 4.5 + windOffset.y;
-            float2 streakUV = float2(layerUV.x, layerUV.y * 0.22);
-            float4 dropSamp = tex2D(weatherTex, frac(streakUV));
-            // The extracted Classic texture deliberately stores very low
-            // alpha (its maximum is about 0.15). Bring it into a useful
-            // screen-space range before applying the user's intensity.
-            float drop = saturate(dropSamp.a * 4.5);
+            // A texture lookup at uv+travel moves the IMAGE against travel.
+            // Subtract it so rain falls down/right with positive gravity/wind.
+            layerUV -= float2(windOffset.x, t * layerSpeeds[i] * 1.2 + windOffset.y);
+            // The old V multiplier (.22) stretched one drop over almost THREE
+            // screen heights in the nearest layer. Tile compact, sparse drops
+            // instead: each near-layer cell is at most 1/(16*1.6) screen high.
+            float2 grid = layerUV * float2(64.0, 16.0);
+            float cellNoise = WeatherHash(floor(grid));
+            float2 dropUV = frac(grid);
+            dropUV.x = (dropUV.x-.5)*2.5+.5+(cellNoise-.5)*.6;
+            float inside = step(0,dropUV.x)*step(dropUV.x,1);
+            float envelope = smoothstep(.08,.18,dropUV.y)*(1-smoothstep(.65,.90,dropUV.y));
+            float4 dropSamp = tex2Dlod(weatherTex, float4(saturate(dropUV),0,0));
+            // Random occupancy breaks tiled columns and their apparent reverse
+            // motion at high speeds. Explicit finite support also bounds the
+            // streak when an optional texture has opaque/untapered edges.
+            float drop = saturate(dropSamp.a * 4.5) * inside * envelope * step(.55,cellNoise);
             accum += float3(0.75, 0.82, 0.92) * drop * layerWeights[i] * occlusion;
             totalAlpha += drop * layerWeights[i] * occlusion;
         }
@@ -172,10 +196,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // Add subtle ambient mist during heavy rain/snow at mid-distances
     if (isSand < 0.5 && sceneZ > 6.0)
     {
-        float2 mistUV = uv * aspect * 1.5 + float2(windParams.x * 0.2, t * 0.15);
+        float2 mistUV = uv * aspect * 1.5 - float2(windParams.x * t * 0.2, t * 0.15);
         float mistSamp = tex2D(mistTex, frac(mistUV)).a;
         float mistDepthFade = smoothstep(6.0, 40.0, sceneZ);
-        float mistAmount = mistSamp * mistDepthFade * 0.20 * intensity * windParams.z;
+        // Apply intensity once, below, just like the drops. Squaring it here
+        // made high-intensity rain emit a disproportionately bright wash.
+        float mistAmount = mistSamp * mistDepthFade * 0.08 * windParams.z;
         accum += float3(0.8, 0.85, 0.9) * mistAmount;
         totalAlpha += mistAmount;
     }
@@ -293,8 +319,11 @@ inline void CreateProceduralFallback(IDirect3DDevice9* device)
                 DWORD* pixels = static_cast<DWORD*>(lr.pBits);
                 for (int y = 0; y < 128; ++y)
                 {
-                    float fy = float(y) / 128.0f;
-                    BYTE a = static_cast<BYTE>(std::clamp(fy * 255.0f, 0.0f, 255.0f));
+                    float fy = (float(y) + .5f) / 128.0f;
+                    // Match the authored mask's ~15% peak alpha, with a soft
+                    // tail and head. Full-opacity fallback drops became beams.
+                    float taper = std::min(fy * 2.f, (1.f - fy) * 8.f);
+                    BYTE a = static_cast<BYTE>(38.f * std::clamp(taper, 0.f, 1.f));
                     for (int x = 0; x < 16; ++x)
                     {
                         float fx = (float(x) - 7.5f) / 7.5f;
@@ -364,7 +393,7 @@ inline void EnsureShaders(IDirect3DDevice9* device)
     ComPtr<ID3DBlob> codeBlob, errBlob;
     if (!precipitationPS)
     {
-        HRESULT hr = D3DCompile(precipitationHLSL, strlen(precipitationHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", 0, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
+        HRESULT hr = D3DCompile(precipitationHLSL, strlen(precipitationHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
         if (SUCCEEDED(hr) && codeBlob)
             device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), precipitationPS.GetAddressOf());
         else if (errBlob)
@@ -374,7 +403,7 @@ inline void EnsureShaders(IDirect3DDevice9* device)
     if (!lensDropletsPS)
     {
         codeBlob.Reset(); errBlob.Reset();
-        HRESULT hr = D3DCompile(lensDropletsHLSL, strlen(lensDropletsHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", 0, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
+        HRESULT hr = D3DCompile(lensDropletsHLSL, strlen(lensDropletsHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
         if (SUCCEEDED(hr) && codeBlob)
             device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), lensDropletsPS.GetAddressOf());
         else if (errBlob)
@@ -672,8 +701,11 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     // Depth is optional for the visible precipitation/lens layers. If INTZ
     // capture is unavailable, only roof occlusion is disabled; returning here
     // used to make the menu say RAIN ON while drawing absolutely nothing.
-    const bool hasCapturedDepth = renderer::DepthCapture::Instance().HasDepth() &&
-        renderer::DepthCapture::Instance().GetDepthTexture();
+    const renderer::FrameContext& frame = renderer::FrameContext::Current();
+    const bool hasCapturedDepth = renderer::DepthCapture::Instance().GetOwner() == device &&
+        renderer::DepthCapture::Instance().HasDepth() &&
+        renderer::DepthCapture::Instance().GetDepthTexture() && frame.cameraValid &&
+        frame.viewport.MaxZ > frame.viewport.MinZ;
     CreateNeutralDepthFallback(device);
     IDirect3DTexture9* depthTex = hasCapturedDepth
         ? renderer::DepthCapture::Instance().GetDepthTexture()
@@ -695,7 +727,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
 
     // Precipitation itself composites over sceneTex, so the scene copy is
     // mandatory even when lens droplets are disabled.
-    if (!sceneCopyTex || copyWidth != desc.Width || copyHeight != desc.Height)
+    if (!sceneCopyTex || !sceneCopySurface || copyWidth != desc.Width || copyHeight != desc.Height)
     {
         sceneCopyTex.Reset(); sceneCopySurface.Reset();
         copyWidth = desc.Width; copyHeight = desc.Height;
@@ -707,6 +739,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     if (!sceneCopySurface || FAILED(device->StretchRect(backBuffer.Get(), nullptr, sceneCopySurface.Get(), nullptr, D3DTEXF_NONE)))
         return;
 
+    const auto trackedState = renderer::g_trackedState;
     internal = true;
     {
     renderer::ScopedRenderState savedState(device);
@@ -717,6 +750,12 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
     device->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+    // This pass replaces scene color; inherited UI/world fog, stencil,
+    // scissor or sRGB state must not turn drops into bright/clipped bands.
+    for (auto state : {D3DRS_FOGENABLE, D3DRS_LIGHTING, D3DRS_STENCILENABLE,
+                       D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_CLIPPLANEENABLE})
+        device->SetRenderState(state, FALSE);
+    device->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
     device->SetVertexShader(nullptr);
     device->SetVertexDeclaration(nullptr);
     device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
@@ -724,14 +763,13 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     // Compute wind vector
     float rad = windAngle * 0.0174532925f;
     float windX = std::sin(rad) * windStrength;
-    float windY = std::cos(rad) * 0.2f;
+    float windY = std::cos(rad) * windStrength * 0.2f;
 
     // Setup shader constants
     // c0: Projection params from CameraCapture / frame constants
-    const renderer::FrameContext& frame = renderer::FrameContext::Current();
     float projConstants[4] = {
-        frame.cameraValid ? frame.projUnpack[0] : 0.001f,
-        frame.cameraValid ? frame.projUnpack[1] : 1.0f,
+        hasCapturedDepth ? frame.projUnpack[0] : 1.001f,
+        hasCapturedDepth ? frame.projUnpack[1] : -.1f,
         frame.cameraValid ? frame.projUnpack[2] : float(desc.Width) / float(desc.Height),
         frame.cameraValid ? frame.projUnpack[3] : 1.0f };
     // c1: Weather params
@@ -754,6 +792,9 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     device->SetPixelShaderConstantF(2, windConst, 1);
     device->SetPixelShaderConstantF(3, screenConst, 1);
     device->SetPixelShaderConstantF(4, lightConst, 1);
+    const float depthConst[4] = {hasCapturedDepth ? frame.viewport.MinZ : 0.f,
+        hasCapturedDepth ? 1.f/(frame.viewport.MaxZ-frame.viewport.MinZ) : 1.f, 0, 0};
+    device->SetPixelShaderConstantF(5, depthConst, 1);
 
     struct QuadVertex { float x, y, z, rhw, u, v; };
     float w = float(desc.Width) - 0.5f, h = float(desc.Height) - 0.5f;
@@ -768,21 +809,20 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     device->SetPixelShader(precipitationPS.Get());
     device->SetTexture(0, sceneCopyTex ? sceneCopyTex.Get() : nullptr);
     device->SetTexture(1, depthTex);
-    device->SetTexture(2, (mode == 2) ? (snowFlakeTex ? snowFlakeTex.Get() : rainDropTex.Get()) : (rainDropTex ? rainDropTex.Get() : nullptr));
+    device->SetTexture(2, (renderMode == 2) ? (snowFlakeTex ? snowFlakeTex.Get() : rainDropTex.Get()) : (rainDropTex ? rainDropTex.Get() : nullptr));
     device->SetTexture(3, snowMistTex ? snowMistTex.Get() : nullptr);
 
-    device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-    device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-    device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-    device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-    device->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
-    device->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
-    device->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-    device->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-    device->SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-    device->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-    device->SetSamplerState(2, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
-    device->SetSamplerState(2, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    for (DWORD slot=0; slot<4; ++slot)
+    {
+        const DWORD filter = slot == 1 ? D3DTEXF_POINT : D3DTEXF_LINEAR;
+        const DWORD address = slot < 2 ? D3DTADDRESS_CLAMP : D3DTADDRESS_WRAP;
+        device->SetSamplerState(slot, D3DSAMP_MINFILTER, filter);
+        device->SetSamplerState(slot, D3DSAMP_MAGFILTER, filter);
+        device->SetSamplerState(slot, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        device->SetSamplerState(slot, D3DSAMP_ADDRESSU, address);
+        device->SetSamplerState(slot, D3DSAMP_ADDRESSV, address);
+        device->SetSamplerState(slot, D3DSAMP_SRGBTEXTURE, FALSE);
+    }
 
     static bool loggedFirstRender = false;
     if (!loggedFirstRender)
@@ -827,6 +867,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
 
     }
     internal = false;
+    renderer::g_trackedState = trackedState;
 }
 
 inline void Present(IDirect3DDevice9*, bool preserveDetection = false)

@@ -109,6 +109,22 @@ jobs:
           }
           Write-Output "::notice title=Water regression results::$flat"
 
+      - name: Weather motion regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Weather.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          # Preserve compiler/GPU diagnostics in API-readable annotations too.
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Weather regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Weather regression results::$flat"
+
       - name: Verify output
         shell: pwsh
         run: |
