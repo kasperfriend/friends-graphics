@@ -136,9 +136,9 @@ The comparison implementation runs a Tessendorf FFT wave simulation and an advec
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
 state without spending a render pass, and **560 instruction slots** enforced by
-`tools/ValidateShaders.ps1` (the shader measures 543; the budget was raised from 496 for this
-rework rather than cut a visible term - see "Shader budget raised for the volume rework" below,
-which also records what a 512-slot device does). So each of those has a substitute
+`tools/ValidateShaders.ps1` (the shader measures 542 - 543 before the doubled tint came out;
+the budget was raised from 496 for this rework rather than cut a visible term - see "Shader
+budget raised for the volume rework" below, which also records what a 512-slot device does). So each of those has a substitute
 here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
 toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent carries both
 the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
@@ -323,8 +323,18 @@ cannot run fxc, so "it fits in 560 slots" is a CI result there, not a local one.
 
 The first Windows run of the volume shader failed to compile (`mix`, a GLSL spelling - now
 guarded portably by `tools/ShaderSourceRegression.cpp`), and the second failed the budget:
-**543 instruction slots against 496**. 543 is also above the 512-slot `ps_3_0` file limit that
-the 496 budget existed to stay under, so this was a decision, not a tweak.
+**543 instruction slots against 496** (542 now, since the doubled tint below came out of the
+shader). 543 is above the 512 instruction slots that a `ps_3_0` *device* is required to support,
+which is what the 496 budget existed to stay under, so this was a decision, not a tweak.
+
+That is worth stating precisely, because the number appears in three places and the reason for it
+is easy to over-read. 512 is not a limit of the `ps_3_0` bytecode format and it is not a limit the
+client imposes. The pixel shader model 3.0 hardware requirement is that a device support *at least*
+512 slots, and a device may report more, up to 32768, in `D3DCAPS9.MaxPixelShader30InstructionSlots`.
+It is that per-device number which `CreatePixelShader` is accepted or rejected against. fxc here
+assembles the shader without a word of complaint, which is the proof that the format is not the
+bound. Nor is the game's own shader budget involved: `WaterEffect` compiles and creates this shader
+itself, on the client's device.
 
 The decision was made from measurements rather than from the plan's guess. `fxc` priced one copy
 of the shader per candidate cut in a single run (the probe scaffolding is gone; these are the
@@ -352,9 +362,25 @@ exists to add, so the budget was raised to **560** and the trade is recorded at 
 The consequence is explicit rather than hidden: on a device reporting
 `MaxPixelShader30InstructionSlots = 512`, `CreatePixelShader` fails, `WaterEffect` logs
 `water shader creation failed hr=... PS30 slots=512; keeping native water until device reset`
-and the client's own water is drawn for that session. Water effects therefore require a GPU
-newer than the 512-slot class. That is a player-visible limitation and is in `changelog.d`,
-not only here. The budget still does its original job for this shader - growth must be argued in
+and the client's own water is drawn for that session. The fallback is clean in the sense that
+matters: `Scope` has only *read* device state by the point it attempts creation - textures,
+samplers, MRT bindings and constants are all touched after - so a device that refuses the shader
+is left exactly as it was found, and `shaderCreationFailed` keeps it from trying per tile.
+Water effects therefore require a GPU that reports more than 512 slots, which in practice means
+anything newer than the GeForce 6/7 and Radeon X1xxx generation that the 512 minimum was written
+for; recent drivers report the maximum. That is a player-visible limitation and is in
+`changelog.d`, not only here.
+
+The alternative was considered and rejected: a `WATER_COMPACT` compile of the same shader text,
+chosen when the device reports the bare minimum, keeping the body, tint, scatter, swell and foam
+and dropping the two ray marches (69 + 51 slots) so that device class keeps new water instead of
+native. It is a real option - the text is compiled at runtime by `D3DCompile`, so a second pass
+with a `#define` is cheap, and `ValidateShaders.ps1` could enforce a second budget of 496 on it -
+but it puts a second shading path into the file that every future water change then has to be
+thought about twice, to buy back a look on hardware the 512-slot minimum was written for. Nothing
+here forecloses it: the guards would go around the two marches and nothing else.
+
+The budget still does its original job for this shader - growth must be argued in
 a diff - and the other enforced budgets are untouched.
 
 
@@ -472,9 +498,9 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation measures **494 slots** and enforces a **496-slot budget**
-with room below the minimum hardware limit (that ceiling held until the volume rework of
-2026-10-14 above, which needed 543). Device-creation failures log the HRESULT and device instruction
+shader validation measures **542 slots** and enforces a **560-slot budget** (the 496-slot
+budget it used to enforce stood below the 512-slot hardware minimum until the volume rework of
+2026-10-14 above outgrew both). Device-creation failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
 This is a verified failure path in the code, not a diagnosis from a capture of
@@ -518,7 +544,7 @@ the reporting player's machine. In-game confirmation still matters.
 ## Tests
 
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 560 static instruction slots (543 measured; the ceiling was raised from 496 - see
+  exceeds 560 static instruction slots (542 measured; the ceiling was raised from 496 - see
   "Shader budget raised for the volume rework") or its instruction count cannot be read.
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
