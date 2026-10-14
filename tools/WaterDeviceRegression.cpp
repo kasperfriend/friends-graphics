@@ -500,8 +500,16 @@ int main() try {
         }
         auto reducedSurface=texture(256,256,0xff808080);
         Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,reducedSurface.Get()));
+        // The liquid material is its pixel shader. The client swaps vertex
+        // variants by camera distance and shadow quality, so a vertex identity
+        // that is stale or absent must not veto a real water tile - that veto is
+        // what left whole near-camera tiles native - while the pixel identity
+        // still has to be genuine.
         tracked.currentVS=nullptr;
-        Require(!renderer::water::IsMaterial(d.Get()),"stale tracked VS identity cannot approve actual unknown shader");
+        Require(renderer::water::IsMaterial(d.Get()),
+            "an unlisted liquid vertex variant still gets modern water");
+        Require((pixel(1)&0xffffff)==0xff00ff,
+            "sweep: unlisted vertex variant is replaced on the framebuffer, not only classified");
         tracked.currentVS=originalVS.Get();tracked.currentPS=nullptr;
         Require(!renderer::water::IsMaterial(d.Get()),"stale tracked PS identity cannot approve actual unknown shader");
         tracked.currentPS=originalPS.Get();tracked.psHash=0;

@@ -2,6 +2,10 @@
 
 ## Current stabilization priorities
 
+- [x] Stop the replacement water from showing square patterns: the wave field is anchored to the terrain instead of to a tile's uv, the noise hash is bounded so it cannot collapse onto its lattice, and the unresolved octave fades in value as well as in slope. Live comparison against a 3.3.5 coast remains.
+- [x] Stop whole liquid tiles from staying native: the documented water *pixel* shader plus the two-texture signature identifies the material at any surface size, the fourth live-confirmed vertex variant is listed, and both fog paths share the water register table instead of naming one variant. Unmatched liquid layouts are now reported by hash in `WaterEffect.log`.
+
+
 - [x] Restore native shadow-map creation with the actual 3.3.5 CVars (`extShadowQuality=5`, `projectedTextures=1`). Softness and strength are live-verified across both receiver families (`c12.xy` and terrain/WMO `c8.yz`).
 - [x] Match water by its stable two-texture liquid signature rather than shader hashes. Live logs confirmed a fourth VS variant (`70faf83955e2b668`) on the same water; rejecting it caused triangular canal/coast holes and angle-dependent missing chunks. Runtime stress test remains for Stormwind, Stranglethorn, Booty Bay, and Northrend.
 - [x] Use that same structural identity for the pre-water SSR/refraction capture. The leftover three-VS whitelist delayed capture until mid-surface, so later tiles sampled a scene copy that already contained earlier water tiles and formed large camera-dependent seams.

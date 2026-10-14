@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include "../D3D9/TrackedRenderState.h"
+#include "../Water/WaterPolicy.h"
 
 // Read-only capture of WoW's own authored fog for the current draw. Never
 // writes any shader state - this observes the native, unmodified vertex
@@ -44,8 +45,7 @@ public:
         try {
             uint64_t vsHash = renderer::g_trackedState.vsHash;
             if (!vsHash) return;
-            UINT reg;
-            // Restricted to the water case only. DistanceFog.h's other
+            // Restricted to the water family. DistanceFog.h's other
             // registers (12/8/30, covering several terrain/model shader
             // hashes) are confirmed to hold *a* fog-shaped curve, but not
             // confirmed to represent "how far you can see across the
@@ -59,10 +59,11 @@ public:
             // register is the one case with real cross-validated
             // confidence - WaterEffect's deepTint/environment blend has
             // depended on reading it correctly for weeks.
-            switch (vsHash) {
-            case 0x206d861fd0a721ddull: reg = 4; break;
-            default: return;
-            }
+            // Every documented liquid vertex shader carries the same authored fog
+            // curve in c4; naming only one of them captured the visibility range
+            // for some tiles and not for the neighbours they are continuous with.
+            const UINT reg = renderer::water::FogConstantRegister(vsHash);
+            if (!reg) return;
             float raw[4]{};
             if (FAILED(d->GetVertexShaderConstantF(reg, raw, 1))) return;
             for (float v : raw) if (!std::isfinite(v)) return;
@@ -84,7 +85,7 @@ public:
             m_state.densityHint = std::clamp(raw[2], .1f, 8.f);
             m_state.valid = true;
 
-            if (vsHash == 0x206d861fd0a721ddull) {
+            if (renderer::water::IsKnownVertexShader(vsHash)) {
                 float color[4]{};
                 if (SUCCEEDED(d->GetPixelShaderConstantF(4, color, 1))) {
                     bool plausible = true;

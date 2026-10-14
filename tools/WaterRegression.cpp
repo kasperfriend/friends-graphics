@@ -1,5 +1,7 @@
 // Portable policy regressions. Run from any directory; no Windows SDK needed.
 #include "../src/Water/WaterPolicy.h"
+#include "../src/Water/WaveField.h"
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 #include <initializer_list>
@@ -20,8 +22,8 @@ int main() try
     Require(!IsMaterialLayout(8,64,0,0), "missing surface texture rejected");
     Require(!IsMaterialLayout(512,512,512,512), "ordinary terrain material rejected");
     for (uint64_t pixel : {0x17f042a7906ca126ull, 0x7d4f078fa1876a09ull})
-    for (uint64_t vertex : {0x206d861fd0a721ddull,
-                           0xfdd9528ed3ac30eaull, 0x48a82796bd612aebull})
+    for (uint64_t vertex : {0x206d861fd0a721ddull, 0xfdd9528ed3ac30eaull,
+                            0x48a82796bd612aebull, 0x70faf83955e2b668ull})
     {
         for (unsigned size : {16u, 64u, 128u, 256u, 512u, 1024u})
             for (unsigned w=8,h=64; h; w=w>1?w/2:1,h/=2)
@@ -36,10 +38,29 @@ int main() try
         Require(!IsMaterialLayout(4,32,0,0,vertex,pixel), "known pair cannot bypass missing surface");
     }
     constexpr uint64_t pixel = 0x7d4f078fa1876a09ull;
-    Require(!IsMaterialLayout(8,64,256,256,0,pixel), "known PS alone cannot identify water");
-    Require(!IsMaterialLayout(8,64,256,256,0x17f042a7906ca126ull,pixel), "second water PS cannot be used as VS identity");
-    Require(!IsMaterialLayout(4,32,256,256), "unknown scaled materials fail closed");
+    constexpr uint64_t otherPixel = 0x17f042a7906ca126ull;
+    Require(!IsMaterialLayout(8,64,256,256,0,0) && !IsMaterialLayout(4,32,256,256,0,0),
+            "unidentified shaders at a reduced layout stay native");
+    Require(IsMaterialLayout(8,64,256,256,0x17f042a7906ca126ull,pixel),
+            "liquid pixel shader carries unlisted vertex variants");
+    Require(IsMaterialLayout(8,64,128,128,0,otherPixel) && IsMaterialLayout(8,64,1024,1024,0,otherPixel),
+            "reduced and enlarged liquid surfaces are one material family");
+    Require(!IsMaterialLayout(8,64,256,256,0x8832bcc5ed4ff2a6ull,pixel),
+            "native rain vertex shader cannot borrow the liquid pixel shader");
+    Require(!IsMaterialLayout(8,64,256,256,0xec9ee827b8bf5afaull,pixel),
+            "native snow vertex shader cannot borrow the liquid pixel shader");
     Require(!IsMaterialLayout(8,64,64,64,0xd9e7756460af6296ull,pixel), "UI shader with ripple texture rejected");
+    Require(!IsMaterialLayout(8,64,64,64,0,0xc29c7060b723c0c6ull), "UI pixel shader is never liquid");
+    Require(IsLiquidCandidate(8,64,64,64) && IsLiquidCandidate(4,32,256,256),
+            "an unapproved liquid layout is still reported as a candidate");
+    Require(!IsLiquidCandidate(512,512,256,256) && !IsLiquidCandidate(8,64,300,300),
+            "candidate reporting does not widen what is restyled");
+    for (uint64_t vertex : {0x206d861fd0a721ddull, 0xfdd9528ed3ac30eaull,
+                            0x48a82796bd612aebull, 0x70faf83955e2b668ull})
+        Require(FogConstantRegister(vertex)==4u,
+                "every documented liquid vertex shader shares one fog register");
+    Require(FogConstantRegister(0x2437f34e978bb37full)==0u && FogConstantRegister(pixel)==0u,
+            "fog capture stays closed to unlisted shaders");
     for (unsigned bits=0; bits<32; ++bits)
         Require(NeedsScene(bits&1,bits&2,bits&4,bits&8,bits&16)==(bits!=0),
                 "every depth-dependent feature requests capture independently");
@@ -48,6 +69,95 @@ int main() try
     Require(!TargetsMatch(1920,720,1920,1080), "height-only resize invalidates targets");
     Require(!TargetsMatch(1280,1080,1920,1080), "width-only resize invalidates targets");
     Require(!TargetsMatch(0,0,0,0), "uninitialized targets are never valid");
+
+    // Wave field. The shader evaluates the lattice from the position relative to
+    // the camera plus a phase that carries the camera's own world position. Two
+    // statements make that correct and neither holds by construction:
+    //
+    //  * the same terrain point seen from two cameras must land on the same
+    //    lattice coordinate, otherwise the pattern slides over the world;
+    //  * that coordinate must stay inside the noise wrap, because a lattice
+    //    index outside it is where the previous shader lost the float32
+    //    fraction bits and hardened the noise into flat squares.
+    auto coordinate=[](const WaveField& field,float relativeX,float relativeY) {
+        return WrapLattice(relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.phase[0]);
+    };
+    auto distance=[](float a,float b) {
+        const float difference=std::fabs(a-b);
+        return std::fmin(difference,kLatticeWrap-difference);
+    };
+    for (double time : {0.0, 3.7, 61.0, 3600.0, 100000.0})
+    for (float counter : {0.f, .32f, 1.f})
+    for (float scale : {25.f, 100.f, 400.f})
+    {
+        const auto reference=BuildWaveField(time,1.f,counter,scale,0.f,0.f,true,true);
+        // Any camera position on any continent, at the same distance and in the
+        // same direction from the wave as the reference point.
+        for (float camera : {-46321.f, -13.5f, 0.f, 977.25f, 51000.f})
+        {
+            const auto field=BuildWaveField(time,1.f,counter,scale,camera,camera*2.f,true,true);
+            const float relativeX=4213.f-camera, relativeY=-7781.f-camera*2.f;
+            Require(distance(coordinate(field,relativeX,relativeY),
+                              coordinate(reference,4213.f,-7781.f))<2e-2f,
+                    "the same terrain point lands on the same wave lattice from any camera");
+            Require(std::fabs(field.phase[0])<=kLatticeWrap&&std::fabs(field.phase[1])<=kLatticeWrap&&
+                    std::fabs(field.phase[2])<=kLatticeWrap&&std::fabs(field.phase[3])<=kLatticeWrap,
+                    "phases stay inside the lattice wrap at any world coordinate");
+            Require(std::fabs(coordinate(field,relativeX,relativeY))<=kLatticeWrap,
+                    "the lattice coordinate the pixel shader floors is always wrapped");
+            Require(std::isfinite(field.lattice[0])&&std::isfinite(field.phase[0])&&
+                    std::isfinite(field.uvDrift[0])&&std::isfinite(field.uvDrift[1]),
+                    "wave constants stay finite after hours of animation");
+        }
+    }
+    {
+        const auto still=BuildWaveField(12.0,1.f,.32f,100.f,0.f,0.f,false,false);
+        Require(still.uvDrift[0]==0.f&&still.uvDrift[1]==0.f,
+                "switching waves off also stops the texture creep");
+        const auto moving=BuildWaveField(12.0,1.f,.32f,100.f,0.f,0.f,false,true);
+        Require(moving.phase[0]!=still.phase[0], "flow animation drives the wave field");
+        const auto noCamera=BuildWaveField(12.0,1.f,.32f,100.f,0.f,0.f,false,true);
+        Require(std::isfinite(noCamera.phase[0])&&std::isfinite(noCamera.phase[3]),
+                "a frame without camera capture still yields a finite field");
+        const float cell=kRippleCellYards*100.f*.01f;
+        Require(std::fabs(std::hypot(moving.lattice[0],moving.lattice[1])-1.f/cell)<1e-5f,
+                "the lattice frequency is one cell of the configured size");
+        Require(std::fabs(moving.lattice[0]*moving.lattice[2]+
+                          moving.lattice[1]*moving.lattice[3])<1e-5f,
+                "the two lattice axes stay perpendicular");
+    }
+    // The vertex shader's geometry waves: they get the camera's own lattice
+    // coordinate as a constant, added before the sines. Two properties matter -
+    // a crest must land on the same terrain point from any camera (otherwise the
+    // displacement swims as you move, which is what the per-tile uv version did),
+    // and the anchor must keep BOTH octaves in step, so it is deliberately not
+    // reduced into the noise wrap.
+    for (float camera : {-46321.f, -13.5f, 0.f, 977.25f, 51000.f})
+    {
+        const auto field=BuildWaveField(0.0,1.f,.32f,100.f,camera,camera*2.f,true,true);
+        const float worldX=4213.f, worldY=-7781.f;
+        const auto anchored=BuildWaveField(0.0,1.f,.32f,100.f,0.f,0.f,true,true);
+        // The shader sees the position RELATIVE to the camera, and adds this
+        // constant back: (world - camera) * lattice + camera * lattice = world.
+        const float fromCamera=(worldX-camera)*field.lattice[0]+(worldY-camera*2.f)*field.lattice[1]+field.anchor[0];
+        const float fromOrigin=worldX*anchored.lattice[0]+worldY*anchored.lattice[1];
+        Require(std::fabs(fromCamera-fromOrigin)<2e-2f,
+                "a displaced crest stays on the same terrain point for every camera");
+        // At t=0 nothing has drifted, so the wrapped phase and the raw anchor are
+        // the same number: the pixel and vertex shaders share one lattice.
+        Require(distance(field.anchor[0],field.phase[0])<1e-3f&&
+                distance(field.anchor[1],field.phase[1])<1e-3f,
+                "the vertex and pixel shaders agree on the wave anchor");
+        Require(std::fabs(field.anchor[0])>=kLatticeWrap||std::fabs(camera)<kLatticeWrap,
+                "the geometry anchor is not folded into the noise wrap");
+    }
+    {
+        const auto blind=BuildWaveField(9.0,1.f,.32f,100.f,12000.f,9000.f,false,true);
+        Require(blind.anchor[0]==0.f&&blind.anchor[1]==0.f,
+                "no camera position means no geometry anchor, but still a finite field");
+        Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.phase[2]),
+                "the anchor fallback stays usable by both shader stages");
+    }
     return 0;
 }
 catch (const std::exception& e)

@@ -79,6 +79,8 @@ inline std::vector<Item> items={
  {KIND_TOGGLE,L"Water",L"FoamEnabled","FOAM",0,1,1,1},
  {KIND_SLIDER,L"Water",L"ShoreFoamPercent","FOAM AMOUNT",0,60,1,28},
  {KIND_SLIDER,L"Water",L"SpecularPercent","WATER SHINE",0,400,5,115},
+ {KIND_SLIDER,L"Water",L"WaveScalePercent","WAVE SIZE",25,400,5,100},
+ {KIND_SLIDER,L"Water",L"WaveSofteningPercent","WAVE FADE",0,400,5,100},
 
  // === LOCAL LIGHTING ===
  {KIND_HEADER,nullptr,nullptr,"--- LOCAL LIGHTING ---",0,0,0,0},

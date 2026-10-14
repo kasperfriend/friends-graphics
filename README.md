@@ -87,6 +87,8 @@ See [water rendering, verification and troubleshooting](docs/water-rendering.md)
 
 - Screen-space reflections and environment fallback reflections.
 - Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
+- Waves are evaluated on a world-anchored lattice, not on a tile's texture coordinates, so
+  one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 
 ### Native shadows and post-processing
