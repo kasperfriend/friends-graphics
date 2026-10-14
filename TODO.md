@@ -8,11 +8,12 @@
 - [x] Re-measure the water pixel stage's instruction slots with fxc on the Windows runner. Round 4's
   six trains and grouping envelope measured **642**, not the estimated ~607 (the estimate was 4x low:
   vectorised `sincos` batches hide their per-lane price). The 621 budget is gone by decision, not by
-  drift: `tools/ValidateShaders.ps1` now holds `source` to 2048 as a runaway guard, because a ceiling
-  that starts deciding which waves are allowed to shade has become a design input, and the device
-  answer was always the runtime one - a card reporting fewer slots than the shader needs fails
-  `CreatePixelShader` and keeps native water. What the number is still for: a pixel-shader change that
-  moves it by tens has to say so in its commit message, since CI will not refuse it.
+  drift: water now sits in `$measureOnly` in `tools/ValidateShaders.ps1` - counted, annotated on every
+  run, still a hard failure if the count cannot be read - because a ceiling that starts deciding which
+  waves are allowed to shade has stopped being a guard and become a design input. The device answer was
+  always the runtime one: a card reporting fewer slots than the shader needs fails `CreatePixelShader`
+  and keeps native water. What the count is for now: it is visible in the Checks tab, so a change that
+  moves it by tens has to be argued in the pull request that makes it.
 - [x] Stop the replacement water from showing square patterns: the wave field is anchored to the terrain instead of to a tile's uv, the noise hash is bounded so it cannot collapse onto its lattice, and the unresolved octave fades in value as well as in slope. Live comparison against a 3.3.5 coast remains.
 - [x] Stop the waves marching in lines: the swell is six trains whose wavelengths are never an
   octave apart and whose crest lines are never closer than 21 degrees, each starting at an

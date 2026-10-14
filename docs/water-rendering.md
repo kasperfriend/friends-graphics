@@ -135,16 +135,17 @@ changing the wrap fails the build rather than sliding the waves apart by eye.
 The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
-state without spending a render pass, and a **2048-slot validation budget** enforced by
-`tools/ValidateShaders.ps1` as a runaway guard rather than a design limit (fxc /O3 measured the
-current shader at 642 slots on Windows CI on 2026-10-14; it had been held to 621 - 597 measured
-plus 24 of compiler margin - until that ceiling started deciding which waves were allowed to
-shade, which is the wrong job for a budget, so round 4 raised it and recorded why. Round 3 is the
-counter-example worth keeping: it estimated 608, the shader measured 633, and rather than take a
-zero-margin budget or cut visible shading the broad warp moved to the vertex stage and is
-interpolated to pixels - the slot count came down by changing *where* the work happens, not by
-removing work. Earlier rounds and the device
-fallback are recorded under "Shader budget raised for the volume rework" below). So each of those
+state without spending a render pass, and no ceiling on how many instruction slots the water pixel
+stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
+run, and lets it be (fxc /O3 put the current shader at 642 slots on Windows CI on 2026-10-14; it had
+been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
+which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
+than re-negotiating it. The count is still the number to argue about, and the reason to keep measuring
+at all is Round 3: it estimated 608, the shader measured 633, and instead of a zero-margin budget or
+cut visible shading the broad warp moved to the vertex stage and is interpolated to pixels - the slot
+count came down by changing *where* the work happens, not by removing work. Earlier rounds, the device
+fallback, and why the volume and cloud raymarches *are* still capped, are recorded under
+"Shader budget raised for the volume rework" below). So each of those
 has a substitute here: an analytic multi-train swell plus bounded value noise for the simulation,
 a roughness mix toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent
 carries both the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
@@ -373,12 +374,12 @@ bright the disc is - were set against `tools/WaterPreview.cpp` above, which says
 than a reference screenshot can and less than an in-game pass does: the frames carry no client
 detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
 in-game pass. The
-slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
-cannot run fxc, so every **slot measurement** in this document is a CI result, not a local one.
-The budget is now deliberately loose, which moves the honest constraint onto the measured number
-itself: a pixel-shader change that moves it by tens of slots has to say so in its commit message,
-because CI will no longer refuse it. In-game waves, transitions and foam still require a
-live-client pass.
+slot count, the MSVC build and the device test all run on the Windows CI job; this environment
+cannot run fxc, so every **slot measurement** in this document is a CI result, not a local one. The
+water pixel stage carries no ceiling any more, which puts the constraint on the measured number
+itself: the count is annotated on every run, so a change that moves it by tens of slots is something
+a reviewer reads and weighs, in the pull request that made it, rather than something a stale number
+decides. In-game waves, transitions and foam still require a live-client pass.
 
 ## Full rework round 3: motion, mass and foam (2026-10-14)
 
@@ -565,7 +566,7 @@ in double on the CPU from the draw's own matrix, per-train deep-water dispersion
 trains displaced and shaded, the client's detail map creeping underneath, and the Gerstner slide
 that makes a crest read as a body.
 
-### Registers, and the slot budget
+### Registers, the slot count, and the interpolant ceiling
 
 The pixel stage grew one register (`c217`, the four shading-only trains' phases in one contiguous
 `float4` rather than gathered across three) and the vertex stage one (`c204`, the grouping field's
@@ -592,10 +593,18 @@ taught two things that are worth keeping because neither is visible in the sourc
   shrink - the heights matter more to the silhouette than their exact slopes do - and the
   envelope is not on that list, because it is the one addition that no train can substitute for.
 
-The budget then moved to 2048, which is a decision rather than a measurement: the sea is no
-longer asked to shed visible features in order to keep the shape the shader had in October. The
-number is still recorded above all the same, because "what did this change cost" is the only way
-to notice a shader drifting somewhere it will not come back from.
+The ceiling then went away, which is a decision rather than a measurement: the sea is not asked
+to shed visible features to keep the shape the shader had in October. `source` moved out of
+`$budgets` in `tools/ValidateShaders.ps1` and into `$measureOnly`, where fxc's count is still read,
+printed and annotated on every run - and still fails the job if it cannot be read at all. The other
+entries keep their budgets, because a raymarch loop that unrolls past what a driver accepts is a
+different failure from an expensive line of shading.
+
+What replaced the ceiling is the review, and it is worth being blunt that this is now a weaker
+guard than the number it replaced: the protection against a 900-slot water shader is a human
+reading an annotated count, so the number above is the thing a change has to answer for. The
+hardware limit was never the budget anyway - it is `MaxPixelShader30InstructionSlots`, and a card
+under it keeps native water because `CreatePixelShader` fails.
 
 ### Verification
 
@@ -796,10 +805,12 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation enforces a **621-slot budget** on it (597 measured with fxc /O3 on 2026-10-14,
-plus 24 slots of margin; the broad domain warp is vertex-sampled and interpolated to keep the
-pixel shader within budget without removing foam or its chain-rule normal). Earlier shader-budget
-history, including why the original 496-slot ceiling moved, is recorded above. Device-creation
+shader validation measured it against a **621-slot budget** (597 slots with fxc /O3 plus 24 of
+margin; the broad domain warp is vertex-sampled and interpolated to keep the pixel shader inside that
+number without removing foam or its chain-rule normal). That budget no longer exists for water - the
+round that retired it and the measurement that prompted it are described under "Full rework round 4"
+above. Earlier shader-budget history, including why the original 496-slot ceiling moved, is recorded
+above. Device-creation
 failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
@@ -843,10 +854,11 @@ the reporting player's machine. In-game confirmation still matters.
 
 ## Tests
 
-- `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 621 static instruction slots (597 measured with fxc /O3 on Windows CI on 2026-10-14,
-  plus 24 slots of compiler margin; the ceiling was raised from 496 - see "Shader budget raised
-  for the volume rework") or its instruction count cannot be read.
+- `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
+  compile, if the water instruction count cannot be read, or if any *budgeted* shader - the volume
+  and cloud raymarches and weather - exceeds its ceiling. The water pixel stage is measured and
+  annotated but not capped (fxc /O3: 642 slots on Windows CI on 2026-10-14; the 621 it used to be
+  held to is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
