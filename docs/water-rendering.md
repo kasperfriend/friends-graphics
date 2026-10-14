@@ -11,14 +11,15 @@ shader compilation cannot establish that a water draw reaches replacement.
 
 Keep the canonical layout fallback for previously supported unknown tile
 variants. For different resolutions, require **both** a documented native
-water VS and the documented water PS, the lookup's base size or a valid reduced
+water VS and a documented water PS, the lookup's base size or a valid reduced
 top mip, and a square power-of-two surface. The shader roles are not
 interchangeable. A ripple lookup alone (also used by weather) is insufficient.
 Verify the actually bound shader pointers before using tracked hashes; when
 state-block application bypasses hooks, query the bound shaders' cached hashes.
 Classification, scene capture, replacement and ground capture now use one gate.
 
-Portable tests cover every documented VS, all lookup mips, surface sizes
+Portable tests cover all three documented VS and both PS (stage roles verified
+from the pre-refactor gate at `11fd29e`), all lookup mips, surface sizes
 16–1024, missing inputs, wrong shader roles, weather/UI and invalid shapes.
 Device tests use synthetic ABI-compatible shaders **with supplied native
 identity metadata** to exercise the real classifier, scene copy, replacement,

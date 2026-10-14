@@ -5,15 +5,17 @@ namespace renderer::water
 {
     // Captured native water families (including near-camera tiles). Keep the
     // vertex and pixel roles separate: one known shader is not enough.
+    // Roles are recorded in WaterEffect/DrawCallClassifier at 11fd29e; the
+    // older ShaderCache list mixed both stages in a single isKnownWater flag.
     constexpr bool IsKnownVertexShader(uint64_t hash)
     {
-        return hash == 0x17f042a7906ca126ull || hash == 0x206d861fd0a721ddull ||
+        return hash == 0x206d861fd0a721ddull ||
                hash == 0xfdd9528ed3ac30eaull || hash == 0x48a82796bd612aebull;
     }
 
     constexpr bool IsKnownPixelShader(uint64_t hash)
     {
-        return hash == 0x7d4f078fa1876a09ull;
+        return hash == 0x17f042a7906ca126ull || hash == 0x7d4f078fa1876a09ull;
     }
 
     constexpr bool IsRippleLookup(unsigned width, unsigned height)

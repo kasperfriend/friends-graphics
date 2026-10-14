@@ -19,8 +19,8 @@ int main() try
     Require(!IsMaterialLayout(0,0,512,512), "missing base texture rejected");
     Require(!IsMaterialLayout(8,64,0,0), "missing surface texture rejected");
     Require(!IsMaterialLayout(512,512,512,512), "ordinary terrain material rejected");
-    constexpr uint64_t pixel = 0x7d4f078fa1876a09ull;
-    for (uint64_t vertex : {0x17f042a7906ca126ull, 0x206d861fd0a721ddull,
+    for (uint64_t pixel : {0x17f042a7906ca126ull, 0x7d4f078fa1876a09ull})
+    for (uint64_t vertex : {0x206d861fd0a721ddull,
                            0xfdd9528ed3ac30eaull, 0x48a82796bd612aebull})
     {
         for (unsigned size : {16u, 64u, 128u, 256u, 512u, 1024u})
@@ -35,7 +35,9 @@ int main() try
         Require(!IsMaterialLayout(0,0,256,256,vertex,pixel), "known pair cannot bypass missing lookup");
         Require(!IsMaterialLayout(4,32,0,0,vertex,pixel), "known pair cannot bypass missing surface");
     }
+    constexpr uint64_t pixel = 0x7d4f078fa1876a09ull;
     Require(!IsMaterialLayout(8,64,256,256,0,pixel), "known PS alone cannot identify water");
+    Require(!IsMaterialLayout(8,64,256,256,0x17f042a7906ca126ull,pixel), "second water PS cannot be used as VS identity");
     Require(!IsMaterialLayout(4,32,256,256), "unknown scaled materials fail closed");
     Require(!IsMaterialLayout(8,64,64,64,0xd9e7756460af6296ull,pixel), "UI shader with ripple texture rejected");
     for (unsigned bits=0; bits<32; ++bits)

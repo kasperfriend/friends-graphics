@@ -371,7 +371,11 @@ int main() try {
         tracked.currentVS=originalVS.Get();tracked.currentPS=originalPS.Get();
         tracked.vsHash=0x48a82796bd612aebull;tracked.psHash=0x7d4f078fa1876a09ull;
         const UINT sizes[][3]={{8,64,256},{8,64,128},{4,32,256},{2,16,128},{8,64,1024},{1,1,16}};
+        const uint64_t vertexHashes[]={0x206d861fd0a721ddull,0xfdd9528ed3ac30eaull,0x48a82796bd612aebull};
+        const uint64_t pixelHashes[]={0x7d4f078fa1876a09ull,0x17f042a7906ca126ull};
+        unsigned fixture=0;
         for(const auto& size:sizes) {
+            tracked.vsHash=vertexHashes[fixture%3];tracked.psHash=pixelHashes[fixture/3];++fixture;
             auto lookup=texture(size[0],size[1],0xff406080);
             auto waves=texture(size[2],size[2],0xff808080);
             Check(d->SetTexture(0,lookup.Get()));Check(d->SetTexture(1,waves.Get()));
