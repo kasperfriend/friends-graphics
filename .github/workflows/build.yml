@@ -206,3 +206,5 @@ jobs:
           ./build/frame-clock-test
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/WaterRegression.cpp -o build/water-test
           ./build/water-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
+          ./build/device-health-test

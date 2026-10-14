@@ -20,6 +20,7 @@
 #include "../src/Lighting/LocalLightManager.h"
 #include "../src/D3D9/DepthCapture.h"
 #include "../src/D3D9/DepthCapturePolicy.h"
+#include "../src/D3D9/CelestialStability.h"
 #include "../WeatherVisuals.h"
 using Microsoft::WRL::ComPtr;
 using namespace renderer;
@@ -698,6 +699,41 @@ int main() try {
  printf("clouds direct lighting unlit=%.1f lit=%.1f\n",unlitDirect,litDirect);
  Require(litDirect>unlitDirect+20,"stabilized light lights the deck");
  Require(renderClouds()&&((pixel(64,110)>>8)&255)<0x20,"stabilized light restores the cloud shadow");
+ // Freeze the scene light/field, then rotate the camera and change which
+ // legacy glare source is visible. Exercise the same independent body
+ // updates as the compositor before comparing the actual GPU shadow map.
+ {
+  const Matrix4 savedView=f.inverseView;
+  const Vec3 sun=Normalize({.6f,.2f,.8f}),moon=Normalize({-.8f,-.2f,.01f});
+  CelestialLightStabilizer light;
+  CelestialDirectionStabilizer direction;
+  direction.Update(&sun,false,.016f);direction.Update(&moon,true,.016f);
+  CelestialLightInput sceneLight;sceneLight.daylight=.8f;sceneLight.directionalLuminance=.8f;
+  f.directLightDirectionWorld=direction.Update(nullptr,false,sceneLight.deltaSeconds);
+  Require(renderClouds(),"angled world light casts cloud shadows");
+  const auto stableMap=shadowBytes();
+  for(int i=0;i<8;++i){
+   const float yaw=float(i)*.78539816f,pitch=float(i-4)*.15f;
+   Matrix4 yawRotation,pitchRotation;
+   yawRotation.m[0][0]=std::cos(yaw);yawRotation.m[0][1]=std::sin(yaw);
+   yawRotation.m[1][0]=-std::sin(yaw);yawRotation.m[1][1]=std::cos(yaw);
+   pitchRotation.m[1][1]=std::cos(pitch);pitchRotation.m[1][2]=std::sin(pitch);
+   pitchRotation.m[2][1]=-std::sin(pitch);pitchRotation.m[2][2]=std::cos(pitch);
+   f.inverseView=Matrix4::Multiply(savedView,Matrix4::Multiply(yawRotation,pitchRotation));
+   const bool sunVisible=(i&1)!=0,moonVisible=(i&2)!=0;
+   f.celestialIsMoon=moonVisible&&!sunVisible;
+   f.celestialIntensity=(sunVisible||moonVisible)?1.f:0.f;
+   f.sunDirectionWorld=f.celestialIsMoon?moon:Vec3{std::cos(yaw),std::sin(yaw),0};
+   const auto stable=light.Update(sceneLight);
+   const auto sunWorld=direction.Update(sunVisible?&sun:nullptr,false,sceneLight.deltaSeconds);
+   const auto moonWorld=direction.Update(moonVisible?&moon:nullptr,true,sceneLight.deltaSeconds);
+   f.directLightIntensity=stable.intensity;f.directLightIsMoon=stable.isMoon;
+   f.directLightDirectionWorld=stable.isMoon?moonWorld:sunWorld;
+   Require(renderClouds(),"rotated camera renders world cloud shadows");
+   Require(shadowBytes()==stableMap,"yaw/pitch and visible glare source cannot change the world shadow texture");
+  }
+  f.inverseView=savedView;f.celestialIntensity=1;f.celestialIsMoon=false;
+ }
  f.directLightValid=false;
  f.sunDirectionWorld={0,0,1};cloud.groundShadows=false;
  cloud.enabled=false;
