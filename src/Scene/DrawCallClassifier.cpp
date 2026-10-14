@@ -15,14 +15,17 @@ namespace renderer
         const DrawCallContext& ctx,
         const float capturedViewTranslation[3],
         bool capturedViewValid,
-        uint64_t cameraCaptureShaderHash)
+        uint64_t cameraCaptureShaderHash,
+        const water::Observation* waterObservation)
     {
         // Material identity depends on the currently bound textures, not just
         // the shader pipeline. Check before consulting (or populating) the
         // pipeline cache, otherwise a non-water batch can poison it for water
         // and vice versa when WoW reuses shaders.
         const bool isUI = ctx.vsHash == 0xd9e7756460af6296ull || ctx.psHash == 0xc29c7060b723c0c6ull;
-        if (!isUI && ctx.vertexShader && ctx.pixelShader && water::IsMaterial(device))
+        const bool waterMaterial = !isUI && ctx.vertexShader && ctx.pixelShader &&
+            (waterObservation ? waterObservation->liquid : water::IsMaterial(device));
+        if (waterMaterial)
         {
             DrawClassification dc;
             dc.material = MaterialType::Water;

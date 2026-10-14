@@ -382,7 +382,8 @@ HRESULT WINAPI HookedSetRenderState(IDirect3DDevice9* d, D3DRENDERSTATETYPE stat
     return originalSetRenderState(d, state, val);
 }
 
-renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n)
+renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n,
+    const renderer::water::Observation* waterObservation=nullptr)
 {
     renderer::DrawCallContext ctx;
     ctx.primitiveType = t;
@@ -398,9 +399,20 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
     ctx.zEnable = renderer::g_trackedState.zEnable;
 
     auto dc = renderer::DrawCallClassifier::Instance().Classify(
-        d, ctx, volume::capturedViewTranslation, volume::capturedViewValid, volume::cameraCaptureShaderHash);
+        d, ctx, volume::capturedViewTranslation, volume::capturedViewValid,
+        volume::cameraCaptureShaderHash, waterObservation);
     renderer::RendererDiagnostics::Instance().RecordDrawCall(dc);
     return dc;
+}
+
+struct WaterDrawObservation {
+    renderer::water::Observation material{};
+    bool available=false;
+};
+WaterDrawObservation ObserveWaterForDraw(IDirect3DDevice9* d,bool requested) {
+    const bool effectNeedsMaterial=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled;
+    if(g_drawingOverlay||(!requested&&!effectNeedsMaterial))return {};
+    return {renderer::water::Observe(d),true};
 }
 
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
@@ -413,20 +425,26 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
-    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
-        auto dc=ClassifyCurrentDraw(d,t,n);
+    const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
+    const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
+    const bool needsWaterMaterial=updateShadows||captureGround||
+        renderer::MaterialCacheManager::Instance().IsActive();
+    const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(updateShadows){
+        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
     }
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,start,n,false);
-    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDraw(d,t,start,n);});volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDraw(d,t,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
-    watereffect::Scope water(d,g_drawingOverlay||tint.changed);
+    watereffect::Scope water(d,g_drawingOverlay||tint.changed,
+        waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDraw(d,t,start,n);
@@ -444,25 +462,31 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
-    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
-        auto dc=ClassifyCurrentDraw(d,t,n);
+    const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
+    const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
+    const bool needsWaterMaterial=updateShadows||captureGround||
+        renderer::MaterialCacheManager::Instance().IsActive();
+    const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(updateShadows){
+        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     }
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,base,start,n);
-    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
-    watereffect::Scope water(d,g_drawingOverlay||tint.changed);
+    watereffect::Scope water(d,g_drawingOverlay||tint.changed,
+        waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(SUCCEEDED(hr)&&!g_drawingOverlay&&renderer::MaterialCacheManager::Instance().IsActive()){
-        auto dc=ClassifyCurrentDraw(d,t,n);
+        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         if(dc.material==renderer::MaterialType::Terrain){
             renderer::MaterialCacheManager::Instance().ApplyNormalModulation(d,t,base,min,vertices,start,n,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
         }
@@ -484,20 +508,26 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
-    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
-        auto dc=ClassifyCurrentDraw(d,t,n);
+    const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
+    const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
+    const bool needsWaterMaterial=updateShadows||captureGround||
+        renderer::MaterialCacheManager::Instance().IsActive();
+    const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(updateShadows){
+        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
     }
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,false,v,stride);
-    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawUP(d,t,n,v,stride);});volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawUP(d,t,n,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
-    watereffect::Scope water(d,g_drawingOverlay||tint.changed);
+    watereffect::Scope water(d,g_drawingOverlay||tint.changed,
+        waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
@@ -516,20 +546,26 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
-    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
-        auto dc=ClassifyCurrentDraw(d,t,n);
+    const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
+    const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
+    const bool needsWaterMaterial=updateShadows||captureGround||
+        renderer::MaterialCacheManager::Instance().IsActive();
+    const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(updateShadows){
+        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     }
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,true,v,stride,indices,f,min+vertices);
-    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
-    watereffect::Scope water(d,g_drawingOverlay||tint.changed);
+    watereffect::Scope water(d,g_drawingOverlay||tint.changed,
+        waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);

@@ -46,7 +46,27 @@ int main() try {
    resolutionFound=true;
   }
   if(!resolutionFound)throw std::runtime_error("Cloud resolution slider missing");
-  std::cout<<"PASS overlay global fallback toggle and cloud resolution round-trip on an unverified client\n";
+  tuningoverlay::Configure(L"build\\overlay-preview\\global-fallback\\");
+  const int waterTab=4;const auto waterRows=tuningoverlay::Tabs()[waterTab];
+  auto& unrelated=tuningoverlay::items[1];unrelated.value=0;
+  if(!tuningoverlay::Save(unrelated))throw std::runtime_error("Could not prepare unrelated tab setting");
+  for(int index=waterRows.begin+1;index<waterRows.end;++index){
+   auto& control=tuningoverlay::items[index];
+   control.value=tuningoverlay::defaults[index]==control.lo?control.hi:control.lo;
+   if(!tuningoverlay::Save(control))throw std::runtime_error("Could not prepare nondefault water tab value");
+  }
+  tuningoverlay::layout.SelectTab(waterTab);
+  if(!tuningoverlay::ResetActiveTab())throw std::runtime_error("Reset current tab reported no changed values");
+  const auto resetFile=L"build\\overlay-preview\\global-fallback\\GraphicsEffects.ini";
+  for(int index=waterRows.begin+1;index<waterRows.end;++index){
+   const auto& control=tuningoverlay::items[index];
+   if(control.value!=tuningoverlay::defaults[index]||
+      renderer::locationtuning::ReadEditorInt(control.section,control.key,-1,resetFile)!=tuningoverlay::defaults[index])
+    throw std::runtime_error("Reset current tab did not restore and persist every default");
+  }
+  if(unrelated.value!=0||renderer::locationtuning::ReadEditorInt(unrelated.section,unrelated.key,1,resetFile)!=0)
+   throw std::runtime_error("Per-tab reset changed a setting outside the selected tab");
+  std::cout<<"PASS overlay global fallback, cloud resolution and per-tab reset round-trip\n";
  }
  // While the menu is visible the game window must not receive the clicks
  // aimed at it (they would click the world / orbit the camera mid-drag).

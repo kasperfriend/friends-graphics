@@ -361,6 +361,7 @@ void Finish(IDirect3DDevice9* d) {
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
     watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+    watereffect::waterTargetDesc = {}; watereffect::waterTargetDescValid = false;
     auto& frame = renderer::FrameContext::Current();
     frame.waterMaskTexture = frame.waterDepthTexture = nullptr;
 }
@@ -440,8 +441,7 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     depthFrames = renderer::DepthCapture::Instance().GetDepthFrames();
     if (renderer::DepthCapture::Instance().HasDepth()) {
         auto& frameCtx = renderer::FrameContext::Current();
-        ++frameCtx.frameIndex;
-        frameCtx.device = d;
+        frameCtx.ResetForNewFrame(frameCtx.frameIndex + 1, d);
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
         renderer::CameraCapture::Instance().BeginFrame();
@@ -458,6 +458,7 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         // Sized to the real render target, cleared fresh every frame before
         // any water draws happen.
         watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+        watereffect::waterTargetDesc = {}; watereffect::waterTargetDescValid = false;
         frameCtx.waterMaskTexture = frameCtx.waterDepthTexture = nullptr;
         D3DSURFACE_DESC targetDesc{};
         if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
@@ -496,6 +497,8 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
                 watereffect::waterTargetSurface = target.Get();
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
                 watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
+                watereffect::waterTargetDesc = targetDesc;
+                watereffect::waterTargetDescValid = true;
                 frameCtx.waterMaskTexture = resources.waterMask.Get();
                 frameCtx.waterDepthTexture = resources.waterDepth.Get();
             }
@@ -838,6 +841,12 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
+        frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f;
+        if (frameCtx.moonDiscValid) {
+            frameCtx.moonDiscScreenX = moon.screenX;
+            frameCtx.moonDiscScreenY = moon.screenY;
+            frameCtx.moonDiscViewDepth = moon.viewSpacePosition.z;
+        }
         // Both discs can be rendered in the same frame.  "Sun wins whenever
         // visible" consequently kept the radial pass attached to the bright
         // sun candidate even in a moon-lit sky, producing an oversized halo

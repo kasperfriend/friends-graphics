@@ -367,7 +367,12 @@ namespace renderer
             return;
 
         m_fallbackSawSceneDraw = true;
-        if (!m_cameraGate.MatchesBasis(view.m, vp.Width, vp.Height))
+        // Pitch/yaw may change by far more than the normal scene-capture gate's
+        // one-frame threshold when the player snaps the camera toward zenith.
+        // The full-frame viewport and the position check below distinguish that
+        // turn from an unrelated portrait/reflection camera; basis similarity
+        // must not freeze the sky fallback on yesterday's view.
+        if (!m_cameraGate.MatchesViewport(vp.Width, vp.Height))
             return;
 
         const bool zeroTrans =
@@ -432,12 +437,11 @@ namespace renderer
             for (int c = 0; c < 3; ++c)
                 v[3][c] = m_fallbackView.m[3][c];
             v[3][3] = 1.0f;
-            if (m_cameraGate.Accept(v[3], v, m_fallbackVp.Width, m_fallbackVp.Height))
-            {
-                camPos[0] = m_cameraGate.Position()[0];
-                camPos[1] = m_cameraGate.Position()[1];
-                camPos[2] = m_cameraGate.Position()[2];
-            }
+            if (!m_cameraGate.AcceptFallback(v[3], v, m_fallbackVp.Width, m_fallbackVp.Height))
+                return false;
+            camPos[0] = m_cameraGate.Position()[0];
+            camPos[1] = m_cameraGate.Position()[1];
+            camPos[2] = m_cameraGate.Position()[2];
         }
         else
         {

@@ -37,6 +37,13 @@ namespace renderer
         float sunScreenX = -1.0f;
         float sunScreenY = -1.0f;
         float sunStrength = 0.0f;
+        // The real camera-relative moon billboard, captured only when its draw
+        // is visible this frame. Clouds match its screen centre and view depth so
+        // the sprite does not act like an opaque wall in the scene depth buffer.
+        float moonDiscScreenX = -1.0f;
+        float moonDiscScreenY = -1.0f;
+        float moonDiscViewDepth = 0.0f;
+        bool moonDiscValid = false;
         // Confirmed CelestialTracker source used by the atmosphere path.
         // celestialIsMoon is deliberately explicit: colour is never used to
         // guess which body is active.

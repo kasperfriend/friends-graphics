@@ -75,6 +75,45 @@ float reflectionData[12]{};
 IDirect3DSurface9* waterTargetSurface=nullptr;
 IDirect3DSurface9* waterMaskSurface=nullptr;
 IDirect3DSurface9* waterDepthSurface=nullptr;
+D3DSURFACE_DESC waterTargetDesc{};
+bool waterTargetDescValid=false;
+struct WaterMrtDeviceInfo {
+    IDirect3DDevice9* device=nullptr;
+    bool checked=false;
+    bool supported=false;
+    D3DCAPS9 caps{};
+};
+inline WaterMrtDeviceInfo waterMrtInfo;
+inline void ResetMrtCapabilities(IDirect3DDevice9* device=nullptr) {
+    waterMrtInfo={};waterMrtInfo.device=device;
+}
+inline bool SupportsWaterMrt(IDirect3DDevice9* device) {
+    if(!device)return false;
+    if(waterMrtInfo.device!=device)ResetMrtCapabilities(device);
+    if(waterMrtInfo.checked)return waterMrtInfo.supported;
+    auto& caps=waterMrtInfo.caps;
+    if(FAILED(device->GetDeviceCaps(&caps)))return false; // retry after transient device errors
+    if(caps.NumSimultaneousRTs<3||
+       !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING)) {
+        waterMrtInfo.checked=true;
+        return false;
+    }
+    ComPtr<IDirect3D9> api;
+    D3DDEVICE_CREATION_PARAMETERS creation{};D3DDISPLAYMODE mode{};
+    if(FAILED(device->GetDirect3D(api.GetAddressOf()))||
+       FAILED(device->GetCreationParameters(&creation))||
+       FAILED(api->GetAdapterDisplayMode(creation.AdapterOrdinal,&mode)))
+        return false; // retry transient query failures instead of disabling the water path
+    if(FAILED(api->CheckDeviceFormat(creation.AdapterOrdinal,creation.DeviceType,mode.Format,
+           D3DUSAGE_RENDERTARGET|D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING,
+           D3DRTYPE_TEXTURE,D3DFMT_R32F))) {
+        waterMrtInfo.checked=true;
+        return false;
+    }
+    waterMrtInfo.checked=true;
+    waterMrtInfo.supported=true;
+    return true;
+}
 std::vector<DWORD> code,vertexCode;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
@@ -907,6 +946,11 @@ void Present() {
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
+    // Drop cached texture references before D3D9 Reset: keeping even a lookup
+    // texture alive here can make the device reject reset of default-pool assets.
+    renderer::water::ResetObservationCache(d);
+    ResetMrtCapabilities(d);
+    waterTargetDesc = {}; waterTargetDescValid = false;
     // A device reset drops the eased sea state rather than letting it interpolate across a change
     // of settings or a mode switch. The wave clock keeps running: snapping it would move every
     // crest at once, which is the jump the clock exists to avoid.
@@ -960,28 +1004,19 @@ struct Scope {
     }
 
     void BindTargets(IDirect3DDevice9* d) {
-        if(!waterTargetSurface||!waterMaskSurface||!waterDepthSurface)return;
+        if(!waterTargetSurface||!waterMaskSurface||!waterDepthSurface||!waterTargetDescValid)return;
         ComPtr<IDirect3DSurface9> current;
-        D3DCAPS9 caps{};
         if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=waterTargetSurface||
-           FAILED(d->GetDeviceCaps(&caps))||caps.NumSimultaneousRTs<3 ||
-           !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING))return;
-        D3DSURFACE_DESC colorDesc{},maskDesc{},depthDesc{};
-        if(FAILED(current->GetDesc(&colorDesc))||FAILED(waterMaskSurface->GetDesc(&maskDesc))||
-           FAILED(waterDepthSurface->GetDesc(&depthDesc))||
-           !renderer::water::TargetsMatch(colorDesc.Width,colorDesc.Height,maskDesc.Width,maskDesc.Height)||
-           !renderer::water::TargetsMatch(colorDesc.Width,colorDesc.Height,depthDesc.Width,depthDesc.Height)||
-           colorDesc.MultiSampleType!=D3DMULTISAMPLE_NONE)return;
+           !SupportsWaterMrt(d))return;
+        // The mask/depth resources were created to this immutable target
+        // descriptor in BeforeClear. Fetching all three descriptors and
+        // re-querying adapter/device capabilities for every tile was pure
+        // per-draw driver overhead; retain the exact target descriptor instead.
+        const D3DSURFACE_DESC& colorDesc=waterTargetDesc;
+        const D3DCAPS9& caps=waterMrtInfo.caps;
+        if(colorDesc.MultiSampleType!=D3DMULTISAMPLE_NONE)return;
         if(colorDesc.Format!=D3DFMT_A8R8G8B8&&colorDesc.Format!=D3DFMT_X8R8G8B8&&
            !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTINDEPENDENTBITDEPTHS))return;
-        // Creating an R32F target does not guarantee that alpha blending to it
-        // is supported. An incompatible MRT can make the entire water draw fail.
-        ComPtr<IDirect3D9> api;
-        D3DDEVICE_CREATION_PARAMETERS creation{};D3DDISPLAYMODE mode{};
-        if(FAILED(d->GetDirect3D(api.GetAddressOf()))||FAILED(d->GetCreationParameters(&creation))||
-           FAILED(api->GetAdapterDisplayMode(creation.AdapterOrdinal,&mode))||
-           FAILED(api->CheckDeviceFormat(creation.AdapterOrdinal,creation.DeviceType,mode.Format,
-               D3DUSAGE_RENDERTARGET|D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING,D3DRTYPE_TEXTURE,depthDesc.Format)))return;
         // NOTFOUND means an unbound slot; other query failures cannot be safely restored.
         HRESULT maskHR=d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
         HRESULT depthHR=d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
@@ -1018,10 +1053,11 @@ struct Scope {
             std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
     }
 
-    explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
+    explicit Scope(IDirect3DDevice9* d,bool skip=false,
+                   const renderer::water::Observation* observed=nullptr) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         try {
-            const auto observation=renderer::water::Observe(d);
+            const auto observation=observed?*observed:renderer::water::Observe(d);
             if(!observation.liquid) {
                 // A draw carrying the liquid two-texture signature that the
                 // captured shader families do not cover is exactly how a whole

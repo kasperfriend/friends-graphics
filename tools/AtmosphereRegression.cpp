@@ -74,13 +74,22 @@ int main() try {
  auto fillFloat=[&](IDirect3DTexture9* t,float v){DWORD bits;memcpy(&bits,&v,4);fill(t,bits);};
  fill(scene.Get(),0xff202020);fill(noise.Get(),0xffb0b0b0);fill(mask.Get(),0);fillFloat(waterDepth.Get(),20.f);
  ComPtr<IDirect3DSurface9> sceneSurface;Check(scene->GetSurfaceLevel(0,sceneSurface.GetAddressOf()));
- FrameContext f; f.cameraValid=f.depthAvailable=true;f.sceneColor=scene.Get();f.sceneSurface=sceneSurface.Get();
+ FrameContext f; f.cameraValid=f.depthAvailable=true;f.viewRaw.SetIdentity();f.viewRawValid=true;
+ f.sceneColor=scene.Get();f.sceneSurface=sceneSurface.Get();
  f.depthTexture=depth.Get();f.atmosphereNoise=noise.Get();f.waterMaskTexture=mask.Get();f.waterDepthTexture=waterDepth.Get();
  f.projUnpack[0]=1000.f/999.9f;f.projUnpack[1]=-100.f/999.9f;f.projUnpack[2]=f.projUnpack[3]=1;
  f.inverseView.SetZero();f.inverseView.m[0][0]=f.inverseView.m[1][2]=f.inverseView.m[2][1]=f.inverseView.m[3][3]=1;
  f.sunDirectionView={0,0,1};f.viewport={0,0,128,128,0,1};f.daylightFactor=1;
  auto& fog=DirectionalVolumetricLighting::Instance();auto& settings=fog.Settings();
  settings.temporalEnabled=false;settings.localFogEnabled=false;settings.useEnvironmentBaseline=false;
+ {
+  FrameContext stale=f;stale.ResetForNewFrame(1,d.Get());
+  Require(!stale.cameraValid&&!stale.depthAvailable&&stale.viewRawValid&&
+          stale.cameraPosition.x==f.cameraPosition.x&&stale.sceneColor==nullptr,
+          "new frame clears fog validity/resources but keeps the last camera pose only as a fallback");
+  Require(!fog.Render(d.Get(),stale,back.Get()),
+          "local atmosphere refuses to render from a stale pre-reset camera pose");
+ }
  auto encode=[&](float distance,float maxZ,float minZ=0){
   f.viewport.MinZ=minZ;f.viewport.MaxZ=maxZ;f.depthMaxZ=maxZ;
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
@@ -263,6 +272,28 @@ int main() try {
  Vec3 torchPosition=manager.Selected()[0].position;boneRows[0][3]=1;Check(d->SetVertexShaderConstantF(31,boneRows[0],3));
  manager.ObserveTorchDraw(d.Get(),D3DPT_TRIANGLELIST,0,0,1);manager.SelectForFrame({0,0,0},{0,1,0});
  Require(manager.Selected().size()==1&&fabsf(manager.Selected()[0].position.x-torchPosition.x-1)<.01f,"torch light follows the animated hand without duplicates");
+ // The same flame vertex moves into a different view-space location when the
+ // camera looks up and yaws. Reconstruct that location from the new view
+ // matrix and camera position; its world-space emitter must stay where the
+ // animated hand actually is rather than orbiting with the camera.
+ const Vec3 fixedTorchWorld=manager.Selected()[0].position;
+ const float yaw=2.2f,pitch=1.45f,cy=std::cos(yaw),sy=std::sin(yaw),cp=std::cos(pitch),sp=std::sin(pitch);
+ const float cameraRotation[3][3]={{cy,-sy*cp,sy*sp},{sy,cy*cp,-cy*sp},{0,sp,cp}};
+ f.cameraPosition={4,-3,2};f.viewRaw.SetIdentity();
+ for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+  f.viewRaw.m[row][column]=cameraRotation[row][column];
+ const float worldDelta[3]={fixedTorchWorld.x-f.cameraPosition.x,
+                            fixedTorchWorld.y-f.cameraPosition.y,
+                            fixedTorchWorld.z-f.cameraPosition.z};
+ float torchView[3]{};
+ for(int column=0;column<3;++column)for(int row=0;row<3;++row)
+  torchView[column]+=worldDelta[row]*cameraRotation[row][column];
+ boneRows[0][3]=torchView[0];boneRows[1][3]=torchView[1]-.2f/3.f;boneRows[2][3]=torchView[2];
+ Check(d->SetVertexShaderConstantF(31,boneRows[0],3));FrameContext::Current()=f;
+ manager.ObserveTorchDraw(d.Get(),D3DPT_TRIANGLELIST,0,0,1);
+ manager.SelectForFrame(f.cameraPosition,{0,1,0});
+ Require(manager.Selected().size()==1&&Length(manager.Selected()[0].position-fixedTorchWorld)<.02f,
+         "torch world position stays stable through a large camera yaw and upward pitch");
  // Classic torch flames use the unskinned c31..c33 particle path too,
  // and may be submitted as UP draws with no readable GPU vertex buffer.
  g_trackedState.vsHash=0x5f2c6b3af8c6e543ull;manager.Reset();
@@ -281,6 +312,7 @@ int main() try {
  // camera rotation, and draw-state restoration are checked independently.
  auto& ground=GroundSurfaceCapture::Instance();ground.Reset();manager.Reset();
  f.cameraPosition={0,0,0};f.inverseView.SetZero();f.inverseView.m[0][0]=f.inverseView.m[1][2]=f.inverseView.m[2][1]=f.inverseView.m[3][3]=1;
+ f.viewRaw.SetIdentity();f.viewRawValid=true;
  struct GroundVertex{float x,y,z;};
  GroundVertex hill[]={{-110,-110,-24.8f},{110,-110,-2.8f},{-110,110,-7.2f},{110,110,14.8f}};
  float groundView[4][4]={{1,0,0,0},{0,0,1,0},{0,1,0,0},{0,0,0,1}};
@@ -591,10 +623,13 @@ int main() try {
   Check(d->BeginScene());bool ok=clouds.Render(d.Get(),f,back.Get());Check(d->EndScene());return ok;};
  // One pixel cannot describe a procedural sky: these average the blue
  // channel over the part of the frame that is genuinely above the horizon.
- auto skyMean=[&]{Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};
-  Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));double sum=0;int n=0;
-  for(int y=6;y<58;++y)for(int x=6;x<122;++x){sum+=double(reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]&255);++n;}
-  Check(read->UnlockRect());return sum/double(n?n:1);};
+ auto readCloudImage=[&]{Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};
+  Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));std::vector<DWORD> pixels(128*128);
+  for(int y=0;y<128;++y)memcpy(pixels.data()+128*y,static_cast<BYTE*>(r.pBits)+y*r.Pitch,128*sizeof(DWORD));
+  Check(read->UnlockRect());return pixels;};
+ auto skyMean=[&]{const auto image=readCloudImage();double sum=0;int n=0;
+  for(int y=6;y<58;++y)for(int x=6;x<122;++x){sum+=double(image[y*128+x]&255);++n;}
+  return sum/double(n?n:1);};
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
  Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));
@@ -610,6 +645,53 @@ int main() try {
  Require(diff(overcastSky,0xff202020)>12,"overcast deck is visible against the sky");
  Require(pixel(64,110)==0xff202020,"cloud composite leaves solid geometry byte-identical");
  Require((overcastSky&255)>((overcastSky>>16)&255),"deck takes the environment ambient tint instead of a fixed white");
+ // WoW's moon billboard writes a near view-space depth into only its own
+ // pixels. Those pixels must not clip the cloud march or leave a black disk,
+ // while an ordinary foreground surface at the same depth must still occlude
+ // the deck. Search the deterministic clear-sky image for an off-disc cloud
+ // pixel so the occluder assertion measures real cloud contribution.
+ const auto clearCloudImage=readCloudImage();
+ constexpr int moonX=64,moonY=20;const float moonU=float(moonX)/128.f,moonV=float(moonY)/128.f;
+ const Vec3 moonRay=Normalize({(moonU*2-1)/f.projUnpack[2],(1-moonV*2)/f.projUnpack[3],1});
+ int foregroundX=-1,foregroundY=-1;float strongestForeground=0;
+ for(int y=14;y<50;++y)for(int x=10;x<118;++x){
+  const float u=float(x)/128.f,v=float(y)/128.f;
+  const Vec3 ray=Normalize({(u*2-1)/f.projUnpack[2],(1-v*2)/f.projUnpack[3],1});
+  if(ray.x*moonRay.x+ray.y*moonRay.y+ray.z*moonRay.z>std::cos(12.f*.01745329252f))continue;
+  const float contribution=float(diff(clearCloudImage[y*128+x],0xff202020));
+  if(contribution>strongestForeground){strongestForeground=contribution;foregroundX=x;foregroundY=y;}
+ }
+ Require(diff(clearCloudImage[moonY*128+moonX],0xff202020)>12&&strongestForeground>12,
+         "cloud pixels are available both at the tracked moon and outside its disc");
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int dy=-6;dy<=6;++dy)for(int dx=-6;dx<=6;++dx)
+   if(dx*dx+dy*dy<=36)
+    reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+(moonY+dy)*r.Pitch)[moonX+dx]=
+      .94f*(f.projUnpack[0]+f.projUnpack[1]/12.f);
+  for(int dy=-8;dy<=8;++dy)for(int dx=-8;dx<=8;++dx)
+   if(dx*dx+dy*dy<=64)
+    reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+(foregroundY+dy)*r.Pitch)[foregroundX+dx]=
+      .94f*(f.projUnpack[0]+f.projUnpack[1]/12.f);
+  Check(depth->UnlockRect(0));
+ }
+ f.moonDiscScreenX=moonU;f.moonDiscScreenY=moonV;
+ f.moonDiscViewDepth=12.f;f.moonDiscValid=true;
+ Require(renderClouds(),"tracked moon depth cloud fixture renders");
+ const auto trackedMoonImage=readCloudImage();
+ Require(diff(trackedMoonImage[moonY*128+moonX],0xff202020)>12&&
+         diff(trackedMoonImage[moonY*128+moonX],clearCloudImage[moonY*128+moonX])<8,
+         "clouds remain visible through the tracked moon-disc depth instead of a black disk");
+ Require(diff(trackedMoonImage[foregroundY*128+foregroundX],0xff202020)<=2,
+         "ordinary foreground geometry still occludes clouds outside the tracked moon cone");
+ f.moonDiscValid=false;f.moonDiscViewDepth=0.f;
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int y=0;y<128;++y)for(int x=0;x<128;++x)
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=
+     y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
+  Check(depth->UnlockRect(0));
+ }
  // Opacity, not brightness, is the honest measurement: the diagnostic
  // returns the integrated (1 - transmittance) directly.
  cloud.debugMode=CloudDebugMode::Coverage;
