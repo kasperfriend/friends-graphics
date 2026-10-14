@@ -102,12 +102,12 @@ int main() try {
     renderer::FrameContext::Current().cameraValid=false;
     renderer::g_trackedState.vsHash=0xd9e7756460af6296ull;
     const auto tracked=renderer::g_trackedState;
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
     Check(d->SetRenderState(D3DRS_SCISSORTESTENABLE,TRUE));RECT rect{0,0,1,1};Check(d->SetScissorRect(&rect));
     Check(d->SetRenderState(D3DRS_FOGENABLE,TRUE));Check(d->SetRenderState(D3DRS_STENCILENABLE,TRUE));
     Check(d->SetRenderState(D3DRS_FILLMODE,D3DFILL_WIREFRAME));Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,TRUE));
     Check(d->SetSamplerState(3,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,TRUE));
     float sentinel[4]={17,18,19,20};Check(d->SetPixelShaderConstantF(5,sentinel,1));
-    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
     weathervisuals::composedThisFrame=false;Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());
     Require(nonblack(pixels())>1000,"Auto snow uses snow texture and renders without cloud/depth passes");
     DWORD state=0;Check(d->GetRenderState(D3DRS_SCISSORTESTENABLE,&state));Require(state==TRUE,"scissor state restored after weather");
@@ -125,6 +125,6 @@ int main() try {
     weathervisuals::rainDropTex.Reset();weathervisuals::CreateProceduralFallback(d.Get());
     D3DLOCKED_RECT r{};Check(weathervisuals::rainDropTex->LockRect(0,&r,nullptr,D3DLOCK_READONLY));unsigned maxAlpha=0;
     for(unsigned y=0;y<128;++y)for(unsigned x=0;x<16;++x)maxAlpha=std::max(maxAlpha,unsigned(reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]>>24));
-    Check(weathervisuals::rainDropTex->UnlockRect());Require(maxAlpha>0&&maxAlpha<=38,"fallback rain matches the low-opacity authored mask");
+    Check(weathervisuals::rainDropTex->UnlockRect(0));Require(maxAlpha>0&&maxAlpha<=38,"fallback rain matches the low-opacity authored mask");
     weathervisuals::Reset(d.Get());std::puts("Weather GPU regressions passed");return 0;
 } catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}

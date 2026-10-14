@@ -88,7 +88,7 @@ sampler2D mistTex : register(s3);
 float4 projection : register(c0);
 // c1: x=time, y=intensity, z=mode (1=Rain, 2=Snow, 3=Sandstorm), w=speed
 float4 weatherParams : register(c1);
-// c2: x=windX, y=windY, z=maxDist, w=indoorFactor
+// c2: x=windX, y=windY, z=haze strength, w=indoorFactor
 float4 windParams : register(c2);
 // c3: x=resX, y=resY, z=invResX, w=invResY
 float4 screenParams : register(c3);
@@ -181,6 +181,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             float cellNoise = WeatherHash(floor(grid));
             float2 dropUV = frac(grid);
             dropUV.x = (dropUV.x-.5)*2.5+.5+(cellNoise-.5)*.6;
+            dropUV.y = dropUV.y*1.25-frac(cellNoise*17.17)*.25;
             float inside = step(0,dropUV.x)*step(dropUV.x,1);
             float envelope = smoothstep(.08,.18,dropUV.y)*(1-smoothstep(.65,.90,dropUV.y));
             float4 dropSamp = tex2Dlod(weatherTex, float4(saturate(dropUV),0,0));
