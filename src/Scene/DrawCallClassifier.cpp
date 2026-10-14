@@ -40,7 +40,7 @@ namespace renderer
             static_cast<const void*>(ctx.vertexShader),
             static_cast<const void*>(ctx.pixelShader),
             static_cast<const void*>(ctx.vertexDecl),
-            stateBits
+            stateBits, ctx.vsHash, ctx.psHash
         };
 
         auto it = m_cache.find(key);

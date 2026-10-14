@@ -5,8 +5,10 @@ namespace renderer
 {
     ShaderCache& ShaderCache::Instance()
     {
-        static ShaderCache instance;
-        return instance;
+        // COM references must be released by Clear during reset, not by CRT
+        // teardown under the loader lock. Process exit owns final lifetime.
+        static auto* instance = new ShaderCache;
+        return *instance;
     }
 
     template<typename T>
@@ -21,23 +23,24 @@ namespace renderer
         if (it != m_cache.end())
         {
             ++m_hits;
-            return &it->second;
+            m_recency.splice(m_recency.begin(), m_recency, it->second.recency);
+            return &it->second.info;
         }
 
         UINT size = 0;
         if (FAILED(shader->GetFunction(nullptr, &size)) || size == 0 || size > 65536)
         {
-            auto [iter, inserted] = m_cache.emplace(key, ShaderInfo{});
+            // A transient GetFunction failure must not poison this identity.
             ++m_misses;
-            return &iter->second;
+            return nullptr;
         }
 
         std::vector<BYTE> bytes(size);
         if (FAILED(shader->GetFunction(bytes.data(), &size)))
         {
-            auto [iter, inserted] = m_cache.emplace(key, ShaderInfo{});
+            // A transient GetFunction failure must not poison this identity.
             ++m_misses;
-            return &iter->second;
+            return nullptr;
         }
 
         uint64_t hash = 14695981039346656037ull;
@@ -59,8 +62,20 @@ namespace renderer
         info.isKnownWater = water::IsKnownVertexShader(hash) || water::IsKnownPixelShader(hash);
 
         ++m_misses;
-        auto [iter, inserted] = m_cache.emplace(key, info);
-        return &iter->second;
+        // Raw interface addresses can be recycled as soon as the game releases
+        // a shader. Hold the identity while cached, or a new shader at the same
+        // address can inherit an old water/UI hash without reading its bytecode.
+        m_recency.push_front(key);
+        Entry entry{info, shader, m_recency.begin()};
+        decltype(m_cache)::iterator iter;
+        try { iter = m_cache.emplace(key, std::move(entry)).first; }
+        catch (...) { m_recency.pop_front(); throw; }
+        if (m_cache.size() > MaxEntries)
+        {
+            m_cache.erase(m_recency.back());
+            m_recency.pop_back();
+        }
+        return &iter->second.info;
     }
 
     uint64_t ShaderCache::GetShaderHash(IDirect3DVertexShader9* vs)
@@ -88,5 +103,6 @@ namespace renderer
     void ShaderCache::Clear()
     {
         m_cache.clear();
+        m_recency.clear();
     }
 }

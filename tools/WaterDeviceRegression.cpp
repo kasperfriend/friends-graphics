@@ -1,6 +1,8 @@
 // Tests the production water Scope, not a second implementation of it.
 #include "../WaterEffect.h"
 #include "../WaterDiagnostics.h"
+#include "../WaterHighlight.h"
+#include <memory>
 #include "../src/Scene/DrawCallClassifier.h"
 // The capture provider is controlled here; Prepare itself is production code.
 namespace volume {
@@ -188,7 +190,60 @@ struct TextureFailure {
         }
     }
 };
+// Deterministic COM lifetime fixture. No HAL or allocator address-reuse luck
+// is needed: the cache must own identities and bound their retained count.
+struct ShaderIdentityFixture final : IDirect3DPixelShader9 {
+    ULONG refs=1;
+    DWORD bytes[3]={0xffff0300,0x0000ffff,0};
+    bool fail=false;
+    explicit ShaderIdentityFixture(DWORD id=0) {bytes[2]=id;}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID,void**) override {return E_NOINTERFACE;}
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++refs;}
+    ULONG STDMETHODCALLTYPE Release() override {return --refs;}
+    HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9**) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE GetFunction(void* data,UINT* size) override {
+        if(fail)return E_FAIL;
+        if(!data){*size=sizeof(bytes);return S_OK;}
+        if(*size<sizeof(bytes))return D3DERR_INVALIDCALL;
+        memcpy(data,bytes,sizeof(bytes));*size=sizeof(bytes);return S_OK;
+    }
+};
+void TestShaderIdentityLifetime() {
+    auto& cache=renderer::ShaderCache::Instance();cache.Clear();
+    ShaderIdentityFixture reused(1);
+    const auto first=cache.GetShaderHash(&reused);
+    Require(first!=0&&reused.refs==2,"sweep: cached shader identity owns a COM reference");
+    reused.Release();
+    Require(reused.refs==1,"sweep: game release cannot recycle a cached water shader address");
+    cache.Clear();Require(reused.refs==0,"sweep: reset releases cached shader identities");
+    // Reuse exactly the same address after Clear with DIFFERENT bytecode.
+    reused.refs=1;reused.bytes[2]=2;
+    Require(cache.GetShaderHash(&reused)!=first,"sweep: recycled shader address gets a fresh bytecode hash");
+    cache.Clear();
+    reused.fail=true;Require(cache.GetShaderHash(&reused)==0,"sweep: failed shader query is rejected");
+    reused.fail=false;
+    Require(cache.GetShaderHash(&reused)!=0,"sweep: transient shader query failure is retryable");
+    cache.Clear();
+    std::vector<std::unique_ptr<ShaderIdentityFixture>> shaders;
+    for(size_t i=0;i<renderer::ShaderCache::MaxEntries;++i) {
+        shaders.push_back(std::make_unique<ShaderIdentityFixture>(DWORD(i)));
+        cache.GetShaderHash(shaders.back().get());
+    }
+    cache.GetShaderHash(shaders.front().get()); // keep a hot native shader
+    ShaderIdentityFixture extra(9999);cache.GetShaderHash(&extra);
+    Require(shaders[0]->refs==2&&shaders[1]->refs==1&&extra.refs==2,
+        "sweep: shader identity cache is bounded and evicts least-recently-used entries");
+    cache.Clear();
+    for(const auto& shader:shaders)Require(shader->refs==1,"sweep: cache clear releases every retained reference");
+    Require(extra.refs==1,"sweep: cache clear releases newest entry");
+    renderer::PipelineKey a{},b{};
+    a.ps=b.ps=&reused;a.psHash=first;b.psHash=first+1;
+    std::unordered_map<renderer::PipelineKey,int> pipelines;
+    pipelines[a]=1;pipelines[b]=2;
+    Require(pipelines.size()==2,"sweep: pipeline cache distinguishes recycled pointers with different shader identities");
+}
 int main() try {
+    TestShaderIdentityLifetime();
     WaterSettings settings;
     TestWaterSettings(settings);
     TestDiagnosticFiles(settings);
@@ -348,7 +403,8 @@ int main() try {
     auto pixel=[&](float debug,bool modern=true) {
         watereffect::waterDebugMode=debug;
         Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
-        {watereffect::Scope scope(d.Get());
+        {waterhighlight::Scope tint(d.Get());
+         watereffect::Scope scope(d.Get(),tint.changed);
             Require(scope.device==(modern?d.Get():nullptr),"production draw follows live water and master switches");
             wroteMRT=scope.maskBound&&scope.depthBound;
             Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
@@ -360,6 +416,53 @@ int main() try {
     Require((pixel(1)&0xffffff)==0xff00ff,"debug mode proves replacement reaches the framebuffer");
     Require((pixel(0)&0xffffff)!=0,"modern water without capture is finite and nonblack");
     restored();
+    // The legacy global skip disabled EVERY water draw when Highlight was
+    // visible, even when its selected shader group did not match the draw.
+    waterhighlight::enabled=waterhighlight::visible=true;waterhighlight::group=0;
+    waterhighlight::firstHash=0;
+    Require((pixel(1)&0xffffff)==0xff00ff,"sweep: unmatched enabled highlighter no longer suppresses water pixels");
+    const char* tintSource="float4 color:register(c0);float4 main():COLOR{return color;}";
+    ComPtr<ID3DBlob> tintCode;
+    Check(D3DCompile(tintSource,strlen(tintSource),nullptr,nullptr,nullptr,"main","ps_2_0",0,0,tintCode.GetAddressOf(),nullptr));
+    waterhighlight::code.resize(tintCode->GetBufferSize()/sizeof(DWORD));
+    memcpy(waterhighlight::code.data(),tintCode->GetBufferPointer(),tintCode->GetBufferSize());
+    waterhighlight::firstHash=renderer::ShaderCache::Instance().GetShaderHash(originalPS.Get());
+    Require((pixel(0,false)&0xffffff)==0xff00ff,"sweep: matched highlighter retains priority over water replacement");
+    waterhighlight::enabled=false;restored();
+
+    // Render the COMPLETE production shader with refraction=1 and all added
+    // lighting/absorption disabled. A copied 128 gray must remain 128, not
+    // become 188 when sRGB output encodes an already-encoded scene sample.
+    const bool savedWaves=watereffect::wavesEnabled,savedFoam=watereffect::foamEnabled;
+    const bool savedDepth=watereffect::depthEnabled,savedGlint=watereffect::sunGlintEnabled;
+    const bool savedRefraction=watereffect::refractionEnabled,savedReflections=watereffect::reflectionsEnabled;
+    const float savedRefractionStrength=watereffect::refractionStrength;
+    watereffect::wavesEnabled=watereffect::foamEnabled=watereffect::depthEnabled=watereffect::sunGlintEnabled=false;
+    watereffect::reflectionsEnabled=false;watereffect::refractionEnabled=true;watereffect::refractionStrength=1;
+    auto encodedScene=texture(128,128,0xff808080),sampledDepth=texture(128,128,0xffe5e5e5);
+    watereffect::reflectionScene=encodedScene.Get();watereffect::reflectionDepth=sampledDepth.Get();
+    watereffect::reflectionData[0]=1.001f;watereffect::reflectionData[1]=-.1f;
+    watereffect::reflectionData[2]=watereffect::reflectionData[3]=1;
+    watereffect::reflectionData[5]=watereffect::reflectionData[6]=1.f/128;watereffect::reflectionData[7]=.94f;
+    for(DWORD srgb:{FALSE,TRUE}) {
+        Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,srgb));
+        {watereffect::Scope scope(d.Get());DWORD sceneSampler=0,depthSampler=1;
+            Check(d->GetSamplerState(2,D3DSAMP_SRGBTEXTURE,&sceneSampler));
+            Check(d->GetSamplerState(3,D3DSAMP_SRGBTEXTURE,&depthSampler));
+            Require(sceneSampler==srgb&&depthSampler==FALSE,"sweep: scene gamma follows native output while depth stays linear");}
+        const DWORD value=pixel(0);std::printf("sRGB refraction enabled=%lu pixel=%08lx\n",srgb,value);
+        for(unsigned shift:{0u,8u,16u})Require(std::abs(int((value>>shift)&255)-128)<=2,
+            "sweep: full water refraction preserves scene brightness with sRGB both off and on");
+        restored();
+        DWORD outputSrgb=0;Check(d->GetRenderState(D3DRS_SRGBWRITEENABLE,&outputSrgb));
+        Require(outputSrgb==srgb,"sweep: water leaves native output gamma state unchanged");
+    }
+    Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE));
+    watereffect::reflectionScene=watereffect::reflectionDepth=nullptr;
+    watereffect::wavesEnabled=savedWaves;watereffect::foamEnabled=savedFoam;
+    watereffect::depthEnabled=savedDepth;watereffect::sunGlintEnabled=savedGlint;
+    watereffect::reflectionsEnabled=savedReflections;watereffect::refractionEnabled=savedRefraction;
+    watereffect::refractionStrength=savedRefractionStrength;
     // Identity fixture: the synthetic ABI-compatible shaders above stand in
     // for the captured native pair. Seed the same metadata that SetShader
     // hooks supply, but keep actual-device identity checks, classification,

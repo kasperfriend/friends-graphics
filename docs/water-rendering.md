@@ -1,5 +1,33 @@
 # Water rendering audit
 
+## Additional safety sweep (2026-10-14)
+
+Three further defects were found in code:
+
+- All four draw hooks skipped water whenever the legacy highlighter was
+  enabled/visible, even if it did not match or install a shader on the draw.
+  They now skip water/fog only when that draw's highlight scope actually
+  changed the shader. A matching highlight still has priority.
+- Scene color was always sampled with sRGB decoding **off**. When the native
+  color target enables sRGB writes, its copied pixels are already encoded;
+  sampling them as linear and encoding again brightens refraction/reflections.
+  The scene sampler now follows native sRGB output. The depth sampler always
+  stays linear. Neither native output state nor caller sampler state is lost.
+- `ShaderCache` keyed hashes by unowned COM addresses. A released shader's
+  address could be recycled for a different shader but retain the old hash,
+  affecting water recognition. Entries now own identities, with a 1024-entry
+  LRU bound (important for short-lived debug shaders). Reset releases them;
+  shutdown avoids COM releases under loader lock. Transient bytecode-query
+  failures are not cached. Pipeline keys also include bytecode hashes so
+  pointers recycled after eviction cannot resurrect old classifications.
+
+The device regression tests COM lifetime/eviction/retry deterministically
+before HAL setup, actual highlighted/unhighlighted water pixels, and the
+**complete production shader's** refraction with sRGB both off and on. For
+128-gray scene color, both paths must produce 128-gray (±2), not approximately
+188-gray from double gamma correction. State restoration is checked afterward.
+These are targeted regression tests, not a claim of an Ascension client replay.
+
 ## Follow-up: texture resolution was used as material identity (2026-10-14)
 
 The shared material gate required slot 0 to be exactly 8×64 and slot 1 to be
