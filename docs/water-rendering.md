@@ -135,14 +135,15 @@ changing the wrap fails the build rather than sliding the waves apart by eye.
 The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
-state without spending a render pass, and **608 instruction slots** enforced by
-`tools/ValidateShaders.ps1` (the shader measured 542 - 543 before the doubled tint came out and
-before round 3 below added its third train, its Jacobian and its whitecaps; the budget was
-raised from 496 for this rework rather than cut a visible term - see "Shader
-budget raised for the volume rework" below, which also records what a 512-slot device does). So each of those has a substitute
-here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
-toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent carries both
-the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
+state without spending a render pass, and a **621-slot validation budget** enforced by
+`tools/ValidateShaders.ps1` (fxc /O3 measured the current shader at 597 slots on Windows CI on
+2026-10-14, with 24 slots held back for compiler variation. Round 3 initially estimated 608;
+the measured shader was 633, so the broad warp was moved to the vertex stage and interpolated
+to pixels rather than cutting foam or raising the budget blindly. Earlier rounds and the device
+fallback are recorded under "Shader budget raised for the volume rework" below). So each of those
+has a substitute here: an analytic multi-train swell plus bounded value noise for the simulation,
+a roughness mix toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent
+carries both the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
 wide, a high sun keeps it tight, which is the behaviour the disc-widened lobe produced. The
 SSR march takes the first convincing hit instead of maximising confidence per step, and the
 sun-visibility march uses a single sided band. Both were measured against the frame budget,
@@ -337,9 +338,9 @@ than a reference screenshot can and less than an in-game pass does: the frames c
 detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
 in-game pass. The
 slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
-cannot run fxc, so "it fits in the budgeted slots" is a CI result there, not a local one - and
-since round 3 the budget line itself carries that caveat, because 608 is an estimate awaiting
-the next Windows run's measured count.
+cannot run fxc, so the **597-slot measurement** is a CI result, not a local one. The current
+621-slot ceiling keeps 24 slots of headroom for another SDK's instruction selection. In-game
+waves, transitions and foam still require a live-client pass.
 
 ## Full rework round 3: motion, mass and foam (2026-10-14)
 
@@ -449,11 +450,14 @@ the same foam gate, so a fix cannot be half-reverted. `tools/WaterDeviceRegressi
 sits exactly on the far clip plane and a displaced vertex would be a clipped pixel; its sentinel
 `c200` moved from `{71,0,73,74}` to `{0,0,73,74}` because `c200.x` is the amplitude now.
 
-The pixel stage grew by roughly forty instruction slots (a third train, the pinch and Jacobian, the
-whitecap mask, the back-lit in-scatter, the foam coupling, minus the flow gate and the crest slope
-dot it replaced), so the budget in `tools/ValidateShaders.ps1` moved 560 to 608 - an estimate made
-without fxc, and the comment on the line says so and asks the next Windows run to replace it with
-the measured count plus margin.
+The pixel stage was estimated to grow by roughly forty instruction slots (a third train, the pinch
+and Jacobian, the whitecap mask, the back-lit in-scatter, the foam coupling, minus the flow gate
+and the crest slope dot it replaced), so the initial budget moved 560 to 608 without fxc. The next
+Windows run measured 633, not 608. Rather than accept a zero-margin increase or remove visible
+shading, the broad domain warp and its gradient moved to the vertex stage and are interpolated
+through `TEXCOORD7`; the liquid mesh resolves this 35-yard-scale field smoothly, while the fine
+chop remains per pixel. That kept the same warped crest and chain-rule normal and measured **597**
+slots. `tools/ValidateShaders.ps1` now budgets 621 (597 measured plus 24 slots of compiler margin).
 
 ## Shader budget raised for the volume rework (2026-10-14)
 
@@ -635,11 +639,11 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation enforces a **608-slot budget** on it (measured 542 before round 3's third
-train, Jacobian and whitecaps; the 496-slot
-budget it used to enforce stood below the 512-slot hardware minimum until the volume rework of
-2026-10-14 above outgrew both, and round 3's count is an estimate this environment could not
-compile). Device-creation failures log the HRESULT and device instruction
+shader validation enforces a **621-slot budget** on it (597 measured with fxc /O3 on 2026-10-14,
+plus 24 slots of margin; the broad domain warp is vertex-sampled and interpolated to keep the
+pixel shader within budget without removing foam or its chain-rule normal). Earlier shader-budget
+history, including why the original 496-slot ceiling moved, is recorded above. Device-creation
+failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
 This is a verified failure path in the code, not a diagnosis from a capture of
@@ -683,9 +687,9 @@ the reporting player's machine. In-game confirmation still matters.
 ## Tests
 
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 608 static instruction slots (542 measured before round 3, whose ~40 added slots are
-  an estimate awaiting fxc; the ceiling was raised from 496 - see
-  "Shader budget raised for the volume rework") or its instruction count cannot be read.
+  exceeds 621 static instruction slots (597 measured with fxc /O3 on Windows CI on 2026-10-14,
+  plus 24 slots of compiler margin; the ceiling was raised from 496 - see "Shader budget raised
+  for the volume rework") or its instruction count cannot be read.
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
