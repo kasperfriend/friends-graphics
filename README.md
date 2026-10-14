@@ -99,8 +99,10 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 - Per-zone sea state and live weather response: an exposed coast carries more water than a
   sheltered pond, a storm roughens and quickens both, and an untouched zone is exactly the
-  previous behaviour. The per-zone number lives with the cloud climates, and weather eases in and
-  out over `[Water] WeatherEaseSeconds`.
+  previous behaviour. Weather eases in and out over `[Water] WeatherEaseSeconds`.
+- Explicit sea states cover all 414 roots in the verified Ascension patch-M tables. This is a
+  custom WotLK 3.3.5-based dataset, including Ascension and expansion-derived map IDs, not the
+  stock Wrath zone catalog; the [full zone audit](docs/water-zone-profile-audit.md) documents scope.
 
 ![Water: a river, an open sea at a low sun, a windward coast and a moonlit lake](Screenshots/water-forever-look.png)
 

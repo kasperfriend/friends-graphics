@@ -1,11 +1,13 @@
 # Water zone profile audit
 
 Generated from the authoritative `data/areas.txt` and `EnvironmentProfiles.ini` files.
-There are **2849 area records** and **414 map-root zones**. Every root has a direct `WaterAgitationMultiplier`; the other areas resolve through the existing Map → Zone → Area inheritance order.
+The verified Ascension patch-M tables contain **374 maps** and **2849 area records**, including **414 map-root zones**. Every root has a direct `WaterAgitationMultiplier`; other areas retain the existing Map → Zone → Area inheritance order.
+
+**Scope:** this is Ascension's custom, WotLK 3.3.5-based client table, not the stock Wrath DBC catalog. It includes Ascension map IDs and some expansion-derived names. Their presence in the loaded table makes them addressable by this supported client; it does not prove that the zone is currently playable or has rendered water. A stock 3.3.5 client is outside this renderer's tested target and will not auto-enable the verified Ascension location provider.
 
 `1.00` is the neutral baseline. Lower values keep enclosed, sheltered or inland water calmer; higher values are reserved for exposed coasts and open seas. Neutral entries avoid inventing extra motion where a map has no known water or is a test/development space. Where a map has no rendered water, its multiplier is inert. These are authoring multipliers, not measurements of a live frame.
 
-Automatic runtime application still requires a verified supported client and authoritative area database. This audit verifies every root ID, map association and profile resolution source; it cannot observe a running game process.
+Automatic runtime application requires the exact supported Ascension executable (or another client whose location RVAs and table are explicitly verified). This audit checks every root ID, map association and profile resolution source; it cannot observe a running game process or confirm all zones in-world.
 
 Regenerate or validate this list with `python3 tools/GenerateWaterZoneAudit.py` or `python3 tools/GenerateWaterZoneAudit.py --check`.
 
