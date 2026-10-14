@@ -212,6 +212,9 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     // count is treated as a researched server-side storm intensity.
     volume::cloudWeather=static_cast<renderer::CloudWeather>(std::clamp(weathervisuals::nativeWeatherMode,0,3));
     volume::cloudWeatherStrength=weathervisuals::intensity;
+    // Water reacts to the same observation, in the same frame, so a squall closes the sky and
+    // roughens the sea together instead of only half of them agreeing that it is raining.
+    watereffect::FeedWeather(std::clamp(weathervisuals::nativeWeatherMode,0,3),weathervisuals::intensity);
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
     weathervisuals::Present(d,tuningoverlay::visible);

@@ -130,3 +130,30 @@ term, and never the shoreline shading.
 - **Logistics.** PR #17 (`arena/e57ae181-modern-wow-renderer`) carries round 1. This
   session may only push to that one branch, so the round-2 work lands as a second pull
   request once #17 is merged; until then the round-2 commits sit on the same branch.
+
+## What was built
+
+Every item in the plan landed, with these substitutions, and the details are in
+`water-rendering.md` under "Full rework round 2":
+
+- **Detail mip sampling: not needed.** The plan proposed `tex2Dgrad` with an explicit world
+  footprint for the client's own 512 detail tiles. Checked against the shader: the tile is
+  sampled at an interpolator uv that the vertex stage derives from the material transforms, so
+  `tex2D` already has correct per-pixel derivatives and picks the right mip on its own. The
+  reference needs `tex2Dgrad` because it *builds* its uv from a world position inside a loop.
+  Adding it here would have cost slots to restate what the sampler already does. The fade that
+  mattered - the one for our own procedural lattice - is driven by `fwidth(plane)` and was
+  already in place; it now applies to the chop only, never to the swell.
+- **FFT and foam state:** replaced by two analytic swell trains plus the bounded noise chop,
+  sharing the vertex stage's displacement. No per-frame state texture.
+- **GGX/Smith and the EnvBRDF curve:** replaced by a shaped-exponent lobe whose exponent carries
+  roughness and sun height, and by Schlick Fresnel with the roughness mix standing in for the
+  BRDF integration curve.
+- **Blurred reflection mips:** replaced by mixing the screen-space hit toward the sky term by
+  `rough`, which is the same perceptual move with fewer samples.
+- **Shallow-detail fade by column depth:** implemented as the depth-gated refraction offset
+  plus the shore/crest foam split; the fine octave keeps its own footprint fade.
+- **Reflection path fog:** the composite already applies the draw's fog after reflections are
+  mixed in, and at the near-grazing angles a water surface reflects, the difference between view
+  path and reflected path is second order. No separate term.
+

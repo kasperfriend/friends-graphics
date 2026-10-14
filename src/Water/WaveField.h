@@ -5,7 +5,7 @@ namespace renderer::water
 {
     // Everything in this header keeps the water's procedural wave field
     // anchored to the terrain instead of to a liquid tile's material uv, and
-    // keeps the numbers the pixel shader evaluates small. Both halves matter:
+    // keeps the numbers the shader evaluates small. Both halves matter:
     //
     //  * A field built from per-tile uv repeats identically in every tile, so
     //    wave detail was framed by hard square edges and restarted at the seams.
@@ -14,47 +14,57 @@ namespace renderer::water
     //    bits of float32, the noise collapses onto its own lattice and hardens
     //    into flat axis-aligned squares.
     //
-    // So the shader evaluates the lattice from the position RELATIVE TO THE
+    // So the shaders evaluate the lattice from the position RELATIVE TO THE
     // CAMERA (small and exact, recovered in the vertex shader from the draw's own
-    // view matrix) and adds the camera's own contribution as a phase computed
-    // in double on the CPU. The shader wraps lattice indices modulo
+    // view matrix) and add the camera's own contribution as a phase computed in
+    // double on the CPU. The pixel shader wraps lattice indices modulo
     // kLatticeWrap, which makes reducing that phase into the lattice period a
     // free, invisible operation: the field stays world-anchored while every
     // coordinate stays small.
+    //
+    // Two scales share that one lattice. The long swell is a pair of ANALYTIC
+    // sine trains - not noise - because rounded forms with lit backs and shaded
+    // faces is what a real sea looks like, because a sine gives exact slopes for
+    // free, and because the vertex stage can then displace the very same waves
+    // the shading lights, so a crest and its highlight cannot drift apart. The
+    // trains' periods (kSwellCells and half of it) divide kLatticeWrap exactly,
+    // which is what makes wrapping the swell phase harmless. Fine chop on top of
+    // them stays procedural noise, with the same bounded hash.
     inline constexpr float kRippleCellYards = 2.5f;   // one ripple lattice cell
-    inline constexpr float kSwellRatio = 0.055f;      // long swell shares the orientation
     inline constexpr float kLatticeWrap = 64.0f;      // must match noiseGradient()
+    inline constexpr float kSwellCells = 16.0f;        // long train: 16 cells
+    inline constexpr float kSwellShortCells = 8.0f;    // secondary train: half of it
+    inline constexpr float kSwellRadians = 6.2831853f / kSwellCells;
     inline constexpr float kLatticeRotation = 0.035f; // radians per second of flow
     inline constexpr float kRippleDriftYards = 2.2f;  // ripple travel, yards per second
     inline constexpr float kSwellDriftYards = .8f;    // long swell travel
     inline constexpr float kCounterAngle = 1.9f;      // full counter-current spread
-    inline constexpr float kGeometryWaveCells = 16.f; // one geometry wave spans 16 cells
     inline constexpr float kUvDriftU = .0019f;        // native detail map creep, uv/s
     inline constexpr float kUvDriftV = -.0011f;
 
     struct WaveField
     {
         // Rows of the world -> lattice matrix, already scaled by 1/cell. Row 0
-        // projects onto the flow direction, row 1 across it. The pixel shader
-        // needs nothing else: the vertex shader rotates the resulting slope back
+        // projects onto the flow direction, row 1 across it. Both shader stages
+        // need nothing else: the vertex shader rotates the resulting slope back
         // into view space, so the wave normal follows the real gradient.
         float lattice[4] = {1.f, 0.f, 0.f, 1.f};
-        // Lattice-space phase of each octave, wrapped into the lattice period.
+        // Lattice-space phase of each octave, in cells and wrapped into the
+        // lattice period: xy=ripple, zw=long swell. The swell phase stays in
+        // RIPPLE cells - each stage scales it by its own wave frequency - so one
+        // number feeds the shading, the displacement and the foam masks.
         float phase[4] = {0.f, 0.f, 0.f, 0.f};
         // Drift of the client's own water detail texture, in its uv space.
         float uvDrift[2] = {0.f, 0.f};
-        // The camera's own lattice coordinate, in cells, NOT wrapped: it feeds
-        // sines whose period is a fraction of the hash period, so reducing it
-        // would jump one octave against the other every 64 cells. It is a
-        // per-draw constant, so its size costs no per-pixel precision, and the
-        // vertex shader adds it back so the displaced crests are anchored to the
-        // terrain as well - geometry waves driven from the camera-relative
-        // coordinate alone slide across the surface whenever the camera moves.
-        float anchor[2] = {0.f, 0.f};
+        // Nothing else is needed: the camera's own coordinate is inside `phase`, and
+        // because every train's period divides kLatticeWrap, the vertex stage can share
+        // the wrapped phase exactly rather than carrying an unwrapped anchor that would
+        // lose float32 precision at the far corners of a continent.
     };
 
-    // Lattice indices wrap at kLatticeWrap inside the shader, so shifting a
-    // phase by any multiple of it cannot change the rendered field.
+    // Lattice indices wrap at kLatticeWrap inside the shader, and both swell
+    // trains divide that wrap, so shifting a phase by any multiple of it cannot
+    // change what either stage draws.
     inline float WrapLattice(float value)
     {
         return value - kLatticeWrap * std::floor(value / kLatticeWrap);
@@ -85,15 +95,13 @@ namespace renderer::water
         const float travel = float(time);
         const float spread = kCounterAngle * (counter > 0.f ? counter : 0.f);
         const float rippleDrift = kRippleDriftYards * travel * inv;
-        const float swellDrift = kSwellDriftYards * travel * inv * kSwellRatio;
+        const float swellDrift = kSwellDriftYards * travel * inv;
         const float cam0 = cameraValid ? cameraX * field.lattice[0] + cameraY * field.lattice[1] : 0.f;
         const float cam1 = cameraValid ? cameraX * field.lattice[2] + cameraY * field.lattice[3] : 0.f;
         field.phase[0] = WrapLattice(cam0 + rippleDrift);
         field.phase[1] = WrapLattice(cam1);
-        field.phase[2] = WrapLattice(cam0 * kSwellRatio + swellDrift * std::cos(spread));
-        field.phase[3] = WrapLattice(cam1 * kSwellRatio - swellDrift * std::sin(spread));
-        field.anchor[0] = cameraValid ? cam0 : 0.f;
-        field.anchor[1] = cameraValid ? cam1 : 0.f;
+        field.phase[2] = WrapLattice(cam0 + swellDrift * std::cos(spread));
+        field.phase[3] = WrapLattice(cam1 - swellDrift * std::sin(spread));
 
         // The client's sampler wraps at 1 in both axes, so an accumulated uv
         // creep can be reduced without moving the image.

@@ -87,11 +87,30 @@ See [water rendering, verification and troubleshooting](docs/water-rendering.md)
 [the plan for the next water pass](docs/water-forever-round2-plan.md) for what the shading
 model is being moved to and which parts of it a `ps_3_0` shader can and cannot carry.
 
-- Screen-space reflections and environment fallback reflections.
-- Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
+- Screen-space reflections against the pre-water scene copy, with a horizon-to-zenith sky and
+  the sun or moon mirrored in it as the fallback.
+- Refraction that bends the bottom further the deeper the column is, per-channel depth
+  absorption with light scattering back out of the water, shoreline/crest/shoal foam, ripples,
+  Schlick Fresnel response, and a sun glint that broadens as the source drops toward the horizon.
+- The long swell is analytic and shared with the vertex stage, so a displaced crest and the
+  light on it are the same wave; only the chop fades when a pixel cannot resolve it.
 - Waves are evaluated on a world-anchored lattice, not on a tile's texture coordinates, so
   one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
+- Per-zone sea state and live weather response: an exposed coast carries more water than a
+  sheltered pond, a storm roughens and quickens both, and an untouched zone is exactly the
+  previous behaviour. The per-zone number lives with the cloud climates, and weather eases in and
+  out over `[Water] WeatherEaseSeconds`.
+
+![Water: a river, an open sea at a low sun, a windward coast and a moonlit lake](Screenshots/water-forever-look.png)
+
+*The four bodies the look was tuned against - rendered by `tools/WaterPreview.cpp`, the CPU mirror of the water
+shader, at the shipped defaults.*
+
+![The same sea four times: a sheltered zone and an exposed coast, each in calm air and in a rainstorm](Screenshots/water-zone-weather.png)
+
+*One sea, four sea states - `build/waterpreview --matrix --scene sea --grid 2 --supersample 2`. The columns are the
+sky, the rows are what the zone asks for, and every panel shares a clock and a camera, so the difference is the model.*
 
 ### Native shadows and post-processing
 
@@ -165,7 +184,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
 | `[WeatherVisuals]` | Rain/snow intensity, speed, wind, occlusion, lens droplets, and haze. |
-| `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, and glint. |
+| `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
 | `[PostProcess]` | Global enable switch, brightness, contrast, gamma, and sharpness. Always saved in `GraphicsEffects.ini`; location overrides are ignored. |
 | `[DistanceFog]` | Scaling for the client's native distance fog. |
