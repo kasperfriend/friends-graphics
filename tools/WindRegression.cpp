@@ -1,0 +1,441 @@
+// Run from repository root. No SDK needed on Linux; Windows additionally
+// exercises the real location-scoped INI read/save/reload path.
+#include "../src/Environment/WindTuning.h"
+#include "../src/Environment/WindDebug.h"
+#include "../src/Environment/OverlayLayout.h"
+#include "../src/Effects/CloudDynamics.h"
+#include "../src/Water/WaveMotion.h"
+#include "../src/Water/WaterNoise.h"
+#include "../src/Water/WaterSeaState.h"
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <set>
+#include <stdexcept>
+#if defined(_WIN32)
+#include "../src/Environment/LocationTuning.h"
+#endif
+
+using namespace renderer;
+using namespace renderer::water;
+static void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+static void Pass(const char* message) { std::printf("PASS %s\n", message); }
+static bool Near(double a, double b, double e = 1e-5) { return std::abs(a - b) <= e; }
+static double PeriodDistance(double a, double b, double period) { return std::abs(std::remainder(a - b, period)); }
+static std::string Read(const char* path)
+{
+    std::ifstream file(path);
+    Check(bool(file), path);
+    return {std::istreambuf_iterator<char>(file), {}};
+}
+static WindSettings Steady(WindDirection direction = WindDirection::NorthEast, float strength = 1.f)
+{
+    WindSettings s; s.dynamic = false; s.direction = direction; s.strength = strength;
+    return s;
+}
+static WindState Air(WindDirection direction, float strength = 1.f)
+{
+    WindSystem system; system.Configure(Steady(direction, strength));
+    return system.Update({}, 0);
+}
+static void FiniteState(const WindState& state)
+{
+    Check(std::isfinite(state.strength) && state.strength >= 0 && state.strength <= 3, "wind strength range");
+    Check(std::isfinite(state.targetStrength) && state.targetStrength >= 0 && state.targetStrength <= 3, "wind target range");
+    Check(std::isfinite(state.headingDegrees) && state.headingDegrees >= 0 && state.headingDegrees < 360, "wind heading range");
+    Check(Near(std::hypot(state.direction.x, state.direction.y), 1, 2e-7), "wind direction stays normalized");
+    Check(Near(std::hypot(state.velocity.x, state.velocity.y), state.strength * kWindReferenceSpeed, 1e-5), "wind velocity magnitude");
+    Check(std::isfinite(state.deltaSeconds) && state.deltaSeconds >= 0 && state.deltaSeconds <= .1f, "bounded wind delta");
+}
+static void SamePhases(const WaveField& a, const WaveField& b, double epsilon)
+{
+    for (int i = 0; i < kTrainCount; ++i)
+        Check(PeriodDistance(a.swellPhase[i], b.swellPhase[i], kTrainCells[i]) < epsilon, "swell phase continuity");
+    for (int i = 0; i < 2; ++i)
+    {
+        Check(PeriodDistance(a.ripplePhase[i], b.ripplePhase[i], kLatticeWrap) < epsilon, "ripple phase continuity");
+        Check(PeriodDistance(a.warpPhase[i], b.warpPhase[i], kLatticeWrap) < epsilon, "warp phase continuity");
+        Check(PeriodDistance(a.groupPhase[i], b.groupPhase[i], kLatticeWrap) < epsilon, "group phase continuity");
+        Check(PeriodDistance(a.uvDrift[i], b.uvDrift[i], 1) < epsilon, "native detail phase continuity");
+    }
+}
+static void TestDirectionsAndTime()
+{
+    const WindVector expected[] = {{1,0},{.70710678f,-.70710678f},{0,-1},{-.70710678f,-.70710678f},
+                                  {-1,0},{-.70710678f,.70710678f},{0,1},{.70710678f,.70710678f}};
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        const auto state = Air(static_cast<WindDirection>(i), 1.25f);
+        FiniteState(state);
+        Check(state.targetDirection == static_cast<WindDirection>(i), "all eight targets selectable");
+        Check(Near(state.direction.x, expected[i].x) && Near(state.direction.y, expected[i].y), "WoW compass axes/sign");
+        Check(Near(state.headingDegrees, i * 45.f), "compass degrees clockwise from north");
+        Check(NearestWindDirection(state.headingDegrees) == state.targetDirection, "debug compass matches state");
+        Check(Near(state.strength, 1.25), "authored strength");
+    }
+    Check(NearestWindDirection(359.9f) == WindDirection::North && NearestWindDirection(22.4f) == WindDirection::North &&
+          NearestWindDirection(22.5f) == WindDirection::NorthEast, "nearest-sector seam");
+    WindSystem turns; turns.Configure(Steady(WindDirection::NorthWest)); turns.Update({}, 0);
+    turns.Configure(Steady(WindDirection::North));
+    Check(turns.Update({}, .1f).headingDegrees > 315.f, "NW to N turns across 360 seam, not the long way");
+    WindSystem reverse; reverse.Configure(Steady(WindDirection::North)); reverse.Update({}, 0);
+    reverse.Configure(Steady(WindDirection::NorthWest));
+    Check(reverse.Update({}, .1f).headingDegrees > 359.f, "N to NW turns backwards across seam");
+    Pass("eight compass targets, correct world axes, normalized travel and shortest-arc turns");
+
+    WindSystem system;
+    unsigned visited = 0;
+    float low = 10, high = 0;
+    auto previous = system.Update({}, 0);
+    for (int i = 0; i < 36000; ++i)
+    {
+        const auto current = system.Update({}, .1f);
+        FiniteState(current);
+        Check(PeriodDistance(current.headingDegrees, previous.headingDegrees, 360) <= .1501, "no step at direction changes");
+        Check(std::abs(current.strength - previous.strength) < .01f, "continuous gust strength");
+        visited |= 1u << unsigned(current.targetDirection);
+        low = std::min(low, current.strength); high = std::max(high, current.strength);
+        previous = current;
+    }
+    Check(visited == 255, "dynamic wind eventually visits all eight sectors");
+    Check(high - low > .15f && low < 1.f && high > 1.f, "strength both rises and falls with time");
+    auto reload = system;
+    reload.Configure(reload.Settings());
+    const auto a = system.Update({}, .016f), b = reload.Update({}, .016f);
+    Check(a.headingDegrees == b.headingDegrees && a.strength == b.strength && a.secondsToChange == b.secondsToChange,
+          "identical F7/F12 reload preserves direction, gust and schedule");
+    auto shortPause = system, longPause = system;
+    const auto c = shortPause.Update({}, .1f), d = longPause.Update({}, 1000000.f);
+    Check(c.headingDegrees == d.headingDegrees && c.strength == d.strength, "long stalls take only one bounded step");
+    const auto before = system.State();
+    for (float dt : {0.f, -1.f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+    {
+        const auto after = system.Update({}, dt);
+        Check(before.headingDegrees == after.headingDegrees && before.strength == after.strength &&
+              before.secondsToChange == after.secondsToChange, "invalid/stalled clock cannot move wind");
+    }
+    auto settings = system.Settings(); settings.enabled = false; system.Configure(settings);
+    const auto disabled = system.Update({3, 1}, .1f);
+    Check(disabled.strength == 0 && disabled.velocity.x == 0 && disabled.velocity.y == 0 &&
+          !disabled.DrivesClouds() && !disabled.DrivesWaves(), "disabled wind publishes no influence");
+    for (int i = 0; i < 600; ++i) system.Update({}, .1f);
+    settings.enabled = true; system.Configure(settings);
+    const auto resumed = system.Update({}, 0);
+    Check(resumed.headingDegrees == before.headingDegrees && resumed.strength == before.strength &&
+          resumed.secondsToChange == before.secondsToChange, "re-enable preserves simulation, not a new random wind");
+    settings.affectWaves = false; settings.affectClouds = false; settings.debugView = true;
+    system.Configure(settings);
+    const auto unlinked = system.Update({}, 0);
+    Check(unlinked.strength == resumed.strength && unlinked.headingDegrees == resumed.headingDegrees &&
+          !unlinked.DrivesWaves() && !unlinked.DrivesClouds() && unlinked.debugView,
+          "link/debug edits do not reset or perturb wind");
+    Pass("dynamic rise/fall, all-sector scheduling, reload/disable continuity and stall/NaN safety");
+
+    auto simulated = [](int fps) {
+        WindSystem wind; wind.Update({}, 0);
+        for (int i = 0; i < fps * 365; ++i)
+            wind.Update(i >= fps * 60 && i < fps * 240 ? WindWeather{1,1} : WindWeather{}, 1.f / fps);
+        return wind.State();
+    };
+    const auto reference = simulated(60);
+    for (int fps : {30, 144, 240})
+    {
+        const auto compared = simulated(fps);
+        Check(PeriodDistance(reference.headingDegrees, compared.headingDegrees, 360) < .07, "frame-rate independent turning");
+        Check(Near(reference.strength, compared.strength, .001), "frame-rate independent strength");
+        Check(reference.targetDirection == compared.targetDirection, "frame-rate independent target schedule");
+    }
+    Pass("30/60/144/240 Hz produce the same wind evolution within integration tolerance");
+}
+static void TestWeather()
+{
+    Check(ResolveWindWeather(0, 2, 4).strength == 0 && ResolveWindWeather(9, 1, 1).kind == 0, "unknown weather is clear");
+    Check(Near(ResolveWindWeather(1, 1.5f, .5f).strength, .75) && ResolveWindWeather(1, 2, 4).strength == 1,
+          "zone intensity is applied before one common clamp");
+    Check(ResolveWindWeather(1, NAN, 1).strength == 0 && ResolveWindWeather(1, -3, 1).strength == 0, "invalid intensity is calm");
+    for (const auto& [kind, target] : {std::pair{1,1.8f}, {2,1.4f}, {3,2.1f}})
+    {
+        WindSystem wind; wind.Configure(Steady()); wind.Update({}, 0);
+        const float first = wind.Update({kind, 1}, .1f).strength;
+        Check(first > 1 && first < 1.02f, "weather builds, never steps");
+        for (int i = 0; i < 2400; ++i) wind.Update({kind, 1}, .1f);
+        Check(Near(wind.State().strength, target, 1e-5), "weather type response");
+        const float clearing = wind.Update({}, .1f).strength;
+        Check(clearing < target && clearing > target - .02f, "weather eases down on clearing");
+        for (int i = 0; i < 3000; ++i) wind.Update({}, .1f);
+        Check(Near(wind.State().strength, 1, 1e-5), "clearing returns to baseline");
+    }
+    WindSystem still; still.Configure(Steady(WindDirection::East, 0));
+    Check(still.Update({3, 1}, .1f).strength == 0, "zero base is calm even in sandstorm");
+    WindSettings noWeather = Steady(); noWeather.weatherResponse = 0;
+    still.Configure(noWeather);
+    for (int i = 0; i < 3000; ++i) still.Update({3, 1}, .1f);
+    Check(Near(still.State().strength, 1, 1e-5), "weather-response opt-out");
+    WindSettings corrupt; corrupt.strength = INFINITY; corrupt.gustAmount = NAN; corrupt.gustSeconds = 0;
+    corrupt.directionSeconds = -50; corrupt.transitionSeconds = NAN; corrupt.weatherResponse = 9999;
+    still.Configure(corrupt);
+    for (int i = 0; i < 1000; ++i) FiniteState(still.Update({3, INFINITY}, .1f));
+    auto strong = Steady(WindDirection::West, 2); strong.weatherResponse = 2;
+    WindSystem cap; cap.Configure(strong);
+    Check(cap.Update({3,1}, 0).strength == 3, "maximum storm strength is bounded");
+    Pass("native rain/snow/sand, clearing, zero strength, weather opt-out and corrupt-input limits");
+}
+static void TestCloudsAndSea()
+{
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        const auto wind = Air(static_cast<WindDirection>(i), 1.5f);
+        CloudShape base; base.evolutionSpeed = 0;
+        const auto driven = ApplyCloudWind(base, wind);
+        Check(Near(driven.windSpeed, 39) && Near(driven.windShear, base.windShear * 1.5f), "cloud strength coupling");
+        CloudMotion motion; constexpr float dt = .025f; motion.Advance(driven, dt);
+        const float direction[] = {wind.direction.x, wind.direction.y};
+        for (int axis = 0; axis < 2; ++axis)
+        {
+            Check(Near(std::remainder(motion.shape[axis], 1.0) * driven.featureSize / dt,
+                       -direction[axis] * driven.windSpeed, 1e-4), "cloud body travels downwind, not sample-offset direction");
+            Check(Near(std::remainder(motion.detail[axis], 1.0) * driven.detailSize / dt,
+                       -direction[axis] * driven.windSpeed * 1.7, 1e-4), "cloud detail follows the same wind");
+            Check(Near(std::remainder(motion.weather[axis], 1.0) * driven.weatherSize / dt,
+                       -direction[axis] * driven.windSpeed * .35, 1e-4), "cloud weather map follows the same wind");
+        }
+        CloudDynamics live;
+        const auto resolved = live.Update(base, {}, false, CloudWeather::Clear, 0, 12, dt, wind);
+        Check(Near(resolved.windAngle, driven.windAngle) && Near(resolved.windSpeed, driven.windSpeed), "cloud dynamics uses shared snapshot");
+        Check(live.Motion().shape == motion.shape, "cloud density/shadow field shares one integrated offset");
+        auto unlinked = wind; unlinked.affectClouds = false;
+        const auto fallback = ApplyCloudWind(base, unlinked);
+        Check(fallback.windSpeed == base.windSpeed && fallback.windAngle == base.windAngle, "cloud opt-out restores legacy authoring");
+    }
+    const auto calm = ApplyCloudWind(CloudShape{}, Air(WindDirection::North, 0));
+    CloudMotion evolving; evolving.Advance(calm, 1.f);
+    Check(calm.windSpeed == 0 && calm.windShear == 0 && evolving.shape[0] == 0 && evolving.shapeZ > 0,
+          "no-wind cloud drift stops while independent evolution remains");
+    CloudShape frozen; frozen.evolutionSpeed = 0;
+    auto motionShape = ApplyCloudWind(frozen, Air(WindDirection::North));
+    CloudMotion motion; motion.Advance(motionShape, 1e6f);
+    const auto before = motion;
+    motionShape = ApplyCloudWind(frozen, Air(WindDirection::South, 2));
+    motion.Advance(motionShape, 0);
+    Check(before.shape == motion.shape && before.weather == motion.weather, "wind edits never rephase clouds from session age");
+    Pass("all eight cloud travel signs, strength/shear, shared density offsets and independent evolution");
+
+    SeaTuning tuning; tuning.sharedWind = true;
+    const auto normal = TargetSeaState(tuning, {});
+    Check(normal.agitation == 1 && normal.motion == 1 && normal.wind == 1, "reference wind is neutral sea state");
+    tuning.windStrength = 0; const auto flat = TargetSeaState(tuning, {3,1});
+    tuning.windStrength = 2; const auto storm = TargetSeaState(tuning, {1,1});
+    const auto sameAir = TargetSeaState(tuning, {});
+    Check(storm.agitation == sameAir.agitation && storm.motion == sameAir.motion && storm.wind == sameAir.wind,
+          "water never applies weather twice to shared wind");
+    Check(flat.agitation < normal.agitation && flat.motion < normal.motion && flat.wind == 0 && flat.agitation > 0,
+          "calm air leaves residual swell, not wind foam");
+    Check(storm.agitation > normal.agitation && storm.motion > normal.motion && storm.shear > normal.shear,
+          "stronger air roughens and quickens the sea");
+    tuning.zoneAgitation = .45f; const auto sheltered = TargetSeaState(tuning, {});
+    tuning.zoneAgitation = 1.45f; const auto exposed = TargetSeaState(tuning, {});
+    Check(sheltered.agitation < exposed.agitation, "shared wind preserves zone exposure");
+    tuning.response = 0; const auto noResponse = TargetSeaState(tuning, {1,1});
+    Check(noResponse.agitation == 1.45f, "per-water response zero preserves authored energy");
+    tuning.authoredWind = 0; Check(TargetSeaState(tuning, {}).wind == 0, "water's foam bias zero still wins");
+    tuning.windStrength = NAN; tuning.response = INFINITY; tuning.zoneAgitation = NAN;
+    const auto safe = TargetSeaState(tuning, {1,1});
+    Check(std::isfinite(safe.agitation) && std::isfinite(safe.motion), "corrupt wind cannot poison sea constants");
+    SeaStateFilter filter; filter.Observe(SeaTuning{}, {}, 0, 14);
+    Check(std::isfinite(filter.Observe(tuning, {1,1}, .1f, NAN).agitation), "invalid sea response time cannot poison wind coupling");
+    Pass("wave energy/motion/foam coupling, local exposure, zero controls and no doubled storm response");
+}
+static void TestWaveMotion()
+{
+    constexpr float dt = 1.f / 60;
+    WaveMotion startup;
+    startup.Advance(0, 0, .32f, 25, Air(WindDirection::West), 0, 0, false, true);
+    Check(startup.ScalePercent() == 25 && Near(startup.Build(0, 0, false, true).lattice[3], 0),
+          "saved size/direction is primed before the first draw, without a camera");
+    const auto initial = startup.Build(0, 0, true, true);
+    startup.Advance(.1f, 1, .32f, 25, Air(WindDirection::East, 0), 40000, -40000, true, true);
+    Check(startup.Build(0, 0, true, true).lattice[1] == initial.lattice[1], "zero-strength wind cannot steer residual swell");
+    for (unsigned direction = 0; direction < 8; ++direction)
+    {
+        const auto wind = Air(static_cast<WindDirection>(direction));
+        WaveMotion motion; motion.Advance(0, 1, 0, 100, wind, 42000, -38000, true, true);
+        const auto before = motion.Build(42000, -38000, true, true);
+        motion.Advance(dt, 1, 0, 100, wind, 42000, -38000, true, true);
+        const auto after = motion.Build(42000, -38000, true, true);
+        Check(Near(-before.lattice[0] * kRippleCellYards, wind.direction.x) &&
+              Near(-before.lattice[1] * kRippleCellYards, wind.direction.y), "dominant wave travels toward selected compass direction");
+        const double yards = PhaseSpeedYards(kTrainCells[0] * kRippleCellYards) * double(dt);
+        const double moved = (wind.direction.x * before.lattice[0] + wind.direction.y * before.lattice[1]) * yards;
+        Check(PeriodDistance(before.swellPhase[0], after.swellPhase[0] + moved, kTrainCells[0]) < 2e-5,
+              "moving downwind at dispersion speed follows the same crest");
+    }
+    for (float scale : {25.f, 100.f, 400.f})
+    {
+        WaveMotion motion;
+        for (int i = 0; i < 2000; ++i) motion.Advance(.05f, .7f, .43f, scale, {}, 12000, -9000, true, true);
+        const auto integrated = motion.Build(12000, -9000, true, true);
+        const auto legacy = BuildWaveField(double(.05f) * 2000, .7f, .43f, scale, 12000, -9000, true, true);
+        SamePhases(integrated, legacy, .003);
+    }
+    Pass("waves physically travel toward all eight directions; constant unlinked motion matches legacy field");
+
+    const auto startWind = Air(WindDirection::NorthEast), turnedWind = Air(WindDirection::SouthWest);
+    for (float pivot : {-50000.f, 0.f, 51000.f})
+    {
+        WaveMotion motion; motion.Advance(.1f, 1, .32f, 100, startWind, pivot, -pivot, true, true);
+        for (int i = 0; i < 1000; ++i) motion.Advance(.1f, 1, .32f, 100, startWind, pivot, -pivot, true, true);
+        auto control = motion;
+        control.Advance(dt, 1, .32f, 100, startWind, pivot, -pivot, true, true);
+        motion.Advance(dt, 1, .32f, 100, turnedWind, pivot, -pivot, true, true);
+        const auto expected = control.Build(pivot, -pivot, true, true);
+        const auto turned = motion.Build(pivot, -pivot, true, true);
+        SamePhases(expected, turned, 2e-5);
+        Check(turned.lattice[1] != expected.lattice[1], "wind really changes wave orientation");
+        const auto beforeEdit = motion.Build(pivot, -pivot, true, true);
+        motion.Advance(0, 9, 1, 100, turnedWind, pivot, -pivot, true, true);
+        SamePhases(beforeEdit, motion.Build(pivot, -pivot, true, true), 1e-6);
+        // Scale changes retain the local phase, including the low-frequency
+        // warp and the grouping envelope, instead of jumping from elapsed time.
+        motion.Advance(0, 9, 1, 25, turnedWind, pivot, -pivot, true, true);
+        SamePhases(beforeEdit, motion.Build(pivot, -pivot, true, true), 2e-5);
+    }
+    Pass("direction/size changes re-anchor locally even at continent coordinates; no world-origin sweep");
+
+    WaveMotion motion;
+    motion.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
+    for (int i = 0; i < 1000; ++i) motion.Advance(.1f, 1, .32f, 100, turnedWind, 4213, -7781, true, true);
+    const auto world = motion.Build(0, 0, true, true);
+    for (float camera : {-46000.f, 0.f, 530.f, 49000.f})
+    {
+        const auto field = motion.Build(camera, camera * .5f, true, true);
+        const float x = (4213 - camera) * field.lattice[0] + (-7781 - camera * .5f) * field.lattice[1];
+        const float y = (4213 - camera) * field.lattice[2] + (-7781 - camera * .5f) * field.lattice[3];
+        const float wx = 4213 * world.lattice[0] - 7781 * world.lattice[1];
+        const float wy = 4213 * world.lattice[2] - 7781 * world.lattice[3];
+        const auto warped = WarpWavePlane(field, x, y), reference = WarpWavePlane(world, wx, wy);
+        for (int i = 0; i < kTrainCount; ++i)
+            Check(PeriodDistance(SwellTheta(i, warped.plane.x, warped.plane.y, field.swellPhase),
+                SwellTheta(i, reference.plane.x, reference.plane.y, world.swellPhase), kTwoPi) < .035,
+                "all draws/reflection cameras see the same turned, warped wave");
+    }
+    auto held = motion, pause = motion;
+    motion.Advance(.1f, 1, .32f, 100, turnedWind, 4213, -7781, true, true);
+    pause.Advance(1e9f, 1, .32f, 100, turnedWind, 4213, -7781, true, true);
+    SamePhases(motion.Build(0, 0, true, true), pause.Build(0, 0, true, true), 1e-6);
+    const auto before = held.Build(0, 0, true, true);
+    held.Advance(.1f, 0, .32f, 100, startWind, -15000, 20000, true, true);
+    SamePhases(before, held.Build(0, 0, true, true), 1e-6);
+    Check(before.lattice[0] == held.Build(0, 0, true, true).lattice[0], "zero wave speed also freezes turns");
+    held.Advance(.1f, 9, 1, 100, startWind, 4213, -7781, true, false);
+    SamePhases(before, held.Build(0, 0, true, true), 1e-6);
+    Check(held.Build(0, 0, true, false).uvDrift[0] == 0, "waves off stops native UV drift");
+    for (int i = 0; i < 100000; ++i)
+    {
+        const auto wind = Air(static_cast<WindDirection>((i / 1200) % 8));
+        held.Advance(.1f, 9, 1, 25, wind, 51000, -51000, true, true);
+    }
+    held.Advance(NAN, INFINITY, NAN, INFINITY, startWind, NAN, INFINITY, true, true);
+    const auto safe = held.Build(NAN, INFINITY, true, true);
+    for (float phase : safe.swellPhase) Check(std::isfinite(phase) && phase >= 0 && phase <= 16, "bounded long-session phases");
+    for (float value : safe.lattice) Check(std::isfinite(value), "finite shader basis after invalid inputs");
+    Pass("camera/reflection coherence, speed/off freeze, long sessions, device gaps and invalid input safety");
+}
+static std::map<std::wstring, int> SettingValues(const WindSettings& s)
+{
+    return {{L"Enabled",s.enabled},{L"Dynamic",s.dynamic},{L"Direction",int(s.direction)},
+        {L"StrengthPercent",int(std::lround(s.strength * 100))},{L"GustPercent",int(std::lround(s.gustAmount * 100))},
+        {L"GustSeconds",int(s.gustSeconds)},{L"DirectionChangeSeconds",int(s.directionSeconds)},
+        {L"TransitionSeconds",int(s.transitionSeconds)},{L"WeatherResponsePercent",int(std::lround(s.weatherResponse * 100))},
+        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},{L"DebugView",s.debugView}};
+}
+static void TestConfigurationAndWiring()
+{
+    const auto ini = Read("GraphicsEffects.ini");
+    const auto section = ini.substr(ini.find("[Wind]"), ini.find("[VolumetricClouds]") - ini.find("[Wind]"));
+    std::map<std::wstring, int> readDefaults;
+    const auto defaults = SettingValues(ReadWindSettings([&](const wchar_t* key, int value) { readDefaults[key] = value; return value; }));
+    Check(defaults == SettingValues(WindSettings{}) && defaults == readDefaults, "configuration defaults match simulation defaults");
+    unsigned count = 0;
+    for (const auto& control : tuningoverlay::items)
+    {
+        if (!control.section || std::wstring(control.section) != L"Wind") continue;
+        ++count;
+        Check(defaults.at(control.key) == control.value, "F7 and runtime have identical defaults");
+        const std::wstring key(control.key);
+        const std::string entry = std::string(key.begin(), key.end()) + "=" + std::to_string(control.value) + "\n";
+        Check(section.find(entry) != std::string::npos, "shipped INI and F7 default match");
+        if (control.kind == tuningoverlay::KIND_SLIDER)
+        {
+            for (const auto& [asked, expected] : {std::pair{control.lo - 1000, control.lo}, {control.hi + 1000, control.hi}})
+            {
+                const auto values = SettingValues(ReadWindSettings([&](const wchar_t* k, int fallback) { return key == k ? asked : fallback; }));
+                Check(values.at(key) == expected, "INI and F7 range endpoints match");
+            }
+        }
+        if (key == L"Direction")
+            for (int i = 0; i < 8; ++i)
+            {
+                auto item = control; item.value = i;
+                Check(tuningoverlay::ValueLabel(item) == WindDirectionName(static_cast<WindDirection>(i)), "F7 shows compass names, not unexplained numbers");
+            }
+    }
+    Check(count == defaults.size(), "every supported wind option has an F7 control");
+    const auto main = Read("ModernWoWRenderer.cpp");
+    const auto present = main.find("HRESULT WINAPI HookedPresent");
+    const auto fallback = main.find("    volume::Present(d);", present);
+    const auto weather = main.find("    weathervisuals::Present(d,tuningoverlay::visible);", present);
+    const auto snapshot = main.find("nextFrame.wind=g_windSystem.Update", present);
+    const auto sea = main.find("    watereffect::Present();", present);
+    Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
+    Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();") != main.npos &&
+          main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();") != main.npos, "F7/location/F12 all reload wind");
+    const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
+    Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
+    const auto water = Read("WaterEffect.h");
+    Check(water.find("frame.wind.DrivesWaves(),frame.wind.strength") != water.npos &&
+          water.find("waveScalePercent,frame.wind,pivotX,pivotY") != water.npos, "waves use shared direction AND strength");
+    Check(water.find("seaFilter.Forget();") == water.npos, "device reset preserves CPU sea state");
+    auto debug = Air(WindDirection::East, 1.25f);
+    const auto lines = WindDebugLines(debug);
+    Check(lines[1].find("E 90.0") != std::string::npos && lines[2].find("125.0%") != std::string::npos &&
+          lines[4].find("not connected") != std::string::npos, "debug reports actual internal state and unwired vegetation honestly");
+    Pass("all 12 INI/F7 defaults/ranges, compass value labels, reload wiring, shared frame ordering and debug text");
+
+#if defined(_WIN32)
+    const auto directory = std::filesystem::absolute("build/wind-tuning-regression");
+    std::filesystem::create_directories(directory);
+    const auto base = directory.wstring() + L"\\";
+    const auto file = base + L"GraphicsEffects.ini";
+    std::filesystem::remove(file); std::filesystem::remove(base + L"LocationGraphics.ini");
+    locationtuning::Sync(base, {}, false);
+    Check(locationtuning::Save(L"Wind", L"Direction", 2), "global direction save");
+    Check(locationtuning::Save(L"Wind", L"DebugView", 1), "global debug save");
+    const auto load = [&] { return ReadWindSettings([&](const wchar_t* key, int fallback) {
+        return int(locationtuning::ReadInt(L"Wind", key, fallback, file.c_str())); }); };
+    Check(load().direction == WindDirection::East && load().debugView, "global wind readback");
+    locationtuning::Sync(base, {0,12,87,true}, true); locationtuning::editZone = true;
+    Check(locationtuning::Save(L"Wind", L"Direction", 6), "zone wind save");
+    Check(load().direction == WindDirection::West, "zone overrides global wind");
+    locationtuning::editZone = false;
+    Check(locationtuning::Save(L"Wind", L"Direction", 3), "subarea wind save");
+    Check(locationtuning::Save(L"Wind", L"DebugView", 0), "subarea debug save");
+    Check(load().direction == WindDirection::SouthEast && !load().debugView, "subarea overrides zone wind/debug");
+    locationtuning::Sync(base, {0,12,86,true}, true);
+    Check(load().direction == WindDirection::West && load().debugView, "leaving subarea restores zone/global wind");
+    locationtuning::Sync(base, {}, false);
+    Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
+    Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
+    Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
+    Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence and manual reload");
+#endif
+}
+int main() try
+{
+    TestDirectionsAndTime(); TestWeather(); TestCloudsAndSea(); TestWaveMotion(); TestConfigurationAndWiring();
+    std::puts("Wind regressions passed");
+    return 0;
+}
+catch (const std::exception& error) { std::fprintf(stderr, "FAIL %s\n", error.what()); return 1; }

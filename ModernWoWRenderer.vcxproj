@@ -47,6 +47,9 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Environment\EnvironmentProfileManager.h" />
     <ClInclude Include="src\Environment\LocationContext.h" />
     <ClInclude Include="src\Environment\LocationTuning.h" />
+    <ClInclude Include="src\Environment\WindSystem.h" />
+    <ClInclude Include="src\Environment\WindTuning.h" />
+    <ClInclude Include="src\Environment\WindDebug.h" />
     <ClInclude Include="src\Effects\ImagePostProcess.h" />
     <ClInclude Include="src\Environment\OverlayFont.h" />
     <ClInclude Include="src\Environment\OverlayItems.h" />
@@ -66,6 +69,9 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Diagnostics\PerformanceProfiler.h" />
     <ClInclude Include="src\Water\WaterMaterial.h" />
     <ClInclude Include="src\Water\WaterPolicy.h" />
+    <ClInclude Include="src\Water\WaveField.h" />
+    <ClInclude Include="src\Water\WaveMotion.h" />
+    <ClInclude Include="src\Water\WaterSeaState.h" />
     <ClInclude Include="src\D3D9\DepthCapture.h" />
     <ClInclude Include="src\D3D9\DepthCapturePolicy.h" />
     <ClInclude Include="src\D3D9\CameraCapture.h" />

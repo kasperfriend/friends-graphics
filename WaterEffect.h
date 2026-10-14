@@ -18,6 +18,7 @@
 #include "src/Water/WaterMaterial.h"
 #include "src/Water/WaveField.h"
 #include "src/Water/WaterSeaState.h"
+#include "src/Water/WaveMotion.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
@@ -58,8 +59,10 @@ float weatherResponse=1.f,weatherEaseSeconds=14.f;
 bool zoneWavesEnabled=true;
 renderer::water::SeaWeather seaWeather;
 renderer::water::SeaStateFilter seaFilter;
-renderer::water::SeaMotionClock seaMotion_;
+renderer::water::WaveMotion waveMotion;
+renderer::water::DrawAnchor lastWaveAnchor;
 renderer::FrameClock seaFrameClock;
+void AdvanceSea(float dt);
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
@@ -830,9 +833,9 @@ void ReloadTuning(){
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
     waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
-    // Sea state. `WeatherResponsePercent` is a percent of what this zone's own weather damping
-    // allows; the ease time is the clouds' shape (95% in one time constant) so a squall arrives at
-    // the same rate in the sky and on the water.
+    // Sea response: shared wind when linked, native weather otherwise.
+    // The already-resolved wind includes the zone's weather damping; never
+    // apply that multiplier (or a separate rain boost) a second time.
     weatherResponse=std::clamp(ReadTuning(L"WeatherResponsePercent",100),0,200)*.01f;
     weatherEaseSeconds=float(std::clamp(ReadTuning(L"WeatherEaseSeconds",14),1,120));
     zoneWavesEnabled=ReadTuning(L"ZoneWaves",1)!=0;
@@ -848,6 +851,9 @@ void Configure(const std::wstring& base) {
     // Compile independently of the live switch. HookDevice uses readiness to
     // install draw/depth hooks once, before a player can turn water on in F7.
     ReloadTuning();
+    // Prime the CPU field before the first draw too, not one frame later:
+    // a saved size/direction or calm wind must not flash the old default sea.
+    AdvanceSea(0.f);
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     ComPtr<ID3DBlob> blob,error;
     HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
@@ -877,21 +883,28 @@ float ZoneAgitation() noexcept {
     const float value=renderer::FrameContext::Current().environment[renderer::WaterAgitation];
     return std::isfinite(value)?std::clamp(value,0.f,4.f):1.f;
 }
-void Present() {
-    if(!enabled)return;
-    // One eased sea state per frame, before any draw reads it. The delta comes from the
-    // performance-counter clock rather than from absolute time, because at high refresh rates a
-    // naive delta alternates between zero and a whole timer tick and anything integrated from it
-    // pulses (src/Core/FrameClock.h). The zone's WeatherIntensityMultiplier scales how hard the
-    // weather lands here as well as how wet the sky gets, which is deliberate: a sheltered valley
-    // that damps storms should not whip its own water up in them.
-    const float dt=seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency());
-    const renderer::water::SeaTuning tuning{ZoneAgitation(),
-        weatherResponse*std::clamp(renderer::FrameContext::Current().environment[renderer::Weather],0.f,4.f),
-        windStrengthPercent*.01f};
+void AdvanceSea(float dt) {
+    // Prepare next frame from the SAME immutable wind/weather snapshot the
+    // clouds will read. No dependence on cloud rendering, camera visibility,
+    // weather replacement textures or a successful depth capture.
+    const auto& frame=renderer::FrameContext::Current();
+    const renderer::water::SeaTuning tuning{ZoneAgitation(),weatherResponse,
+        windStrengthPercent*.01f,frame.wind.DrivesWaves(),frame.wind.strength};
     const auto sea=seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds);
     seaAgitation=sea.agitation;seaMotion=sea.motion;seaShear=sea.shear;seaWind=sea.wind;
-    seaMotion_.Observe(dt,flowSpeed*seaMotion);
+    // Prefer the main camera; waves-only/no-depth frames can use the most
+    // recent accepted draw anchor. It chooses only the turn pivot, never
+    // the per-draw phase (reflection draws retain their own camera below).
+    const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];
+    const float pivotY=frame.cameraValid?frame.cameraPosition.y:lastWaveAnchor.camera[1];
+    waveMotion.Advance(dt,flowSpeed*seaMotion,std::clamp(flowRotation*(1.f+seaShear),0.f,1.f),
+        waveScalePercent,frame.wind,pivotX,pivotY,frame.cameraValid||lastWaveAnchor.valid,wavesEnabled);
+}
+void Present() {
+    if(!enabled)return;
+    const auto& wind=renderer::FrameContext::Current().wind;
+    AdvanceSea(wind.sequence?wind.deltaSeconds:
+        seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency()));
     const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
     DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
@@ -907,10 +920,9 @@ void Present() {
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
-    // A device reset drops the eased sea state rather than letting it interpolate across a change
-    // of settings or a mode switch. The wave clock keeps running: snapping it would move every
-    // crest at once, which is the jump the clock exists to avoid.
-    seaFilter.Forget();
+    // Wind, sea state and accumulated phases survive GPU loss. They are CPU
+    // state, not device resources; forgetting them would pop every crest.
+    lastWaveAnchor.valid=false;
     if(cachedShaderDevice == d) {
         cachedReplacementPS.Reset();
         cachedReplacementVS.Reset();
@@ -1039,11 +1051,6 @@ struct Scope {
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
-            // Relative time avoids both uptime-sized float precision loss and
-            // the old discontinuous wave jump every ten minutes. It is integrated by the sea clock
-            // rather than read from the counter, because wave travel speed is now something that
-            // changes, and multiplying an absolute clock by a changing speed moves every crest.
-            const double elapsed=seaMotion_.Time();
             float controls[76]={0.f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
@@ -1125,20 +1132,17 @@ struct Scope {
                 anchor.up[1]=viewValid?waveFrame.viewRaw.m[1][2]:0.f;
                 anchor.up[2]=viewValid?waveFrame.viewRaw.m[2][2]:1.f;
             }
-            // The clock above already contains the flow speed, so it arrives here as 1: passing it
-            // twice would scale the same field by speed squared, and weather would look like a jump
-            // in travel rather than an increase of it. Weather also puts a cross-chop on the swell
-            // by taking the authored flow rotation further across it.
-            const float seaCounter=std::clamp(flowRotation*(1.f+seaShear),0.f,1.f);
-            const auto wave=renderer::water::BuildWaveField(elapsed,1.f,seaCounter,
-                waveScalePercent,anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled);
+            if(anchor.valid)lastWaveAnchor=anchor;
+            // Direction, speed, shear and their phases were integrated once at
+            // Present. Both shader stages and every draw share that field.
+            const auto wave=waveMotion.Build(anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled);
             // Geometry waves: the lift and the slide toward the crest, with the steepness
             // already clamped fold-safe on the CPU, so no slider combination can turn a
             // wave inside out. `sigma` goes to the pixel stage whether or not the mesh is
             // being displaced, because the crest sharpening and the whitecap mask are
             // properties of the sea and not of the toggle.
             const auto geometry=renderer::water::BuildGeometryWaves(geometryWavePercent,
-                waveScalePercent,seaAgitation,geometryWavesEnabled,wavesEnabled);
+                waveMotion.ScalePercent(),seaAgitation,geometryWavesEnabled,wavesEnabled);
             controls[0]=geometry.sigma;
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
             controls[38]=wave.lattice[2];controls[39]=wave.lattice[3];

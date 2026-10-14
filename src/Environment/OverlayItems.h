@@ -43,6 +43,21 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"WeatherVisuals",L"Mode","WEATHER HINT (0=AUTO 1=RAIN 2=SNOW)",0,2,1,0},
  {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","WEATHER STRENGTH",25,200,5,100},
 
+ // === SHARED WIND (simulation only; no visible wind effect) ===
+ {KIND_HEADER,nullptr,nullptr,"--- WIND ---",0,0,0,0},
+ {KIND_TOGGLE,L"Wind",L"Enabled","SHARED WIND",0,1,1,1},
+ {KIND_TOGGLE,L"Wind",L"Dynamic","TIME VARIATION",0,1,1,1},
+ {KIND_SLIDER,L"Wind",L"Direction","BASE DIRECTION (TRAVEL TOWARD)",0,7,1,1},
+ {KIND_SLIDER,L"Wind",L"StrengthPercent","BASE STRENGTH (%)",0,200,5,100},
+ {KIND_SLIDER,L"Wind",L"GustPercent","GUST VARIATION (%)",0,100,5,35},
+ {KIND_SLIDER,L"Wind",L"GustSeconds","GUST PERIOD (SECONDS)",2,120,1,18},
+ {KIND_SLIDER,L"Wind",L"DirectionChangeSeconds","DIRECTION INTERVAL (SECONDS)",15,600,5,120},
+ {KIND_SLIDER,L"Wind",L"TransitionSeconds","RESPONSE TIME (SECONDS)",1,120,1,30},
+ {KIND_SLIDER,L"Wind",L"WeatherResponsePercent","WEATHER RESPONSE (%)",0,200,5,100},
+ {KIND_TOGGLE,L"Wind",L"AffectWaves","DRIVE WAVES",0,1,1,1},
+ {KIND_TOGGLE,L"Wind",L"AffectClouds","DRIVE CLOUDS",0,1,1,1},
+ {KIND_TOGGLE,L"Wind",L"DebugView","WIND DEBUG VIEW",0,1,1,0},
+
  // Raymarched volumetric cloud deck. Advanced scattering knobs stay ini-only.
  {KIND_HEADER,nullptr,nullptr,"--- VOLUMETRIC CLOUDS ---",0,0,0,0},
  {KIND_TOGGLE,L"VolumetricClouds",L"Enabled","CLOUDS",0,1,1,1},
@@ -55,7 +70,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"BaseAltitude","CLOUD HEIGHT",100,20000,50,850},
  {KIND_SLIDER,L"VolumetricClouds",L"Thickness","CLOUD THICKNESS",100,12000,50,2150},
  {KIND_SLIDER,L"VolumetricClouds",L"FeatureSize","CLOUD SIZE",600,40000,200,3000},
- {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD WIND",0,400,5,26},
+ {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD DRIFT AT 100% WIND",0,400,5,26},
  {KIND_SLIDER,L"VolumetricClouds",L"SunIntensityPercent","CLOUD SUNLIGHT",0,400,5,130},
  {KIND_SLIDER,L"VolumetricClouds",L"AerialPerspectivePercent","CLOUD HAZE",0,100,5,60},
  {KIND_SLIDER,L"VolumetricClouds",L"GroundShadowPercent","CLOUD SHADOWS",0,100,5,55},
@@ -88,10 +103,10 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"GeometryWavePercent","WAVE HEIGHT",0,300,5,100},
  {KIND_SLIDER,L"Water",L"WaveSofteningPercent","WAVE FADE",0,400,5,100},
  {KIND_SLIDER,L"Water",L"ClarityPercent","WATER CLARITY",5,200,5,100},
- {KIND_SLIDER,L"Water",L"WindStrengthPercent","WIND",0,200,5,100},
+ {KIND_SLIDER,L"Water",L"WindStrengthPercent","WATER WIND / FOAM BIAS",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
  {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},
- {KIND_SLIDER,L"Water",L"WeatherResponsePercent","WEATHER RESPONSE",0,200,5,100},
+ {KIND_SLIDER,L"Water",L"WeatherResponsePercent","WIND / WEATHER RESPONSE",0,200,5,100},
  {KIND_TOGGLE,L"Water",L"ZoneWaves","PER-ZONE SEA STATE",0,1,1,1},
 
  // === LOCAL LIGHTING ===

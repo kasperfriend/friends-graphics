@@ -126,7 +126,12 @@ int main() try {
             tuningoverlay::visible = frame < 150; // also cover close/reopen
             if (frame >= 170) tuningoverlay::visible = true;
             const unsigned before = setterCalls;
-            Check(d->BeginScene()); tuningoverlay::Draw(d); Check(d->EndScene());
+            Check(d->BeginScene());
+            renderer::WindState wind; wind.debugView=frame%3!=0;
+            tuningoverlay::DrawWindDebug(d,wind);
+            CheckRestored(d,world); // Debug works with F7 closed, without state leakage.
+            if(!wind.debugView)Require(setterCalls==before,"disabled wind HUD touched the device");
+            tuningoverlay::Draw(d); Check(d->EndScene());
             Require(!tuningoverlay::visible || setterCalls > before, "test did not observe menu setters");
             CheckRestored(d, world);
         }
@@ -138,6 +143,7 @@ int main() try {
         };
         earlyReturn(); CheckRestored(d, world);
         tuningoverlay::font.Reset();
+        tuningoverlay::windDebugFont.Reset();
     }
     tuningoverlay::visible = false;
     DestroyWindow(window);

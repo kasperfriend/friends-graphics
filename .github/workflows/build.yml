@@ -132,6 +132,13 @@ jobs:
           $sweep = $sweep -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
           Write-Output "::notice title=Water safety sweep::$sweep"
 
+      - name: Wind simulation and settings regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          & cmd.exe /c tools\Test-Wind.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: F7 overlay state regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
@@ -235,6 +242,8 @@ jobs:
           ./build/cloud-climate-test
           g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-test
           ./build/cloud-layer-test
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/WindRegression.cpp -o build/wind-test
+          ./build/wind-test
           g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
           ./build/frame-clock-test
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/WaterRegression.cpp -o build/water-test

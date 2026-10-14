@@ -81,6 +81,14 @@ of the cloud shader, at the shipped defaults.*
 - Weather state survives short native-particle gaps caused by opening the F7 menu or returning from Alt+Tab.
 - Optional rain lens droplets and an atmosphere-haze response are available.
 
+### Shared wind
+
+- One invisible, world-space wind drives wave direction/sea strength and cloud drift/shear.
+- Eight compass targets (N, NE, E, SE, S, SW, W, NW), smooth turns, time-varying gusts and native-weather response. Strength rises during rain, snow and sandstorms and eases as weather clears.
+- **F7 → WIND** controls direction, strength, gusts, timing, weather response and each effect link, with an optional diagnostic HUD. No visible wind effect is added.
+- Motion phases survive tuning reloads and device resets. The shared state is ready for future vegetation consumers; plants, trees and grass are not connected yet.
+- See [wind controls, conventions and validation](docs/wind-system.md).
+
 ### Water
 
 See [water rendering, verification and troubleshooting](docs/water-rendering.md), and
@@ -98,8 +106,8 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
   one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 - Per-zone sea state and live weather response: an exposed coast carries more water than a
-  sheltered pond, a storm roughens and quickens both, and an untouched zone is exactly the
-  previous behaviour. Weather eases in and out over `[Water] WeatherEaseSeconds`.
+  sheltered pond, and stronger shared wind roughens and quickens both without counting weather twice.
+  Sea strength eases over `[Water] WeatherEaseSeconds`; unlinked water retains its legacy weather response.
 - Explicit sea states cover all 414 roots in the verified Ascension patch-M tables. This is a
   custom WotLK 3.3.5-based dataset, including Ascension and expansion-derived map IDs, not the
   stock Wrath zone catalog; the [full zone audit](docs/water-zone-profile-audit.md) documents scope.
@@ -191,7 +199,9 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
-| `[WeatherVisuals]` | Rain/snow intensity, speed, wind, occlusion, lens droplets, and haze. |
+| `[WeatherVisuals]` | Rain/snow intensity, speed, precipitation tilt, occlusion, lens droplets, and haze. |
+| `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links and diagnostic HUD. |
+| `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
 | `[PostProcess]` | Global enable switch, brightness, contrast, gamma, and sharpness. Always saved in `GraphicsEffects.ini`; location overrides are ignored. |
@@ -244,13 +254,14 @@ The repository includes focused regression and shader checks:
 ```powershell
 tools\Test-DeviceHealth.cmd
 tools\Test-FrameClock.cmd
+tools\Test-Wind.cmd
 tools\Test-Atmosphere.cmd
 tools\Test-Water.cmd
 tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 
-The tests cover fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
+The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
 
 ## Project structure
 
@@ -264,6 +275,8 @@ TuningOverlay.h             F7 in-game settings interface
 src/Core/                   Shared frame state, math, and shader caches
 src/D3D9/                   Camera/depth capture and render-state guards
 src/Effects/                Volumetric and local-light render passes
+src/Environment/            Location profiles, shared wind and F7 controls
+src/Water/                  Sea state, wave fields and integrated wind-driven motion
 src/Lighting/               Trusted local-light collection and lifetime rules
 src/Scene/                  Draw-call classification
 src/Materials/              Experimental, unfinished AI Materials code

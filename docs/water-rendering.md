@@ -166,79 +166,75 @@ scope the enable switch uses), so zones differ without a code change: `ClarityPe
 is the asymptote, `AbsorptionColour` is the per-channel rate). Colours are the only values
 that need text rather than an integer, so `ReadTuningColour` parses `0xRRGGBB` or decimal in
 this header rather than growing a colour type in the shared tuning reader. `WATER CLARITY`,
-`WIND` and `SUN SPARKLE` are on the F7 overlay; the rest are file-only for now.
+`WATER WIND / FOAM BIAS` and `SUN SPARKLE` are on the F7 overlay; the rest are file-only for now.
 
-### Sea state: the zone and the weather
+### Sea state: zone, shared wind and weather
 
-The keys above decide what a body of water looks like. This decides how much of it there is.
-Water was already procedural and already moving - `BuildWaveField` is an analytic sum of sine
-trains advected across the surface by `FlowSpeedPercent` and `FlowRotationPercent`, and the vertex
-stage displaces the same field the pixel stage lights - but it moved the same amount in a mountain
-pond as off the coast of Stranglethorn, and it did not care whether it was raining. Both are now
-inputs.
+`renderer::water::TargetSeaState` in `src/Water/WaterSeaState.h` is portable
+policy shared by the DLL and reference preview. The live path now consumes
+[shared dynamic wind](wind-system.md); the existing preview scenes remain
+fixed, unlinked references unless a shared-wind input is supplied explicitly.
 
-The model is one pure, device-free function, `renderer::water::TargetSeaState(zone, weather)` in
-`src/Water/WaterSeaState.h`, shared by the DLL and the previewer so a PNG here and a frame in the
-game cannot disagree about what a setting does. Two things feed it:
+- `WaterAgitationMultiplier` in **EnvironmentProfiles.ini** describes exposure.
+  All 414 verified roots carry a value (see the zone audit): open seas and coasts
+  are rougher than sheltered ponds. `ZoneWaves=0` substitutes 1.0 without
+  disabling wind. The accepted authored range remains 0–4.
+- Shared wind owns the direction and its weather/time-dependent strength.
+  Native type and authored intensity, scaled once by the zone's
+  `WeatherIntensityMultiplier`, feed wind and cloud coverage at the same frame
+  boundary. There is no verified server-side severity signal.
+- With shared wind disabled or `AffectWaves=0`, water uses its legacy fixed
+  direction and direct native-weather sea response.
 
-- `WaterAgitationMultiplier` in **EnvironmentProfiles.ini**, which is the same per-zone layer the
-  cloud climates ride (`[Zone.33] Profile=CloudLush WaterAgitationMultiplier=1.45` keeps the Lush
-  climate and retunes one water number, because `ResolveEnvironment` inherits the chain and then
-  applies the section's own keys). All 88 authored zones carry a value: 1.4-1.5 on the open seas,
-  1.45 for Stranglethorn, 1.15-1.3 for the high coasts and fjords, 0.45 in Elwynn, 0.3 in
-  Undercity. `[Default]` is 1.0, which is what makes the feature shippable switched on: a zone
-  nobody authored is exactly the old water. A value outside 0-4 fails the whole F12 reload rather
-  than being clamped, in company with every other key in that file.
-- live weather, taken from the observation the clouds already make. `ModernWoWRenderer.cpp` calls
-  `watereffect::FeedWeather(nativeWeatherMode, intensity)` on the line after
-  `volume::cloudWeatherStrength`, so rain closes the sky and roughens the water in the same frame
-  instead of only one of them agreeing that it is raining.
+`[Water] WeatherResponsePercent` (0–200, default 100) controls departures from
+reference wind energy when linked, and the native-weather push when unlinked.
+`WeatherEaseSeconds` (1–120, default 14) is the response time to about 95%, with
+clearing twice as slow. Zone exposure and the per-body `WindStrengthPercent`
+foam bias remain independent authoring layers.
 
-`[Water] WeatherResponsePercent` (0-200, default 100) is how far weather is allowed to push a
-zone, `WeatherEaseSeconds` (1-120, default 14) how long it takes to get there, and `ZoneWaves`
-(0/1) the switch that pins every zone to 1.0 if a value in the profile file is disputed. The easing
-is the cloud weather easing's own shape, `Response = -expm1(-3*dt/seconds)` - 95% of a step in one
-time constant - with the drain at twice the build, so open water settles rather than snapping flat.
-`dt` is clamped to 0.1 s per frame, so a loading screen cannot teleport the sea state. A zone that
-damps storms with `WeatherIntensityMultiplier` also damps what those storms do to its water:
-`Present()` multiplies the response by `Environment[Weather]`. That coupling is deliberate, and it
-is documented at `[Default]` in the profile file, where an author meets both numbers.
+For linked water, let `air = clamp(1 + (sharedStrength - 1) * response, 0, 5)`
+and `forcing = max(air - 1, 0)`. Strength 1 is neutral; at 0 a little residual
+swell survives but wind-driven foam vanishes. The native-weather push is not
+added again on top of the already weather-modulated wind.
 
-The five outputs are multiplied into floats the CPU already uploads. There is no new constant
-register, no HLSL edit, and the slot budget is untouched:
-
-| output | where it lands |
+| Output | Linked formula / destination |
 | --- | --- |
-| `agitation` = `clamp(zone*(1+.95*push), .12, 2.6)` | `controls[1]` wave amplitude, `[32]` swell, `[35]` crest foam, `[30] *= .7+.3*agitation` shore foam |
-| normal response | `controls[2] = NormalPercent * clamp(sqrt(agitation), 0, 2.5)` |
-| `shear` = `clamp(.25*push + (agitation-1)*.12, 0, 1)` | `BuildWaveField(elapsed, 1, clamp(flowRotation*(1+shear), 0, 1))`, a cross-chop over the swell |
-| `wind` = `clamp(authoredWind*(.45+.55*agitation), 0, 2.5)` | `controls[51]`, the wind the shader shades and foams against |
-| `motion` = `clamp(1+(agitation-1)*.55+.8*push, .08, 3)` | `SeaMotionClock`, which supplies `elapsed` |
+| `agitation` | `clamp(zone*(.2+.8*air), .12, 2.6)`; wave/swell/geometry amplitude and foam energy |
+| normal response | `NormalPercent * clamp(sqrt(agitation), 0, 2.5)` |
+| `shear` | `clamp(.25*forcing + (agitation-1)*.12, 0, 1)`; integrated cross-current |
+| `wind` | `clamp(authoredWind*air*(.45+.55*agitation), 0, 2.5)`; shader foam/wind gate |
+| `motion` | `clamp(1+(agitation-1)*.55+.8*forcing, .08, 3)`; future phase velocity |
 
-`push` is `response * amount`, where `amount` is the current weather's intensity and `response` is
-`WeatherResponsePercent * WeatherIntensityMultiplier`. `motion` is the reason a clock exists at all:
-wave phase is `elapsed * speed`, so multiplying an absolute clock by a *changing* speed moves every
-crest the instant weather eases - one visible jump per frame while a squall arrives. `SeaMotionClock`
-accumulates `dt * speed` instead, so a speed change alters future travel only. It never wraps and it
-ignores a non-finite step.
+The unlinked model retains `agitation = clamp(zone*(1+.95*push), .12, 2.6)` with
+`push = response * localWeatherAmount`, `forcing = push` and `air = 1` in the
+other formulas. A response of zero keeps the zone's authored energy in either
+mode; direction is separately controlled by the wind link. An authored foam
+bias of zero still suppresses wind-derived foam.
 
-`Reset()` forgets the eased state, so reloading settings or changing zones cannot interpolate across
-the change. An authored `WindStrengthPercent` of 0 keeps a river foamless in any weather, because
-every wind-derived term here is a multiplier on what the zone asked for. `WaterEffect.log` prints the
-eased state every 600 frames (`sea=agitation,motion,shear weather=kind,strength`), which is how a
-report of "nothing changed in Stormwind" becomes a number rather than an argument.
+`WaveMotion` now integrates **each** swell/chop/shear/UV phase in double
+precision, wrapping each in its own period. Speed or shear edits never multiply
+a new value into the whole session's elapsed time. Turns use a local world
+pivot and compensate the swell, warp and grouping phases together, rather
+than spinning the sea around the world origin. Every draw/reflection camera
+continues to use its own rigid model/view anchor. The geometry and pixel stages
+receive the same effective basis, wave size and phases; the shader ABI and
+instruction count are unchanged.
 
-On the F7 Water tab: `WAVE SPEED`, `WEATHER RESPONSE` and `PER-ZONE SEA STATE`, next to the existing
-`WIND`, `WATER CLARITY` and `SUN SPARKLE`, and saved per location like the rest.
+Wind, sea state and phase history survive device reset and tuning reload.
+A frame delta is bounded to 0.1 seconds; invalid deltas cannot poison shader
+constants. `WaterEffect.log` still reports eased sea state every 600 frames;
+**F7 → WIND → WIND DEBUG VIEW** reports the shared input and linkage.
 
-`tools/WaterRegression.cpp` asserts the identity case (untuned zone, clear sky: every multiplier 1,
-no shear), the ordering (an exposed coast in calm air is rougher than a sheltered pond in a
-downpour), the clamps, that a NaN never reaches a constant, the easing rate and its framerate
-independence, that the drain is slower than the build, that the clock does not jump when speed
-changes, and that the shipped 88-zone file stays inside the accepted range.
-`tools/CloudClimateRegression.cpp` parses the same file with the real resolver and asserts that a
-water-only zone line keeps its climate, which is the cheapest proof that two features sharing one
-authoring layer do not collide. In-game, this has not been looked at yet.
+On the F7 Water tab the relevant controls are `WAVE SPEED`, `WIND / WEATHER
+RESPONSE`, `PER-ZONE SEA STATE`, and `WATER WIND / FOAM BIAS`. Wind direction,
+strength, gusts, timing and link switches live in the separate **WIND** tab.
+Both use the existing location save/reload mechanism.
+
+`tools/WindRegression.cpp` covers all eight direction signs, shared weather,
+energy response, phase continuity, far-origin turns, reflected/different camera
+anchors, frame rates, controls, stalls and long sessions. Water and cloud
+regressions retain their geometry, shader/CPU, climate and exposure checks.
+Final visual acceptance still requires the actual client.
 
 ### Constant ABI
 

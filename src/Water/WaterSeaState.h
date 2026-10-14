@@ -1,5 +1,5 @@
 #pragma once
-// Zone and weather driven sea state.
+// Zone and shared-wind (or legacy native-weather) driven sea state.
 //
 // The wave numbers are authored globally ([Water] RIPPLE, SWELL, WIND), but a Stranglethorn coast
 // and an Elwynn pond are not the same water, and neither of them stays flat when a squall comes
@@ -13,7 +13,8 @@
 // was tuned against carry the same sea state the game will use. A change that is visible in one is
 // visible in the other, which is the whole point of having the previewer.
 //
-// Every multiplier is 1 (and the shear 0) for an untuned zone under a clear sky, so with
+// In the legacy/unlinked mode every multiplier is 1 (and the shear 0) for an untuned
+// zone under a clear sky. Linked wind has the same identity at strength 1. With
 // [Water] WeatherResponsePercent=0 and no authored agitation the produced numbers are exactly the
 // ones from before this existed. That property is asserted in tools/WaterRegression.cpp.
 #include <algorithm>
@@ -34,7 +35,9 @@ namespace renderer::water
     {
         float zoneAgitation = 1.f;   // [Environment] WaterAgitationMultiplier for the area
         float response = 1.f;        // [Water] WeatherResponsePercent, how hard weather lands here
-        float authoredWind = 1.f;    // [Water] WindStrengthPercent, the authored wind bias
+        float authoredWind = 1.f;    // [Water] WindStrengthPercent, the authored foam/wind bias
+        bool sharedWind = false;    // use the one weather-driven wind instead of a second storm boost
+        float windStrength = 1.f;   // shared wind [0,3], before this body's response/exposure
     };
 
     // Multipliers on the authored numbers. See TargetSeaState for what each one is allowed to do.
@@ -72,10 +75,19 @@ namespace renderer::water
         // Every input is sanitised because these multipliers end up in a shader constant: a NaN
         // that survives to a wave amplitude is a black frame, not a calmer sea. `clamp` alone
         // cannot do this - it passes NaN straight through - hence the explicit finite test.
-        state.agitation = std::clamp(Finite(tuning.zoneAgitation, 1.f) * (1.f + .95f * push), .12f, 2.6f);
-        state.motion = std::clamp(1.f + (state.agitation - 1.f) * .55f + .8f * push, .08f, 3.f);
-        state.shear = std::clamp(.25f * push + (state.agitation - 1.f) * .12f, 0.f, 1.f);
-        state.wind = std::clamp(Finite(tuning.authoredWind, 1.f) * (.45f + .55f * state.agitation), 0.f, 2.5f);
+        // Linked water consumes wind's ALREADY weather-modulated strength.
+        // Never multiply another rain boost into it. Response=0 keeps the
+        // authored sea energy (direction can still follow wind); at strength
+        // zero a little residual swell survives, but wind-driven foam vanishes.
+        const float air = tuning.sharedWind ? std::clamp(1.f +
+            (std::clamp(Finite(tuning.windStrength, 0.f), 0.f, 3.f) - 1.f) *
+            std::clamp(Finite(tuning.response, 1.f), 0.f, 4.f), 0.f, 5.f) : 1.f;
+        const float forcing = tuning.sharedWind ? std::max(air - 1.f, 0.f) : push;
+        const float energy = tuning.sharedWind ? .2f + .8f * air : 1.f + .95f * push;
+        state.agitation = std::clamp(Finite(tuning.zoneAgitation, 1.f) * energy, .12f, 2.6f);
+        state.motion = std::clamp(1.f + (state.agitation - 1.f) * .55f + .8f * forcing, .08f, 3.f);
+        state.shear = std::clamp(.25f * forcing + (state.agitation - 1.f) * .12f, 0.f, 1.f);
+        state.wind = std::clamp(Finite(tuning.authoredWind, 1.f) * air * (.45f + .55f * state.agitation), 0.f, 2.5f);
         return state;
     }
 
@@ -88,7 +100,8 @@ namespace renderer::water
     public:
         static float Response(float dt, float seconds)
         {
-            return -std::expm1(-3.f * dt / std::max(seconds, .01f));
+            return -std::expm1(-3.f * std::clamp(Finite(dt, 0.f), 0.f, .1f) /
+                std::max(Finite(seconds, 14.f), .01f));
         }
 
         SeaState Observe(const SeaTuning& tuning, const SeaWeather& weather, float dt, float buildSeconds)
@@ -96,8 +109,8 @@ namespace renderer::water
             const SeaState target = TargetSeaState(tuning, weather);
             if (!m_primed) { m_current = target; m_primed = true; return m_current; }
             const bool easingDown = target.agitation < m_current.agitation;
-            const float alpha = Response(std::isfinite(dt) ? std::clamp(dt, 0.f, .1f) : 0.f,
-                easingDown ? std::max(buildSeconds, .01f) * 2.f : std::max(buildSeconds, .01f));
+            const float seconds = std::max(Finite(buildSeconds, 14.f), .01f);
+            const float alpha = Response(dt, easingDown ? seconds * 2.f : seconds);
             for (auto member : {&SeaState::agitation, &SeaState::motion, &SeaState::shear, &SeaState::wind})
             {
                 m_current.*member += (target.*member - m_current.*member) * alpha;
@@ -115,10 +128,9 @@ namespace renderer::water
         SeaState m_current;
     };
 
-    // The wave field's clock. It integrates speed instead of multiplying the session's age by it,
-    // which is the difference between weather that arrives and weather that jumps: BuildWaveField
-    // derives travel AND lattice rotation from this number, so scaling elapsed time would teleport
-    // every wave - and every lit crest - the moment a storm started or the slider moved.
+    // Legacy scalar clock retained for fixed-wind callers/tests. Runtime uses
+    // WaveMotion, which integrates each train's speed AND shear independently.
+    // Multiplying session age by a changing parameter would teleport crests.
     class SeaMotionClock
     {
     public:

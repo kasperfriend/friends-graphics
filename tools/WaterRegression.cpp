@@ -630,9 +630,10 @@ int main() try
         Require(shader.find("seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds)") != std::string::npos
                 && shader.find("watereffect::FeedWeather") == std::string::npos,
                 "water is eased once per frame and is fed its weather rather than reading the client");
-        Require(shader.find("const double elapsed=seaMotion_.Time();") != std::string::npos
-                && shader.find("BuildWaveField(elapsed,1.f,") != std::string::npos,
-                "the wave field runs on the integrated clock, and speed is not re-multiplied into it");
+        Require(shader.find("waveMotion.Advance(dt,flowSpeed*seaMotion,") != std::string::npos
+                && shader.find("waveMotion.Build(anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled)") != std::string::npos
+                && shader.find("BuildWaveField(elapsed,") == std::string::npos,
+                "each wave phase is integrated once, and draws do not re-multiply speed/shear into session age");
 
         // ---- the three defects this round exists to remove, pinned as text -------------
         // Text is the only thing a portable test can hold a production shader to, and these
@@ -885,7 +886,7 @@ int main() try
         // Per-zone and per-weather authoring has to reach the geometry, not only the
         // shading: the sea state multiplies the lift, and waves off is flat water.
         Require(code.find("BuildGeometryWaves(geometryWavePercent,\n"
-                            "                waveScalePercent,seaAgitation,geometryWavesEnabled,wavesEnabled)")
+                            "                waveMotion.ScalePercent(),seaAgitation,geometryWavesEnabled,wavesEnabled)")
                     !=std::string::npos,
                 "the geometry waves are lifted by the same sea state the shading is");
         const std::string mirror = ReadAlongside("WaterPreview.cpp");

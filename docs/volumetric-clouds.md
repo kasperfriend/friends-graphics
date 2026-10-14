@@ -153,7 +153,7 @@ the F7 menu in the first column.
 | `DetailSize` | 240 | World size of one tile of the erosion volume. |
 | `WeatherSize` | 34000 | World size of one tile of the weather map. |
 | `DetailPercent` | 88 | Strength of the erosion that shreds cloud edges. |
-| `WindSpeed` / `WindAngle` / `WindShearPercent` | 26 / 25 / 22 | Drift speed, direction, and how far the tops lean downwind. |
+| `WindSpeed` / `WindAngle` / `WindShearPercent` | 26 / 25 / 22 | Drift speed at shared wind strength 100% and downwind shear gain. `WindAngle` is the legacy sampling angle, ignored while linked to `[Wind]`. See [shared wind](wind-system.md). |
 | `AbsorptionPercent` | 38 | Self-shadowing strength along the light march. |
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
 | `AmbientPercent` | 105 | Sky ambient contribution, tinted by the zone fog colour. |
@@ -236,8 +236,13 @@ fades out at full overcast so storms never acquire animated holes. These are
 noise-coordinate changes, **not changes to the world-height profile**. Wind and
 evolution integrate bounded frame deltas into wrapped double-precision phases;
 changing wind no longer recomputes displacement from the entire session age.
-INI reloads and device resets preserve phases. Set evolution and wind to zero
-and allow the transition to settle for a frozen field.
+INI reloads and device resets preserve phases. Shared wind now supplies the
+travel direction and strength; sampling offsets move opposite travel so the
+clouds and their shadows move downwind, like the waves. F7 → WIND controls the
+shared state, while the cloud wind-speed setting remains a local drift gain.
+For a frozen field, set evolution to zero and shared base wind strength to zero,
+disable weather-driven coverage, and allow transitions to settle. When unlinked,
+set cloud `WindSpeed=0` instead. See [shared wind](wind-system.md).
 
 No extra noise textures, texture fetches per density sample, ray steps or render
 passes are added. One shared constant register and a few arithmetic instructions

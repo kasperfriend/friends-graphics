@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "MathTypes.h"
 #include "../Environment/EnvironmentProfile.h"
+#include "../Environment/WindSystem.h"
 
 namespace renderer
 {
@@ -11,6 +12,10 @@ namespace renderer
         static FrameContext& Current();
 
         ResolvedEnvironmentState environment;
+        // Published after ALL rendering in Present, then immutable throughout
+        // the next frame, including the pre-UI and fallback cloud paths.
+        // Kept across camera/depth resets; wind is not a GPU resource.
+        WindState wind;
         uint64_t frameIndex = 0;
         IDirect3DDevice9* device = nullptr;
 

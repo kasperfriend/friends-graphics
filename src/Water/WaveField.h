@@ -50,7 +50,9 @@ namespace renderer::water
     // The speed slider scaled it, but only down to "still far too fast": at 5% the
     // field still travelled at ~17 yards per second on its own. Direction variety
     // now comes from the trains below, each with its own direction, and the shear
-    // knob advects them against one another. Nothing rotates.
+    // knob advects them against one another. This fixed-wind builder never
+    // rotates. Runtime wind turns use WaveMotion's locally re-anchored basis,
+    // never a time-dependent rotation about the world origin.
     inline constexpr float kLatticeYaw = 0.62f;   // radians, world +X to lattice row 0
 
     // ---- the swell trains ---------------------------------------------------
@@ -196,7 +198,9 @@ namespace renderer::water
     struct WaveField
     {
         // Rows of the world -> lattice matrix, already scaled by 1/cell. Row 0
-        // projects onto the dominant wind direction, row 1 across it. Both shader
+        // projects onto the dominant train axis, row 1 across it. With a
+        // positive sampling phase the train travels opposite row 0 (upwind).
+        // Both shader
         // stages need nothing else: the vertex shader rotates the resulting slope
         // back into view space, so the wave normal follows the real gradient.
         float lattice[4] = {1.f, 0.f, 0.f, 1.f};

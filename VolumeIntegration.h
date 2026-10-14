@@ -1086,8 +1086,8 @@ bool Composite(IDirect3DDevice9* d) {
     if (!shaftDebug && cloudsEffectEnabled) {
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
-        clouds.Settings().weatherStrength =
-            std::clamp(cloudWeatherStrength * frameCtx.environment[renderer::Weather], 0.f, 1.f);
+        // Already resolved once at the frame boundary, alongside wind/water.
+        clouds.Settings().weatherStrength = cloudWeatherStrength;
         if (clouds.Render(d, frameCtx, target.Get())) {
             frameCtx.cloudTexture = clouds.GetCloudTexture();
             frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
