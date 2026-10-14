@@ -144,7 +144,7 @@ static const float kRadA=0.39269908;
 static const float kRadB=0.78539816;
 static const float kWeightA=1.0;
 static const float kWeightB=0.5;
-struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;};
+struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float3 waveWarp:TEXCOORD7;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
@@ -212,14 +212,18 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
     // viewPos is the DISPLACED point, so the surface depth the atmosphere marches to and
     // the column the absorption measures are the water the player can actually see;
-    // worldRel is the undisplaced lattice coordinate, which is what the pixel stage must
-    // evaluate the field at so its shading lands on the vertex that was moved.
+    // worldRel is the undisplaced lattice coordinate where the pixel stage evaluates the
+    // swell trains, while the broad warp sample is passed separately for interpolation.
     o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=rel;
     // The wave gradient is expressed in world axes; the same three axis vectors rotate it
     // into view space here so the pixel shader only has to scale them by the wave slope:
     // no screen-space approximation and no per-triangle winding flip in the shading normal.
     o.waveTangent=axisX*waveLattice.x+axisY*waveLattice.y;
     o.waveBitangent=axisX*waveLattice.z+axisY*waveLattice.w;
+    // Pass the broad warp and its gradient to the pixel stage. At its 35-yard
+    // lattice scale the field is smooth across the liquid mesh, so perspective
+    // interpolation is accurate while avoiding a second noise evaluation per pixel.
+    o.waveWarp=waveWarp;
     return o;
 }
 )HLSL";
@@ -279,9 +283,6 @@ float4 waterTint:register(c214);
 float4 deepTint:register(c215);
 // rgb=per-channel absorption bias (a red-heavy value kills red first), w=sparkle gain
 float4 absorbTint:register(c216);
-// Camera anchor for the broad, low-frequency domain warp, in its own scaled
-// noise lattice. c210.xy remains the independently wrapped fine-chop phase.
-float4 waveWarpPhase:register(c217);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
 // Analytic value noise on one rotated lattice, evaluated for all four corner
 // hashes at once. Every hash argument is folded into a bounded range first:
@@ -334,7 +335,7 @@ static const float kSwellToUnit=0.28409091;
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
 struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
-WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6) {
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float3 waveWarp:TEXCOORD7) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
@@ -345,12 +346,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // crest and the light on it cannot drift apart - and only the chop on top of it is
     // noise.
     float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
-    // Low-frequency stochastic domain warp: local, smooth changes in the wave
-    // phase break up the perfectly repeated sine trains without adding unstable
-    // frame noise. c217 is the matching camera anchor in the scaled warp lattice.
-    float2 warpCoord=float2(dot(plane,float2(.8253356,.5646425)),
-                            dot(plane,float2(-.5646425,.8253356)))*.07142857+waveWarpPhase.xy;
-    float3 waveWarp=noiseGradient(warpCoord);
+    // The vertex stage sampled this broad, world-anchored warp and its gradient
+    // at the same lattice point. Its 35-yard scale is smooth over the liquid mesh,
+    // so interpolating it here preserves the bent crests without another pixel-noise
+    // evaluation (the fine chop below remains per-pixel).
     float warp=(waveWarp.x-.5)*3.2;
     float2 warpGradient=.07142857*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
                                          waveWarp.y*.5646425+waveWarp.z*.8253356);
@@ -372,8 +371,9 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // response: the same slope the geometry was lifted by, so shading and silhouette agree.
     float2 swellSlope=(kWgtA*kRadA*cosA*kDirA+kWgtB*kRadB*cosB*kDirB
                       +kWgtC*kRadC*cosC*kDirC);
-    // Chain rule through p' = p + direction * warp(p). This keeps the normal
-    // on the exact same gently bent crest the vertex stage lifted and slid.
+    // Chain rule through p' = p + direction * warp(p), using the interpolated
+    // warp gradient. This keeps the normal on the same gently bent crest the
+    // vertex stage lifted and slid without another per-pixel noise evaluation.
     swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*3.2)*foreverStyle.x;
     // One minus the Gerstner Jacobian: how hard the surface is pinching at this point.
     // It is the same number the vertex stage's slide was clamped by, so dividing the
@@ -933,7 +933,7 @@ struct Scope {
             // rather than read from the counter, because wave travel speed is now something that
             // changes, and multiplying an absolute clock by a changing speed moves every crest.
             const double elapsed=seaMotion_.Time();
-            float controls[72]={0.f,strength,normalStrength,specularStrength};
+            float controls[68]={0.f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
@@ -1035,7 +1035,6 @@ struct Scope {
             controls[42]=wave.swellPhase[0];controls[43]=wave.swellPhase[1];
             controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
             controls[46]=wave.swellPhase[2];controls[47]=wavesEnabled?1.f:0.f;
-            controls[68]=wave.warpPhase[0];controls[69]=wave.warpPhase[1];
             // Per-body authoring. The up axis comes from the draw's own matrix, so the sky
             // gradient, the sun elevation and the wind term point the right way for this
             // draw - including a reflected water pass, which runs under the reflection
@@ -1064,9 +1063,10 @@ struct Scope {
             controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
             controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
             controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
-            // The vertex stage gets the pixel shader's swell phases and low-frequency
-            // warp anchor verbatim, so lifted crests are the same irregular waves shading
-            // lights. Registers: c200 control, c201 lattice, c202 swell phase, c203 warp.
+            // Both stages share the swell phases. The vertex stage also samples the
+            // low-frequency warp from this anchor and interpolates that sample to pixels,
+            // keeping the lifted crest irregular without re-hashing noise per pixel.
+            // Registers: c200 control, c201 lattice, c202 swell phase, c203 warp.
             float vertexControls[16]={geometry.amplitude,geometry.lateral,geometry.sigma,
                 geometry.cellYards,
                 wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
@@ -1118,7 +1118,7 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,18))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,4))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,17))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,4))){Restore();return;}
             {
                 float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();

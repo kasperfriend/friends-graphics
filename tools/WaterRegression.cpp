@@ -652,10 +652,13 @@ int main() try
                     !=std::string::npos,
                 "pixel normals apply the full chain rule through the same crest warp");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
-                pixel.find("waveWarpPhase:register(c217)")!=std::string::npos&&
-                code.find("SetPixelShaderConstantF(200,controls,18)")!=std::string::npos&&
+                vertex.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
+                vertex.find("o.waveWarp=waveWarp;")!=std::string::npos&&
+                pixel.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
+                pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
+                code.find("SetPixelShaderConstantF(200,controls,17)")!=std::string::npos&&
                 code.find("SetVertexShaderConstantF(200,vertexControls,4)")!=std::string::npos,
-                "both shader stages upload the independent camera-anchored warp phase");
+                "the vertex stage anchors the broad warp and interpolates it to pixels without resampling");
         Require(pixel.find("float2 tilt=-slopes*(controls.z/jacobian)*flip;")!=std::string::npos,
                 "a crest leans toward the light it catches: the normal is the negative gradient");
         Require(pixel.find("float jacobian=max(1.0-pinch,.3);")!=std::string::npos&&
