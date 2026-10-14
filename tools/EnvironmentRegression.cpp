@@ -36,9 +36,14 @@ int main() try {
  locationtuning::Sync(tuningBase,{530,10127,123,true},true);
  Require(locationtuning::ReadInt(L"Water",L"Enabled",1,locationtuning::baseFile.c_str())==0,"subarea inherits zone override including zero values");
  locationtuning::Sync(tuningBase,{},true);
- Require(!locationtuning::Save(L"Water",L"Enabled",1),"loading screen cannot save a preset");
+ Require(locationtuning::Save(L"Water",L"Enabled",1)&&
+         locationtuning::ReadInt(L"Water",L"Enabled",0,locationtuning::baseFile.c_str())==1,
+         "loading-screen edits save globally without an invalid location preset");
  locationtuning::Sync(tuningBase,{571,65,4164,true},false);
- Require(!locationtuning::Save(L"Water",L"Enabled",1),"unverified database blocks location writes");
+ Require(locationtuning::Save(L"Water",L"Enabled",0)&&
+         locationtuning::ReadInt(L"Water",L"Enabled",1,locationtuning::baseFile.c_str())==0&&
+         GetPrivateProfileIntW(L"Map.571.Zone.65.Area.4164.Water",L"Enabled",-1,locationtuning::localFile.c_str())==-1,
+         "unverified database falls back globally without writing a location preset");
  // Existing map/zone/subarea color overrides must never affect global grading.
  locationtuning::Sync(tuningBase,{571,65,4164,true},true);
  const wchar_t* colorKeys[]={L"Enabled",L"BrightnessPercent",L"ContrastPercent",L"GammaPercent",L"SharpnessPercent"};
