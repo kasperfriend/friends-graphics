@@ -388,7 +388,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // road wide, a high one keeps it short and tight, and chop broadens it further.
     // That replaces a full Smith visibility chain, which cost eight slots to describe
     // a falloff the lobe width already produces.
-    float sharpness=mix(26.0,230.0,saturate(sunElev*1.8))/(1.0+rough*7.0)*absorbTint.w;
+    float sharpness=lerp(26.0,230.0,saturate(sunElev*1.8))/(1.0+rough*7.0)*absorbTint.w;
     // (sharpness+2) is the lobe's own energy normalization: pow(NoH,n) integrates to
     // 2*pi/(n+2), so without it a low sun smears a dim band and a high sun - where n is
     // large - faded to nothing. The CPU preview showed a whole sea with no sun road at all.
