@@ -2,11 +2,16 @@
 // the row-vector matrix conventions used by tracked light and temporal passes.
 #include "../src/Core/DeviceHealth.h"
 #include "../src/D3D9/CelestialStability.h"
+#include "../src/D3D9/CameraContinuity.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 
 using namespace renderer;
 
@@ -16,6 +21,18 @@ namespace
     {
         if (!value) throw std::runtime_error(name);
         std::printf("PASS %s\n", name);
+    }
+    std::string Read(const char* path)
+    {
+        std::ifstream in(path);
+        if (!in) throw std::runtime_error(std::string("Missing ") + path);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    }
+    bool Contains(const std::string& text, const char* needle)
+    {
+        return text.find(needle) != std::string::npos;
     }
 }
 
@@ -53,6 +70,73 @@ int main() try
         gate.Succeed();
         Require(!gate.Failed() && gate.Open(3501), "success clears the failure streak");
         Require(gate.Fail(4000, 2000), "a new streak after recovery is reported again");
+    }
+
+    {
+        // Click-an-NPC brightening: the camera whose light the frame inherits
+        // is latched off the first qualifying draw, so a portrait-style draw
+        // must not be able to become it. The gate sees the same rows the
+        // capture checks (v[0..3]) plus the viewport size.
+        auto viewFor = [](float px, float py, float pz, float yaw, float translation[4], float basis[3][4]) {
+            const float c = std::cos(yaw), s = std::sin(yaw);
+            const float rows[3][3] = {{c, s, 0.f}, {-s, c, 0.f}, {0.f, 0.f, 1.f}};
+            for (int r = 0; r < 3; ++r) {
+                for (int j = 0; j < 3; ++j) basis[r][j] = rows[r][j];
+                basis[r][3] = 0.f;
+                translation[r] = -(rows[r][0] * px + rows[r][1] * py + rows[r][2] * pz);
+            }
+            translation[3] = 1.f;
+        };
+        float t[4], basis[3][4];
+        CameraContinuityGate gate;
+        viewFor(100.f, 200.f, 10.f, .4f, t, basis);
+        Require(gate.Accept(t, basis, 1920, 1080), "the first full-frame camera anchors the gate");
+        // A portrait camera: close-up, differently aimed, small viewport.
+        viewFor(102.f, 198.f, 12.f, 2.6f, t, basis);
+        Require(!gate.Accept(t, basis, 256, 256), "a portrait-viewport camera cannot take over the frame's light");
+        // Even a full-frame interloper from somewhere else is not this camera.
+        Require(!gate.Accept(t, basis, 1920, 1080), "a distant, differently aimed camera cannot take over either");
+        // The real camera next frame: a few yards on, barely turned.
+        viewFor(104.f, 203.f, 10.5f, .47f, t, basis);
+        Require(gate.Accept(t, basis, 1920, 1080), "the scene camera still latches after the interloper was refused");
+        // A teleport: three consistent candidates re-anchor, no sooner.
+        viewFor(800.f, -400.f, 30.f, .47f, t, basis);
+        Require(!gate.Accept(t, basis, 1920, 1080), "a teleport is not believed on the first frame");
+        Require(!gate.Accept(t, basis, 1920, 1080), "nor on the second");
+        Require(gate.Accept(t, basis, 1920, 1080), "three consistent candidates re-anchor after a teleport");
+        gate.Reset();
+        viewFor(0.f, 0.f, 0.f, 0.f, t, basis);
+        Require(gate.Accept(t, basis, 1920, 1080), "a reset gate anchors on the next camera it sees");
+    }
+
+    {
+        // Moon lighting following the camera: a view-space disc direction is
+        // only a world direction once the frame's real camera converts it.
+        // For a fixed moon, every camera yaw must recover the same world
+        // vector - build the view direction the way the scene itself would
+        // (vd is the world direction read against the camera basis rows) and
+        // convert it back through viewRaw.
+        const Vec3 moonWorld = Normalize({.35f, -.62f, .70f});
+        for (float yaw : {0.f, .7f, 1.9f, 3.4f, 5.8f}) {
+            const float c = std::cos(yaw), s = std::sin(yaw);
+            float viewRaw[16] = {c, s, 0.f, 0.f, -s, c, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+            const float viewDir[3] = {
+                viewRaw[0] * moonWorld.x + viewRaw[1] * moonWorld.y + viewRaw[2] * moonWorld.z,
+                viewRaw[4] * moonWorld.x + viewRaw[5] * moonWorld.y + viewRaw[6] * moonWorld.z,
+                viewRaw[8] * moonWorld.x + viewRaw[9] * moonWorld.y + viewRaw[10] * moonWorld.z};
+            float world[3];
+            ViewDirectionToWorld(viewRaw, viewDir, world);
+            const float dot = world[0] * moonWorld.x + world[1] * moonWorld.y + world[2] * moonWorld.z;
+            Require(dot > .9999f, "the moon's world direction is the same from every camera yaw");
+        }
+        const auto composite = Read("VolumeIntegration.h");
+        Require(Contains(composite, "renderer::ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0]") &&
+                Contains(composite, "moon.visible ? &moonDirectionWorld : nullptr") &&
+                !Contains(composite, "moon.visible ? &moon.worldSpaceDirection : nullptr"),
+            "the compositor converts celestial directions with the captured camera, not the billboard draw's");
+        const auto capture = Read("src/D3D9/CameraCapture.cpp");
+        Require(Contains(capture, "if (!fullFrame)") && Contains(capture, "m_cameraGate.Accept(v[3], v, vp.Width, vp.Height)"),
+            "camera capture demands a full-frame, continuous camera before latching the frame's light");
     }
 
     {

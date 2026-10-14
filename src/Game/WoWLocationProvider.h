@@ -31,6 +31,12 @@ private:
     // configuration, and the panel reads it whenever it draws. Same reason rawSample and
     // validation are already mutable.
     mutable LocationFailure failure=LocationFailure::NotConfigured;
+    // The refusal Configure() itself reached, kept separately because Sample() runs
+    // every poll and must not rename it: a client whose fingerprint matches nothing
+    // is "unrecognized executable" forever, and letting the first world-frame sample
+    // overwrite that with NotConfigured sent players to check a file that was never
+    // the problem (and made the log's real cause unreachable from the panel).
+    LocationFailure configureFailure=LocationFailure::NotConfigured;
     WoWClientContext client;
     WoWLocationOffsets offsets;
     bool available=false,verified=false;

@@ -277,6 +277,42 @@ int main() try
     Require(source.find("Cloud(p+light*(baseDistance+(h-low)*reach),h)")!=std::string::npos,
             "production shadow integrates from the visible world-height cloud base");
     Require(source.find("windSpeed*m_elapsed")==std::string::npos,"production no longer recomputes wind from session age");
+    // ----- Per-zone water colours: resolution, layering, blending -------------
+    {
+        Require(config.areas.size()==1,"water colours add an area layer, never a new zone");
+        const auto booty=ResolveEnvironment(config,{530,33,35,true}).state;
+        Require(booty.water.authored,"Booty Bay resolves authored water colours");
+        // Area beats zone on every channel, and the bay is bluer than the teal coast
+        // around it: that contrast is the whole point of authoring the area.
+        Require(Near(booty.water.tint[2],0xCC/128.f)&&Near(booty.water.deep[1],0x44/255.f),
+                "Booty Bay area colours win over its Stranglethorn zone");
+        const auto vale=ResolveEnvironment(config,{530,33,0,true}).state;
+        Require(vale.water.authored&&Near(vale.water.deep[2],0x4D/255.f)&&vale.water.tint[2]<booty.water.tint[2],
+                "Stranglethorn keeps its own teal under the Booty Bay override");
+        // A zone that authors nothing keeps the shipped global base, unauthored,
+        // so WaterEffect leaves GraphicsEffects.ini in charge there.
+        const auto plain=ResolveEnvironment(config,{0,400,0,true}).state;
+        Require(!plain.water.authored&&Near(plain.water.deep[1],42.f/255.f),
+                "an unauthored zone keeps the global water colours");
+        for (const uint32_t darkZone : {10u,8u,139u,361u,3520u,210u}) {
+            const auto dark=ResolveEnvironment(config,{0,darkZone,0,true}).state;
+            Require(dark.water.authored&&dark.water.deep[1]<42.f/255.f,
+                    "gloomy zones author a darker deep colour than the global base");
+        }
+        const auto halfway=BlendEnvironment(plain,vale,.5f);
+        Require(halfway.water.authored&&halfway.water.deep[2]>plain.water.deep[2]&&halfway.water.deep[2]<vale.water.deep[2],
+                "water colours blend across a zone border instead of stepping");
+        EnvironmentConfiguration broken;std::string colourError;
+        Require(!ParseEnvironmentConfiguration("[Default]\nWaterColour=0xZZZZZZ\n",broken,colourError)&&
+                !ParseEnvironmentConfiguration("[Zone.33]\nDeepColour=red\n",broken,colourError),
+                "malformed water colours are rejected, not guessed at");
+        const auto waterEffect=Read("WaterEffect.h");
+        Require(waterEffect.find("waveFrame.environment.water.authored")!=std::string::npos&&
+                waterEffect.find("HasScopedValue(L\"Water\",L\"WaterColour\")")!=std::string::npos&&
+                waterEffect.find("HasScopedValue(L\"Water\",L\"DeepColour\")")!=std::string::npos&&
+                waterEffect.find("HasScopedValue(L\"Water\",L\"AbsorptionColour\")")!=std::string::npos,
+                "zone water colours replace the global ones unless the location overrides them");
+    }
     return 0;
 }
 catch(const std::exception& e) { std::cerr<<"FAIL "<<e.what()<<'\n';return 1; }

@@ -302,7 +302,7 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     WaveState w;
     const V2 plane{ worldX * field.lattice[0] + worldY * field.lattice[1],
                     worldX * field.lattice[2] + worldY * field.lattice[3] };
-    // A low-frequency anchored warp makes the six swell trains wander, and a broader
+    // A low-frequency anchored warp makes the eight swell trains wander, and a broader
     // envelope groups them into sets. The same coordinate and chain-rule gradient are
     // evaluated in both shaders.
     const WaveWarpSample warp = WarpWavePlane(field, plane.x, plane.y);
@@ -327,12 +327,15 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // The chop rides the swell instead of scrolling over it, exactly as the shader's does.
     const NoiseSample ripple = NoiseGradient(plane.x + field.ripplePhase[0] + swell * .62f,
                                             plane.y + field.ripplePhase[1] + swell * .33f);
+    // The shader's second chop octave: finer, counter-phased, footprint-faded sooner.
+    const NoiseSample rippleFine = NoiseGradient(plane.x * 2.17f + field.ripplePhase[1] * 1.31f + swell * .9f,
+                                                 plane.y * 2.17f - field.ripplePhase[0] * 1.31f + swell * .47f);
     const float strength = c.ripple * .001f, normalResponse = c.normalResponse * .01f;
     // The shader's waveFlow.w gate, which the DLL fills from WAVES rather than from the
     // strengths: the preview has no such switch, so it derives the same 0/1 from them.
     const float flowGate = Saturate(strength * 100.f + normalResponse * 4.f);
-    w.slopes = V2{ (ripple.dx * .72f * filter * gain + swellSlope.x) * flowGate,
-                   (ripple.dy * .72f * filter * gain + swellSlope.y) * flowGate };
+    w.slopes = V2{ ((ripple.dx * .72f * filter + rippleFine.dx * .30f * filter * filter) * gain + swellSlope.x) * flowGate,
+                   ((ripple.dy * .72f * filter + rippleFine.dy * .30f * filter * filter) * gain + swellSlope.y) * flowGate };
     w.detail = Mix(.5f, ripple.value, filter);
     // Long foam tongues inherit the broad crest-scale breakup while chop tears
     // their edges into smaller, moving flecks. Both fields are already sampled

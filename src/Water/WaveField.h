@@ -56,23 +56,26 @@ namespace renderer::water
     // ---- the swell trains ---------------------------------------------------
     // One table, three readings of it: the vertex stage displaces the two long
     // ones (the client's liquid grid is ~4 yards apart, so an eleven yard wave is
-    // the shortest it can carry without faceting), the pixel stage shades all six
+    // the shortest it can carry without faceting), the pixel stage shades all eight
     // and wraps its phases against them, and this header advances them. Directions
     // are unit vectors in lattice space, wavelengths are in cells, weights are the
     // share of the authored amplitude each train carries. Both shaders spell the
     // same numbers as literals; tools/WaterRegression.cpp pins the spelling.
     //
-    // Why six and not three: three sinusoids of comparable height are a rhythm, and
+    // Why eight and not three: three sinusoids of comparable height are a rhythm, and
     // a rhythm is precisely what "line by line of waves going and going" was. Three
     // crests can only interfere so much - the forty yard train repeated after one
     // 40 yard step along the dominant train and the eye finds the seam immediately.
-    // A real wind sea is a broad BAND of wavenumbers, each with its own direction and
-    // its own speed, and what a player sees as "the waves" is the interference of
-    // that band: crests that grow, weaken, curve into one another and disappear. Six
-    // trains whose wavelengths are in a ~1.35 ratio (never an integer one), in six
-    // directions no two of which share a crest line, produce exactly that - and every
-    // adjacent PAIR of them beats, which is where the grouping below gets its scale
-    // for free.
+    // Six trains were the first answer and still read as lines at range, because the
+    // band stopped at an 8.5 yard wavelength: everything shorter was one noise octave,
+    // so the eye grouped the six surviving crest families back into combs. A real wind
+    // sea is a broad BAND of wavenumbers, each with its own direction and its own
+    // speed, and what a player sees as "the waves" is the interference of that band:
+    // crests that grow, weaken, curve into one another and disappear. Eight trains
+    // whose wavelengths are in a ~1.35 ratio (never an integer one), in eight
+    // directions no two of which share a crest line, carry the band down to a five
+    // yard wavelength where the chop takes over - and every adjacent PAIR of them
+    // beats, which is where the grouping below gets its scale for free.
     //
     // The weights follow the sea rather than the eye: what stays roughly constant
     // across a developed wind sea is the SLOPE of each component (w * k), not its
@@ -80,29 +83,32 @@ namespace renderer::water
     // owns the silhouette while the short ones own the texture. Summed slope is kept
     // near the one this table has always carried (see kMaxPinch), because that number
     // is the crest steepness the shading divides its Jacobian by.
-    inline constexpr int kTrainCount = 6;
-    // 0, -34, 21, 47, 83 and 110 degrees. A crest line has no direction, so what has
-    // to be spread is the angle MODULO A HALF TURN: six lines across 180 degrees with
-    // gaps of 21, 26, 36, 27, 36 and 34 degrees are far enough apart that no two share
-    // a crest, and irregularly enough that the fan is not itself a pattern. The first
-    // version of this table ran the two shortest trains at -71 and 104 degrees - five
-    // degrees apart in line space, i.e. one comb with two teeth, which is exactly the
-    // artefact the whole table exists to remove. The regression test computes the
-    // cross products and refuses that, so the mistake cannot come back.
-    inline constexpr float kTrainDirX[kTrainCount] = {1.f, .8290376f, .9335804f, .6819984f, .1218693f, -.3420201f};
-    inline constexpr float kTrainDirY[kTrainCount] = {0.f, -.5591929f, .3583679f, .7313537f, .9925462f, .9396926f};
-    inline constexpr float kTrainCells[kTrainCount] = {16.f, 11.5f, 8.f, 5.8f, 4.4f, 3.4f};  // 40 down to 8.5 yards
-    inline constexpr float kTrainWeight[kTrainCount] = {1.f, .62f, .34f, .19f, .12f, .075f};
+    inline constexpr int kTrainCount = 8;
+    // 0, -34, 21, 47, 83, 110, 65 and 128 degrees. A crest line has no direction, so
+    // what has to be spread is the angle MODULO A HALF TURN: eight lines across 180
+    // degrees with gaps no wider than 36 and none narrower than 18 degrees are far
+    // enough apart that no two share a crest, and irregularly enough that the fan is
+    // not itself a pattern. The first version of this table ran the two shortest
+    // trains at -71 and 104 degrees - five degrees apart in line space, i.e. one comb
+    // with two teeth, which is exactly the artefact the whole table exists to remove.
+    // The regression test computes the cross products and refuses that, so the
+    // mistake cannot come back. The two shortest trains sit in the fan's two widest
+    // remaining gaps (65 between 47 and 83, 128 between 110 and 146), so the fine
+    // end of the band crosses the coarse end instead of marching beside it.
+    inline constexpr float kTrainDirX[kTrainCount] = {1.f, .8290376f, .9335804f, .6819984f, .1218693f, -.3420201f, .4226183f, -.6156615f};
+    inline constexpr float kTrainDirY[kTrainCount] = {0.f, -.5591929f, .3583679f, .7313537f, .9925462f, .9396926f, .9063078f, .7880108f};
+    inline constexpr float kTrainCells[kTrainCount] = {16.f, 11.5f, 8.f, 5.8f, 4.4f, 3.4f, 2.55f, 1.95f};  // 40 down to 4.9 yards
+    inline constexpr float kTrainWeight[kTrainCount] = {1.f, .62f, .34f, .19f, .12f, .075f, .052f, .036f};
     inline constexpr float kTrainRadians[kTrainCount] =
-        {kTwoPi / 16.f, kTwoPi / 11.5f, kTwoPi / 8.f, kTwoPi / 5.8f, kTwoPi / 4.4f, kTwoPi / 3.4f};
-    // Where each train starts along its own direction, in CELLS of that train. Six
+        {kTwoPi / 16.f, kTwoPi / 11.5f, kTwoPi / 8.f, kTwoPi / 5.8f, kTwoPi / 4.4f, kTwoPi / 3.4f, kTwoPi / 2.55f, kTwoPi / 1.95f};
+    // Where each train starts along its own direction, in CELLS of that train. Eight
     // trains whose crests all cross lattice zero at the same instant look like one
     // comb being dragged over the water; a fixed offset per train - an irregular
     // fraction of its own wavelength, so it survives the phase wrap untouched - puts
-    // each crest somewhere else, and the interference of six of them is a surface
+    // each crest somewhere else, and the interference of eight of them is a surface
     // that never repeats inside the distance a player can see.
     inline constexpr float kTrainPhaseCells[kTrainCount] =
-        {0.f, .37f * 11.5f, .71f * 8.f, .19f * 5.8f, .55f * 4.4f, .83f * 3.4f};
+        {0.f, .37f * 11.5f, .71f * 8.f, .19f * 5.8f, .55f * 4.4f, .83f * 3.4f, .29f * 2.55f, .63f * 1.95f};
     // The two trains the mesh is dense enough to carry. Everything above index 1
     // is normal-mapped only, exactly like a real renderer splits simulation from
     // detail: displacing an eleven yard wave on a four yard grid is what facets.
@@ -132,8 +138,8 @@ namespace renderer::water
     // speed while the shorter trains shear against it and against each other.
     // That is what stops the surface reading as a still mirror with noise on top,
     // and it is what [Water] FlowRotationPercent and the weather shear both drive.
-    // With six trains the shear is doing more work than it used to: six directions
-    // across one current means six different speeds, so the crests slide through each
+    // With eight trains the shear is doing more work than it used to: eight directions
+    // across one current means eight different speeds, so the crests slide through each
     // other instead of marching as one comb, which is the difference between a
     // "pattern of waves" and a sea.
     inline constexpr float kCrossCurrent = .55f;
@@ -142,13 +148,13 @@ namespace renderer::water
     inline constexpr float kUvDriftV = -.0011f;
 
     // A low-frequency, world-anchored domain warp makes the swell wander instead of
-    // laying down six perfectly repeatable sine trains. Its input uses the same
+    // laying down eight perfectly repeatable sine trains. Its input uses the same
     // bounded value-noise lattice as the fine chop, at one sample per 50 yards, and
     // it displaces the crest ALONG the wave field rather than sideways out of it:
-    // a bend of five cells over a twenty cell wavelength moves a forty yard crest
+    // a bend of six and a half cells over a twenty cell wavelength moves a forty yard crest
     // fifteen yards sideways here and back again there, which stretches the spacing
     // in one place and doubles crests up in the next. That is the second half of the
-    // fix for "lines of waves going and going" - the first being the six trains -
+    // fix for "lines of waves going and going" - the first being the eight trains -
     // because a bent train has no constant wavelength left to read as a rhythm.
     // The pixel stage gets the bend AND its gradient from the vertex stage, so the
     // chain rule below keeps the shading normal on the crest the geometry was lifted
@@ -158,7 +164,7 @@ namespace renderer::water
     inline constexpr float kWaveWarpSin = .5646425f;         // sin(.6 radians)
     inline constexpr float kWaveWarpDirectionX = .6f;        // unit displacement direction
     inline constexpr float kWaveWarpDirectionY = .8f;
-    inline constexpr float kWaveWarpAmplitude = 5.f;        // maximum displacement in lattice cells
+    inline constexpr float kWaveWarpAmplitude = 6.5f;      // maximum displacement in lattice cells
 
     // ---- wave grouping: the envelope that decides whether THIS patch has waves ----
     // A real sea is not uniformly rough. Wind waves grow in a generating area and
@@ -212,7 +218,7 @@ namespace renderer::water
         // per lattice axis is what lets a directional wave share one small number
         // between the stages: a shift of one wavelength is one full turn of the
         // sine, so it cannot be seen, whatever the direction.
-        float swellPhase[kTrainCount] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        float swellPhase[kTrainCount] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
         // Drift of the client's own water detail texture, in its uv space.
         float uvDrift[2] = {0.f, 0.f};
         // Nothing else is needed: the camera's own coordinate is inside the phases,
@@ -402,11 +408,12 @@ namespace renderer::water
     inline constexpr float kMaxPinch = kTrainWeight[0] * kTrainRadians[0]
         + kTrainWeight[1] * kTrainRadians[1] + kTrainWeight[2] * kTrainRadians[2]
         + kTrainWeight[3] * kTrainRadians[3] + kTrainWeight[4] * kTrainRadians[4]
-        + kTrainWeight[5] * kTrainRadians[5];
+        + kTrainWeight[5] * kTrainRadians[5] + kTrainWeight[6] * kTrainRadians[6]
+        + kTrainWeight[7] * kTrainRadians[7];
 
     // The same sum over the trains the MESH carries. This is the one the Gerstner
     // surface actually folds against: the vertex stage slides the two long trains only,
-    // so the four short ones steepen the shading without ever turning a triangle
+    // so the six short ones steepen the shading without ever turning a triangle
     // inside out, and the fold clamp is written against this number, not the other.
     inline constexpr float kGeometryPinch = kTrainWeight[0] * kTrainRadians[0]
         + kTrainWeight[1] * kTrainRadians[1];
@@ -420,7 +427,8 @@ namespace renderer::water
     // is over the whitecap threshold, and the water at the end of it is under it.
     inline constexpr float kSwellToUnit = 1.f
         / (2.f * (kTrainWeight[0] + kTrainWeight[1] + kTrainWeight[2]
-            + kTrainWeight[3] + kTrainWeight[4] + kTrainWeight[5]));
+            + kTrainWeight[3] + kTrainWeight[4] + kTrainWeight[5]
+            + kTrainWeight[6] + kTrainWeight[7]));
 
     inline SwellSample EvaluateSwell(float cellX, float cellY, const float phase[kTrainCount]) noexcept
     {

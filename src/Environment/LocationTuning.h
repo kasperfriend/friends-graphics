@@ -41,6 +41,19 @@ inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
     wchar_t value[128]{};ReadString(section,key,L"",value,128,path);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
+// True only for a value actually written into LocationGraphics.ini at some scope
+// for the current place. ReadString cannot answer this - it falls back to the
+// global file - and the water colours need the distinction: a shipped per-zone
+// colour replaces the global default, but never a player's own scoped override.
+inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
+    if(!editable||localFile.empty())return false;
+    for(int level=active.areaId?2:1;level>=0;--level) {
+        const auto scope=Scope(level)+L"."+section;
+        wchar_t value[128]{};GetPrivateProfileStringW(scope.c_str(),key,L"",value,128,localFile.c_str());
+        if(value[0])return true;
+    }
+    return false;
+}
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     if(IsGlobal(section))return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
     // Per-location overrides are only meaningful once this client's location

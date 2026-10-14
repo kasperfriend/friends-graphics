@@ -140,11 +140,22 @@ int main() try
             "location RVAs go through the trimming parser, not a raw wcstoull");
         Require(!Contains(provider, "wcstoull(value,&end,0)"), "the old whitespace-intolerant RVA parse is gone");
         int causes = 0;
-        for (const char* needle : {"failure=LocationFailure::UnsupportedExecutable", "failure=LocationFailure::FingerprintMismatch",
-                                  "failure=LocationFailure::UnreadableRvas", "failure=LocationFailure::ReadFailed"})
+        for (const char* needle : {"failure=configureFailure=LocationFailure::UnsupportedExecutable", "failure=configureFailure=LocationFailure::FingerprintMismatch",
+                                  "failure=configureFailure=LocationFailure::UnreadableRvas", "failure=LocationFailure::ReadFailed"})
             if (Contains(provider, needle)) ++causes;
         Require(causes == 4, "every Configure/Sample refusal records which refusal it was");
         Require(Contains(provider, "rawSample=a;sampled=true;"), "raw ids are marked as read only after a successful read");
+        // The always-"not configured" report: Sample() runs on every poll, and it used
+        // to rename every Configure() refusal to NotConfigured on the first world frame,
+        // so the panel (and the log line built from the same value) pointed at a missing
+        // INI file when the real cause was an unrecognized executable or unreadable RVAs.
+        Require(Contains(provider, "failure=configureFailure=LocationFailure::FingerprintMismatch") &&
+                Contains(provider, "if(!available) {validation=\"Provider unavailable: \"+status;failure=configureFailure;return {};}"),
+            "a refused sample keeps the configure-time cause instead of renaming it not configured");
+        Require(!Contains(provider, "failure=available?LocationFailure::NoWorldContext:LocationFailure::NotConfigured"),
+            "Sample no longer collapses every unavailable provider into not configured");
+        Require(Contains(provider, "failure=configureFailure=LocationFailure::NoWorldContext;"),
+            "a configured provider waiting on a world frame says so instead of not configured");
     }
     {
         // The hold defended a confirmed zone against a frame with no world evidence. It

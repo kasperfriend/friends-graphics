@@ -145,7 +145,7 @@ float3 noiseGradient(float2 p) {
 // the authored amplitude each one lifts, and the train's own start in cells. The four
 // shorter trains are shaded but NOT displaced - the client's liquid grid is about four
 // yards apart, and lifting a wave shorter than a handful of facets on it is what
-// facets - so the pixel stage carries six trains and this stage carries the two the
+// facets - so the pixel stage carries eight trains and this stage carries the two the
 // mesh can actually hold.
 static const float2 kDirA=float2(1.0,0.0);
 static const float2 kDirB=float2(0.8290376,-0.5591929);
@@ -196,7 +196,7 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));
     float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw));
     // A slowly varying pseudorandom domain warp bends crests over the surface instead
-    // of repeating six perfect sine trains, and a second, broader field groups those
+    // of repeating eight perfect sine trains, and a second, broader field groups those
     // trains into sets. c203 and c204 carry the camera contribution after each
     // field's own scale/rotation, so `cell` remains relative and neither the bend nor
     // the grouping slides at tile seams or when the camera moves. Both are sampled
@@ -207,7 +207,7 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     float2 warpCoord=float2(dot(cell,float2(.8253356,.5646425)),
                             dot(cell,float2(-.5646425,.8253356)))*.05+waveWarpPhase.xy;
     float3 waveWarp=noiseGradient(warpCoord);
-    float warp=(waveWarp.x-.5)*5.0;
+    float warp=(waveWarp.x-.5)*6.5;
     float2 warpGradient=.05*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
                                    waveWarp.y*.5646425+waveWarp.z*.8253356);
     float2 groupCoord=float2(dot(cell,float2(.9702957,.2419219)),
@@ -233,8 +233,8 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     sincos(thetaA,sinA,cosA);
     sincos(thetaB,sinB,cosB);
     float lift=waveControl.x*(kWeightA*sinA+kWeightB*sinB)*gain;
-    float2 warpedDirA=kDirA+5.0*dot(kDirA,float2(.6,.8))*warpGradient;
-    float2 warpedDirB=kDirB+5.0*dot(kDirB,float2(.6,.8))*warpGradient;
+    float2 warpedDirA=kDirA+6.5*dot(kDirA,float2(.6,.8))*warpGradient;
+    float2 warpedDirB=kDirB+6.5*dot(kDirB,float2(.6,.8))*warpGradient;
     float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB)*gain;
     // slide is in lattice axes; waveControl.w turns the scaled lattice rows back into the
     // unit world directions they were built from, and the same three axes carry the result
@@ -331,6 +331,10 @@ float4 absorbTint:register(c216);
 // the four projections of one batch in a single instruction: a float4 the shader can
 // swizzle whole is cheaper than three the shader has to gather.
 float4 waveSwell:register(c217);
+// xy=the phase of swell trains G and H, in the same units as c217; zw unused. The two
+// shortest trains get their own register for the same reason C-F share one: a phase has
+// to arrive contiguous to be added to a batch of projections in one instruction.
+float4 waveSwell2:register(c218);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
 // Analytic value noise on one rotated lattice, evaluated for all four corner
 // hashes at once. Every hash argument is folded into a bounded range first:
@@ -351,22 +355,23 @@ float3 noiseGradient(float2 p) {
     return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
                   du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
 }
-// The swell: SIX ANALYTIC, DIRECTIONAL sine trains on that one lattice, in a fan whose
-// crest lines (0, -34, 21, 47, 83, 110 degrees) are never closer than 21 degrees apart,
-// with wavelengths in a ~1.35 ratio (40, 28.75, 20, 14.5,
-// 11 and 8.5 yards) and each train starting at an irregular point along its own
+// The swell: EIGHT ANALYTIC, DIRECTIONAL sine trains on that one lattice, in a fan whose
+// crest lines (0, -34, 21, 47, 83, 110, 65, 128 degrees) are never closer than 18 degrees
+// apart, with wavelengths in a ~1.35 ratio (40, 28.75, 20, 14.5,
+// 11, 8.5, 6.4 and 4.9 yards) and each train starting at an irregular point along its own
 // direction. Three trains were the previous answer to "the water is a picture of curves
-// drawn on a flat plane", and six is the answer to the next complaint, which was truer:
-// three crests of equal height at equal spacing, marching in lock step, are a rhythm a
-// player reads as a pattern no matter how oblique the angles are. What a real sea shows
-// is the INTERFERENCE of a band of wavenumbers, and a band of six incommensurate trains
+// drawn on a flat plane", and six were the answer to the next complaint; eight is the
+// answer to the one after that, which was also true: with the band ending at 8.5 yards
+// the eye regrouped the six surviving crest families into lines again, because nothing
+// crossed them at the scale the chop lives at. What a real sea shows
+// is the INTERFERENCE of a band of wavenumbers, and a band of eight incommensurate trains
 // has no repeat length in it at all: crests grow and die, double up, curve around each
-// other and change spacing, because there is no translation that leaves all six phases
+// other and change spacing, because there is no translation that leaves all eight phases
 // intact. The grouping envelope below then decides how much of that swell each patch of
 // water is carrying, which is the part a sine comb can never fake.
 //
-// Six trains evaluated one at a time would cost the pixel stage six copies of the same
-// five operations, so they are evaluated as two BATCHES of two and four. A batch is
+// Eight trains evaluated one at a time would cost the pixel stage eight copies of the same
+// five operations, so they are evaluated as three BATCHES of two, four and two. A batch is
 // spelled with one vector per COMPONENT of the directions - kDirX4 holds the x of trains
 // C, D, E and F, kDirY4 their y - which buys two things: `plane.x*kDirX+plane.y*kDirY`
 // projects one point onto every train of the batch in two instructions, and the same two
@@ -375,7 +380,7 @@ float3 noiseGradient(float2 p) {
 // transpose. (No matrix type is used, deliberately: HLSL's rows-versus-columns
 // convention is exactly the kind of thing a reader has to look up, and a direction read
 // in the wrong order is a sea whose crests lean one way and whose light leans another.)
-// tools/WaterRegression.cpp holds these six numbers, the vertex stage's two-train copy,
+// tools/WaterRegression.cpp holds these eight numbers, the vertex stage's two-train copy,
 // and the CPU table in src/Water/WaveField.h to each other, because a wavelength that
 // moves in one place and not the others slides a lit crest off a displaced one.
 static const float2 kDirX01=float2(1.0,0.8290376);      // trains A and B: 0 and -34 degrees
@@ -388,11 +393,16 @@ static const float4 kDirY4=float4(0.3583679,0.7313537,0.9925462,0.9396926);
 static const float4 kRad4=float4(0.78539816,1.08330781,1.42799666,1.84799568);
 static const float4 kWgt4=float4(0.34,0.19,0.12,0.075);
 static const float4 kStart4=float4(5.68,1.102,2.42,2.822);   // and of C, D, E and F
+static const float2 kDirX2=float2(0.4226183,-0.6156615);    // trains G and H: 65 and 128 degrees
+static const float2 kDirY2=float2(0.9063078,0.7880108);
+static const float2 kRad2=float2(2.46399424,3.22214631);    // 2pi over 2.55 and 1.95 cells
+static const float2 kWgt2=float2(0.052,0.036);
+static const float2 kStart2=float2(0.7395,1.2285);          // .29 and .63 of their own wavelengths
 // 1/(2*sum of the weights): maps the summed swell onto 0..1 for the crest masks, so the
 // mask thresholds stay authored in fractions of the largest wave this sea can make. The
 // grouping envelope can carry a crest up to 1.14 times past it, which is where the foam
 // thresholds saturate, and that is the intent: the tallest crest of a set caps white.
-static const float kSwellToUnit=0.21321962;
+static const float kSwellToUnit=0.20550760;
 // The grouping envelope's own two constants, spelled exactly as the vertex stage
 // multiplied the noise by them, and as src/Water/WaveField.h declares them.
 static const float kGroupBase=0.52;
@@ -424,7 +434,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // so interpolating it here preserves the bent crests without another pixel-noise
     // evaluation (the fine chop below remains per-pixel). The fourth lane is the
     // grouping gain, which travelled here because this register had it spare.
-    float warp=(waveWarp.x-.5)*5.0;
+    float warp=(waveWarp.x-.5)*6.5;
     float2 warpGradient=.05*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
                                    waveWarp.y*.5646425+waveWarp.z*.8253356);
     float2 swellPlane=plane+warp*float2(.6,.8);
@@ -440,22 +450,25 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
-    // The two batches of the sea band. Six directions, six wavelengths, six starts.
+    // The three batches of the sea band. Eight directions, eight wavelengths, eight starts.
     float2 t01=kRad01*(swellPlane.x*kDirX01+swellPlane.y*kDirY01+wavePhase.zw+kStart01);
     float4 t4=kRad4*(swellPlane.x*kDirX4+swellPlane.y*kDirY4+waveSwell+kStart4);
+    float2 t2=kRad2*(swellPlane.x*kDirX2+swellPlane.y*kDirY2+waveSwell2.xy+kStart2);
     float2 sin01,cos01;
     float4 sin4,cos4;
+    float2 sin2,cos2;
     sincos(t01,sin01,cos01);
     sincos(t4,sin4,cos4);
-    float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4);
+    sincos(t2,sin2,cos2);
+    float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);
     // The exact gradient of that height field, in lattice axes, times the authored swell
     // response: the same slope the geometry was lifted by, so shading and silhouette agree.
-    float2 swellSlope=float2(dot(kWgt01*kRad01*cos01,kDirX01)+dot(kWgt4*kRad4*cos4,kDirX4),
-                             dot(kWgt01*kRad01*cos01,kDirY01)+dot(kWgt4*kRad4*cos4,kDirY4));
+    float2 swellSlope=float2(dot(kWgt01*kRad01*cos01,kDirX01)+dot(kWgt4*kRad4*cos4,kDirX4)+dot(kWgt2*kRad2*cos2,kDirX2),
+                             dot(kWgt01*kRad01*cos01,kDirY01)+dot(kWgt4*kRad4*cos4,kDirY4)+dot(kWgt2*kRad2*cos2,kDirY2));
     // Chain rule through p' = p + direction * warp(p), using the interpolated
     // warp gradient. This keeps the normal on the same gently bent crest the
     // vertex stage lifted and slid without another per-pixel noise evaluation.
-    swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*5.0)*foreverStyle.x;
+    swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*6.5)*foreverStyle.x;
     // The envelope then has to be DIFFERENTIATED, not just multiplied in: h = gain*swell,
     // so dh = gain*dswell + swell*dgain. The second term is what makes the flank of a set
     // tilt the water as well as dim it, which is the difference between waves that fade
@@ -468,17 +481,25 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // crests tighten and catch the light, troughs open out and go flat - and it is zero
     // on water that was authored flat, where there is nothing to sharpen. It carries the
     // envelope as well, because the tallest crest of a set is also the pinched one.
-    float pinch=controls.x*gain*(dot(kWgt01*kRad01,sin01)+dot(kWgt4*kRad4,sin4));
+    float pinch=controls.x*gain*(dot(kWgt01*kRad01,sin01)+dot(kWgt4*kRad4,sin4)+dot(kWgt2*kRad2,sin2));
     float jacobian=max(1.0-pinch,.3);
     // The chop rides the swell instead of scrolling over it: sampling the noise at a
     // coordinate the swell itself offsets is what ties the small ripples to the big
     // forms, so they travel together and the surface reads as one body of water.
     float3 ripple=noiseGradient(plane+wavePhase.xy+swell*float2(.62,.33));
+    // A second, finer chop octave, sampled at a little over twice the base frequency
+    // on a phase that runs the other way around the lattice. One noise octave is a
+    // texture; two incommensurate ones are weather - the fine octave is what stops
+    // the short swell trains and the base chop from aligning into corduroy at the
+    // distance where neither is quite resolvable. It fades with the SQUARE of the
+    // footprint filter, so it is gone before it can alias, and it rides the swell
+    // further than the base octave does, which keeps it glued to the same crests.
+    float3 rippleFine=noiseGradient(plane*2.17+float2(wavePhase.y,-wavePhase.x)*1.31+swell*float2(.9,.47));
     // waveFlow.w is the wave gate. With WAVES off there is no slope, no refraction
     // distortion, no roughness and no foam, whatever the field would have said.
     // The chop is inside the same envelope as the swell it rides: a patch of sea that is
     // carrying no set has no wind texture either, which is what a calm spot looks like.
-    float2 slopes=(ripple.yz*.72*filter*gain+swellSlope)*waveFlow.w;
+    float2 slopes=((ripple.yz*.72*filter+rippleFine.yz*.30*filter*filter)*gain+swellSlope)*waveFlow.w;
     // The chop's sampled VALUE fades with the footprint too, not only its slope:
     // unresolved value noise aliases into a fixed screen-aligned grid, which is what
     // read as square patterns on distant water. The swell keeps its value, so crest
@@ -918,8 +939,8 @@ struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
-    // c200..c217 for the pixel shader, c200..c203 for the vertex shader.
-    float old[72]{},oldVertexControls[20]{},oldLocalLights[68]{};bool localLightsSaved=false;
+    // c200..c218 for the pixel shader, c200..c204 for the vertex shader.
+    float old[76]{},oldVertexControls[20]{},oldLocalLights[68]{};bool localLightsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -1014,7 +1035,7 @@ struct Scope {
             if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
-            if(FAILED(d->GetPixelShaderConstantF(200,old,18)))return;
+            if(FAILED(d->GetPixelShaderConstantF(200,old,19)))return;
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
@@ -1023,7 +1044,7 @@ struct Scope {
             // rather than read from the counter, because wave travel speed is now something that
             // changes, and multiplying an absolute clock by a changing speed moves every crest.
             const double elapsed=seaMotion_.Time();
-            float controls[72]={0.f,strength,normalStrength,specularStrength};
+            float controls[76]={0.f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
@@ -1124,7 +1145,7 @@ struct Scope {
             controls[40]=wave.ripplePhase[0];controls[41]=wave.ripplePhase[1];
             // The two trains the vertex stage displaces share their register with the
             // pixel stage, and the four it does not are one float4 of their own (c217):
-            // six gathers from three registers would cost the pixel stage more than the
+            // gathers from spread registers would cost the pixel stage more than the
             // four trains it saves, and a phase has to arrive contiguous to be added to
             // a batch of projections in one instruction.
             controls[42]=wave.swellPhase[0];controls[43]=wave.swellPhase[1];
@@ -1158,9 +1179,30 @@ struct Scope {
             controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
             controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
             controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
+            // Per-zone colours (EnvironmentProfiles.ini [Zone.N]/[Area.N], resolved and
+            // blended by the environment manager) sit between the two authored layers:
+            // they replace the global GraphicsEffects colours above, because azure in
+            // Booty Bay is the zone's look, not a user preference - but an explicit
+            // per-location colour in LocationGraphics.ini is a deliberate override of
+            // exactly this place, so it still wins, key by key. The resolved values
+            // are already in register space (tint/absorption over 128, deep over 255),
+            // so this is a copy, not a second conversion that could drift from it.
+            if(waveFrame.environment.water.authored) {
+                const auto& zoneWater=waveFrame.environment.water;
+                if(!renderer::locationtuning::HasScopedValue(L"Water",L"WaterColour"))
+                    {controls[56]=zoneWater.tint[0];controls[57]=zoneWater.tint[1];controls[58]=zoneWater.tint[2];}
+                if(!renderer::locationtuning::HasScopedValue(L"Water",L"DeepColour"))
+                    {controls[60]=zoneWater.deep[0];controls[61]=zoneWater.deep[1];controls[62]=zoneWater.deep[2];}
+                if(!renderer::locationtuning::HasScopedValue(L"Water",L"AbsorptionColour"))
+                    {controls[64]=zoneWater.absorption[0];controls[65]=zoneWater.absorption[1];controls[66]=zoneWater.absorption[2];}
+            }
             // c217: the four trains only the shading carries, in one contiguous float4.
             controls[68]=wave.swellPhase[2];controls[69]=wave.swellPhase[3];
             controls[70]=wave.swellPhase[4];controls[71]=wave.swellPhase[5];
+            // c218: the two shortest trains, which cross the coarse band at the scale
+            // the chop lives at - the pair that stops the surviving crest families
+            // from regrouping into lines at range.
+            controls[72]=wave.swellPhase[6];controls[73]=wave.swellPhase[7];
             // Both stages share the swell phases of the trains they both carry. The
             // vertex stage also samples the low-frequency warp and the grouping envelope
             // from this anchor and interpolates both to pixels, keeping the lifted crest
@@ -1218,7 +1260,7 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,18))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,5))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,19))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,5))){Restore();return;}
             {
                 float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();
@@ -1246,7 +1288,7 @@ struct Scope {
         if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
         device->SetPixelShader(original.Get());
         device->SetVertexShader(originalVertex.Get());
-        device->SetPixelShaderConstantF(200,old,18);
+        device->SetPixelShaderConstantF(200,old,19);
         device->SetVertexShaderConstantF(200,oldVertexControls,5);
         if(extraState) {
             const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,

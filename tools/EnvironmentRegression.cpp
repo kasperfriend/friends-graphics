@@ -92,17 +92,24 @@ int main() try {
  WoWClientContext client;Require(client.Detect(),"detect x86 test executable");uint32_t value=0;
  Require(!client.Read(client.imageSize,&value,4)&&!client.Read(UINTPTR_MAX,&value,4),"bad RVAs fail without crash");
  WoWLocationProvider provider;provider.Configure(L"nonexistent-environment.ini");Require(!provider.Verified()&&!provider.Sample(db,true).valid,"unrecognized build never reads reference offsets");
+ Require(provider.Failure()==LocationFailure::FingerprintMismatch&&!provider.Sampled(),
+        "a refused sample keeps the configure-time cause instead of renaming it not configured");
+ Require(provider.ValidationStatus().find("Unrecognized executable")!=std::string::npos,
+        "the validation line names the real provider status after a refused sample");
  const auto providerFile=std::filesystem::temp_directory_path()/"modern-wow-location-regression.ini";
  auto writeProvider=[&](uintptr_t mapRva) {std::ofstream ini(providerFile);ini<<"[LocationProvider]\nExeSHA256="<<client.sha256<<"\nMapRva="<<mapRva<<"\nZoneRva="<<(reinterpret_cast<uintptr_t>(&testZone)-client.base)<<"\nAreaRva="<<(reinterpret_cast<uintptr_t>(&testArea)-client.base)<<"\nVerifiedInWorld=1\n";};
  writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
+ Require(provider.Failure()==LocationFailure::NoWorldContext,
+        "a configured provider waiting on a world frame says so instead of not configured");
  Require(provider.Verified()&&provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==87,"exact-hash provider reads validated live test-process image globals");
- Require(!provider.Sample(db,false).valid,"provider rejects absent world context instead of guessing from stale IDs");
+ Require(!provider.Sample(db,false).valid&&provider.Failure()==LocationFailure::NoWorldContext,"provider rejects absent world context instead of guessing from stale IDs");
  Require(ShouldHoldLocation(HasWorldContext(false,false),true),"HookedPresent holds a confirmed zone when a no-depth sample would be invalid");
  Require(!ShouldHoldLocation(HasWorldContext(false,false),false),"no confirmed location is never a reason to stop polling");
  Require(!ShouldHoldLocation(HasWorldContext(false,true),true),"a known-draw waves-only frame re-enables verified location sampling");
  testArea=12345;Require(provider.Sample(db,true).valid,"provider accepts unknown custom area with known zone and map");testArea=87;
  testArea=0;Require(provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==0,"zero subarea preserves validated zone/map without inventing AreaID");testArea=87;
- writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");std::filesystem::remove(providerFile);
+ writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");
+ Require(provider.Failure()==LocationFailure::UnreadableRvas,"unreadable RVAs keep their own cause through a refused sample");std::filesystem::remove(providerFile);
  // Exercise the actual manager gate, not only the ShouldHoldLocation helper:
  // focused frames with neither captured depth nor recognized world draws must
  // never feed the provider's deliberate invalid no-world sample into debounce.
