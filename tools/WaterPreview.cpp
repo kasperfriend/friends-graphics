@@ -17,8 +17,10 @@
 //     bytes, here the copy is computed and encoded once at the end;
 //   * no painted detail maps (the client's 512 ripple/surface textures), so the analytic
 //     chop stands in for both of the shader's octaves and `surfaceTexture` is a flat tone;
-//   * no vertex stage: geometry waves displace the surface by evaluating the same sine
-//     pair per pixel instead of interpolating it across a tessellated grid;
+//   * no vertex stage: the Gerstner lift and the slide toward the crest are evaluated per
+//     pixel at the shaded point, forward-displaced rather than interpolated across a
+//     tessellated grid and inverted. Crests here are therefore the same height and the same
+//     pinch as the client's, but a fold this deep would only be resolved by real facets;
 //   * the shader's `baseAlpha` comes from the client's own painted water (`color.a*base.a`),
 //     which does not exist here, so shoreline transparency is a depth ramp instead and the
 //     wet-sand fade is approximate. Everything above the alpha line is the production formula.
@@ -107,7 +109,9 @@ struct Config
     float swell = 55.f, glint = 160.f, fresnel = 100.f, crestFoam = 20.f;
     float ripple = 18.f, normalResponse = 28.f, specular = 115.f;
     float roughness = 100.f, sheen = 50.f, shoalFoam = 100.f, foamBrightness = 100.f;
-    float sunDisc = 40.f, geometryWaves = 0.f;
+    // WAVE HEIGHT in percent of the shipped sea, the same number and the same scale as the
+    // client's GeometryWavePercent (0 = a flat sheet, 100 = the reference look, 300 = a gale).
+    float sunDisc = 40.f, geometryWaves = 100.f;
     float reflectionStrength = 80.f, environmentStrength = 45.f, reflectionDistance = 120.f;
     float reflectionThickness = 350.f;
     unsigned waterColour = 0x808080u, deepColour = 0x0e2a28u, absorptionColour = 0xff8c6bu;
@@ -278,6 +282,11 @@ struct WaveState
     V3 normal{ 0, 0, 1 };
     V2 slopes{};
     float detail = .5f, swell01 = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
+    // The Gerstner pair: how hard the surface is pinching here (1 - Jacobian), and the
+    // Jacobian itself, which is what the shading slope is divided by so that a crest the
+    // geometry steepened is a crest the light also sees steepened.
+    float pinch = 0.f, jacobian = 1.f;
+    V2 lateral{};   // yards, the slide toward the coming crest
 };
 
 // SampleWaves(): the shared lattice, evaluated in world axes. The DLL does the same in
@@ -287,37 +296,57 @@ struct WaveState
 // this depth. It is the only distance-dependent term in the wave sampling, and the reason the
 // preview cannot borrow BuildWaveField's basis for it - the rasterizer knows the pixel's own
 // footprint, a CPU loop has to derive it from the view.
-static WaveState SampleWaves(const Config& c, const WaveField& field, float worldX, float worldY, V2 footprint)
+static WaveState SampleWaves(const Config& c, const WaveField& field, const GeometryWaves& geometry,
+                             float worldX, float worldY, V2 footprint)
 {
     WaveState w;
     const V2 plane{ worldX * field.lattice[0] + worldY * field.lattice[1],
                     worldX * field.lattice[2] + worldY * field.lattice[3] };
-    // Two analytic swell trains; both periods divide the shader's 64-cell wrap, which is
-    // what lets the vertex stage share the wrapped phase instead of an anchor.
-    const V2 arg{ (plane.x + field.phase[2]) * kSwellRadians,
-                  (plane.y + field.phase[3]) * kSwellRadians * 2.f };
-    const float swell = std::sin(arg.x) + std::sin(arg.y) * .55f;
-    const V2 swellSlope{ std::cos(arg.x) * kSwellRadians * c.swell * .01f,
-                         std::cos(arg.y) * kSwellRadians * 1.1f * c.swell * .01f };
+    // The three directional swell trains, from the one function the vertex stage, the pixel
+    // stage and this preview all mirror: height, exact slope, and the Gerstner pinch.
+    const SwellSample trains = EvaluateSwell(plane.x, plane.y, field.swellPhase);
+    const float swell = trains.height;
+    const V2 swellSlope{ trains.slope[0] * c.swell * .01f, trains.slope[1] * c.swell * .01f };
     // One pixel spans this many lattice cells: the shader's fwidth(plane).
     const float filter = 1.f / std::sqrt(1.f + c.softening * .16f
         * (footprint.x * footprint.x + footprint.y * footprint.y));
-    const NoiseSample ripple = NoiseGradient(plane.x + field.phase[0] + swell * .71f,
-                                            plane.y + field.phase[1] + swell * .37f);
+    // The chop rides the swell instead of scrolling over it, exactly as the shader's does.
+    const NoiseSample ripple = NoiseGradient(plane.x + field.ripplePhase[0] + swell * .62f,
+                                            plane.y + field.ripplePhase[1] + swell * .33f);
     const float strength = c.ripple * .001f, normalResponse = c.normalResponse * .01f;
+    // The shader's waveFlow.w gate, which the DLL fills from WAVES rather than from the
+    // strengths: the preview has no such switch, so it derives the same 0/1 from them.
     const float flowGate = Saturate(strength * 100.f + normalResponse * 4.f);
     w.slopes = V2{ (ripple.dx * .72f * filter + swellSlope.x) * flowGate,
                    (ripple.dy * .72f * filter + swellSlope.y) * flowGate };
     w.detail = Mix(.5f, ripple.value, filter);
-    w.swell01 = swell * .3225f + .5f;
+    w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
+    w.pinch = geometry.sigma * trains.pinch;
+    w.jacobian = std::max(1.f - w.pinch, .3f);
     const V3 axisX{ field.lattice[0], field.lattice[1], 0.f }, axisY{ field.lattice[2], field.lattice[3], 0.f };
-    w.normal = Normalize(V3{ axisX.x * w.slopes.x * normalResponse + axisY.x * w.slopes.y * normalResponse,
-                             axisX.y * w.slopes.x * normalResponse + axisY.y * w.slopes.y * normalResponse, 1.f });
-    if (c.geometryWaves > 0.f)
-        w.height = c.geometryWaves * .01f * (std::sin(arg.x) + std::sin(arg.y) * .55f)
-            * (.55f + .45f * c.swell * .01f);
+    // A height field's normal is the NEGATIVE gradient, divided by the Jacobian: the same
+    // sign and the same sharpening the shader uses, and the one that puts the light on the
+    // face of the wave that is actually leaning toward it.
+    const float tilt = normalResponse / w.jacobian;
+    w.normal = Normalize(V3{ -(axisX.x * w.slopes.x * tilt + axisY.x * w.slopes.y * tilt),
+                             -(axisX.y * w.slopes.x * tilt + axisY.y * w.slopes.y * tilt), 1.f });
+    // The vertex stage's Gerstner lift and slide, from the two trains a four yard grid can
+    // carry. This preview has no vertex stage, so it displaces the shaded point directly.
+    const float thetaA = kTwoPi / kTrainCells[0]
+        * (kTrainDirX[0] * plane.x + kTrainDirY[0] * plane.y + field.swellPhase[0]);
+    const float thetaB = kTwoPi / kTrainCells[1]
+        * (kTrainDirX[1] * plane.x + kTrainDirY[1] * plane.y + field.swellPhase[1]);
+    w.height = geometry.amplitude * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB));
+    const V2 slide{ geometry.lateral * (kTrainWeight[0] * std::cos(thetaA) * kTrainDirX[0]
+                                        + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1]),
+                    geometry.lateral * (kTrainWeight[0] * std::cos(thetaA) * kTrainDirY[0]
+                                        + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1]) };
+    // Lattice axes to world axes: the lattice rows are the world directions scaled by
+    // 1/cell, so one cell length turns them back into unit vectors.
+    w.lateral = V2{ (slide.x * field.lattice[0] + slide.y * field.lattice[2]) * geometry.cellYards,
+                    (slide.x * field.lattice[1] + slide.y * field.lattice[3]) * geometry.cellYards };
     return w;
 }
 
@@ -484,6 +513,12 @@ int main(int argc, char** argv)
         // per-pixel work is evaluating it. The DLL likewise builds it once per draw.
         const WaveField field = BuildWaveField(c.time, c.flowSpeed * c.motion * .01f,
             c.flowRotation * .01f, c.waveScale, 0.f, 0.f, true, true);
+        // The geometry wave constants, from the same builder the DLL calls: this preview has
+        // no vertex stage, so it displaces the shaded point itself. `--geometry-waves` stands
+        // in for the DLL's GEOMETRY WAVES percent, and the sea state scales it exactly as it
+        // does in the client, so a storm panel lifts the same coast a storm frame does.
+        const GeometryWaves geometry = BuildGeometryWaves(c.geometryWaves, c.waveScale,
+            sea.agitation, c.geometryWaves > 0.f, true);
         // Rendered larger than the sheet and box filtered down, the way a 2x backbuffer is
         // resolved for display. It matters for the mirror specifically: the scene silhouette is
         // ray-marched, and the wave octave is exactly what the shader's anti-alias gain exists to
@@ -603,12 +638,18 @@ int main(int argc, char** argv)
                             + std::fabs(field.lattice[0] * v.up.x + field.lattice[1] * v.up.y) * pixelsY,
                         std::fabs(field.lattice[2] * v.right.x + field.lattice[3] * v.right.y) * pixelsX
                             + std::fabs(field.lattice[2] * v.up.x + field.lattice[3] * v.up.y) * pixelsY };
-                    WaveState wave = SampleWaves(c, field, surface.x, surface.y, footprint);
-                    if (c.geometryWaves > 0.f)
+                    WaveState wave = SampleWaves(c, field, geometry, surface.x, surface.y, footprint);
+                    if (geometry.amplitude > 0.f || geometry.lateral > 0.f)
                     {
+                        // Gerstner: the point the shading belongs to is the flat-plane hit
+                        // pushed up by the lift AND slid toward the crest it is riding. The
+                        // slide is applied forward (at the undisplaced position) rather than
+                        // inverting the displacement map, which is the one place this preview
+                        // knowingly differs from a real vertex stage.
+                        surface = Add(surface, V3{ wave.lateral.x, wave.lateral.y, 0.f });
                         const float push = std::max((surface.z - wave.height) / -dir.z, 0.f);
                         surface = Add(v.pos, Mul(dir, planeHit.distance + push));
-                        wave = SampleWaves(c, field, surface.x, surface.y, footprint);
+                        wave = SampleWaves(c, field, geometry, surface.x, surface.y, footprint);
                     }
                     const float viewZ = std::max(Dot(Sub(surface, v.pos), v.fwd), .05f);
                     const V3 viewPos = Sub(surface, v.pos);
@@ -650,13 +691,35 @@ int main(int argc, char** argv)
                     V3 inScatter = Mul(Add(Mul(deep, 1.7f), Mul(tint, .12f)),
                         absorption * (1.f - g * g) * .17f / (phaseDen * std::sqrt(phaseDen))
                         * Saturate(sunElev * 2.5f + .2f));
+                    // Looking into the sun at a crest that is standing up: the sheet between the
+                    // camera and the light goes translucent, which is the one place water reads as
+                    // a body of water rather than a mirror. `toCamera` is the shader's own `v`
+                    // (both are normalize(-viewPos)), so the term carries over sign and all.
+                    const float backlit = Saturate(-Dot(toCamera, light) * 1.7f - .45f)
+                        * Saturate(wave.swell01 * 1.7f - .45f);
+                    inScatter = Mul(inScatter, 1.f + 2.2f * backlit);
                     inScatter = Mul(inScatter, lightColour);
 
                     const float shallowEdge = 1.f - Smoothstep(.08f, .08f + std::max(shoreFoamWidth, .1f), effectiveDepth);
                     const float shore = validDepth * shallowEdge;
-                    const float crest = Saturate(.55f + wave.detail * .45f
-                        + wave.slopes.x * .18f - wave.slopes.y * .12f);
-                    const float rough = Saturate(sheenFloor + std::hypot(wave.slopes.x, wave.slopes.y) * roughnessGain);
+                    const float crest = Saturate(.42f + wave.swell01 * .6f + wave.detail * .3f);
+                    // ---- foam, computed before the reflections because the shader lets it damp
+                    // them: a breaking crest scatters the sky, it does not mirror it. The three
+                    // sources are the ones a real sea shows - the crest itself, the pinch where
+                    // the geometry waves are folding water onto water, and the shoal that runs up
+                    // a beach. All three are gated by the authored WIND and by how rough this
+                    // water is, so a calm lake stays a calm lake and a squall breaks.
+                    const float breaking = Saturate(wave.pinch * 2.4f);
+                    const float capBand = wave.swell01 * 1.06f + breaking * .30f + (wave.detail - .5f) * .26f;
+                    const float whitecap = Smoothstep(.86f, 1.02f, capBand) * wind;
+                    const float bottomSlope = FieldSlope(c, surface.x, surface.y);
+                    const float shoal = Saturate(bottomSlope * shoalGain * 2.f - .3f)
+                        * Saturate(1.f - column * .05f) * validDepth;
+                    const float crestMask = Smoothstep(.60f, .94f, wave.swell01 + wave.rippleEnergy * .05f);
+                    const float foamAmount = (shore * shoreFoamStrength * (.35f + .65f * wind)
+                        + (crestMask * .45f + whitecap * 1.15f + shoal * .6f) * wind * crestFoamStrength) * crest;
+                    const float rough = Saturate(sheenFloor
+                        + std::hypot(wave.slopes.x, wave.slopes.y) * roughnessGain + foamAmount * 1.4f);
 
                     const V3 toCam = Normalize(Mul(viewPos, -1.f));
                     V3 reflectDir = Normalize(Sub(toCam, Mul(wn, 2.f * Dot(toCam, wn))));
@@ -737,19 +800,20 @@ int main(int argc, char** argv)
                     // bytes/128, so 1.0 is neutral and no gain belongs here.
                     waterBody = Mul(waterBody, tint);
                     rgb = waterBody;
-                    rgb = Lerp(rgb, reflected, Saturate(fresnel * (1.f - .5f * rough)
-                        * (environmentStrength * .5f + ssrStrength * hit * 1.5f)));
-                    const float pathEnergy = Saturate(celestialPath * specularStrength * .0992f);
+                    // Foam damps the mirror: a crest that is breaking is full of air, and air
+                    // scatters instead of reflecting. The shader applies both factors here.
+                    const float reflectionAmount = Saturate(fresnel * (1.f - .5f * rough)
+                        * (environmentStrength * .5f + ssrStrength * hit * 1.5f))
+                        * (1.f - Saturate(foamAmount * .85f));
+                    rgb = Lerp(rgb, reflected, reflectionAmount);
+                    const float pathEnergy = Saturate(celestialPath * specularStrength * .0992f)
+                        * (1.f - Saturate(foamAmount));
                     rgb = Add(rgb, Mul(lightColour, pathEnergy * (.35f + .65f * fresnel)));
-                    const float crestMask = Smoothstep(.60f, .94f, wave.swell01 + wave.rippleEnergy * .05f);
-                    const float bottomSlope = FieldSlope(c, surface.x, surface.y);
-                    const float shoal = Saturate(bottomSlope * shoalGain * 2.f - .3f)
-                        * Saturate(1.f - column * .05f) * validDepth;
-                    const float waveFoam = (crestMask * .8f + shoal * .6f) * wind;
-                    const float foamAmount = (shore * shoreFoamStrength * (.35f + .65f * wind)
-                        + waveFoam * crestFoamStrength) * crest;
+                    // The foam colour itself, added last so it sits on top of everything the
+                    // water did below it. The lift toward the light is softened at NoL = -.25
+                    // so a shaded face still carries its own cap instead of going flat black.
                     rgb = Add(rgb, Mul(Add(Mul(deep, .3f), V3{ .42f, .48f, .43f }),
-                        foamAmount * (.6f + .4f * Saturate(NoL)) * foamBrightness));
+                        foamAmount * (.55f + .45f * Saturate(NoL + .25f)) * foamBrightness));
                     const float columnBottom = std::max(-BottomOf(c, surface.x, surface.y), 0.f);   // the client's own alpha stand-in
                     const float baseAlpha = Saturate(.30f + columnBottom * .30f);
                     const float depthAlpha = absorption * (.78f - .20f * fresnel);
@@ -843,14 +907,16 @@ static void ApplyPreset(Config& c, const char* name)
         c.scene = SCENE_RIVER; c.wind = 15.f; c.clarity = 130.f; c.sparkle = 90.f;
         c.sunElevation = 12.f; c.sunAzimuth = 96.f; c.fog = V3{ .92f, .78f, .72f }; c.sun = V3{ 1.f, .86f, .66f };
         c.camZ = 2.4f; c.camY = -46.f; c.pitch = -5.f; c.waveScale = 110.f;
-        c.crestFoam = 6.f; c.shoreFoam = 8.f; c.geometryWaves = 6.f; c.swell = 40.f;
+        // WAVE HEIGHT, in percent of the shipped sea: a river is sheltered, so it carries
+        // chop rather than swell, and its foam stays a thin line at the shore.
+        c.crestFoam = 6.f; c.shoreFoam = 8.f; c.geometryWaves = 35.f; c.swell = 40.f;
     }
     else if (n == "coast")
     {
         c.scene = SCENE_COAST; c.wind = 140.f; c.clarity = 95.f; c.sparkle = 150.f;
         c.sunElevation = 5.f; c.sunAzimuth = 78.f; c.fog = V3{ .98f, .86f, .68f }; c.sun = V3{ 1.f, .93f, .72f };
         c.camZ = 4.f; c.camY = -30.f; c.yaw = -22.f; c.pitch = -7.f; c.swell = 70.f;
-        c.geometryWaves = 16.f; c.shoalFoam = 160.f; c.crestFoam = 34.f;
+        c.geometryWaves = 130.f; c.shoalFoam = 160.f; c.crestFoam = 34.f;
     }
     else if (n == "lake")
     {
@@ -860,12 +926,13 @@ static void ApplyPreset(Config& c, const char* name)
         c.sunElevation = 18.f; c.sunAzimuth = 95.f; c.moonAmount = 1.f; c.sunDisc = 85.f;
         c.fog = V3{ .10f, .12f, .19f }; c.fogDensity = .0009f; c.fog = V3{ .34f, .38f, .52f }; c.sun = V3{ .58f, .66f, .86f };
         c.camZ = 3.f; c.camY = -40.f; c.yaw = 14.f; c.pitch = -6.f; c.swell = 40.f;
-        c.geometryWaves = 8.f; c.deepColour = 0x0a2230u; c.sparkle = 120.f;
+        c.geometryWaves = 45.f; c.deepColour = 0x0a2230u; c.sparkle = 120.f;
     }
     else
     {
         c.scene = SCENE_SEA; c.wind = 120.f; c.clarity = 100.f; c.sparkle = 140.f;
         c.sunElevation = 7.f; c.sunAzimuth = 90.f; c.fog = V3{ .80f, .80f, .90f }; c.sun = V3{ 1.f, .92f, .74f };
-        c.camZ = 5.f; c.camY = 0.f; c.pitch = -4.f; c.swell = 65.f; c.geometryWaves = 18.f; c.crestFoam = 30.f;
+        c.camZ = 5.f; c.camY = 0.f; c.pitch = -4.f; c.swell = 65.f; c.crestFoam = 30.f;
+        c.geometryWaves = 100.f;   // the shipped WAVE HEIGHT: this panel is the reference look
     }
 }

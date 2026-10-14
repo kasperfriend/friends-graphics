@@ -2,6 +2,10 @@
 
 ## Current stabilization priorities
 
+- [x] Make the sea hold still in the world: the lattice coordinate is read from the draw's own matrix rows (world axes in view space) instead of across them, and the wave phase is anchored to the camera of the draw being shaded rather than to a frame-captured one, so turning or moving the camera no longer moves the water. Live comparison against a 3.3.5 coast remains.
+- [x] Give waves a readable pace and a body: the lattice orientation is a constant now (it used to rotate about the world origin, which translates the sea at hundreds of yards a second at any camera distance), crests travel at the dispersion speed of their own wavelength, and geometry waves lift along world up and slide toward the crest (Gerstner), with the shading slope divided by the Jacobian and the steepness clamped fold-safe on the CPU.
+- [x] Foam at the edges of waves: whitecaps from the Gerstner pinch plus the crest mask and the shoal, all gated by each body's authored WIND and sea state, damping the reflection and the sun road - a calm zone stays foamless, a storm on an exposed coast caps every third crest.
+- [ ] Re-measure the water pixel stage's instruction slots with fxc on the Windows runner and replace the estimated 608 budget with the measured count plus margin.
 - [x] Stop the replacement water from showing square patterns: the wave field is anchored to the terrain instead of to a tile's uv, the noise hash is bounded so it cannot collapse onto its lattice, and the unresolved octave fades in value as well as in slope. Live comparison against a 3.3.5 coast remains.
 - [x] Stop whole liquid tiles from staying native: the documented water *pixel* shader plus the two-texture signature identifies the material at any surface size, the fourth live-confirmed vertex variant is listed, and both fog paths share the water register table instead of naming one variant. Unmatched liquid layouts are now reported by hash in `WaterEffect.log`.
 

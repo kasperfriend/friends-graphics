@@ -105,7 +105,7 @@ int main() try
     //    index outside it is where the previous shader lost the float32
     //    fraction bits and hardened the noise into flat squares.
     auto coordinate=[](const WaveField& field,float relativeX,float relativeY) {
-        return WrapLattice(relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.phase[0]);
+        return WrapLattice(relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.ripplePhase[0]);
     };
     auto distance=[](float a,float b) {
         const float difference=std::fabs(a-b);
@@ -125,13 +125,15 @@ int main() try
             Require(distance(coordinate(field,relativeX,relativeY),
                               coordinate(reference,4213.f,-7781.f))<2e-2f,
                     "the same terrain point lands on the same wave lattice from any camera");
-            Require(std::fabs(field.phase[0])<=kLatticeWrap&&std::fabs(field.phase[1])<=kLatticeWrap&&
-                    std::fabs(field.phase[2])<=kLatticeWrap&&std::fabs(field.phase[3])<=kLatticeWrap,
-                    "phases stay inside the lattice wrap at any world coordinate");
-            Require(std::fabs(coordinate(field,relativeX,relativeY))<=kLatticeWrap,
-                    "the lattice coordinate the pixel shader floors is always wrapped");
-            Require(std::isfinite(field.lattice[0])&&std::isfinite(field.phase[0])&&
-                    std::isfinite(field.uvDrift[0])&&std::isfinite(field.uvDrift[1]),
+            Require(std::fabs(field.ripplePhase[0])<=kLatticeWrap&&
+                    std::fabs(field.ripplePhase[1])<=kLatticeWrap,
+                    "the chop phase stays inside the lattice wrap at any world coordinate");
+            for (int train=0;train<kTrainCount;++train)
+                Require(field.swellPhase[train]>=0.f&&field.swellPhase[train]<kTrainCells[train],
+                        "each swell train wraps its phase into its own wavelength");
+            Require(std::isfinite(field.lattice[0])&&std::isfinite(field.ripplePhase[0])&&
+                    std::isfinite(field.swellPhase[2])&&std::isfinite(field.uvDrift[0])&&
+                    std::isfinite(field.uvDrift[1]),
                     "wave constants stay finite after hours of animation");
         }
     }
@@ -140,77 +142,279 @@ int main() try
         Require(still.uvDrift[0]==0.f&&still.uvDrift[1]==0.f,
                 "switching waves off also stops the texture creep");
         const auto moving=BuildWaveField(12.0,1.f,.32f,100.f,0.f,0.f,false,true);
-        Require(moving.phase[0]!=still.phase[0], "flow animation drives the wave field");
-        const auto noCamera=BuildWaveField(12.0,1.f,.32f,100.f,0.f,0.f,false,true);
-        Require(std::isfinite(noCamera.phase[0])&&std::isfinite(noCamera.phase[3]),
-                "a frame without camera capture still yields a finite field");
+        Require(moving.ripplePhase[0]!=still.ripplePhase[0], "flow animation drives the wave field");
         const float cell=kRippleCellYards*100.f*.01f;
         Require(std::fabs(std::hypot(moving.lattice[0],moving.lattice[1])-1.f/cell)<1e-5f,
                 "the lattice frequency is one cell of the configured size");
         Require(std::fabs(moving.lattice[0]*moving.lattice[2]+
                           moving.lattice[1]*moving.lattice[3])<1e-5f,
                 "the two lattice axes stay perpendicular");
+        Require(std::fabs(std::atan2(moving.lattice[1],moving.lattice[0])-kLatticeYaw)<1e-5f,
+                "the lattice keeps the one orientation the chop drifts along");
     }
-    // The vertex stage displaces the very waves the pixel shader lights, from one
-    // shared number: the swell phase in lattice cells. That is only legal because
-    // every train's period divides the wrap the shader applies to its lattice
-    // indices - if it stopped doing so, a wrapped phase would slide the displaced
-    // crest off the lit one every 64 cells, which is exactly the artefact class
-    // this whole field exists to remove.
-    static_assert(int(kLatticeWrap) % int(kSwellCells) == 0,
-        "the long swell period must divide the lattice wrap");
-    static_assert(int(kLatticeWrap) % int(kSwellShortCells) == 0,
-        "the secondary swell period must divide the lattice wrap");
-    Require(std::fabs(kSwellRadians*kSwellCells-6.2831853f)<1e-4f&&
-            std::fabs(kSwellRadians*kSwellShortCells*2.0f-6.2831853f)<1e-4f,
-            "one swell train is 2pi over its cell count, the other twice as frequent");
-    // (1) Translation invariance, measured where a tile is actually visible: the
-    // reference camera sits on the water it is testing, and each other camera sees
-    // the same point from up to six hundred yards away.
+    // ---- the pace, and the rotation that used to steal it --------------------------
+    // Two statements a screenshot cannot hold a shader to, and the two that made the
+    // shipped sea read as boiling:
+    //
+    //  * the lattice orientation used to be `time * kLatticeRotation`. Rotating a basis
+    //    about the WORLD ORIGIN translates every point that is not at the origin, so a
+    //    camera six hundred yards out watched the sea sweep past at hundreds of yards a
+    //    second while a camera at the origin saw nothing wrong at all. The orientation is
+    //    a constant now, so what is tested is that it stays one.
+    //  * how fast a crest travels is a property of its wavelength: deep-water dispersion,
+    //    scaled to a pace that reads as water. The long swell is slow and heavy, the short
+    //    chop quicker, and neither is a blur.
+    for (float scale : {25.f,100.f,400.f})
+    for (float counter : {0.f,1.f})
+    {
+        const auto early=BuildWaveField(0.0,1.f,counter,scale,4213.f,-7781.f,true,true);
+        const auto late=BuildWaveField(3600.0,1.f,counter,scale,4213.f,-7781.f,true,true);
+        Require(early.lattice[0]==late.lattice[0]&&early.lattice[1]==late.lattice[1]&&
+                early.lattice[2]==late.lattice[2]&&early.lattice[3]==late.lattice[3],
+                "the wave lattice keeps one orientation: nothing spins about the world origin");
+    }
+    {
+        const float swellSpeed=PhaseSpeedYards(kTrainCells[0]*kRippleCellYards);   // forty yards
+        const float chopSpeed=PhaseSpeedYards(kTrainCells[2]*kRippleCellYards);     // ten yards
+        Require(swellSpeed>2.f&&swellSpeed<6.f,
+                "the long swell crosses at a pace that reads as water, not as a boil");
+        Require(chopSpeed<swellSpeed,"shorter waves travel slower, as deep-water dispersion says");
+        Require(swellSpeed<.2f*kTrainCells[0]*kRippleCellYards,
+                "one second of travel is a fraction of the wavelength it belongs to");
+        // A bigger wave size means longer waves, and longer waves travel faster: the knob
+        // changes the sea rather than the frame rate of the same sea.
+        Require(PhaseSpeedYards(kTrainCells[0]*kRippleCellYards*4.f)>swellSpeed,
+                "a larger wave size carries a faster, longer swell");
+        // Weather puts a cross-current on the trains that run across it. The dominant train
+        // runs with the wind, so it is left alone: a squall chops the sea, it does not drag
+        // the whole swell sideways.
+        const auto sheared=BuildWaveField(60.0,1.f,1.f,100.f,0.f,0.f,true,true);
+        const auto calm=BuildWaveField(60.0,1.f,0.f,100.f,0.f,0.f,true,true);
+        Require(std::fabs(sheared.swellPhase[0]-calm.swellPhase[0])<1e-3f,
+                "weather chops across the swell instead of dragging the long train with it");
+        Require(sheared.swellPhase[1]!=calm.swellPhase[1]&&sheared.ripplePhase[1]!=calm.ripplePhase[1],
+                "weather does put a cross-current on the water running across it");
+    }
+    // ---- the anchor: the camera the draw itself carries ----------------------------
+    // A world-anchored wave is two halves that have to agree: the camera-relative
+    // coordinate the vertex stage computes from its own matrix, and the camera's world
+    // position the CPU folds into the phase. Read one half from a frame-captured camera
+    // and the sea slides by exactly however far the player moved since that capture - the
+    // capture happens on the first draw of the frame that carries the perspective
+    // constants, so water drawn before it is anchored to LAST frame's camera, and the
+    // client's own reflection pass renders water under a mirrored camera the capture never
+    // sees at all. Both halves therefore come from c5..c8 of the draw being shaded.
+    //
+    // The array is the client's row-vector matrix: world axis i arrives in view space as
+    // row i, and the camera is -dot(row i, translation). Reading the components ACROSS the
+    // rows gives the view axes in world coordinates instead, and dotting those with a
+    // view-space position applies the camera's rotation twice - which is why the field used
+    // to turn when the camera turned.
+    auto viewMatrix=[](float yawDegrees,float pitchDegrees,const float camera[3],float m[4][4]) {
+        const float deg=3.14159265358979f/180.f;
+        const float cy=std::cos(yawDegrees*deg),sy=std::sin(yawDegrees*deg);
+        const float cp=std::cos(pitchDegrees*deg),sp=std::sin(pitchDegrees*deg);
+        const float forward[3]={sy*cp,cy*cp,sp},right[3]={cy,-sy,0.f},up[3]={-sy*sp,-cy*sp,cp};
+        // Row j is world axis j in view space, so the row holds that axis' component of
+        // each view axis: right, up, forward.
+        for (int j=0;j<3;++j) { m[j][0]=right[j]; m[j][1]=up[j]; m[j][2]=forward[j]; m[j][3]=0.f; }
+        for (int i=0;i<3;++i)
+            m[3][i]=-(camera[0]*m[0][i]+camera[1]*m[1][i]+camera[2]*m[2][i]);
+        m[3][3]=1.f;
+    };
+    for (float yaw : {0.f,37.f,90.f,-144.f,271.f})
+    for (float pitch : {-32.f,-8.f,0.f,17.f})
+    for (const float cameraZ : {12.f,180.f})
+    {
+        const float camera[3]={4213.f,-7781.f,cameraZ};
+        float m[4][4];
+        viewMatrix(yaw,pitch,camera,m);
+        const auto anchor=AnchorFromModelView(m);
+        Require(anchor.valid,"a real liquid draw's matrix is accepted as an anchor");
+        Require(std::fabs(anchor.camera[0]-camera[0])<2e-2f&&std::fabs(anchor.camera[1]-camera[1])<2e-2f,
+                "the camera read out of a draw is the camera the draw was rendered from");
+        // The pairing itself: the coordinate the vertex stage computes from this matrix,
+        // plus the camera the CPU read out of the SAME matrix, is the world position of the
+        // point - at every yaw and pitch, which is exactly what the transposed reading
+        // could not do.
+        // The point on the camera, and two more out where a tile is actually drawn.
+        static const float kPoints[3][3]={{4213.f,-7781.f,0.f},{4640.f,-7405.f,0.f},{3866.f,-8233.f,0.f}};
+        for (const auto& world : kPoints)
+        {
+            const float offset[3]={world[0]-camera[0],world[1]-camera[1],world[2]-camera[2]};
+            float view[3]={0.f,0.f,0.f};
+            for (int i=0;i<3;++i)
+                for (int j=0;j<3;++j) view[i]+=offset[j]*m[j][i];   // the stage's own p
+            const float relX=m[0][0]*view[0]+m[0][1]*view[1]+m[0][2]*view[2];   // dot(axisX,p)
+            const float relY=m[1][0]*view[0]+m[1][1]*view[1]+m[1][2]*view[2];   // dot(axisY,p)
+            Require(std::fabs(relX+anchor.camera[0]-world[0])<2e-2f&&
+                    std::fabs(relY+anchor.camera[1]-world[1])<2e-2f,
+                    "the drawn camera-relative coordinate plus the drawn camera is the world point");
+        }
+        // And the up axis the shading is handed has to be world up. Taken across the rows it
+        // is the direction the camera looks, which makes the sky gradient, the sun elevation
+        // and the wind term turn with the camera instead of staying with the world.
+        float worldUp[3]={0.f,0.f,0.f};
+        for (int j=0;j<3;++j)
+            for (int i=0;i<3;++i) worldUp[j]+=anchor.up[i]*m[j][i];
+        Require(std::fabs(worldUp[0])<1e-4f&&std::fabs(worldUp[1])<1e-4f&&std::fabs(worldUp[2]-1.f)<1e-4f,
+                "the up axis the water is shaded against is world up, not the view direction");
+    }
+    {
+        // A mirrored camera (the client's own water reflection pass) is still a rigid basis,
+        // so it is still an anchor: the reflected sea has to be anchored to the same world
+        // as the one it mirrors, or the two disagree at the shoreline.
+        const float camera[3]={900.f,-120.f,60.f};
+        float m[4][4];
+        viewMatrix(48.f,-11.f,camera,m);
+        m[1][0]=-m[1][0];m[1][1]=-m[1][1];m[1][2]=-m[1][2];   // flip the view's up axis
+        for (int i=0;i<3;++i)
+            m[3][i]=-(camera[0]*m[0][i]+camera[1]*m[1][i]+camera[2]*m[2][i]);
+        const auto mirrored=AnchorFromModelView(m);
+        Require(mirrored.valid&&std::fabs(mirrored.camera[0]-camera[0])<2e-2f,
+                "a mirrored reflection camera is anchored to the same world it reflects");
+    }
+    {
+        float zero[4][4]={};
+        Require(!AnchorFromModelView(zero).valid,"an unfilled constant register is not an anchor");
+        float scaled[4][4]={{10.f,0.f,0.f,0.f},{0.f,10.f,0.f,0.f},{0.f,0.f,10.f,0.f},{0.f,0.f,0.f,1.f}};
+        Require(!AnchorFromModelView(scaled).valid,"a scaled model matrix is not an anchor");
+        float sheared[4][4]={{1.f,.6f,0.f,0.f},{0.f,1.f,0.f,0.f},{0.f,0.f,1.f,0.f},{0.f,0.f,0.f,1.f}};
+        Require(!AnchorFromModelView(sheared).valid,"a sheared basis is not an anchor");
+        float broken[4][4]={{1.f,0.f,0.f,0.f},{0.f,1.f,0.f,0.f},{0.f,0.f,1.f,0.f},{NAN,0.f,0.f,1.f}};
+        Require(!AnchorFromModelView(broken).valid,"a NaN in the draw's matrix cannot reach the wave field");
+        // And the fallback the caller takes instead: a frame without a usable matrix builds
+        // the field a camera at the origin would see, which is still animated and bounded.
+        const auto blind=BuildWaveField(9.0,1.f,.32f,100.f,12000.f,9000.f,false,true);
+        const auto origin=BuildWaveField(9.0,1.f,.32f,100.f,0.f,0.f,true,true);
+        Require(blind.ripplePhase[0]==origin.ripplePhase[0]&&
+                blind.swellPhase[2]==origin.swellPhase[2],
+                "a missing camera falls back to the origin-anchored field, not to garbage");
+        Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.swellPhase[1]),
+                "the anchor fallback stays usable by both shader stages");
+    }
+    // The vertex stage displaces the very waves the pixel stage lights, from one shared set
+    // of numbers: a phase per train, in cells along that train's own direction. Sharing them
+    // is only legal because each phase is reduced into its OWN wavelength. Wrapping a
+    // directional train's phase with the lattice's 64-cell wrap instead would slide it by
+    // k*64*direction.x and put the lit crest on a different wave than the displaced one -
+    // the artefact class this whole field exists to remove.
+    static_assert(kTrainCount==3,"the swell is three trains: the two the mesh can hold, and one the shading only");
+    static_assert(kGeometryTrainCount==2,"the vertex stage carries the two longest trains only");
+    for (int train=0;train<kTrainCount;++train)
+        Require(std::fabs(kTrainRadians[train]*kTrainCells[train]-kTwoPi)<1e-4f&&
+                std::fabs(kTrainDirX[train]*kTrainDirX[train]+kTrainDirY[train]*kTrainDirY[train]-1.f)<1e-4f,
+                "every swell train is 2pi over its own cell count, in a unit direction");
+    Require(kMaxPinch>1.1f&&kMaxPinch<1.3f,"the train table's steepness budget is the one the clamp assumes");
+    auto trainAngle=[](const WaveField& field,int train,float relativeX,float relativeY) {
+        const float cellX=relativeX*field.lattice[0]+relativeY*field.lattice[1];
+        const float cellY=relativeX*field.lattice[2]+relativeY*field.lattice[3];
+        return kTrainRadians[train]*(kTrainDirX[train]*cellX+kTrainDirY[train]*cellY
+                                     +field.swellPhase[train]);
+    };
+    const auto turn=[](float value){return value-kTwoPi*std::floor(value/kTwoPi);};
+    // (1) Translation invariance, measured where a tile is actually visible: the reference
+    // camera sits on the water it is testing, and each other camera sees the same point from
+    // up to six hundred yards away.
     for (float offset : {-600.f, -133.f, 0.f, 271.f, 640.f})
     for (float counter : {0.f, .32f, 1.f})
+    for (int train=0;train<kTrainCount;++train)
     {
         const auto field=BuildWaveField(17.5,1.f,counter,100.f,4213.f+offset,-7781.f+offset*.5f,true,true);
         const auto reference=BuildWaveField(17.5,1.f,counter,100.f,4213.f,-7781.f,true,true);
         const float relativeX=4213.f-(4213.f+offset), relativeY=-7781.f-(-7781.f+offset*.5f);
-        const auto argum=[](const WaveField& field,float relativeX,float relativeY) {
-            return (relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.phase[2])*kSwellRadians;
-        };
-        const float argX=argum(field,relativeX,relativeY);
-        const float argRef=argum(reference,0.f,0.f);
-        // sin() is what the shader feeds, and arguments that differ by a whole
-        // number of turns are the same wave. Both sides are wrapped with floor (NOT
-        // by taking an absolute value first: |a| and |b| are not congruent when the
-        // signs differ, which is how an earlier version of this check invented a
-        // failure), and compared circularly.
-        const auto turn=[](float value){return value-6.2831853f*std::floor(value/6.2831853f);};
-        const float waveA=turn(argX),waveB=turn(argRef);
-        const float apart=std::fabs(waveA-waveB);
-        Require(std::fmin(apart,6.2831853f-apart)<1e-2f,
-                "the shared swell phase lands the same wave under every camera");
+        // sin() is what both stages feed, and arguments that differ by a whole number of
+        // turns are the same wave. Both sides are wrapped with floor (NOT by taking an
+        // absolute value first: |a| and |b| are not congruent when the signs differ, which
+        // is how an earlier version of this check invented a failure), and compared circularly.
+        const float a=turn(trainAngle(field,train,relativeX,relativeY));
+        const float b=turn(trainAngle(reference,train,0.f,0.f));
+        const float apart=std::fabs(a-b);
+        Require(std::fmin(apart,kTwoPi-apart)<1e-2f,
+                "every swell train lands the same wave under every camera");
     }
-    // (2) And the argument the vertex stage evaluates stays inside a range where
-    // float32 still has fraction bits to spare even at the far corner of a
-    // continent, because the camera's own coordinate is subtracted first.
+    // (2) And the argument each stage evaluates stays inside a range where float32 still has
+    // fraction bits to spare even at the far corner of a continent, because the camera's own
+    // coordinate is subtracted first and the phase is wrapped into one wavelength.
     {
         const auto far=BuildWaveField(41.25,1.f,.32f,100.f,46321.f,-51000.f,true,true);
-        const float arg=std::fabs((421.f*far.lattice[0]-307.f*far.lattice[1]+far.phase[2])*kSwellRadians);
-        Require(arg<160.f,"the geometry wave argument stays small at any world coordinate");
-        const float ripple=std::fabs(421.f*far.lattice[0]-307.f*far.lattice[1]+far.phase[0]);
+        // Both stages evaluate sincos of these angles in float32. What has to stay small is
+        // not the angle - a point far along a train is many turns in - but the coordinate it
+        // is built from: the camera's own position comes off before anything is multiplied,
+        // so what reaches sincos is the offset of a drawn tile and not of a continent. Below
+        // 2^12 radians float32 still resolves a turn to better than a thousandth of a
+        // radian, which is a thousandth of a yard of crest at the shipped wave height.
+        const float cellX=421.f*far.lattice[0]-307.f*far.lattice[1];
+        const float cellY=421.f*far.lattice[2]-307.f*far.lattice[3];
+        Require(std::fabs(cellX)<400.f&&std::fabs(cellY)<400.f,
+                "the lattice coordinate a stage evaluates is a tile offset, not a world coordinate");
+        for (int train=0;train<kTrainCount;++train)
+        {
+            const float angle=std::fabs(trainAngle(far,train,421.f,-307.f));
+            Require(angle<4096.f,"the geometry wave argument stays inside float32's sine precision");
+            Require(std::isfinite(angle)&&std::isfinite(far.swellPhase[train]),
+                    "the swell phase is finite for hours of flow and any camera");
+        }
+        const float ripple=std::fabs(421.f*far.lattice[0]-307.f*far.lattice[1]+far.ripplePhase[0]);
         Require(ripple<=kLatticeWrap*2.f,"the shading argument never leaves the wrapped lattice twice over");
-        Require(std::isfinite(arg)&&std::isfinite(far.phase[3]),
-                "the swell phase is finite for hours of flow and any camera");
+    }
+    // ---- geometry waves: three dimensions, held fold-safe --------------------------
+    // A Gerstner surface folds over itself when its steepness passes one, and a folded wave
+    // is not a steep wave - it is a surface that has turned inside out, with normals pointing
+    // into the water and foam where there is no crest. The steepness is therefore authored on
+    // the CPU, clamped, and shipped as a constant, so no combination of sliders can reach it.
+    for (float height : {0.f, 25.f, 100.f, 300.f, 5000.f, NAN})
+    for (float scale : {25.f, 100.f, 400.f})
+    for (float agitation : {.12f, 1.f, 1.45f, 2.6f, 40.f, NAN})
+    {
+        const auto waves=BuildGeometryWaves(height,scale,agitation,true,true);
+        const float cell=kRippleCellYards*(scale>1.f?scale:100.f)*.01f;
+        Require(std::isfinite(waves.amplitude)&&std::isfinite(waves.lateral)&&std::isfinite(waves.sigma),
+                "no authored wave height, size or sea state produces a NaN");
+        Require(waves.sigma<=kGerstnerSigmaMax&&waves.sigma*kMaxPinch<1.f,
+                "the Gerstner steepness stays below the fold, whatever is authored");
+        Require(waves.amplitude<=1.2f*cell+1e-4f,
+                "a wave never lifts higher than the cell it is drawn on");
+        Require(waves.lateral==waves.sigma*cell||waves.lateral==0.f,
+                "the slide toward a crest is the authored steepness times the cell");
+        Require(std::fabs(waves.cellYards-cell)<1e-4f,"the cell length the stage is given is the wave size");
     }
     {
-        const auto blind=BuildWaveField(9.0,1.f,.32f,100.f,12000.f,9000.f,false,true);
-        const auto origin=BuildWaveField(9.0,1.f,.32f,100.f,0.f,0.f,true,true);
-        // A frame without a captured camera cannot be nailed to the terrain, so the
-        // field degrades to exactly what a camera at the origin would see: still
-        // animated, still bounded, no reliance on a position it does not have.
-        Require(blind.phase[0]==origin.phase[0]&&blind.phase[3]==origin.phase[3],
-                "a missing camera falls back to the origin-anchored field, not to garbage");
-        Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.phase[2]),
-                "the anchor fallback stays usable by both shader stages");
+        // Self-similar crests: the wave SIZE changes the wavelength and the height together,
+        // so the shape a player sees is the same sea at another scale rather than a stretched
+        // one. Growing the height alone would grow the steepness with it, which is the fold.
+        const auto small=BuildGeometryWaves(100.f,25.f,1.f,true,true);
+        const auto shipped=BuildGeometryWaves(100.f,100.f,1.f,true,true);
+        const auto large=BuildGeometryWaves(100.f,400.f,1.f,true,true);
+        Require(small.sigma==shipped.sigma&&shipped.sigma==large.sigma,
+                "the crest shape is the same at every wave size");
+        Require(small.amplitude<shipped.amplitude&&shipped.amplitude<large.amplitude,
+                "a larger wave size is a larger wave");
+        Require(shipped.amplitude>.4f&&shipped.amplitude<1.2f,
+                "the shipped wave height is a body of water a player can see from the shore");
+        // Per-zone and per-weather authoring still reaches the geometry: an exposed coast
+        // lifts more than a sheltered pond, and a storm lifts both. This is the requirement
+        // the whole feature has to keep - calm zones stay calm, and weather changes water.
+        const auto exposed=BuildGeometryWaves(100.f,100.f,1.45f,true,true);
+        const auto sheltered=BuildGeometryWaves(100.f,100.f,.45f,true,true);
+        Require(exposed.amplitude>shipped.amplitude&&sheltered.amplitude<shipped.amplitude,
+                "an authored sea state lifts and lowers the geometry waves");
+        // The switches, in both directions. Waves off is flat water - not a small wave, flat -
+        // because a zone authored calm has to look calm from every camera. Geometry waves off
+        // keeps the shading's crest sharpening, since that is a property of the sea and not of
+        // the mesh: the whitecaps stay where a crest is, they just stop being three dimensional.
+        Require(BuildGeometryWaves(100.f,100.f,1.f,false,false).amplitude==0.f&&
+                BuildGeometryWaves(100.f,100.f,1.f,false,false).sigma==0.f,
+                "waves off is a flat, unsharpened sheet");
+        const auto shadingOnly=BuildGeometryWaves(100.f,100.f,1.f,false,true);
+        Require(shadingOnly.amplitude==0.f&&shadingOnly.lateral==0.f&&shadingOnly.sigma>0.f,
+                "geometry waves off still sharpens the crests the shading lights");
+        Require(BuildGeometryWaves(0.f,100.f,1.f,true,true).amplitude==0.f,
+                "a wave height of zero is flat water even with the geometry switched on");
+        // The pinch the pixel stage divides its slope by is never so large that a crest
+        // sharpens into a spike: the Jacobian is floored in the shader, and the coefficient
+        // that reaches it is bounded here.
+        Require(kGerstnerSigma*kMaxPinch<.7f,"a fully pinched crest still leaves most of its Jacobian");
     }
     // ---- zone and weather driven sea state ----------------------------------------------
     {
@@ -319,6 +523,133 @@ int main() try
         Require(shader.find("const double elapsed=seaMotion_.Time();") != std::string::npos
                 && shader.find("BuildWaveField(elapsed,1.f,") != std::string::npos,
                 "the wave field runs on the integrated clock, and speed is not re-multiplied into it");
+
+        // ---- the three defects this round exists to remove, pinned as text -------------
+        // Text is the only thing a portable test can hold a production shader to, and these
+        // are the lines whose spelling is the fix: a wave that follows the camera, a wave
+        // that travels at a readable pace, and a wave that is a body rather than a curve.
+        // Comments come off before any spelling is searched for. The vertex stage documents
+        // the transposition it must NOT do by writing the wrong expression down next to the
+        // right one, and a pin that matched the warning instead of the code would pass on the
+        // exact bug it describes.
+        const auto stripComments=[](const std::string& text) {
+            std::string out;
+            out.reserve(text.size());
+            for (size_t at=0; at<text.size(); )
+            {
+                if (text.compare(at,2,"//")==0) { while (at<text.size()&&text[at]!='\n') ++at; }
+                else if (text.compare(at,2,"/*")==0)
+                {
+                    at+=2;
+                    while (at+1<text.size()&&text.compare(at,2,"*/")!=0) ++at;
+                    at=at+1<text.size()?at+2:text.size();
+                }
+                else out.push_back(text[at++]);
+            }
+            return out;
+        };
+        const auto literal=[&](const std::string& text,const char* name) {
+            const std::string head=std::string(name)+"=R\"HLSL(";
+            const size_t start=text.find(head);
+            if (start==std::string::npos) return std::string();
+            const size_t end=text.find(")HLSL\"",start);
+            return end==std::string::npos?std::string():stripComments(text.substr(start,end-start));
+        };
+        const std::string vertex=literal(shader,"vertexSource"), pixel=literal(shader,"source");
+        // The whole file with its comments off, for the pins that assert an expression is
+        // NOT there: both sources explain what the lattice orientation used to be by name.
+        // The header is read too, because the wave model itself - the train table, the
+        // dispersion, the orientation - lives there and is spelled into both stages.
+        const std::string code=stripComments(shader);
+        const std::string header=stripComments(ReadAlongside("../src/Water/WaveField.h"));
+        Require(header.size()>4096,"the wave field header both stages mirror is readable");
+        Require(vertex.size()>1024&&pixel.size()>8192,"both water stages are readable as text");
+        // (1) The waves followed the camera. Two causes, both a matrix read the wrong way
+        // round: the lattice was built from the view axes expressed in world coordinates, so
+        // a camera-relative position was rotated by the camera twice and the field turned
+        // when the camera turned; and the anchor was read from a camera captured on an
+        // earlier draw, so the field slid by however far the player had moved since.
+        Require(vertex.find("float3 axisX=modelView[0].xyz;")!=std::string::npos&&
+                vertex.find("float3 axisY=modelView[1].xyz;")!=std::string::npos&&
+                vertex.find("float3 axisZ=modelView[2].xyz;")!=std::string::npos,
+                "the water vertex stage reads the world axes as the rows of its own matrix");
+        Require(vertex.find("float3(modelView[0].z,modelView[1].z,modelView[2].z)")==std::string::npos&&
+                vertex.find("float3(modelView[0].x,modelView[1].x,modelView[2].x)")==std::string::npos,
+                "no wave coordinate is built by reading the draw's matrix across its rows");
+        Require(vertex.find("float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));")!=std::string::npos,
+                "the lattice coordinate is the world offset from this draw's own camera");
+        Require(code.find("GetVertexShaderConstantF(5,&modelView[0][0],4)")!=std::string::npos&&
+                code.find("AnchorFromModelView(modelView)")!=std::string::npos&&
+                code.find("anchor.camera[0],anchor.camera[1],anchor.valid")!=std::string::npos,
+                "the wave field is anchored to the matrix of the draw being shaded");
+        Require(code.find("waveFrame.cameraPosition.x,waveFrame.cameraPosition.y")==std::string::npos,
+                "no water draw is anchored to a camera captured on some other draw");
+        Require(code.find("controls[48]=anchor.up[0]")!=std::string::npos&&
+                code.find("viewMatrix[2][0]")==std::string::npos,
+                "the up axis the water is shaded against comes from the same draw");
+        // (2) The waves were far too fast: the lattice orientation was `time * rotation`,
+        // which spins the basis about the WORLD ORIGIN and translates every point that is
+        // not at the origin by hundreds of yards a second. It is a constant now, and the
+        // pace comes from dispersion over a wavelength instead.
+        Require(code.find("kLatticeRotation")==std::string::npos&&
+                header.find("kLatticeRotation")==std::string::npos&&
+                header.find("inline constexpr float kLatticeYaw = 0.62f;")!=std::string::npos,
+                "the wave lattice has one orientation, so nothing spins about the world origin");
+        Require(header.find("inline constexpr float kPhaseSpeedScale = .44f;")!=std::string::npos&&
+                header.find("kPhaseSpeedScale * std::sqrt(kGravityYards * wavelength / kTwoPi)")!=std::string::npos,
+                "a crest travels at the deep-water speed of its own wavelength");
+        // (3) The waves were flat: curves drawn on a plane. The lift has to go along world
+        // up, and the slide toward the crest is what makes a wave a body - crests pinch and
+        // steepen, troughs open out - so both are pinned, plus the sign of the shading
+        // normal, which is the negative gradient of the height field the geometry lifted.
+        Require(vertex.find("p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;")!=std::string::npos,
+                "geometry waves lift the surface along world up and slide it toward the crest");
+        Require(vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*kDirA+kWeightB*cosB*kDirB);")
+                    !=std::string::npos,
+                "the slide is Gerstner's own, in phase with the lift a quarter turn behind it");
+        Require(pixel.find("float2 tilt=-slopes*(controls.z/jacobian)*flip;")!=std::string::npos,
+                "a crest leans toward the light it catches: the normal is the negative gradient");
+        Require(pixel.find("float jacobian=max(1.0-pinch,.3);")!=std::string::npos&&
+                pixel.find("float pinch=controls.x*(kWgtA*kRadA*sinA+kWgtB*kRadB*sinB+kWgtC*kRadC*sinC);")
+                    !=std::string::npos,
+                "the shading sharpens by the Gerstner Jacobian, and never divides by zero");
+        // One train table, three spellings: the vertex stage, the pixel stage, and the CPU
+        // header that builds the phases. A wavelength that moves in one and not the others
+        // slides a lit crest off a displaced one, so the spellings are held to each other.
+        // The two longest trains are spelled into both stages; the ten yard one is the pixel
+        // stage's alone, because the client's liquid grid is about four yards apart and
+        // lifting a wave that short on it is what facets. That split is deliberate, so it is
+        // pinned in both directions rather than left to a reader to notice.
+        for (const char* spelling : {"0.39269908","0.78539816","-0.4695,0.8829"})
+            Require(vertex.find(spelling)!=std::string::npos&&pixel.find(spelling)!=std::string::npos,
+                    "both shader stages carry the same swell train table");
+        for (const char* spelling : {"1.57079633","0.4384,-0.8988","0.28409091"})
+            Require(pixel.find(spelling)!=std::string::npos&&vertex.find(spelling)==std::string::npos,
+                    "the ten yard train and its crest normalization are the pixel stage's alone");
+        Require(header.find("kTrainCells[kTrainCount] = {16.f, 8.f, 4.f}")!=std::string::npos&&
+                header.find("kTrainDirX[kTrainCount] = {1.f, -.4695f, .4384f}")!=std::string::npos&&
+                header.find("kTrainDirY[kTrainCount] = {0.f, .8829f, -.8988f}")!=std::string::npos&&
+                header.find("kTrainRadians[kTrainCount] = {kTwoPi / 16.f, kTwoPi / 8.f, kTwoPi / 4.f}")
+                    !=std::string::npos,
+                "the CPU header carries the same wavelengths and directions");
+        // Foam at the edges of waves, and only when the water is active: the pinch says a
+        // crest is breaking, the authored wind says whether this body can foam at all, and
+        // the foam then takes the mirror and the sun road with it - a whitecap scatters.
+        Require(pixel.find("float breaking=saturate(pinch*2.4);")!=std::string::npos&&
+                pixel.find("float whitecap=smoothstep(.86,1.02,capBand)*wind;")!=std::string::npos,
+                "a breaking crest foams, gated by the wind this water is authored to have");
+        const size_t foamAt=pixel.find("float foamAmount="), dampAt=pixel.find("float reflectionAmount=");
+        Require(foamAt!=std::string::npos&&dampAt!=std::string::npos&&foamAt<dampAt,
+                "the foam is known before the reflection is mixed, so it can damp it");
+        Require(pixel.find("(1-saturate(foamAmount*.85))")!=std::string::npos&&
+                pixel.find("(1-saturate(foamAmount))")!=std::string::npos,
+                "foam takes the mirror and the sun road away with it");
+        // Per-zone and per-weather authoring has to reach the geometry, not only the
+        // shading: the sea state multiplies the lift, and waves off is flat water.
+        Require(code.find("BuildGeometryWaves(geometryWavePercent,\n"
+                            "                waveScalePercent,seaAgitation,geometryWavesEnabled,wavesEnabled)")
+                    !=std::string::npos,
+                "the geometry waves are lifted by the same sea state the shading is");
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(mirror.find("TargetSeaState(tuning, weather)") != std::string::npos,
                 "the game and the CPU preview ease the same sea state through one function");
@@ -327,6 +658,18 @@ int main() try
         Require(mirror.find("Mul(waterBody, tint)") != std::string::npos
                 && mirror.find("Mul(tint, 2.f)") == std::string::npos,
                 "the CPU mirror multiplies the same tint with no gain of its own");
+        // The waves too: the preview has no vertex stage, so it displaces the shaded point
+        // itself, but the field, the trains, the pinch and the sign of the tilt are the same
+        // expressions - otherwise the published frames are of water the client does not draw.
+        Require(mirror.find("EvaluateSwell(plane.x, plane.y, field.swellPhase)") != std::string::npos
+                && mirror.find("BuildGeometryWaves(c.geometryWaves") != std::string::npos,
+                "the CPU preview evaluates the same swell and asks the same builder for its waves");
+        Require(mirror.find("-(axisX.x * w.slopes.x * tilt") != std::string::npos
+                && mirror.find("swell * kSwellToUnit") != std::string::npos,
+                "the CPU preview tilts the same way and normalizes the swell by the same divisor");
+        Require(mirror.find("Smoothstep(.86f, 1.02f, capBand) * wind") != std::string::npos
+                && mirror.find("Saturate(wave.pinch * 2.4f)") != std::string::npos,
+                "the CPU preview foams at the same crests, on the same pinch, under the same wind");
         const std::string profiles = ReadAlongside("../EnvironmentProfiles.ini");
         {
             // The key's own length, and a section lookup that cannot be fooled by the file's header

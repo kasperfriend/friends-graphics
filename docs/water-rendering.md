@@ -135,9 +135,10 @@ changing the wrap fails the build rather than sliding the waves apart by eye.
 The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
-state without spending a render pass, and **560 instruction slots** enforced by
-`tools/ValidateShaders.ps1` (the shader measures 542 - 543 before the doubled tint came out;
-the budget was raised from 496 for this rework rather than cut a visible term - see "Shader
+state without spending a render pass, and **608 instruction slots** enforced by
+`tools/ValidateShaders.ps1` (the shader measured 542 - 543 before the doubled tint came out and
+before round 3 below added its third train, its Jacobian and its whitecaps; the budget was
+raised from 496 for this rework rather than cut a visible term - see "Shader
 budget raised for the volume rework" below, which also records what a 512-slot device does). So each of those has a substitute
 here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
 toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent carries both
@@ -244,6 +245,25 @@ read `c[13]`, `c[16]`, `c[19]`, `c[20]`, `c[23]` and `c[28..30]` as before; thos
 are the
 cheapest available proof that the ABI did not shift.
 
+Round 3 kept the register count and rearranged what the wave registers mean, because the field
+itself changed from "a phase and a rotation" to "a phase per train":
+
+| register | contents |
+|---|---|
+| `c200` (VS) | amplitude in yards, lateral slide in yards, sigma, one cell in yards |
+| `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
+| `c202` (VS) | one phase per swell train, in cells along that train, wrapped into its own wavelength |
+| `c200` (PS) `.x` | sigma: the Gerstner pinch the pixel stage divides its slope by |
+| `c210` | chop phase (xy), then the two displaced trains' phases (zw) |
+| `c211` | texture creep (xy), the shaded-only train's phase (z), the waves gate (w) |
+| `c212` | this draw's world-up in view space (xyz) and its authored wind (w) |
+
+The vertex stage reads one more set of constants than it used to: `c5..c8`, the draw's own
+model-to-view matrix, are read back on the CPU so the wave phase and the shading's up axis come
+from the same matrix the displacement uses. `watereffect::Scope`'s save/restore is unchanged in
+size - seventeen pixel registers and three vertex registers - because nothing new was added,
+only rearranged.
+
 ### Looking at changes without a GPU
 
 `tools/WaterPreview.cpp` is a CPU mirror of the water pixel shader - the same wave field from `src/Water/WaveField.h`,
@@ -317,7 +337,123 @@ than a reference screenshot can and less than an in-game pass does: the frames c
 detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
 in-game pass. The
 slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
-cannot run fxc, so "it fits in 560 slots" is a CI result there, not a local one.
+cannot run fxc, so "it fits in the budgeted slots" is a CI result there, not a local one - and
+since round 3 the budget line itself carries that caveat, because 608 is an estimate awaiting
+the next Windows run's measured count.
+
+## Full rework round 3: motion, mass and foam (2026-10-14)
+
+Round 2 fixed what the water looked like. Round 3 fixed what it did. The report from play was
+three things, in order of how bad they were: the waves moved when the camera turned and slid when
+the player moved; they were far too fast, "insanely fast" at the shipped numbers; and they were
+flat - wave curves drawn on a plane, with no body to them. Foam on breaking crests was the ask
+that came with the fix, and the round-1 requirements had to survive it: per-zone sea states and
+weather-driven roughness stay, because a calm zone and a storm are authoring, not defects.
+
+### Why the sea followed the camera
+
+Two transpositions, not one. The vertex stage built its world axes by reading the draw's
+model-to-view matrix ACROSS its rows - `float3(modelView[0].x, modelView[1].x, modelView[2].x)` -
+which is the view's own axes expressed in world coordinates. Dotting those with a view-space
+position applies the camera's rotation twice, so the lattice coordinate turned when the camera
+turned: the sea behaved like a decal on the screen. The array is the client's row-vector matrix,
+so world axis *i* in view space is row *i*, exactly the convention the stage's normal transform
+had always used a few lines below the bug.
+
+The second half was the anchor. The camera position that the wave phase carries used to come from
+`FrameContext`, which `CameraCapture` fills on the first draw of a frame that carries perspective
+constants - so a water tile drawn before that capture was anchored to last frame's camera, and the
+sea slid backwards by exactly the distance the player moved in between. The client's own water
+reflection pass is worse: it renders water under a mirrored camera the capture never sees at all.
+Both halves now come from the draw itself: `watereffect::Scope` reads `c5..c8` back with
+`GetVertexShaderConstantF`, and `renderer::water::AnchorFromModelView` in `src/Water/WaveField.h`
+turns that matrix into the camera position and the world-up axis the shading uses. It refuses a
+basis that is not orthonormal - the pairing "view position dotted with row *i* is the world
+offset's component *i*" is only true of a rigid basis - and the caller then falls back to the
+captured camera, which is the right world even when it is the wrong frame. The regression test
+builds real yawed, pitched and mirrored matrices, runs the shader's own dot products through them,
+and requires `rel + anchor == world point` to within two centimetres at every angle.
+
+### Why the sea was fast
+
+`kLatticeRotation` rotated the lattice basis by `time * 0.035` radians per second. Rotating a
+basis about the world origin translates every point that is not at the origin: at a camera six
+hundred yards out that is 175-700 yards per second of sea sweeping past, while a camera at the
+origin saw nothing wrong - which is why it survived two rounds of looking. The orientation is a
+constant now (`kLatticeYaw`, 0.62 rad), and the pace a crest travels at is a property of its
+wavelength instead: `c = 0.44 * sqrt(10.73 * wavelength / 2pi)` yards per second, deep-water
+dispersion scaled to something a player reads as water. The forty yard swell crosses at about
+3.6 yards a second (an eleven second period), the ten yard chop at 1.8. `FlowSpeedPercent` still
+scales all of it, through the integrated sea clock, and weather still quickens it - both
+preserved, neither re-multiplied into the field.
+
+### Why the sea was flat
+
+The displacement went along `float3(modelView[0].z, modelView[1].z, modelView[2].z)` - the view
+direction, not an up axis - so geometry waves pushed water toward and away from the camera and the
+silhouette could never change. Water now lifts along world up and slides toward the coming crest,
+which is a Gerstner wave: the slide is the term that makes crests pinch and steepen and troughs
+open out, and it is why the same amplitude reads as a body of water instead of a sine seen from the
+side. The mesh carries the two longest trains (the client's liquid grid is about four yards apart
+and a ten yard wave on it is facets); the pixel stage shades all three and divides its slope by the
+Gerstner Jacobian, so a crest the geometry steepened is a crest the light sees steepened. The
+steepness is authored once (`sigma = 0.45`, clamped fold-safe on the CPU), so no combination of WAVE
+HEIGHT, WAVE SIZE and sea state can turn a wave inside out - `J` never drops below 0.46, and the
+shading floors it at 0.3 besides.
+
+That also caught a sign error that was invisible while the surface was flat: the shading normal was
+tilted by the POSITIVE gradient of the height field. A height field's normal is `(-dh/dx, -dh/dy, 1)`,
+so every wave face was lit as though it leaned the other way and highlights sat in the troughs. Both
+stages and the CPU mirror now use the negative gradient, and the regression pins the sign in all
+three.
+
+### Foam on the edges of waves
+
+Foam used to be a shore term plus a crest mask. It is now three sources with one gate: the crest
+itself (`crestMask`), the pinch where the geometry is folding water onto water (`breaking`, which is
+zero on water that was authored flat - so a calm zone shows no white line however high its wind),
+and the shoal where the bottom comes up fast. All three are multiplied by the body's authored WIND
+and by its sea state, so per-zone and weather behaviour is unchanged in kind and stronger in effect:
+a squall on an exposed coast puts a cap on every third crest, a sheltered pond in the same rain
+stays dark water with a little chop. Foam is a surface, not a decal: it raises the roughness, takes
+the reflection (`*(1 - foam*0.85)`) and the sun road (`*(1 - foam)`) with it, and only then adds its
+own colour, lifted toward the light but softened at `NoL = -0.25` so a shaded face still carries its
+cap.
+
+### Settings, and what a player sees
+
+`GeometryWavesEnabled` ships on now, with `[Water] GeometryWavePercent` re-authored as a height in
+percent of the shipped sea: 0 is a flat sheet, 100 the reference look, 300 a gale. The F7 menu
+gained WAVE GEOMETRY and WAVE HEIGHT (0-300, step 5) next to WAVES and WAVE SIZE. Turning geometry
+off does not flatten the shading - the crest sharpening and the whitecaps stay, because those are
+properties of the sea and not of the mesh - and turning WAVES off still gives a flat, unsharpened,
+foamless sheet, exactly as before.
+
+The published frames in `Screenshots/water-forever-look.png` and `Screenshots/water-zone-weather.png`
+were re-rendered with this round's `tools/WaterPreview.cpp`, which now displaces the shaded point by
+the same Gerstner lift and slide (forward-displaced rather than inverted, the one named difference
+it adds to its list).
+
+### Verification
+
+`tools/WaterRegression.cpp` gained the statements a screenshot cannot hold: the lattice keeps one
+orientation under any time and wave size; the long swell crosses between 2 and 6 yards a second;
+every train lands the same wave under every camera from its own wrapped phase; a draw's matrix plus
+the coordinate the vertex stage computes from it is the world point, at every yaw, pitch and mirror;
+the up axis converts back to world +Z; unfilled, scaled, sheared and NaN matrices are refused; and
+across every height/size/sea-state combination the steepness stays under the fold, the lift stays
+under 1.2 cells, and waves-off is exactly flat. Both shader stages and the CPU header are pinned to
+the same train table, the same transposition-free axis reading, the same negative-gradient tilt and
+the same foam gate, so a fix cannot be half-reverted. `tools/WaterDeviceRegression.cpp` pins
+`GeometryWavesEnabled=0` in its isolated settings and asserts it after the reload, because its quad
+sits exactly on the far clip plane and a displaced vertex would be a clipped pixel; its sentinel
+`c200` moved from `{71,0,73,74}` to `{0,0,73,74}` because `c200.x` is the amplitude now.
+
+The pixel stage grew by roughly forty instruction slots (a third train, the pinch and Jacobian, the
+whitecap mask, the back-lit in-scatter, the foam coupling, minus the flow gate and the crest slope
+dot it replaced), so the budget in `tools/ValidateShaders.ps1` moved 560 to 608 - an estimate made
+without fxc, and the comment on the line says so and asks the next Windows run to replace it with
+the measured count plus margin.
 
 ## Shader budget raised for the volume rework (2026-10-14)
 
@@ -499,9 +635,11 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation measures **542 slots** and enforces a **560-slot budget** (the 496-slot
+shader validation enforces a **608-slot budget** on it (measured 542 before round 3's third
+train, Jacobian and whitecaps; the 496-slot
 budget it used to enforce stood below the 512-slot hardware minimum until the volume rework of
-2026-10-14 above outgrew both). Device-creation failures log the HRESULT and device instruction
+2026-10-14 above outgrew both, and round 3's count is an estimate this environment could not
+compile). Device-creation failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
 This is a verified failure path in the code, not a diagnosis from a capture of
@@ -545,7 +683,8 @@ the reporting player's machine. In-game confirmation still matters.
 ## Tests
 
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 560 static instruction slots (542 measured; the ceiling was raised from 496 - see
+  exceeds 608 static instruction slots (542 measured before round 3, whose ~40 added slots are
+  an estimate awaiting fxc; the ceiling was raised from 496 - see
   "Shader budget raised for the volume rework") or its instruction count cannot be read.
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
