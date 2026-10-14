@@ -1,4 +1,5 @@
 #pragma once
+#include "../Water/WaterMaterial.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstring>
@@ -76,14 +77,7 @@ public:
         if(!f.cameraValid || !g_trackedState.zEnable)return;
         const auto hash=g_trackedState.psHash;
         bool terrain=IsTerrainVertexShader(g_trackedState.vsHash)||hash==0x1259eadbfaafb43eull||hash==0x8f5f50576e4cf36aull||hash==0x36df746731dcdefdull||hash==0x250ee869fc4be850ull;
-        bool water=false;
-        if(!terrain){
-            water=true;
-            for(UINT s=0;s<2;++s){ComPtr<IDirect3DBaseTexture9> t;D3DSURFACE_DESC desc{};
-                if(FAILED(d->GetTexture(s,t.GetAddressOf()))||!t||t->GetType()!=D3DRTYPE_TEXTURE||
-                    FAILED(static_cast<IDirect3DTexture9*>(t.Get())->GetLevelDesc(0,&desc))||
-                    desc.Width!=(s?512u:8u)||desc.Height!=(s?512u:64u)){water=false;break;}}
-        }
+        const bool water=!terrain && renderer::water::IsMaterial(d);
         if(!terrain&&!water)return;
         Capture(d,f,water?5:0,draw);
     }

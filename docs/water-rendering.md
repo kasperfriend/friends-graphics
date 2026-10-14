@@ -1,5 +1,33 @@
 # Water rendering audit
 
+## Follow-up: texture resolution was used as material identity (2026-10-14)
+
+The shared material gate required slot 0 to be exactly 8×64 and slot 1 to be
+exactly 512×512. It rejected a 256×256 or 128×128 surface before consulting
+any shader identity, incrementing `frameCandidates`, creating the replacement
+shaders, or capturing the scene. `GroundSurfaceCapture` duplicated that gate.
+This is reproducible with the production policy and explains why successful
+shader compilation cannot establish that a water draw reaches replacement.
+
+Keep the canonical layout fallback for previously supported unknown tile
+variants. For different resolutions, require **both** a documented native
+water VS and the documented water PS, the lookup's base size or a valid reduced
+top mip, and a square power-of-two surface. The shader roles are not
+interchangeable. A ripple lookup alone (also used by weather) is insufficient.
+Verify the actually bound shader pointers before using tracked hashes; when
+state-block application bypasses hooks, query the bound shaders' cached hashes.
+Classification, scene capture, replacement and ground capture now use one gate.
+
+Portable tests cover every documented VS, all lookup mips, surface sizes
+16–1024, missing inputs, wrong shader roles, weather/UI and invalid shapes.
+Device tests use synthetic ABI-compatible shaders **with supplied native
+identity metadata** to exercise the real classifier, scene copy, replacement,
+framebuffer readback and state restoration at six noncanonical layouts. They
+also reject stale tracked identities. These tests are not native shader dumps
+or an Ascension client replay. The reporting client's logs have no texture
+sizes; this code defect is verified, but its relevance to that particular
+client remains unconfirmed without an observed draw.
+
 ## Follow-up: live toggle blocked by startup configuration (2026-10-14)
 
 The shader-budget fix did not address a separate enable path. `Configure` read

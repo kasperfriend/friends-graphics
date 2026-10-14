@@ -360,6 +360,56 @@ int main() try {
     Require((pixel(1)&0xffffff)==0xff00ff,"debug mode proves replacement reaches the framebuffer");
     Require((pixel(0)&0xffffff)!=0,"modern water without capture is finite and nonblack");
     restored();
+    // Identity fixture: the synthetic ABI-compatible shaders above stand in
+    // for the captured native pair. Seed the same metadata that SetShader
+    // hooks supply, but keep actual-device identity checks, classification,
+    // capture, Scope, draw, readback and restoration in production code.
+    // This is NOT a replay of captured WoW shader bytecode.
+    {
+        renderer::ScopedTrackedRenderState trackedRestore;
+        auto& tracked=renderer::g_trackedState;
+        tracked.currentVS=originalVS.Get();tracked.currentPS=originalPS.Get();
+        tracked.vsHash=0x48a82796bd612aebull;tracked.psHash=0x7d4f078fa1876a09ull;
+        const UINT sizes[][3]={{8,64,256},{8,64,128},{4,32,256},{2,16,128},{8,64,1024},{1,1,16}};
+        for(const auto& size:sizes) {
+            auto lookup=texture(size[0],size[1],0xff406080);
+            auto waves=texture(size[2],size[2],0xff808080);
+            Check(d->SetTexture(0,lookup.Get()));Check(d->SetTexture(1,waves.Get()));
+            Require(renderer::water::IsMaterial(d.Get()),"known bound water identified at noncanonical resolutions");
+            Require(classifier.Classify(d.Get(),ctx,translation,false,0).isWater,
+                "classifier agrees with replacement at noncanonical resolutions");
+            Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+            Require(waterreflection::ready&&watereffect::reflectionScene,
+                "noncanonical water still gets pre-water scene capture");
+            waterreflection::Finish();
+            Require((pixel(1)&0xffffff)==0xff00ff,"noncanonical water replacement reaches framebuffer");
+            Require((pixel(0)&0xffffff)!=0,"noncanonical full water shader renders nonblack");
+            restored();
+            ComPtr<IDirect3DBaseTexture9> t0,t1;
+            Check(d->GetTexture(0,t0.GetAddressOf()));Check(d->GetTexture(1,t1.GetAddressOf()));
+            Require(t0.Get()==lookup.Get()&&t1.Get()==waves.Get(),"noncanonical native textures restored");
+            std::printf("PASS water resolution %ux%u / %ux%u classifier, capture, pixels and state\n",
+                size[0],size[1],size[2],size[2]);
+        }
+        auto small=texture(256,256,0xff808080);
+        Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,small.Get()));
+        tracked.currentVS=nullptr;
+        Require(!renderer::water::IsMaterial(d.Get()),"stale tracked VS identity cannot approve actual unknown shader");
+        tracked.currentVS=originalVS.Get();tracked.currentPS=nullptr;
+        Require(!renderer::water::IsMaterial(d.Get()),"stale tracked PS identity cannot approve actual unknown shader");
+        tracked.currentPS=originalPS.Get();tracked.psHash=0;
+        Require(!renderer::water::IsMaterial(d.Get()),"unknown PS cannot approve noncanonical water");
+        Require((pixel(1,false)&0xffffff)!=0xff00ff,"unrecognized noncanonical draw stays native");
+        restored();
+        tracked.psHash=0x7d4f078fa1876a09ull;
+        Check(d->SetPixelShader(nullptr));
+        Require(!renderer::water::IsMaterial(d.Get()),"missing actual PS rejected despite tracked water pair");
+        Check(d->SetPixelShader(originalPS.Get()));
+        Check(d->SetTexture(1,nullptr));
+        Require(!renderer::water::IsMaterial(d.Get()),"missing actual texture rejected despite tracked water pair");
+        Check(d->SetTexture(1,surface.Get()));
+    }
+    waterreflection::Reset(d.Get());
     // The optional atmosphere MRTs must never corrupt the main water draw.
     ComPtr<IDirect3DTexture9> mask,waterDepth;ComPtr<IDirect3DSurface9> maskRT,depthRT;
     Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,mask.GetAddressOf(),nullptr));
