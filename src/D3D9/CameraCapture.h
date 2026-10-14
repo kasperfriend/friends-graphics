@@ -38,29 +38,6 @@ namespace renderer
             bool& outCapturedViewValid,
             uint64_t shaderHash);
 
-        // Called at the start of a depth-captured frame.
-        void BeginFrame()
-        {
-            m_fallbackCandidateValid = false;
-            m_fallbackHasTranslation = false;
-            m_fallbackSawSceneDraw = false;
-        }
-
-        // Observes D3DTS_VIEW / D3DTS_PROJECTION during the scene pass so that
-        // looking straight up at the sky (when all terrain/WMO chunks are
-        // frustum-culled below the camera) still tracks the camera orientation
-        // and keeps volumetric clouds visible overhead.
-        void ObserveSkyFallback(IDirect3DDevice9* device);
-
-        // Commits the sky/retained camera fallback if the scene pass ended
-        // (UI draw reached or Present) without a terrain/WMO draw latching.
-        bool ApplySkyFallback(
-            FrameContext& frameContext,
-            const CameraCaptureConfig& config,
-            float outConstants[13][4],
-            float outCapturedViewTranslation[3],
-            bool& outCapturedViewValid);
-
         bool IsValid() const { return m_valid; }
         uint32_t GetCapturedFrames() const { return m_capturedFrames; }
         uint64_t GetCameraCaptureShaderHash() const { return m_cameraCaptureShaderHash; }
@@ -71,7 +48,6 @@ namespace renderer
             m_smoothedSunX = -1.0f;
             m_smoothedSunY = -1.0f;
             m_cameraGate.Reset();
-            BeginFrame();
         }
 
     private:
@@ -85,11 +61,5 @@ namespace renderer
         uint64_t m_cameraCaptureShaderHash = 0;
         float m_smoothedSunX = -1.0f;
         float m_smoothedSunY = -1.0f;
-        bool m_fallbackCandidateValid = false;
-        bool m_fallbackHasTranslation = false;
-        bool m_fallbackSawSceneDraw = false;
-        D3DMATRIX m_fallbackView{};
-        D3DMATRIX m_fallbackProj{};
-        D3DVIEWPORT9 m_fallbackVp{};
     };
 }

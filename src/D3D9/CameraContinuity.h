@@ -28,30 +28,16 @@ class CameraContinuityGate {
 public:
     bool Valid() const { return valid; }
     void Reset() { valid=false; candidates=0; }
-    const float* Position() const { return camera; }
 
-    bool MatchesBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) const {
-        return valid && viewportWidth == width && viewportHeight == height && BasisDot(viewBasis, basis) > .7f;
-    }
-
-    void UpdateBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) {
-        if (!valid) return;
-        for (int r = 0; r < 3; ++r)
-            std::copy(viewBasis[r], viewBasis[r] + 3, basis[r]);
-        width = viewportWidth; height = viewportHeight;
-        candidates = 0;
-    }
-
-    // viewTranslation: row 3 of the row-vector VIEW constants (v[3] = -c * R).
-    // viewBasis: rows v[0..2], first three elements each (row i = world axis i in view space).
+    // viewTranslation: column 3 of the row-major VIEW constants (v[3]).
+    // viewBasis: rows v[0..2], first three elements each.
     bool Accept(const float viewTranslation[4], const float viewBasis[3][4],
                 unsigned viewportWidth, unsigned viewportHeight) {
-        // Camera position in world space: c = -t * R^T (row i of R dotted with t),
-        // matching CameraCapture's c7 calculation (outConstants[7][i] -= v[3][j] * v[i][j]).
+        // Camera position in world space: c = -R^T * t for an orthonormal R.
         const float position[3]={
-            -(viewTranslation[0]*viewBasis[0][0]+viewTranslation[1]*viewBasis[0][1]+viewTranslation[2]*viewBasis[0][2]),
-            -(viewTranslation[0]*viewBasis[1][0]+viewTranslation[1]*viewBasis[1][1]+viewTranslation[2]*viewBasis[1][2]),
-            -(viewTranslation[0]*viewBasis[2][0]+viewTranslation[1]*viewBasis[2][1]+viewTranslation[2]*viewBasis[2][2])};
+            -(viewTranslation[0]*viewBasis[0][0]+viewTranslation[1]*viewBasis[1][0]+viewTranslation[2]*viewBasis[2][0]),
+            -(viewTranslation[0]*viewBasis[0][1]+viewTranslation[1]*viewBasis[1][1]+viewTranslation[2]*viewBasis[2][1]),
+            -(viewTranslation[0]*viewBasis[0][2]+viewTranslation[1]*viewBasis[1][2]+viewTranslation[2]*viewBasis[2][2])};
         if (!valid) {
             Anchor(position, viewBasis, viewportWidth, viewportHeight);
             return true;
@@ -119,13 +105,9 @@ private:
 // only when the capture's orthonormality check accepted the rows, which is
 // exactly the precondition for viewRaw.
 inline void ViewDirectionToWorld(const float viewRaw[16], const float viewDirection[3], float worldOut[3]) {
-    // Row-vector world->view (pos_view = pos_world * V) has inverse rotation V^T:
-    // world_i = dot(row_i(V), viewDirection), matching CameraCapture's sunWorld
-    // (where invX/invY/invZ already hold the columns of V, so invX.x*lv.x + invY.x*lv.y + invZ.x*lv.z
-    // is v[0][0]*lv.x + v[0][1]*lv.y + v[0][2]*lv.z).
-    worldOut[0] = viewRaw[0]*viewDirection[0] + viewRaw[1]*viewDirection[1] + viewRaw[2]*viewDirection[2];
-    worldOut[1] = viewRaw[4]*viewDirection[0] + viewRaw[5]*viewDirection[1] + viewRaw[6]*viewDirection[2];
-    worldOut[2] = viewRaw[8]*viewDirection[0] + viewRaw[9]*viewDirection[1] + viewRaw[10]*viewDirection[2];
+    worldOut[0] = viewRaw[0]*viewDirection[0] + viewRaw[4]*viewDirection[1] + viewRaw[8]*viewDirection[2];
+    worldOut[1] = viewRaw[1]*viewDirection[0] + viewRaw[5]*viewDirection[1] + viewRaw[9]*viewDirection[2];
+    worldOut[2] = viewRaw[2]*viewDirection[0] + viewRaw[6]*viewDirection[1] + viewRaw[10]*viewDirection[2];
     const float length = std::sqrt(worldOut[0]*worldOut[0] + worldOut[1]*worldOut[1] + worldOut[2]*worldOut[2]);
     if (length > 1e-6f) { worldOut[0] /= length; worldOut[1] /= length; worldOut[2] /= length; }
 }

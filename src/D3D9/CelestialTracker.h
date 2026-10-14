@@ -57,11 +57,6 @@ namespace renderer
         // don't match either pattern.
         void Observe(IDirect3DDevice9* device, UINT primitiveCount);
 
-        // Re-derives worldSpaceDirection for any camera-relative body (moon)
-        // observed earlier in the frame once CameraCapture latches the scene's
-        // current viewRaw matrix.
-        void RefreshWorldDirections(const float viewRaw[16]);
-
         const CelestialBody& Sun() const { return m_sun; }
         const CelestialBody& Moon() const { return m_moon; }
 

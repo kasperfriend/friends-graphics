@@ -444,7 +444,6 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         frameCtx.device = d;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
-        renderer::CameraCapture::Instance().BeginFrame();
 
         // Per-frame water mask: watereffect::Scope binds this as a second
         // render target during every actual water draw (see WaterEffect.h)
@@ -565,39 +564,6 @@ bool CaptureCamera(IDirect3DDevice9* d) {
         frameCtx.depthSurface = resources.surface.Get();
         frameCtx.depthAvailable = (resources.depth != nullptr);
         // c13: second height-fog layer (ground mist) - x=height,y=falloff,z=density
-        constants[13][0] = groundMistHeight;
-        constants[13][1] = groundMistFalloff;
-        constants[13][2] = groundMistDensity;
-        constants[13][3] = 0.f;
-    }
-    return ok;
-}
-
-bool CaptureSkyFallback() {
-    renderer::CameraCaptureConfig cfg;
-    cfg.sunOffsetX = sunOffsetX;
-    cfg.sunOffsetY = sunOffsetY;
-    cfg.sunVerticalScale = sunVerticalScale;
-    cfg.strength = strength;
-    cfg.moonStrength = moonStrength;
-    cfg.baseHeight = baseHeight;
-    cfg.falloff = falloff;
-    cfg.density = density;
-    cfg.fogWash = fogWash;
-    cfg.shaftDebug = shaftDebug;
-    cfg.variation = variation;
-    cfg.lowLayer = lowLayer;
-    cfg.raySoftness = raySoftness;
-    cfg.rayFalloff = rayFalloff;
-
-    renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
-    bool ok = renderer::CameraCapture::Instance().ApplySkyFallback(
-        frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid);
-    if (ok) {
-        renderer::RendererDiagnostics::Instance().RecordCameraCapture();
-        frameCtx.depthTexture = resources.depth.Get();
-        frameCtx.depthSurface = resources.surface.Get();
-        frameCtx.depthAvailable = (resources.depth != nullptr);
         constants[13][0] = groundMistHeight;
         constants[13][1] = groundMistFalloff;
         constants[13][2] = groundMistDensity;
@@ -1523,31 +1489,20 @@ void BeforeDraw(IDirect3DDevice9* d) {
     //   - current depth buffer matches our INTZ surface
     // No attempt-count limit: WoW's early draws (skybox, shadow, pre-pass) don't carry
     // the 27 perspective constants; world terrain arrives at draw ~20-50+ and must be reached.
-    if (!ready && surface != nullptr && !isUi) {
-        if (renderer::g_trackedState.currentVS != nullptr) {
-            ComPtr<IDirect3DSurface9> ds;
-            if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
-                cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
-                ready = CaptureCamera(d);
-                if (ready) {
-                    ++cameraFrames;
-                }
+    if (!ready && surface != nullptr && renderer::g_trackedState.currentVS != nullptr) {
+        ComPtr<IDirect3DSurface9> ds;
+        if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
+            cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
+            ready = CaptureCamera(d);
+            if (ready) {
+                ++cameraFrames;
             }
-        }
-        if (!ready) {
-            renderer::CameraCapture::Instance().ObserveSkyFallback(d);
         }
     }
 
     // Water can borrow depth/camera capture with the atmosphere switched off.
     // Do not accidentally enable atmosphere/postprocessing in that mode.
     if (!enabled || !active) return;
-    if (!ready && isUi && surface != nullptr) {
-        ready = CaptureSkyFallback();
-        if (ready) {
-            ++cameraFrames;
-        }
-    }
     if (!ready && isUi) { composed=PostProcessWithoutCamera(d); return; }
     if (!ready || !isUi) return;
 
@@ -1564,12 +1519,6 @@ void BeforeDraw(IDirect3DDevice9* d) {
 }
 
 void Present(IDirect3DDevice9* d) {
-    if (enabled && active && !composed && !ready && surface != nullptr) {
-        ready = CaptureSkyFallback();
-        if (ready) {
-            ++cameraFrames;
-        }
-    }
     if(enabled && active && !composed && !ready)composed=PostProcessWithoutCamera(d);
     if (enabled && active && !composed && ready) {
         composed = true;

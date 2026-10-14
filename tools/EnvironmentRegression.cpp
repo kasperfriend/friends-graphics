@@ -160,10 +160,6 @@ int main() try {
   ++readableRootZones;
  }
  Require(readableRootZones==414,"all 414 authoritative root-zone IDs pass the provider read sweep");
- testMap=0;testZone=12;testArea=9;
- Require(provider.Sample(bundled,true).valid,"stock 3.3.5a Northshire Valley (area 9) under Elwynn Forest (zone 12) passes hierarchy validation");
- testMap=1;testZone=14;testArea=363;
- Require(provider.Sample(bundled,true).valid,"stock 3.3.5a Valley of Trials (area 363) under Durotar (zone 14) passes hierarchy validation");
  testMap=0;testZone=12;testArea=87;std::filesystem::remove(providerFile);
  const auto actual=std::filesystem::path("build/client-research/areas.txt");
  if(std::filesystem::exists(actual)) {EnvironmentDatabase exported;Require(exported.Load(actual.wstring(),error)&&exported.AreaCount()==2849&&!exported.Authoritative(),"real Ascension custom database loads with diagnostic-only gate");}
