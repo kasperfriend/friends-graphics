@@ -27,7 +27,10 @@ private:
     mutable LocationContext rawSample;
     mutable std::string validation="Not sampled";
     mutable bool sampled=false;
-    LocationFailure failure=LocationFailure::NotConfigured;
+    // Set from Sample(), which is const: the refusal belongs to the reading, not to the
+    // configuration, and the panel reads it whenever it draws. Same reason rawSample and
+    // validation are already mutable.
+    mutable LocationFailure failure=LocationFailure::NotConfigured;
     WoWClientContext client;
     WoWLocationOffsets offsets;
     bool available=false,verified=false;
