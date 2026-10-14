@@ -88,14 +88,19 @@ jobs:
           }
           Write-Host "Using PlatformToolset: $toolset"
 
+          $log = Join-Path $env:RUNNER_TEMP "msbuild.log"
           & $msbuild "ModernWoWRenderer.sln" `
             /m `
             /p:Configuration="${{ matrix.configuration }}" `
             /p:Platform="Win32" `
             /p:PlatformToolset="$toolset" `
-            /verbosity:minimal
+            /verbosity:minimal 2>&1 | Tee-Object -FilePath $log | Out-Host
 
           if ($LASTEXITCODE -ne 0) {
+            # The job log is a download; an annotation is readable from the Checks API, so a
+            # build failure says what failed without anyone opening the artifact.
+            Get-Content $log | Select-String -Pattern 'error [A-Z]+[0-9]+|fatal error|Unresolved external' |
+                Select-Object -First 10 | ForEach-Object { Write-Output "::error::$($_.Line.Trim())" }
             exit $LASTEXITCODE
           }
 
