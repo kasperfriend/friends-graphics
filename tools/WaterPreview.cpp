@@ -31,10 +31,16 @@
 //        build/waterpreview --out build/sea.png --scene sea --wind 140 --sparkle 150 --stats
 //        build/waterpreview --scene coast --debug 2          (the glint term alone)
 //        build/waterpreview --scene lake --probe 240 260     (every intermediate, one pixel)
+//        build/waterpreview --out build/weather.png --matrix --scene sea --grid 2 --supersample 2
+//        build/waterpreview --scene sea --agitation 1.45 --weather rain --weather-strength 95
+// --matrix draws one body four times, a sheltered zone and an exposed one under a clear sky and in
+// a downpour; --agitation/--weather/--response set the same inputs by hand. The sea state comes
+// from TargetSeaState, the function the DLL calls, so a frame here is what the game would draw.
 // --grid 2 draws the four bodies into one labelled sheet: 480x270 frames under a 20px settings
 // bar each, 960x580 in total, the same panel geometry as the published cloud sheet.
 #include "../src/Water/WaveField.h"
 #include "../src/Water/WaterNoise.h"
+#include "../src/Water/WaterSeaState.h"
 #include "PreviewSheet.h"
 
 #include <algorithm>
@@ -87,6 +93,7 @@ enum SceneKind { SCENE_RIVER, SCENE_SEA, SCENE_COAST, SCENE_LAKE };
 struct Config
 {
     SceneKind scene = SCENE_SEA;
+    std::string sceneName = "sea";   // re-appliable: the matrix presets a body, then varies it
     int width = 480, height = 270, grid = 1, supersample = 1;
     float time = 6.f;
     float camX = 0.f, camY = 0.f, camZ = 4.f, pitch = -5.f, yaw = 0.f, fov = 62.f;
@@ -105,6 +112,13 @@ struct Config
     float reflectionThickness = 350.f;
     unsigned waterColour = 0x808080u, deepColour = 0x0e2a28u, absorptionColour = 0xff8c6bu;
     bool stats = false, reflections = true, refractionOn = true, depthOn = true, foamOn = true;
+    int matrix = 0;                  // 2x2 zone-by-weather grid instead of the four bodies
+    // Zone and weather, exactly the inputs WaterEffect.h feeds to TargetSeaState: the multiplier
+    // a zone authors, and what the sky is doing. Applied to the numbers below rather than to the
+    // shading, so a frame here shows what the game would draw with the same settings.
+    float zoneAgitation = 1.f, response = 1.f, motion = 1.f;
+    int weatherKind = 0;             // 0 clear, 1 rain, 2 snow, 3 sandstorm
+    float weatherStrength = 0.f;     // percent
     float debugMode = 0.f;   // same channel numbering as [Water] WaterDebugMode
     int labels = 1;          // burn the settings into a bar above each panel
     int probeX = -1, probeY = -1;   // dump every intermediate for one pixel
@@ -324,7 +338,7 @@ int main(int argc, char** argv)
         else if (a == "--no-labels") base.labels = 0;
         else if (a == "--width") base.width = std::atoi(next());
         else if (a == "--height") base.height = std::atoi(next());
-        else if (a == "--scene") { ApplyPreset(base, next()); sceneGiven = true; }
+        else if (a == "--scene") { base.sceneName = next(); ApplyPreset(base, base.sceneName.c_str()); sceneGiven = true; }
         else if (a == "--time") base.time = ArgFloat(next());
         else if (a == "--cam-z") base.camZ = ArgFloat(next());
         else if (a == "--cam-y") base.camY = ArgFloat(next());
@@ -359,6 +373,18 @@ int main(int argc, char** argv)
         else if (a == "--no-depth") base.depthOn = false;
         else if (a == "--no-foam") base.foamOn = false;
         else if (a == "--debug") base.debugMode = ArgFloat(next());
+        else if (a == "--agitation") base.zoneAgitation = ArgFloat(next());
+        else if (a == "--response") base.response = ArgFloat(next());
+        else if (a == "--weather-strength") base.weatherStrength = ArgFloat(next());
+        else if (a == "--motion") base.motion = ArgFloat(next());
+        else if (a == "--weather")
+        {
+            const std::string w = next();
+            base.weatherKind = w == "clear" ? 0 : w == "rain" ? 1 : w == "snow" ? 2 : w == "sand" ? 3 : -1;
+            if (base.weatherKind < 0) { std::printf("unknown weather %s\n", w.c_str()); return 2; }
+            if (!base.weatherStrength) base.weatherStrength = 90.f;
+        }
+        else if (a == "--matrix") base.matrix = 1;
         else if (a == "--probe") { base.probeX = std::atoi(next()); base.probeY = std::atoi(next()); }
         else if (a == "--stats") base.stats = true;
         else { std::printf("unknown option %s\n", a.c_str()); return 2; }
@@ -367,7 +393,29 @@ int main(int argc, char** argv)
 
     struct Frame { Config config; std::string label; };
     std::vector<Frame> frames;
-    if (base.grid > 1)
+    if (base.matrix)
+    {
+        // Rows are the zone's authored sea state, columns are the sky: the two things this feature
+        // is about, with the same water body and camera in every panel so nothing else can
+        // explain the difference between them.
+        const float agitation[2] = { .45f, 1.45f };
+        const int weather[2] = { 0, 1 };
+        for (int column = 0; column < 2; ++column)
+            for (int row = 0; row < 2; ++row)
+            {
+                Frame f;
+                f.config = base;
+                ApplyPreset(f.config, base.sceneName.c_str());
+                f.config.zoneAgitation = agitation[row];
+                f.config.weatherKind = weather[column];
+                f.config.weatherStrength = weather[column] ? 95.f : 0.f;
+                f.label = weather[column] ? (agitation[row] < 1.f ? "SHELTERED RAIN" : "EXPOSED RAIN")
+                                          : (agitation[row] < 1.f ? "SHELTERED CLEAR" : "EXPOSED CLEAR");
+                frames.push_back(f);
+            }
+        base.grid = 2;
+    }
+    else if (base.grid > 1)
     {
         for (const char* name : { "river", "sea", "coast", "lake" })
         {
@@ -391,7 +439,21 @@ int main(int argc, char** argv)
 
     for (size_t index = 0; index < frames.size(); ++index)
     {
-        const Config& c = frames[index].config;
+        // The sea state, derived by the same function the DLL calls, applied to the numbers the
+        // shading reads. Nothing here re-invents the curve: change the model and both sides move.
+        const Config& request = frames[index].config;
+        const SeaTuning tuning{ request.zoneAgitation, request.response, request.wind * .01f };
+        const SeaWeather weather{ request.weatherKind, Saturate(request.weatherStrength * .01f) };
+        const SeaState sea = TargetSeaState(tuning, weather);
+        Config tuned = request;
+        tuned.swell *= sea.agitation;
+        tuned.ripple *= sea.agitation;
+        tuned.normalResponse *= std::clamp(std::sqrt(sea.agitation), 0.f, 2.5f);
+        tuned.crestFoam *= sea.agitation;
+        tuned.shoreFoam *= .7f + .3f * sea.agitation;
+        tuned.motion *= sea.motion;
+        tuned.flowRotation = std::min(tuned.flowRotation * (1.f + sea.shear), 100.f);
+        const Config& c = tuned;
         const float deg = 3.14159265f / 180.f;
         View v;
         v.pos = V3{ c.camX, c.camY, c.camZ };
@@ -413,13 +475,15 @@ int main(int argc, char** argv)
             return Add(sky, Mul(lightColour, Pow(Saturate(Dot(dir, light)), 160.f) * (c.sunDisc * .004f)));
         };
 
-        std::printf("scene %-6s %dx%d  wind %g  clarity %g  sun %g deg  time %g\n",
-            frames[index].label.c_str(), tileW, tileH, c.wind, c.clarity, c.sunElevation, c.time);
+        std::printf("%-16s %dx%d  wind %g  clarity %g  sun %g deg  agitation %.2f  motion %.2f"
+            "  weather %d/%.2f\n", frames[index].label.c_str(), tileW, tileH, request.wind,
+            request.clarity, request.sunElevation, sea.agitation, sea.motion, request.weatherKind,
+            Saturate(request.weatherStrength * .01f));
 
         // One field for the whole frame: BuildWaveField is world-anchored, so the only
         // per-pixel work is evaluating it. The DLL likewise builds it once per draw.
-        const WaveField field = BuildWaveField(c.time, c.flowSpeed * .01f, c.flowRotation * .01f,
-            c.waveScale, 0.f, 0.f, true, true);
+        const WaveField field = BuildWaveField(c.time, c.flowSpeed * c.motion * .01f,
+            c.flowRotation * .01f, c.waveScale, 0.f, 0.f, true, true);
         // Rendered larger than the sheet and box filtered down, the way a 2x backbuffer is
         // resolved for display. It matters for the mirror specifically: the scene silhouette is
         // ray-marched, and the wave octave is exactly what the shader's anti-alias gain exists to
@@ -502,7 +566,7 @@ int main(int argc, char** argv)
         const float environmentStrength = c.reflections ? c.environmentStrength * .01f : 0.f;
         const float ssrStrength = c.reflections ? c.reflectionStrength * .01f : 0.f;
         const float traceReach = c.reflectionDistance, traceThickness = c.reflectionThickness * .01f;
-        const float wind = c.wind * .01f;
+        const float wind = sea.wind;   // authored WIND, scaled by how much wind this water is in
         const float roughnessGain = .25f * c.roughness * .01f;
         const float sheenFloor = .02f + .06f * c.sheen * .01f;
         const float shoalGain = c.shoalFoam * .01f, foamBrightness = c.foamBrightness * .01f;
@@ -746,9 +810,13 @@ int main(int argc, char** argv)
         if (base.labels)
         {
             char label[160];
-            std::snprintf(label, sizeof(label), "%s - WIND %d  CLARITY %d  SWELL %d  SUN %d DEG  T%.1f",
-                frames[index].label.c_str(), int(c.wind), int(c.clarity), int(c.swell),
-                int(c.sunElevation), c.time);
+            // The zone's authored agitation and the sky are printed as the two inputs, not as the
+            // result, so a reader can tell a tuned zone from a storm without re-deriving either.
+            std::snprintf(label, sizeof(label), "%s - ZONE %.2f  WIND %d  SUN %d DEG  %s %.0f%%  T%.1f",
+                frames[index].label.c_str(), request.zoneAgitation, int(request.wind),
+                int(request.sunElevation), request.weatherKind == 0 ? "CLEAR"
+                : request.weatherKind == 1 ? "RAIN" : request.weatherKind == 2 ? "SNOW" : "SAND",
+                Saturate(request.weatherStrength * .01f) * 100.f, request.time);
             const int barY = base.labels ? int(tileY) * panelH : int(tileY) * tileH;
             preview::LabelBar(sheet, sheetW, sheetH, int(tileX) * tileW, barY, tileW, kBar, label);
         }
