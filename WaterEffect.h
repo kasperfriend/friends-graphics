@@ -18,6 +18,9 @@
 #include "src/Water/WaterMaterial.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
+// Backend readiness, NOT the user's switch. Keep shaders/hooks available even
+// when water starts off, so F7/F12 and location changes can enable it live.
+// effectEnabled is the single live switch; active is the F9/F11 master switch.
 bool enabled=false, active=true, keyDown=false, hotkey=true;
 bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=false,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,foamEnabled=true,sunGlintEnabled=true;
 float strength=.003f;
@@ -319,7 +322,9 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
 )HLSL";
 int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"Water",key,fallback,mainIni.c_str());}
 void ReloadTuning(){
-    effectEnabled=ReadTuning(L"Enabled",1)!=0;
+    // Match the menu's source and default exactly. An obsolete Enabled=0 in
+    // ModernWoWRenderer.ini must not veto a live (including per-location) ON.
+    effectEnabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",1,tuningIni.c_str())!=0;
     wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",0)!=0;
     reflectionsEnabled=ReadTuning(L"ReflectionsEnabled",1)!=0;refractionEnabled=ReadTuning(L"RefractionEnabled",1)!=0;
     depthEnabled=ReadTuning(L"DepthEnabled",1)!=0;foamEnabled=ReadTuning(L"FoamEnabled",1)!=0;sunGlintEnabled=ReadTuning(L"SunGlintEnabled",1)!=0;
@@ -346,13 +351,17 @@ void ReloadTuning(){
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
     waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
-    if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" debug="<<waterDebugMode<<'\n';}
+    if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
     logPath=base+L"WaterEffect.log";
-    enabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",0,mainIni.c_str())!=0;
-    if(!enabled)return;
+    enabled=false;
+    code.clear();vertexCode.clear();
+    cachedReplacementPS.Reset();cachedReplacementVS.Reset();
+    cachedShaderDevice=nullptr;shaderCreationFailed=false;
+    // Compile independently of the live switch. HookDevice uses readiness to
+    // install draw/depth hooks once, before a player can turn water on in F7.
     ReloadTuning();
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     ComPtr<ID3DBlob> blob,error;
@@ -366,6 +375,8 @@ void Configure(const std::wstring& base) {
     log<<"vertex_compile="<<hr<<" normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
     if(FAILED(hr)){enabled=false;if(error)log<<static_cast<const char*>(error->GetBufferPointer());return;}
     vertexCode.resize(blob->GetBufferSize()/4);memcpy(vertexCode.data(),blob->GetBufferPointer(),blob->GetBufferSize());
+    enabled=true;
+    log<<"water backend ready; live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
 }
 void Present() {
     if(!enabled)return;
