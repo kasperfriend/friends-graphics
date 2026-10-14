@@ -5,7 +5,7 @@ where cl >nul 2>&1 || for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Mi
 where cl >nul 2>&1 || (echo cl.exe not found. Install the Visual Studio C++ tools or run this from a Developer Command Prompt. & exit /b 1)
 if not exist build\Release mkdir build\Release
 if not exist build\weather-test-obj mkdir build\weather-test-obj
-cl /nologo /EHsc /std:c++20 /O2 /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX tools\WeatherDeviceRegression.cpp src\D3D9\DepthCapture.cpp src\Core\FrameContext.cpp src\Diagnostics\RendererDiagnostics.cpp /Febuild\Release\WeatherDeviceRegression.exe /Fobuild\weather-test-obj\ /link user32.lib ole32.lib d3d9.lib d3dcompiler.lib
+cl /nologo /EHsc /std:c++20 /O2 /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX tools\WeatherDeviceRegression.cpp src\D3D9\DepthCapture.cpp src\Core\FrameContext.cpp src\Core\ShaderCache.cpp src\Diagnostics\RendererDiagnostics.cpp /Febuild\Release\WeatherDeviceRegression.exe /Fobuild\weather-test-obj\ /link user32.lib ole32.lib d3d9.lib d3dcompiler.lib
 if errorlevel 1 exit /b 1
 build\Release\WeatherDeviceRegression.exe
 rem Exit 77 explicitly reports a headless runner without D3D9 HAL, not a passing GPU test.

@@ -204,6 +204,7 @@ tools\Test-DeviceHealth.cmd
 tools\Test-FrameClock.cmd
 tools\Test-Atmosphere.cmd
 tools\Test-Water.cmd
+tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 
