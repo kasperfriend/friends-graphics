@@ -395,8 +395,8 @@ int main() try {
             std::printf("PASS water resolution %ux%u / %ux%u classifier, capture, pixels and state\n",
                 size[0],size[1],size[2],size[2]);
         }
-        auto small=texture(256,256,0xff808080);
-        Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,small.Get()));
+        auto reducedSurface=texture(256,256,0xff808080);
+        Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,reducedSurface.Get()));
         tracked.currentVS=nullptr;
         Require(!renderer::water::IsMaterial(d.Get()),"stale tracked VS identity cannot approve actual unknown shader");
         tracked.currentVS=originalVS.Get();tracked.currentPS=nullptr;
