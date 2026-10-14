@@ -281,7 +281,7 @@ struct WaveState
 {
     V3 normal{ 0, 0, 1 };
     V2 slopes{};
-    float detail = .5f, swell01 = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
+    float detail = .5f, swell01 = .5f, foamPattern = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
     // The Gerstner pair: how hard the surface is pinching here (1 - Jacobian), and the
     // Jacobian itself, which is what the shading slope is divided by so that a crest the
     // geometry steepened is a crest the light also sees steepened.
@@ -302,11 +302,16 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     WaveState w;
     const V2 plane{ worldX * field.lattice[0] + worldY * field.lattice[1],
                     worldX * field.lattice[2] + worldY * field.lattice[3] };
-    // The three directional swell trains, from the one function the vertex stage, the pixel
-    // stage and this preview all mirror: height, exact slope, and the Gerstner pinch.
-    const SwellSample trains = EvaluateSwell(plane.x, plane.y, field.swellPhase);
+    // A low-frequency anchored warp makes the three swell trains wander. The
+    // same coordinate and chain-rule gradient are evaluated in both shaders.
+    const WaveWarpSample warp = WarpWavePlane(field, plane.x, plane.y);
+    const SwellSample trains = EvaluateSwell(warp.plane.x, warp.plane.y, field.swellPhase);
     const float swell = trains.height;
-    const V2 swellSlope{ trains.slope[0] * c.swell * .01f, trains.slope[1] * c.swell * .01f };
+    const float alongWarp = trains.slope[0] * kWaveWarpDirectionX
+        + trains.slope[1] * kWaveWarpDirectionY;
+    const V2 swellSlope{
+        (trains.slope[0] + alongWarp * kWaveWarpAmplitude * warp.gradientX) * c.swell * .01f,
+        (trains.slope[1] + alongWarp * kWaveWarpAmplitude * warp.gradientY) * c.swell * .01f };
     // One pixel spans this many lattice cells: the shader's fwidth(plane).
     const float filter = 1.f / std::sqrt(1.f + c.softening * .16f
         * (footprint.x * footprint.x + footprint.y * footprint.y));
@@ -320,6 +325,10 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     w.slopes = V2{ (ripple.dx * .72f * filter + swellSlope.x) * flowGate,
                    (ripple.dy * .72f * filter + swellSlope.y) * flowGate };
     w.detail = Mix(.5f, ripple.value, filter);
+    // Long foam tongues inherit the broad crest-scale breakup while chop tears
+    // their edges into smaller, moving flecks. Both fields are already sampled
+    // for the warped swell and normal, so the preview mirrors the shader exactly.
+    w.foamPattern = Saturate(.45f * warp.noiseValue + .55f * w.detail);
     w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
@@ -335,14 +344,18 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // The vertex stage's Gerstner lift and slide, from the two trains a four yard grid can
     // carry. This preview has no vertex stage, so it displaces the shaded point directly.
     const float thetaA = kTwoPi / kTrainCells[0]
-        * (kTrainDirX[0] * plane.x + kTrainDirY[0] * plane.y + field.swellPhase[0]);
+        * (kTrainDirX[0] * warp.plane.x + kTrainDirY[0] * warp.plane.y + field.swellPhase[0]);
     const float thetaB = kTwoPi / kTrainCells[1]
-        * (kTrainDirX[1] * plane.x + kTrainDirY[1] * plane.y + field.swellPhase[1]);
+        * (kTrainDirX[1] * warp.plane.x + kTrainDirY[1] * warp.plane.y + field.swellPhase[1]);
     w.height = geometry.amplitude * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB));
-    const V2 slide{ geometry.lateral * (kTrainWeight[0] * std::cos(thetaA) * kTrainDirX[0]
-                                        + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1]),
-                    geometry.lateral * (kTrainWeight[0] * std::cos(thetaA) * kTrainDirY[0]
-                                        + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1]) };
+    const V2 baseSlide{
+        kTrainWeight[0] * std::cos(thetaA) * kTrainDirX[0]
+            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1],
+        kTrainWeight[0] * std::cos(thetaA) * kTrainDirY[0]
+            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1] };
+    const float slideAlongWarp=baseSlide.x*kWaveWarpDirectionX+baseSlide.y*kWaveWarpDirectionY;
+    const V2 slide{ geometry.lateral * (baseSlide.x+slideAlongWarp*kWaveWarpAmplitude*warp.gradientX),
+                    geometry.lateral * (baseSlide.y+slideAlongWarp*kWaveWarpAmplitude*warp.gradientY) };
     // Lattice axes to world axes: the lattice rows are the world directions scaled by
     // 1/cell, so one cell length turns them back into unit vectors.
     w.lateral = V2{ (slide.x * field.lattice[0] + slide.y * field.lattice[2]) * geometry.cellYards,
@@ -709,15 +722,22 @@ int main(int argc, char** argv)
                     // the geometry waves are folding water onto water, and the shoal that runs up
                     // a beach. All three are gated by the authored WIND and by how rough this
                     // water is, so a calm lake stays a calm lake and a squall breaks.
+                    const float foamWind = Saturate(wind);
                     const float breaking = Saturate(wave.pinch * 2.4f);
                     const float capBand = wave.swell01 * 1.06f + breaking * .30f + (wave.detail - .5f) * .26f;
-                    const float whitecap = Smoothstep(.86f, 1.02f, capBand) * wind;
+                    // The noise widens a lively patch and pinches a weak one, so
+                    // foam becomes broken streaks instead of an identical stripe
+                    // on every crest. Broad warp noise supplies the tongue-scale
+                    // shape; drifting chop detail shreds the edges.
+                    const float foamThreshold = .82f + (1.f - wave.foamPattern) * .14f;
+                    const float whitecap = Smoothstep(foamThreshold, foamThreshold + .14f, capBand);
                     const float bottomSlope = FieldSlope(c, surface.x, surface.y);
                     const float shoal = Saturate(bottomSlope * shoalGain * 2.f - .3f)
                         * Saturate(1.f - column * .05f) * validDepth;
-                    const float crestMask = Smoothstep(.60f, .94f, wave.swell01 + wave.rippleEnergy * .05f);
-                    const float foamAmount = (shore * shoreFoamStrength * (.35f + .65f * wind)
-                        + (crestMask * .45f + whitecap * 1.15f + shoal * .6f) * wind * crestFoamStrength) * crest;
+                    const float crestMask = Smoothstep(.60f, .94f, wave.swell01 + wave.rippleEnergy * .05f)
+                        * (.35f + .65f * wave.foamPattern);
+                    const float foamAmount = Saturate((shore * shoreFoamStrength * (.35f + .65f * foamWind)
+                        + (crestMask * .45f + whitecap * 1.15f + shoal * .6f) * foamWind * crestFoamStrength) * crest);
                     const float rough = Saturate(sheenFloor
                         + std::hypot(wave.slopes.x, wave.slopes.y) * roughnessGain + foamAmount * 1.4f);
 

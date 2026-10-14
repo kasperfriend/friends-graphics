@@ -86,12 +86,23 @@ namespace renderer
         uint64_t m_retryAt = 0;
     };
 
-    // The environment location is only re-sampled from frames that actually
-    // rendered the world. When the window is not focused, a frame without
-    // world depth says nothing about where the player is, so it must not
-    // clear the zone that was confirmed before the switch.
-    constexpr bool ShouldHoldLocation(bool worldFrame, bool gameFocused) noexcept
+    // A full-depth capture proves a world frame when a scene-dependent pass
+    // requested it. Waves-only rendering need not capture INTZ, so a known
+    // terrain draw or an accepted liquid-material draw is independent world
+    // evidence in that mode.
+    constexpr bool HasWorldContext(bool capturedDepth, bool knownWorldDrawSeen) noexcept
     {
-        return !worldFrame && !gameFocused;
+        return capturedDepth || knownWorldDrawSeen;
+    }
+
+    // The location provider refuses to read IDs without world context
+    // (Sample(database, false) deliberately returns invalid). Focus does not
+    // turn a UI/loading/no-depth frame into world context: feeding that invalid
+    // sample to the debounce path eventually clears a valid zone and silently
+    // disables its map/zone/area tuning. Hold until either trusted render signal
+    // says this is a world frame, whether or not the game window has focus.
+    constexpr bool ShouldHoldLocation(bool worldFrame) noexcept
+    {
+        return !worldFrame;
     }
 }

@@ -4,6 +4,8 @@
 #define CLOUD_PREVIEW_NO_MAIN
 #include "CloudPreview.cpp"
 #include "../src/Environment/EnvironmentDatabase.h"
+#include <algorithm>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -62,7 +64,28 @@ int main() try
             "shipped cloud climate configuration parses");
     EnvironmentDatabase db;
     Require(db.Load(L"data/areas.txt",error)&&db.Authoritative(),"zone IDs validated against shipped authoritative database");
-    Require(config.zones.size()>=80,"authored climate coverage includes classic, Outland and Northrend zones");
+    constexpr std::array<uint32_t,4> outdoorMaps{0,1,530,571};
+    // These seven root records are known unused/debug entries in the verified
+    // table, not player-facing world zones. Every other root area on the four
+    // outdoor continents must explicitly author its own sea-state multiplier.
+    constexpr std::array<uint32_t,7> nonPlayableRoots{30,276,296,1579,2280,9998,9999};
+    size_t outdoorRoots=0, intentionallyUnprofiled=0;
+    for (const auto& [id,area]:db.Areas())
+    {
+        if (area.parentId || std::find(outdoorMaps.begin(),outdoorMaps.end(),area.mapId)==outdoorMaps.end()) continue;
+        ++outdoorRoots;
+        if (std::find(nonPlayableRoots.begin(),nonPlayableRoots.end(),id)!=nonPlayableRoots.end())
+        {
+            ++intentionallyUnprofiled;
+            if (config.zones.count(id)) throw std::runtime_error("Unused/debug root received a zone profile " + std::to_string(id));
+            continue;
+        }
+        const auto authored=config.zones.find(id);
+        if (authored==config.zones.end() || !authored->second.values[WaterAgitation])
+            throw std::runtime_error("Missing explicit sea state for world root " + std::to_string(id) + " (" + area.name + ")");
+    }
+    Require(outdoorRoots==165&&intentionallyUnprofiled==7&&config.zones.size()==158,
+            "all 158 non-placeholder roots across Eastern Kingdoms, Kalimdor, Outland and Northrend have explicit sea states");
     for (const auto& [id,profile]:config.zones)
     {
         const auto* area=db.Area(id);
@@ -79,6 +102,9 @@ int main() try
     const auto fair=env(12), desert=env(440), coast=env(148), mountain=env(67), open=env(3523);
     Require(fair[CloudCoverage]>desert[CloudCoverage]&&coast[CloudType]<0&&mountain[CloudType]>0&&open[CloudCoverage]==0,
             "zone art directions are distinct, including a genuinely open sky");
+    const auto northernFallback=env(4201);
+    Require(Near(northernFallback[WaterAgitation],.85f)&&northernFallback[CloudType]<0,
+            "a water-only Northrend zone keeps its map-level CloudCold profile");
     Require(ResolveEnvironment(config,{9999,9999,0,true}).state[CloudCoverage]==1&&
             ResolveEnvironment(config,{}).state[CloudType]==0,"unknown/invalid locations have neutral fallback");
     // Water rides the same authoring layer, so the same two things have to hold: a zone line that
@@ -107,11 +133,16 @@ int main() try
     EnvironmentConfiguration layered;
     Require(ParseEnvironmentConfiguration("[Environment.Base]\nCloudTypeOffset=-0.8\nCloudCoverageMultiplier=0.7\n"
         "[Environment.Child]\nProfile=Base\nCloudEvolutionMultiplier=1.5\n"
-        "[Map.0]\nProfile=Child\n[Zone.12]\nCloudCoverageMultiplier=0\n"
-        "[Area.87]\nCloudTypeOffset=0.6\n",layered,error),"cloud parameters support named inheritance and signed type");
+        "[Map.0]\nProfile=Child\nWaterAgitationMultiplier=1.3\n"
+        "[Zone.12]\nCloudCoverageMultiplier=0\nWaterAgitationMultiplier=0.7\n"
+        "[Area.87]\nCloudTypeOffset=0.6\nWaterAgitationMultiplier=0.35\n",layered,error),"cloud parameters support named inheritance and signed type");
     auto state=ResolveEnvironment(layered,{0,12,87,true}).state;
-    Require(state[CloudCoverage]==0&&Near(state[CloudType],.6)&&Near(state[CloudEvolution],1.5),
-            "Default < Map < Zone < Area preserves zero overrides");
+    Require(state[CloudCoverage]==0&&Near(state[CloudType],.6)&&Near(state[CloudEvolution],1.5)
+                &&Near(state[WaterAgitation],.35),
+            "Default < Map < Zone < Area preserves zero and per-area sea-state overrides");
+    Require(Near(ResolveEnvironment(layered,{0,12,999,true}).state[WaterAgitation],.7)
+                &&Near(ResolveEnvironment(layered,{0,999,999,true}).state[WaterAgitation],1.3),
+            "unknown areas inherit zone sea state and unknown zones inherit map sea state");
     for (const auto* invalid:{"CloudTypeOffset=-1.1","CloudCoverageMultiplier=2.1","CloudFeatureSizeMultiplier=0",
          "CloudThicknessMultiplier=5","CloudDetailMultiplier=nan","CloudEvolutionMultiplier=inf","UnknownCloud=1"})
         if (ParseEnvironmentConfiguration(std::string("[Default]\n")+invalid,layered,error))

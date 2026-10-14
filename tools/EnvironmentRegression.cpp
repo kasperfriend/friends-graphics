@@ -1,5 +1,6 @@
 #include "../src/Environment/EnvironmentProfileManager.h"
 #include "../src/Environment/LocationTuning.h"
+#include "../src/Core/DeviceHealth.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -57,14 +58,14 @@ int main() try {
  locationtuning::editZone=false;
  locationtuning::Sync(L"",{},false);
  EnvironmentConfiguration c;std::string error;
- const std::string text="[EnvironmentSystem]\nTransitionSeconds=4\nAreaDebounceMs=300\n[Default]\nFogDensityMultiplier=0.8\n[Environment.Forest]\nRayIntensityMultiplier=1.2\nLocalFogMultiplier=0.7\n[Environment.City]\nProfile=Forest\nLocalFogMultiplier=0.1\n[Map.0]\nFogDensityMultiplier=0.5\n[Zone.12]\nProfile=City\nFogDensityMultiplier=0.6\n[Area.87]\nRayIntensityMultiplier=0.3\n";
+ const std::string text="[EnvironmentSystem]\nTransitionSeconds=4\nAreaDebounceMs=300\n[Default]\nFogDensityMultiplier=0.8\nWaterAgitationMultiplier=1.0\n[Environment.Forest]\nRayIntensityMultiplier=1.2\nLocalFogMultiplier=0.7\n[Environment.City]\nProfile=Forest\nLocalFogMultiplier=0.1\n[Map.0]\nFogDensityMultiplier=0.5\nWaterAgitationMultiplier=1.2\n[Zone.12]\nProfile=City\nFogDensityMultiplier=0.6\nWaterAgitationMultiplier=0.7\n[Area.87]\nRayIntensityMultiplier=0.3\nWaterAgitationMultiplier=0.3\n";
  Require(ParseEnvironmentConfiguration(text,c,error),"INI parser accepts complete profile");
  LocationContext l{0,12,87,true};auto r=ResolveEnvironment(c,l);
- Require(Near(r.state[FogDensity],.6f)&&Near(r.state[LocalFog],.1f)&&Near(r.state[Rays],.3f)&&r.source=="Area","Default < Map < Zone < Area with named inheritance");
+ Require(Near(r.state[FogDensity],.6f)&&Near(r.state[LocalFog],.1f)&&Near(r.state[Rays],.3f)&&Near(r.state[WaterAgitation],.3f)&&r.source=="Area","Default < Map < Zone < Area preserves area-specific sea state");
  l.areaId=12345;r=ResolveEnvironment(c,l);
- Require(r.source=="Zone"&&Near(r.state[Rays],1.2f),"unknown custom area inherits zone");
- l.zoneId=12345;r=ResolveEnvironment(c,l);Require(r.source=="Map"&&Near(r.state[FogDensity],.5f),"unknown zone inherits map zero");
- l.valid=false;r=ResolveEnvironment(c,l);Require(r.source=="Default"&&Near(r.state[FogDensity],.8f),"unavailable location uses Default");
+ Require(r.source=="Zone"&&Near(r.state[Rays],1.2f)&&Near(r.state[WaterAgitation],.7f),"unknown custom area inherits zone water tuning");
+ l.zoneId=12345;r=ResolveEnvironment(c,l);Require(r.source=="Map"&&Near(r.state[FogDensity],.5f)&&Near(r.state[WaterAgitation],1.2f),"unknown zone inherits map water tuning");
+ l.valid=false;r=ResolveEnvironment(c,l);Require(r.source=="Default"&&Near(r.state[FogDensity],.8f)&&Near(r.state[WaterAgitation],1.f),"unavailable location uses neutral Default sea state");
  c.enabled=false;r=ResolveEnvironment(c,l);Require(Near(r.state[FogDensity],1),"disabled system is identity");c.enabled=true;
  for(const auto* bad:{"[Default]\nFogDensityMultiplier=nan\n","[Default]\nFogDensityMultiplier=5\n","[Environment.A]\nProfile=B\n[Environment.B]\nProfile=A\n","[Zone.12]\nProfile=Missing\n","[Map.bad]\n","[Default]\nFogDensityMultiplier=1\nFogDensityMultiplier=2\n"}) {
   Require(!ParseEnvironmentConfiguration(bad,c,error),"reject corrupt config transactionally");
@@ -90,10 +91,45 @@ int main() try {
  auto writeProvider=[&](uintptr_t mapRva) {std::ofstream ini(providerFile);ini<<"[LocationProvider]\nExeSHA256="<<client.sha256<<"\nMapRva="<<mapRva<<"\nZoneRva="<<(reinterpret_cast<uintptr_t>(&testZone)-client.base)<<"\nAreaRva="<<(reinterpret_cast<uintptr_t>(&testArea)-client.base)<<"\nVerifiedInWorld=1\n";};
  writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
  Require(provider.Verified()&&provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==87,"exact-hash provider reads validated live test-process image globals");
- Require(!provider.Sample(db,false).valid,"provider rejects absent world context");
+ Require(!provider.Sample(db,false).valid,"provider rejects absent world context instead of guessing from stale IDs");
+ Require(ShouldHoldLocation(HasWorldContext(false,false)),"HookedPresent holds a confirmed zone when a no-depth sample would be invalid");
+ Require(!ShouldHoldLocation(HasWorldContext(false,true)),"a known-draw waves-only frame re-enables verified location sampling");
  testArea=12345;Require(provider.Sample(db,true).valid,"provider accepts unknown custom area with known zone and map");testArea=87;
  testArea=0;Require(provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==0,"zero subarea preserves validated zone/map without inventing AreaID");testArea=87;
  writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");std::filesystem::remove(providerFile);
+ // Exercise the actual manager gate, not only the ShouldHoldLocation helper:
+ // focused frames with neither captured depth nor recognized world draws must
+ // never feed the provider's deliberate invalid no-world sample into debounce.
+ const auto managerDir=std::filesystem::temp_directory_path()/"modern-wow-location-manager-regression";
+ std::filesystem::create_directories(managerDir/"data");
+ const auto managerBase=managerDir.wstring()+L"\\";
+ {std::ofstream areas(managerDir/"data"/"areas.txt");
+  areas<<"EnvironmentDatabase 1\n"
+         "# provenance=verified-live-client-tables\n"
+         "M 0 \"Eastern Kingdoms\"\n"
+         "A 12 0 0 65 \"Elwynn Forest\"\n"
+         "A 87 0 12 0 \"Goldshire\"\n";}
+ {std::ofstream ini(managerDir/"EnvironmentProfiles.ini");
+  ini<<"[EnvironmentSystem]\nTransitionSeconds=4\nAreaDebounceMs=300\n"
+        "[LocationProvider]\nExeSHA256="<<client.sha256
+     <<"\nMapRva="<<(reinterpret_cast<uintptr_t>(&testMap)-client.base)
+     <<"\nZoneRva="<<(reinterpret_cast<uintptr_t>(&testZone)-client.base)
+     <<"\nAreaRva="<<(reinterpret_cast<uintptr_t>(&testArea)-client.base)
+     <<"\nVerifiedInWorld=1\n[Default]\nWaterAgitationMultiplier=1\n"
+        "[Zone.12]\nWaterAgitationMultiplier=.45\n";}
+ auto& manager=EnvironmentProfileManager::Instance();manager.Configure(managerBase);
+ for(uint64_t now:{1000,1125,1250,1375})manager.Update(now,true,false);
+ Require(manager.Location().valid&&manager.Location().zoneId==12,"manager confirms a stable sampled zone before using its profiles");
+ manager.Update(5375,true,false);
+ Require(Near(manager.State()[WaterAgitation],.45f),"manager resolves the zone sea-state profile");
+ for(uint64_t now:{5500,5625,5750,5875})manager.Update(now,false,false);
+ Require(manager.Location().valid&&manager.Location().zoneId==12&&Near(manager.State()[WaterAgitation],.45f),"manager itself refuses invalid no-depth samples even if the caller forgets the hold flag");
+ testZone=999;manager.Update(6000,true,false); // one invalid world sample starts, but cannot confirm, a new candidate
+ manager.Update(6500,false,false);manager.Update(7000,false,false); // no-world time must not age it
+ manager.Update(7125,true,false);manager.Update(7250,true,false);
+ Require(manager.Location().valid&&manager.Location().zoneId==12,"a menu/loading gap cannot age a pending invalid candidate into clearing zone tuning");
+ testZone=12;
+ std::filesystem::remove_all(managerDir);
  const auto bundledDatabase=std::filesystem::path("data/areas.txt");
  EnvironmentDatabase bundled;Require(bundled.Load(bundledDatabase.wstring(),error)&&bundled.Authoritative()&&bundled.AreaCount()==2849,"release bundles verified Ascension location database");
  Require(bundled.Area(10221)&&bundled.Area(10221)->parentId==1519,"bundled database includes custom Stormwind area");

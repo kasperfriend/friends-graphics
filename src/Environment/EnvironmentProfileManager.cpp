@@ -38,7 +38,13 @@ void EnvironmentProfileManager::Retarget() {
 }
 void EnvironmentProfileManager::Update(uint64_t now,bool world,bool hold) {
     lastNow=now;
-    if(!hold&&(!lastPoll||now-lastPoll>=125)) {
+    // Enforce the provider's world-context precondition here as well as at the
+    // HookedPresent call site. A focused no-depth frame is not a valid sample;
+    // otherwise its deliberate invalid return can debounce into clearing the
+    // last verified zone and disabling all scoped water settings. It must not
+    // age a pending candidate either, so restart that short debounce on resume.
+    if(!world||hold) debounce.Reset();
+    if(world&&!hold&&(!lastPoll||now-lastPoll>=125)) {
         lastPoll=now;const auto sample=provider.Sample(database,world);
         // Invalid world context uses the same confirmation discipline: brief
         // particle/camera gaps cannot oscillate the environment.

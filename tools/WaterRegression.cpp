@@ -1,7 +1,9 @@
 // Portable policy regressions. Run from any directory; no Windows SDK needed.
 #include "../src/Water/WaterPolicy.h"
 #include "../src/Water/WaveField.h"
+#include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -107,6 +109,13 @@ int main() try
     auto coordinate=[](const WaveField& field,float relativeX,float relativeY) {
         return WrapLattice(relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.ripplePhase[0]);
     };
+    auto warpCoordinate=[](const WaveField& field,float relativeX,float relativeY) {
+        const float x=relativeX*field.lattice[0]+relativeY*field.lattice[1];
+        const float y=relativeX*field.lattice[2]+relativeY*field.lattice[3];
+        return std::array<float,2>{
+            WrapLattice((x*kWaveWarpCos+y*kWaveWarpSin)*kWaveWarpFrequency+field.warpPhase[0]),
+            WrapLattice((-x*kWaveWarpSin+y*kWaveWarpCos)*kWaveWarpFrequency+field.warpPhase[1])};
+    };
     auto distance=[](float a,float b) {
         const float difference=std::fabs(a-b);
         return std::fmin(difference,kLatticeWrap-difference);
@@ -125,9 +134,25 @@ int main() try
             Require(distance(coordinate(field,relativeX,relativeY),
                               coordinate(reference,4213.f,-7781.f))<2e-2f,
                     "the same terrain point lands on the same wave lattice from any camera");
+            const auto warpAtCamera=warpCoordinate(field,relativeX,relativeY);
+            const auto warpAtOrigin=warpCoordinate(reference,4213.f,-7781.f);
+            Require(distance(warpAtCamera[0],warpAtOrigin[0])<2e-2f&&
+                    distance(warpAtCamera[1],warpAtOrigin[1])<2e-2f,
+                    "the randomized swell warp stays world-anchored across camera movement");
+            const float cellX=relativeX*field.lattice[0]+relativeY*field.lattice[1];
+            const float cellY=relativeX*field.lattice[2]+relativeY*field.lattice[3];
+            const float worldCellX=4213.f*reference.lattice[0]+(-7781.f)*reference.lattice[1];
+            const float worldCellY=4213.f*reference.lattice[2]+(-7781.f)*reference.lattice[3];
+            const auto warped=WarpWavePlane(field,cellX,cellY);
+            const auto warpedReference=WarpWavePlane(reference,worldCellX,worldCellY);
+            Require(std::fabs((warped.plane.x-cellX)-(warpedReference.plane.x-worldCellX))<2e-2f&&
+                    std::fabs((warped.plane.y-cellY)-(warpedReference.plane.y-worldCellY))<2e-2f,
+                    "the same world point receives the same smooth random crest displacement");
             Require(std::fabs(field.ripplePhase[0])<=kLatticeWrap&&
-                    std::fabs(field.ripplePhase[1])<=kLatticeWrap,
-                    "the chop phase stays inside the lattice wrap at any world coordinate");
+                    std::fabs(field.ripplePhase[1])<=kLatticeWrap&&
+                    std::fabs(field.warpPhase[0])<=kLatticeWrap&&
+                    std::fabs(field.warpPhase[1])<=kLatticeWrap,
+                    "chop and domain-warp phases stay inside their own noise wraps");
             for (int train=0;train<kTrainCount;++train)
                 Require(field.swellPhase[train]>=0.f&&field.swellPhase[train]<kTrainCells[train],
                         "each swell train wraps its phase into its own wavelength");
@@ -309,9 +334,23 @@ int main() try
     auto trainAngle=[](const WaveField& field,int train,float relativeX,float relativeY) {
         const float cellX=relativeX*field.lattice[0]+relativeY*field.lattice[1];
         const float cellY=relativeX*field.lattice[2]+relativeY*field.lattice[3];
-        return kTrainRadians[train]*(kTrainDirX[train]*cellX+kTrainDirY[train]*cellY
+        const auto warped=WarpWavePlane(field,cellX,cellY);
+        return kTrainRadians[train]*(kTrainDirX[train]*warped.plane.x+kTrainDirY[train]*warped.plane.y
                                      +field.swellPhase[train]);
     };
+    {
+        const auto field=BuildWaveField(0.0,1.f,.32f,100.f,4213.f,-7781.f,true,true);
+        constexpr float x=7.31f,y=-4.27f,step=.002f;
+        const auto scalarWarp=[&](float px,float py) {
+            const auto sample=WarpWavePlane(field,px,py);
+            return (sample.plane.x-px)/(kWaveWarpDirectionX*kWaveWarpAmplitude);
+        };
+        const auto center=WarpWavePlane(field,x,y);
+        const float dx=(scalarWarp(x+step,y)-scalarWarp(x-step,y))/(2.f*step);
+        const float dy=(scalarWarp(x,y+step)-scalarWarp(x,y-step))/(2.f*step);
+        Require(std::fabs(dx-center.gradientX)<2e-3f&&std::fabs(dy-center.gradientY)<2e-3f,
+                "the CPU domain-warp gradient matches finite differences of its displacement");
+    }
     const auto turn=[](float value){return value-kTwoPi*std::floor(value/kTwoPi);};
     // (1) Translation invariance, measured where a tile is actually visible: the reference
     // camera sits on the water it is testing, and each other camera sees the same point from
@@ -604,9 +643,19 @@ int main() try
         // normal, which is the negative gradient of the height field the geometry lifted.
         Require(vertex.find("p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;")!=std::string::npos,
                 "geometry waves lift the surface along world up and slide it toward the crest");
-        Require(vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*kDirA+kWeightB*cosB*kDirB);")
+        Require(vertex.find("float2 warpedDirA=kDirA+3.2*dot(kDirA,float2(.6,.8))*warpGradient;")
+                    !=std::string::npos&&
+                vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB);")
                     !=std::string::npos,
-                "the slide is Gerstner's own, in phase with the lift a quarter turn behind it");
+                "the Gerstner slide follows the domain-warped crest with its chain-rule direction");
+        Require(pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*3.2)*foreverStyle.x;")
+                    !=std::string::npos,
+                "pixel normals apply the full chain rule through the same crest warp");
+        Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
+                pixel.find("waveWarpPhase:register(c217)")!=std::string::npos&&
+                code.find("SetPixelShaderConstantF(200,controls,18)")!=std::string::npos&&
+                code.find("SetVertexShaderConstantF(200,vertexControls,4)")!=std::string::npos,
+                "both shader stages upload the independent camera-anchored warp phase");
         Require(pixel.find("float2 tilt=-slopes*(controls.z/jacobian)*flip;")!=std::string::npos,
                 "a crest leans toward the light it catches: the normal is the negative gradient");
         Require(pixel.find("float jacobian=max(1.0-pinch,.3);")!=std::string::npos&&
@@ -635,9 +684,13 @@ int main() try
         // Foam at the edges of waves, and only when the water is active: the pinch says a
         // crest is breaking, the authored wind says whether this body can foam at all, and
         // the foam then takes the mirror and the sun road with it - a whitecap scatters.
-        Require(pixel.find("float breaking=saturate(pinch*2.4);")!=std::string::npos&&
-                pixel.find("float whitecap=smoothstep(.86,1.02,capBand)*wind;")!=std::string::npos,
-                "a breaking crest foams, gated by the wind this water is authored to have");
+        Require(pixel.find("float foamWind=saturate(wind);")!=std::string::npos&&
+                pixel.find("float breaking=saturate(pinch*2.4);")!=std::string::npos&&
+                pixel.find("float foamPattern=saturate(.45*waveWarp.x+.55*detail.x);")!=std::string::npos&&
+                pixel.find("float whitecap=smoothstep(foamThreshold,foamThreshold+.14,capBand);")!=std::string::npos,
+                "breaking crests form irregular foam streaks with bounded wind-driven coverage");
+        Require(pixel.find("float foamAmount=saturate((shore*waterStyle.z")!=std::string::npos,
+                "foam coverage is physically bounded before it masks reflections and adds foam light");
         const size_t foamAt=pixel.find("float foamAmount="), dampAt=pixel.find("float reflectionAmount=");
         Require(foamAt!=std::string::npos&&dampAt!=std::string::npos&&foamAt<dampAt,
                 "the foam is known before the reflection is mixed, so it can damp it");
@@ -661,15 +714,21 @@ int main() try
         // The waves too: the preview has no vertex stage, so it displaces the shaded point
         // itself, but the field, the trains, the pinch and the sign of the tilt are the same
         // expressions - otherwise the published frames are of water the client does not draw.
-        Require(mirror.find("EvaluateSwell(plane.x, plane.y, field.swellPhase)") != std::string::npos
+        Require(mirror.find("WarpWavePlane(field, plane.x, plane.y)") != std::string::npos
+                && mirror.find("EvaluateSwell(warp.plane.x, warp.plane.y, field.swellPhase)") != std::string::npos
                 && mirror.find("BuildGeometryWaves(c.geometryWaves") != std::string::npos,
-                "the CPU preview evaluates the same swell and asks the same builder for its waves");
+                "the CPU preview applies the same anchored warp before evaluating the swell");
+        Require(mirror.find("kWaveWarpAmplitude * warp.gradientX") != std::string::npos
+                && mirror.find("slideAlongWarp*kWaveWarpAmplitude*warp.gradientY") != std::string::npos,
+                "the CPU preview uses the shader's warp gradient for normals and vertex slides");
         Require(mirror.find("-(axisX.x * w.slopes.x * tilt") != std::string::npos
                 && mirror.find("swell * kSwellToUnit") != std::string::npos,
                 "the CPU preview tilts the same way and normalizes the swell by the same divisor");
-        Require(mirror.find("Smoothstep(.86f, 1.02f, capBand) * wind") != std::string::npos
+        Require(mirror.find("Smoothstep(foamThreshold, foamThreshold + .14f, capBand)") != std::string::npos
+                && mirror.find(".45f * warp.noiseValue + .55f * w.detail") != std::string::npos
+                && mirror.find("const float foamWind = Saturate(wind)") != std::string::npos
                 && mirror.find("Saturate(wave.pinch * 2.4f)") != std::string::npos,
-                "the CPU preview foams at the same crests, on the same pinch, under the same wind");
+                "the CPU preview mirrors the broken, bounded wind-driven crest foam");
         const std::string profiles = ReadAlongside("../EnvironmentProfiles.ini");
         {
             // The key's own length, and a section lookup that cannot be fooled by the file's header
