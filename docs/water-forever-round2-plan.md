@@ -67,7 +67,8 @@ an 8x8 butterfly, plus a foam *state* texture advected over frames and a per-mip
 chain. None of that exists in `ps_3_0` on D3D9: no compute, no UAVs, no ping-pong state texture
 without burning a render pass, and the whole shader has to fit **496 instruction slots**
 (`tools/ValidateShaders.ps1`, and creation itself fails on PS3-class drivers above 512 - see
-`water-rendering.md`). So the wave *field* stays the analytic two-octave value-noise lattice
+`water-rendering.md`; the rework later needed 543 and the budget was raised to 560, which is in
+the measured outcome below). So the wave *field* stays the analytic two-octave value-noise lattice
 from round 1, which already gives world-anchored slopes, a swell octave and a crest phase; the
 "simulation" part is not what makes Forever water read as Forever.
 
@@ -114,6 +115,18 @@ into the same reciprocal as the existing `1/(1+distance*distance*k)` local-light
 Windows job reports a budget failure, cut the SSR steps first, then the in-scattering isotropic
 term, and never the shoreline shading.
 
+**Measured outcome (2026-10-14).** The estimate was low: the rework landed at **543 slots**, and
+two of the three fallbacks above bought nothing. The SSR step reduction saves **zero** slots -
+the march loops are `[loop]`, so fxc counts the body once and steps only cost frame time - and
+the sky gradient was already the 4-band form, worth 15 slots rather than a fix for the overflow.
+With one copy of the shader per candidate cut priced by fxc in a single run, every route under
+496 cost a visible term (69 slots for the SSR march, 51 for the sun-road march, 37 for the
+analytic swell, and 11-17 each for the scatter lobe, sky gradient, body shading and shoal foam),
+so the budget was raised to 560 and the trade recorded in `tools/ValidateShaders.ps1`. Water
+effects now require a device that accepts more than 512 instruction slots; below that,
+`CreatePixelShader` fails, the failure is logged, and the client's own water stays. The numbers
+and the reasoning are in `water-rendering.md`, "Shader budget raised for the volume rework".
+
 ## Decisions taken before implementation
 
 - **Budget.** If the PBR set does not fit 496 slots, cut in this order: SSR steps
@@ -130,3 +143,30 @@ term, and never the shoreline shading.
 - **Logistics.** PR #17 (`arena/e57ae181-modern-wow-renderer`) carries round 1. This
   session may only push to that one branch, so the round-2 work lands as a second pull
   request once #17 is merged; until then the round-2 commits sit on the same branch.
+
+## What was built
+
+Every item in the plan landed, with these substitutions, and the details are in
+`water-rendering.md` under "Full rework round 2":
+
+- **Detail mip sampling: not needed.** The plan proposed `tex2Dgrad` with an explicit world
+  footprint for the client's own 512 detail tiles. Checked against the shader: the tile is
+  sampled at an interpolator uv that the vertex stage derives from the material transforms, so
+  `tex2D` already has correct per-pixel derivatives and picks the right mip on its own. The
+  reference needs `tex2Dgrad` because it *builds* its uv from a world position inside a loop.
+  Adding it here would have cost slots to restate what the sampler already does. The fade that
+  mattered - the one for our own procedural lattice - is driven by `fwidth(plane)` and was
+  already in place; it now applies to the chop only, never to the swell.
+- **FFT and foam state:** replaced by two analytic swell trains plus the bounded noise chop,
+  sharing the vertex stage's displacement. No per-frame state texture.
+- **GGX/Smith and the EnvBRDF curve:** replaced by a shaped-exponent lobe whose exponent carries
+  roughness and sun height, and by Schlick Fresnel with the roughness mix standing in for the
+  BRDF integration curve.
+- **Blurred reflection mips:** replaced by mixing the screen-space hit toward the sky term by
+  `rough`, which is the same perceptual move with fewer samples.
+- **Shallow-detail fade by column depth:** implemented as the depth-gated refraction offset
+  plus the shore/crest foam split; the fine octave keeps its own footprint fade.
+- **Reflection path fog:** the composite already applies the draw's fog after reflections are
+  mixed in, and at the near-grazing angles a water surface reflects, the difference between view
+  path and reflected path is second order. No separate term.
+

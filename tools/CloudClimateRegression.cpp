@@ -81,6 +81,26 @@ int main() try
             "zone art directions are distinct, including a genuinely open sky");
     Require(ResolveEnvironment(config,{9999,9999,0,true}).state[CloudCoverage]==1&&
             ResolveEnvironment(config,{}).state[CloudType]==0,"unknown/invalid locations have neutral fallback");
+    // Water rides the same authoring layer, so the same two things have to hold: a zone line that
+    // only names a sea state keeps its climate, and a climate cannot move the water on its own.
+    Require(Near(env(33)[WaterAgitation],1.45f)&&Near(env(12)[WaterAgitation],.45f)&&
+            Near(env(1497)[WaterAgitation],.3f),
+            "the shipped sea state runs from a Stranglethorn coast to an Undercity cistern");
+    Require(env(33)[CloudCoverage]>1.f&&Near(env(33)[CloudFeatureSize],.9f),
+            "a water-only zone line inherits its climate profile instead of replacing it");
+    Require(env(214)[WaterAgitation]>1.3f&&env(308)[WaterAgitation]>1.3f&&
+            env(1638)[WaterAgitation]<.6f&&env(1537)[WaterAgitation]<.6f&&env(618)[WaterAgitation]<1.f,
+            "open seas are rough and landlocked cities are glass");
+    Require(ResolveEnvironment(config,{9999,9999,0,true}).state[WaterAgitation]==1.f,
+            "an unknown zone keeps the neutral sea state");
+    {
+        EnvironmentConfiguration tuned;std::string waterError;
+        Require(ParseEnvironmentConfiguration("[Default]\nWaterAgitationMultiplier=4\n",tuned,waterError)&&
+                tuned.defaults.values[WaterAgitation]&&*tuned.defaults.values[WaterAgitation]==4.f,
+                "the accepted top of the sea-state range parses exactly");
+        Require(!ParseEnvironmentConfiguration("[Default]\nWaterAgitationMultiplier=41\n",tuned,waterError),
+                "an out-of-range sea state is refused rather than quietly clamped");
+    }
     config.enabled=false;
     Require(ResolveEnvironment(config,{1,440,0,true}).state[CloudCoverage]==1,"disabled environment is neutral");
     config.enabled=true;

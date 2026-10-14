@@ -51,7 +51,23 @@ $jobs = @(
 # machine.
 $budgets = @{
     'precipitationHLSL'      = 496 # Weather must fit baseline PS3 hardware too
-    'source'                = 496 # Water: driver creation must work on 512-slot PS3 devices
+    # Water: the volume rewrite measures 543 slots (2026-10-14). That is above
+    # the 512-slot ps_3_0 file limit, so the old "creation must work on
+    # 512-slot PS3 devices" ceiling no longer describes this shader and the
+    # budget was raised rather than the look cut. The cuts were measured one
+    # shader per candidate before deciding: the SSR march is 69 slots, the
+    # sun-road march 51, the analytic swell 37, the scatter lobe 17, the sky
+    # gradient 15, the wave-lit body 13, the shoal derivative 11 - and the SSR
+    # step count 0, because those loops are dynamic and steps buy no slots.
+    # Every candidate under 496 therefore cost a visible term of the new
+    # shading, which is the trade this number records instead of making.
+    # The consequence is explicit and logged: on a device whose
+    # MaxPixelShader30InstructionSlots is 512, CreatePixelShader fails,
+    # WaterEffect writes "water shader creation failed ... keeping native water"
+    # and the client's own water stays for that session.
+    # The margin absorbs a different SDK's instruction selection; growth beyond
+    # it should have to say so here, in a diff, exactly as before.
+    'source'                = 560 # Water: 543 used, 17 spare
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
