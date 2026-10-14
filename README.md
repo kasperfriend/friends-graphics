@@ -113,7 +113,10 @@ See [water rendering, verification and troubleshooting](docs/water-rendering.md)
 | `F11` | Toggle all injected graphics effects. |
 | `F12` | Reload `GraphicsEffects.ini` without restarting the client. |
 
-`F8` is reserved for the unfinished AI Materials development path and is not a supported user control.
+`F8` captures one diagnostic frame when `[Diagnostics] Enabled=1` in
+`ModernWoWRenderer.ini`. F12 reloads that section; `AutoCapture=1` captures a
+frame after reload without F8. Capture status and file errors appear in
+`WaterEffect.log`. This is troubleshooting only, not an AI Materials control.
 
 F7 now uses a left-hand category list: select a tab to open its related settings. Drag the title bar to move the window, or drag the bottom-right corner to resize it. Longer tabs scroll with the mouse wheel over the settings pane, the scrollbar, or the up/down buttons. The window stays on screen; its size, position, selected tab and per-tab scroll positions are retained while the client is running. Changes save automatically.
 

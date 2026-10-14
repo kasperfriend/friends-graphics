@@ -121,6 +121,11 @@ jobs:
             exit $result
           }
           Write-Output "::notice title=Water regression results::$flat"
+          # Keep the safety sweep readable even when the full annotation is
+          # truncated by GitHub (the complete output remains in the job log).
+          $sweep = ($output | Where-Object { "$_" -match 'sweep:|sRGB refraction|Water GPU regressions|SKIP GPU' }) -join "`n"
+          $sweep = $sweep -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Water safety sweep::$sweep"
 
       - name: F7 overlay state regressions
         if: matrix.configuration == 'Release'

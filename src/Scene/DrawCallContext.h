@@ -36,10 +36,13 @@ namespace renderer
         const void* ps = nullptr;
         const void* vertexDecl = nullptr;
         uint32_t renderStateBits = 0;
+        // Addresses may be reused after eviction from the owning shader cache.
+        uint64_t vsHash = 0, psHash = 0;
 
         bool operator==(const PipelineKey& o) const
         {
-            return vs == o.vs && ps == o.ps && vertexDecl == o.vertexDecl && renderStateBits == o.renderStateBits;
+            return vs == o.vs && ps == o.ps && vertexDecl == o.vertexDecl && renderStateBits == o.renderStateBits &&
+                   vsHash == o.vsHash && psHash == o.psHash;
         }
     };
 }
@@ -55,6 +58,8 @@ namespace std
             h ^= reinterpret_cast<size_t>(k.ps) + 0x9e3779b9 + (h << 6) + (h >> 2);
             h ^= reinterpret_cast<size_t>(k.vertexDecl) + 0x9e3779b9 + (h << 6) + (h >> 2);
             h ^= std::hash<uint32_t>{}(k.renderStateBits) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint64_t>{}(k.vsHash) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint64_t>{}(k.psHash) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };

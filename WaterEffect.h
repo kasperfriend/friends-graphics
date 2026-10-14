@@ -554,6 +554,12 @@ struct Scope {
             }
             replacement = cachedReplacementPS;
             replacementVertex = cachedReplacementVS;
+            // StretchRect preserves encoded scene bytes. If the native target
+            // uses sRGB output, decode its copy before lighting/refraction and
+            // let the unchanged output state encode once, not twice. Depth is
+            // data and must NEVER be gamma-decoded.
+            DWORD sceneSrgb = FALSE;
+            if(FAILED(d->GetRenderState(D3DRS_SRGBWRITEENABLE,&sceneSrgb)))return;
             const D3DSAMPLERSTATETYPE samplerStates[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
             {
                 for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}
@@ -561,7 +567,7 @@ struct Scope {
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
                 for(unsigned slot=0;slot<2;++slot) {
                     const DWORD values[]={DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),
-                        D3DTEXF_NONE,D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,FALSE};
+                        D3DTEXF_NONE,D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,slot?FALSE:sceneSrgb};
                     for(unsigned state=0;state<6;++state) {
                         const HRESULT hr=d->SetSamplerState(2+slot,samplerStates[state],values[state]);
                         if(FAILED(hr)){Restore();ReportFailure("water sampler setup",hr);return;}

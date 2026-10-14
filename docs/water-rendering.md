@@ -1,5 +1,62 @@
 # Water rendering audit
 
+## Additional safety sweep (2026-10-14)
+
+Three further defects were found in code:
+
+- All four draw hooks skipped water whenever the legacy highlighter was
+  enabled/visible, even if it did not match or install a shader on the draw.
+  They now skip water/fog only when that draw's highlight scope actually
+  changed the shader. A matching highlight still has priority.
+- Scene color was always sampled with sRGB decoding **off**. When the native
+  color target enables sRGB writes, its copied pixels are already encoded;
+  sampling them as linear and encoding again brightens refraction/reflections.
+  The scene sampler now follows native sRGB output. The depth sampler always
+  stays linear. Neither native output state nor caller sampler state is lost.
+- `ShaderCache` keyed hashes by unowned COM addresses. A released shader's
+  address could be recycled for a different shader but retain the old hash,
+  affecting water recognition. Entries now own identities, with a 1024-entry
+  LRU bound (important for short-lived debug shaders). Reset releases them;
+  shutdown avoids COM releases under loader lock. Transient bytecode-query
+  failures are not cached. Pipeline keys also include bytecode hashes so
+  pointers recycled after eviction cannot resurrect old classifications.
+
+The device regression tests COM lifetime/eviction/retry deterministically
+before HAL setup, actual highlighted/unhighlighted water pixels, and the
+**complete production shader's** refraction with sRGB both off and on. For
+128-gray scene color, both paths must produce 128-gray (±2), not approximately
+188-gray from double gamma correction. State restoration is checked afterward.
+These are targeted regression tests, not a claim of an Ascension client replay.
+
+## Follow-up: texture resolution was used as material identity (2026-10-14)
+
+The shared material gate required slot 0 to be exactly 8×64 and slot 1 to be
+exactly 512×512. It rejected a 256×256 or 128×128 surface before consulting
+any shader identity, incrementing `frameCandidates`, creating the replacement
+shaders, or capturing the scene. `GroundSurfaceCapture` duplicated that gate.
+This is reproducible with the production policy and explains why successful
+shader compilation cannot establish that a water draw reaches replacement.
+
+Keep the canonical layout fallback for previously supported unknown tile
+variants. For different resolutions, require **both** a documented native
+water VS and a documented water PS, the lookup's base size or a valid reduced
+top mip, and a square power-of-two surface. The shader roles are not
+interchangeable. A ripple lookup alone (also used by weather) is insufficient.
+Verify the actually bound shader pointers before using tracked hashes; when
+state-block application bypasses hooks, query the bound shaders' cached hashes.
+Classification, scene capture, replacement and ground capture now use one gate.
+
+Portable tests cover all three documented VS and both PS (stage roles verified
+from the pre-refactor gate at `11fd29e`), all lookup mips, surface sizes
+16–1024, missing inputs, wrong shader roles, weather/UI and invalid shapes.
+Device tests use synthetic ABI-compatible shaders **with supplied native
+identity metadata** to exercise the real classifier, scene copy, replacement,
+framebuffer readback and state restoration at six noncanonical layouts. They
+also reject stale tracked identities. These tests are not native shader dumps
+or an Ascension client replay. The reporting client's logs have no texture
+sizes; this code defect is verified, but its relevance to that particular
+client remains unconfirmed without an observed draw.
+
 ## Follow-up: live toggle blocked by startup configuration (2026-10-14)
 
 The shader-budget fix did not address a separate enable path. `Configure` read
@@ -118,8 +175,22 @@ the reporting player's machine. In-game confirmation still matters.
    lamp. Test reflections off with refraction/depth/foam on, atmosphere off,
    F11 off/on, window resize, and Alt+Tab. Native lava/slime and unsupported
    texture layouts must not become water.
-6. If magenta never appears, enable `[Diagnostics] Enabled=1` and use F8 to
-   capture one frame, then include `WaterEffect.log`, `WaterReflection.log`,
-   `VolumeEffects.log`, and `WaterDiagnostics/<timestamp>/` with the report.
-   This identifies different material layouts without broadly replacing
-   unrelated transparent geometry.
+6. If magenta never appears, edit the existing `[Diagnostics]` section in
+   **ModernWoWRenderer.ini** (not GraphicsEffects.ini): `Enabled=1`,
+   `AutoCapture=1`, `MaxDraws=8192`, `SkipDraws=0`. While looking at the broken
+   water, press F12. This reloads diagnostics and arms **one frame**, without
+   requiring F8 or a restart. For manual F8 captures use `AutoCapture=0`.
+   Include `WaterEffect.log`, `WaterReflection.log`, `VolumeEffects.log`, and
+   the newly reported `WaterDiagnostics/<timestamp>/` folder (draws.txt and
+   shader binaries). Turn diagnostics off and press F12 after collecting it.
+   Capture is observation-only and also works with F11 OFF.
+7. If there is no capture folder, read `water diagnostics:` entries in
+   **WaterEffect.log**. They identify the exact configuration and output paths,
+   effective enable/auto values, disabled F8 presses, the eight-capture limit,
+   directory/file failures, start and completion counts. If that log is also
+   unwritable, messages go to the Windows debugger output. A zero-draw frame
+   still creates a capture file: missing output is not evidence of missing
+   water. Earlier DLLs silently ignored disabled F8 presses/file failures and
+   did **not** reload diagnostics with F12; they require a restart after editing
+   the section. These diagnostic changes do not broaden water detection or
+   claim to resolve an unobserved liquid layout.

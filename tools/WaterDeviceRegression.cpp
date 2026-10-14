@@ -1,5 +1,8 @@
 // Tests the production water Scope, not a second implementation of it.
 #include "../WaterEffect.h"
+#include "../WaterDiagnostics.h"
+#include "../WaterHighlight.h"
+#include <memory>
 #include "../src/Scene/DrawCallClassifier.h"
 // The capture provider is controlled here; Prepare itself is production code.
 namespace volume {
@@ -84,6 +87,84 @@ void TestWaterSettings(WaterSettings& settings) {
     Require(!watereffect::active,"water edits do not override F11 master OFF");
     watereffect::active=true;
 }
+std::string ReadText(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    return std::string(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
+}
+void SetDiagnostics(const WaterSettings& settings,bool on,bool automatic=false) {
+    const auto ini=settings.directory/L"ModernWoWRenderer.ini";
+    Require(WritePrivateProfileStringW(L"Diagnostics",L"Enabled",on?L"1":L"0",ini.c_str())!=0,"write diagnostic enable");
+    Require(WritePrivateProfileStringW(L"Diagnostics",L"AutoCapture",automatic?L"1":L"0",ini.c_str())!=0,"write diagnostic auto capture");
+    waterdiag::Configure(settings.base); // The same reload now called by F12.
+}
+void TestDiagnosticFiles(WaterSettings& settings) {
+    SetDiagnostics(settings,false);
+    Require(!waterdiag::enabled&&!std::filesystem::exists(waterdiag::root),"disabled diagnostics do not create a capture directory");
+    waterdiag::OnPresent(nullptr,true,true);
+    auto text=ReadText(waterdiag::statusPath);
+    Require(text.find("F8 ignored")!=std::string::npos,"disabled F8 explains missing capture in existing water log");
+    waterdiag::OnPresent(nullptr,true,true);
+    Require(ReadText(waterdiag::statusPath)==text,"holding F8 does not spam the log");
+    waterdiag::OnPresent(nullptr,false,true);
+    waterdiag::OnPresent(nullptr,true,false);
+    Require(ReadText(waterdiag::statusPath)==text,"background F8 does not request capture");
+    waterdiag::OnPresent(nullptr,false,true);
+    SetDiagnostics(settings,true,true);
+    Require(waterdiag::enabled&&waterdiag::autoCapture,"reload enables and arms capture without restarting");
+    text=ReadText(waterdiag::statusPath);
+    Require(text.find("configured enabled=1 auto=1")!=std::string::npos&&text.find("ModernWoWRenderer.ini")!=std::string::npos,
+        "configuration status identifies effective enable and input path");
+    // A regular file where a directory belongs deterministically reproduces
+    // write failure without depending on elevation or filesystem ACLs.
+    const auto blocker=settings.directory/L"blocked";
+    {std::ofstream out(blocker);out<<"not a directory";}
+    waterdiag::root=blocker;
+    Require(!waterdiag::OpenCapture()&&!waterdiag::enabled&&!waterdiag::active,"directory failure disables capture safely");
+    text=ReadText(waterdiag::statusPath);
+    Require(text.find("create directory failed code=")!=std::string::npos&&text.find("blocked")!=std::string::npos,
+        "directory failure reports error code and path outside failed directory");
+    SetDiagnostics(settings,true);
+    Require(waterdiag::OpenCapture(),"reload recovers filesystem capture after failure");
+    // Deliberately poison the stream to model disk-full/failed writes.
+    waterdiag::active=true;
+    waterdiag::log.setstate(std::ios::badbit);
+    waterdiag::Finish("test-write-failure");
+    Require(!waterdiag::enabled&&!waterdiag::active&&!waterdiag::log.is_open(),"failed write closes and disables capture");
+    Require(ReadText(waterdiag::statusPath).find("write/close failed")!=std::string::npos,"write failure is reported");
+    SetDiagnostics(settings,true);
+    Require(waterdiag::OpenCapture(),"failed stream can be reopened after reload");
+    waterdiag::active=true;waterdiag::Configure(settings.base);
+    Require(!waterdiag::active&&!waterdiag::log.is_open(),"reload closes an in-progress capture");
+    SetDiagnostics(settings,false);
+}
+void TestDiagnosticDevice(WaterSettings& settings,IDirect3DDevice9* device) {
+    waterdiag::captures=0; // Independent fixture; production keeps its session cap.
+    SetDiagnostics(settings,true,true);
+    waterdiag::OnPresent(device,true,true); // F8 + auto request together.
+    Require(waterdiag::active&&!waterdiag::autoCapture&&waterdiag::captures==1,"auto and F8 start exactly one capture");
+    auto file=waterdiag::folder/L"draws.txt";
+    waterdiag::OnPresent(device,false,true);
+    Require(!waterdiag::active&&ReadText(file).find("captured=0 observed=0")!=std::string::npos,
+        "frame with no draw callbacks still produces an explicit zero-draw capture");
+    SetDiagnostics(settings,true,true);
+    waterdiag::OnPresent(device,false,true);
+    file=waterdiag::folder/L"draws.txt";
+    waterdiag::Draw(device,"DrawPrimitive",D3DPT_TRIANGLELIST,2);
+    waterdiag::OnPresent(device,false,true);
+    const auto text=ReadText(file);
+    Require(text.find("DRAW 0")!=std::string::npos&&text.find("VS vs_")!=std::string::npos&&
+        text.find("T 0 hr=0")!=std::string::npos&&text.find("captured=1 observed=1")!=std::string::npos,
+        "device capture records native shaders, textures and completion");
+    Require(waterdiag::shaders.size()==2,"device capture writes both shader bytecodes");
+    SetDiagnostics(settings,true,true);waterdiag::OnPresent(device,false,true);
+    waterdiag::Reset(device);
+    Require(!waterdiag::active&&!waterdiag::log.is_open(),"reset closes diagnostic capture");
+    waterdiag::captures=8;
+    SetDiagnostics(settings,true,true);waterdiag::OnPresent(device,false,true);
+    Require(!waterdiag::active&&!waterdiag::autoCapture&&ReadText(waterdiag::statusPath).find("capture limit reached")!=std::string::npos,
+        "capture limit is bounded and reported instead of silently ignoring requests");
+    SetDiagnostics(settings,false);
+}
 // Inject one real COM failure after stage 2 has already changed. This
 // reproduces the original partial-setup leak without maintaining a fake device.
 using SetTextureFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,IDirect3DBaseTexture9*);
@@ -109,9 +190,63 @@ struct TextureFailure {
         }
     }
 };
+// Deterministic COM lifetime fixture. No HAL or allocator address-reuse luck
+// is needed: the cache must own identities and bound their retained count.
+struct ShaderIdentityFixture final : IDirect3DPixelShader9 {
+    ULONG refs=1;
+    DWORD bytes[3]={0xffff0300,0x0000ffff,0};
+    bool fail=false;
+    explicit ShaderIdentityFixture(DWORD id=0) {bytes[2]=id;}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID,void**) override {return E_NOINTERFACE;}
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++refs;}
+    ULONG STDMETHODCALLTYPE Release() override {return --refs;}
+    HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9**) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE GetFunction(void* data,UINT* size) override {
+        if(fail)return E_FAIL;
+        if(!data){*size=sizeof(bytes);return S_OK;}
+        if(*size<sizeof(bytes))return D3DERR_INVALIDCALL;
+        memcpy(data,bytes,sizeof(bytes));*size=sizeof(bytes);return S_OK;
+    }
+};
+void TestShaderIdentityLifetime() {
+    auto& cache=renderer::ShaderCache::Instance();cache.Clear();
+    ShaderIdentityFixture reused(1);
+    const auto first=cache.GetShaderHash(&reused);
+    Require(first!=0&&reused.refs==2,"sweep: cached shader identity owns a COM reference");
+    reused.Release();
+    Require(reused.refs==1,"sweep: game release cannot recycle a cached water shader address");
+    cache.Clear();Require(reused.refs==0,"sweep: reset releases cached shader identities");
+    // Reuse exactly the same address after Clear with DIFFERENT bytecode.
+    reused.refs=1;reused.bytes[2]=2;
+    Require(cache.GetShaderHash(&reused)!=first,"sweep: recycled shader address gets a fresh bytecode hash");
+    cache.Clear();
+    reused.fail=true;Require(cache.GetShaderHash(&reused)==0,"sweep: failed shader query is rejected");
+    reused.fail=false;
+    Require(cache.GetShaderHash(&reused)!=0,"sweep: transient shader query failure is retryable");
+    cache.Clear();
+    std::vector<std::unique_ptr<ShaderIdentityFixture>> shaders;
+    for(size_t i=0;i<renderer::ShaderCache::MaxEntries;++i) {
+        shaders.push_back(std::make_unique<ShaderIdentityFixture>(DWORD(i)));
+        cache.GetShaderHash(shaders.back().get());
+    }
+    cache.GetShaderHash(shaders.front().get()); // keep a hot native shader
+    ShaderIdentityFixture extra(9999);cache.GetShaderHash(&extra);
+    Require(shaders[0]->refs==2&&shaders[1]->refs==1&&extra.refs==2,
+        "sweep: shader identity cache is bounded and evicts least-recently-used entries");
+    cache.Clear();
+    for(const auto& shader:shaders)Require(shader->refs==1,"sweep: cache clear releases every retained reference");
+    Require(extra.refs==1,"sweep: cache clear releases newest entry");
+    renderer::PipelineKey a{},b{};
+    a.ps=b.ps=&reused;a.psHash=first;b.psHash=first+1;
+    std::unordered_map<renderer::PipelineKey,int> pipelines;
+    pipelines[a]=1;pipelines[b]=2;
+    Require(pipelines.size()==2,"sweep: pipeline cache distinguishes recycled pointers with different shader identities");
+}
 int main() try {
+    TestShaderIdentityLifetime();
     WaterSettings settings;
     TestWaterSettings(settings);
+    TestDiagnosticFiles(settings);
     // The test sits beside the built proxy DLL. Load the system runtime
     // explicitly so the proxy cannot hook and double-apply our test scopes.
     wchar_t systemPath[MAX_PATH]{};GetSystemDirectoryW(systemPath,MAX_PATH);
@@ -268,7 +403,8 @@ int main() try {
     auto pixel=[&](float debug,bool modern=true) {
         watereffect::waterDebugMode=debug;
         Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));Check(d->BeginScene());
-        {watereffect::Scope scope(d.Get());
+        {waterhighlight::Scope tint(d.Get());
+         watereffect::Scope scope(d.Get(),tint.changed);
             Require(scope.device==(modern?d.Get():nullptr),"production draw follows live water and master switches");
             wroteMRT=scope.maskBound&&scope.depthBound;
             Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex)));}
@@ -280,6 +416,107 @@ int main() try {
     Require((pixel(1)&0xffffff)==0xff00ff,"debug mode proves replacement reaches the framebuffer");
     Require((pixel(0)&0xffffff)!=0,"modern water without capture is finite and nonblack");
     restored();
+    // The legacy global skip disabled EVERY water draw when Highlight was
+    // visible, even when its selected shader group did not match the draw.
+    waterhighlight::enabled=waterhighlight::visible=true;waterhighlight::group=0;
+    waterhighlight::firstHash=0;
+    Require((pixel(1)&0xffffff)==0xff00ff,"sweep: unmatched enabled highlighter no longer suppresses water pixels");
+    const char* tintSource="float4 color:register(c0);float4 main():COLOR{return color;}";
+    ComPtr<ID3DBlob> tintCode;
+    Check(D3DCompile(tintSource,strlen(tintSource),nullptr,nullptr,nullptr,"main","ps_2_0",0,0,tintCode.GetAddressOf(),nullptr));
+    waterhighlight::code.resize(tintCode->GetBufferSize()/sizeof(DWORD));
+    memcpy(waterhighlight::code.data(),tintCode->GetBufferPointer(),tintCode->GetBufferSize());
+    waterhighlight::firstHash=renderer::ShaderCache::Instance().GetShaderHash(originalPS.Get());
+    Require((pixel(0,false)&0xffffff)==0xff00ff,"sweep: matched highlighter retains priority over water replacement");
+    waterhighlight::enabled=false;restored();
+
+    // Render the COMPLETE production shader with refraction=1 and all added
+    // lighting/absorption disabled. A copied 128 gray must remain 128, not
+    // become 188 when sRGB output encodes an already-encoded scene sample.
+    const bool savedWaves=watereffect::wavesEnabled,savedFoam=watereffect::foamEnabled;
+    const bool savedDepth=watereffect::depthEnabled,savedGlint=watereffect::sunGlintEnabled;
+    const bool savedRefraction=watereffect::refractionEnabled,savedReflections=watereffect::reflectionsEnabled;
+    const float savedRefractionStrength=watereffect::refractionStrength;
+    watereffect::wavesEnabled=watereffect::foamEnabled=watereffect::depthEnabled=watereffect::sunGlintEnabled=false;
+    watereffect::reflectionsEnabled=false;watereffect::refractionEnabled=true;watereffect::refractionStrength=1;
+    auto encodedScene=texture(128,128,0xff808080),sampledDepth=texture(128,128,0xffe5e5e5);
+    watereffect::reflectionScene=encodedScene.Get();watereffect::reflectionDepth=sampledDepth.Get();
+    watereffect::reflectionData[0]=1.001f;watereffect::reflectionData[1]=-.1f;
+    watereffect::reflectionData[2]=watereffect::reflectionData[3]=1;
+    watereffect::reflectionData[5]=watereffect::reflectionData[6]=1.f/128;watereffect::reflectionData[7]=.94f;
+    for(DWORD srgb:{FALSE,TRUE}) {
+        Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,srgb));
+        {watereffect::Scope scope(d.Get());DWORD sceneSampler=0,depthSampler=1;
+            Check(d->GetSamplerState(2,D3DSAMP_SRGBTEXTURE,&sceneSampler));
+            Check(d->GetSamplerState(3,D3DSAMP_SRGBTEXTURE,&depthSampler));
+            Require(sceneSampler==srgb&&depthSampler==FALSE,"sweep: scene gamma follows native output while depth stays linear");}
+        const DWORD value=pixel(0);std::printf("sRGB refraction enabled=%lu pixel=%08lx\n",srgb,value);
+        for(unsigned shift:{0u,8u,16u})Require(std::abs(int((value>>shift)&255)-128)<=2,
+            "sweep: full water refraction preserves scene brightness with sRGB both off and on");
+        restored();
+        DWORD outputSrgb=0;Check(d->GetRenderState(D3DRS_SRGBWRITEENABLE,&outputSrgb));
+        Require(outputSrgb==srgb,"sweep: water leaves native output gamma state unchanged");
+    }
+    Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE));
+    watereffect::reflectionScene=watereffect::reflectionDepth=nullptr;
+    watereffect::wavesEnabled=savedWaves;watereffect::foamEnabled=savedFoam;
+    watereffect::depthEnabled=savedDepth;watereffect::sunGlintEnabled=savedGlint;
+    watereffect::reflectionsEnabled=savedReflections;watereffect::refractionEnabled=savedRefraction;
+    watereffect::refractionStrength=savedRefractionStrength;
+    // Identity fixture: the synthetic ABI-compatible shaders above stand in
+    // for the captured native pair. Seed the same metadata that SetShader
+    // hooks supply, but keep actual-device identity checks, classification,
+    // capture, Scope, draw, readback and restoration in production code.
+    // This is NOT a replay of captured WoW shader bytecode.
+    {
+        renderer::ScopedTrackedRenderState trackedRestore;
+        auto& tracked=renderer::g_trackedState;
+        tracked.currentVS=originalVS.Get();tracked.currentPS=originalPS.Get();
+        tracked.vsHash=0x48a82796bd612aebull;tracked.psHash=0x7d4f078fa1876a09ull;
+        const UINT sizes[][3]={{8,64,256},{8,64,128},{4,32,256},{2,16,128},{8,64,1024},{1,1,16}};
+        const uint64_t vertexHashes[]={0x206d861fd0a721ddull,0xfdd9528ed3ac30eaull,0x48a82796bd612aebull};
+        const uint64_t pixelHashes[]={0x7d4f078fa1876a09ull,0x17f042a7906ca126ull};
+        unsigned fixture=0;
+        for(const auto& size:sizes) {
+            tracked.vsHash=vertexHashes[fixture%3];tracked.psHash=pixelHashes[fixture/3];++fixture;
+            auto lookup=texture(size[0],size[1],0xff406080);
+            auto waves=texture(size[2],size[2],0xff808080);
+            Check(d->SetTexture(0,lookup.Get()));Check(d->SetTexture(1,waves.Get()));
+            Require(renderer::water::IsMaterial(d.Get()),"known bound water identified at noncanonical resolutions");
+            Require(classifier.Classify(d.Get(),ctx,translation,false,0).isWater,
+                "classifier agrees with replacement at noncanonical resolutions");
+            Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+            Require(waterreflection::ready&&watereffect::reflectionScene,
+                "noncanonical water still gets pre-water scene capture");
+            waterreflection::Finish();
+            Require((pixel(1)&0xffffff)==0xff00ff,"noncanonical water replacement reaches framebuffer");
+            Require((pixel(0)&0xffffff)!=0,"noncanonical full water shader renders nonblack");
+            restored();
+            ComPtr<IDirect3DBaseTexture9> t0,t1;
+            Check(d->GetTexture(0,t0.GetAddressOf()));Check(d->GetTexture(1,t1.GetAddressOf()));
+            Require(t0.Get()==lookup.Get()&&t1.Get()==waves.Get(),"noncanonical native textures restored");
+            std::printf("PASS water resolution %ux%u / %ux%u classifier, capture, pixels and state\n",
+                size[0],size[1],size[2],size[2]);
+        }
+        auto reducedSurface=texture(256,256,0xff808080);
+        Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,reducedSurface.Get()));
+        tracked.currentVS=nullptr;
+        Require(!renderer::water::IsMaterial(d.Get()),"stale tracked VS identity cannot approve actual unknown shader");
+        tracked.currentVS=originalVS.Get();tracked.currentPS=nullptr;
+        Require(!renderer::water::IsMaterial(d.Get()),"stale tracked PS identity cannot approve actual unknown shader");
+        tracked.currentPS=originalPS.Get();tracked.psHash=0;
+        Require(!renderer::water::IsMaterial(d.Get()),"unknown PS cannot approve noncanonical water");
+        Require((pixel(1,false)&0xffffff)!=0xff00ff,"unrecognized noncanonical draw stays native");
+        restored();
+        tracked.psHash=0x7d4f078fa1876a09ull;
+        Check(d->SetPixelShader(nullptr));
+        Require(!renderer::water::IsMaterial(d.Get()),"missing actual PS rejected despite tracked water pair");
+        Check(d->SetPixelShader(originalPS.Get()));
+        Check(d->SetTexture(1,nullptr));
+        Require(!renderer::water::IsMaterial(d.Get()),"missing actual texture rejected despite tracked water pair");
+        Check(d->SetTexture(1,surface.Get()));
+    }
+    waterreflection::Reset(d.Get());
     // The optional atmosphere MRTs must never corrupt the main water draw.
     ComPtr<IDirect3DTexture9> mask,waterDepth;ComPtr<IDirect3DSurface9> maskRT,depthRT;
     Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,mask.GetAddressOf(),nullptr));
@@ -330,5 +567,7 @@ int main() try {
     watereffect::Reset(d.Get());Require(!watereffect::cachedReplacementPS&&!watereffect::cachedReplacementVS,"reset releases cached shaders");
     {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"replacement recreated after reset");}
     restored();watereffect::Reset(d.Get());
+    TestDiagnosticDevice(settings,d.Get());
+    restored();
     std::puts("Water GPU regressions passed");return 0;
 } catch(const std::exception& e) {std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}

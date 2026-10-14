@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include <mutex>
+#include <list>
+#include <wrl/client.h>
 
 namespace renderer
 {
@@ -20,6 +21,8 @@ namespace renderer
     {
     public:
         static ShaderCache& Instance();
+        // Bound retained COM identities, including short-lived diagnostic shaders.
+        static constexpr size_t MaxEntries = 1024;
 
         uint64_t GetShaderHash(IDirect3DVertexShader9* vs);
         uint64_t GetShaderHash(IDirect3DPixelShader9* ps);
@@ -38,7 +41,14 @@ namespace renderer
         template<typename T>
         const ShaderInfo* FetchOrCreate(T* shader);
 
-        std::unordered_map<const void*, ShaderInfo> m_cache;
+        struct Entry
+        {
+            ShaderInfo info;
+            Microsoft::WRL::ComPtr<IUnknown> owner;
+            std::list<const void*>::iterator recency;
+        };
+        std::unordered_map<const void*, Entry> m_cache;
+        std::list<const void*> m_recency;
         uint64_t m_hits = 0;
         uint64_t m_misses = 0;
     };

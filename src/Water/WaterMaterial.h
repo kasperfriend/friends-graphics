@@ -2,6 +2,8 @@
 #include <d3d9.h>
 #include <wrl/client.h>
 #include "WaterPolicy.h"
+#include "../Core/ShaderCache.h"
+#include "../D3D9/TrackedRenderState.h"
 
 namespace renderer::water
 {
@@ -17,6 +19,26 @@ namespace renderer::water
                 FAILED(static_cast<IDirect3DTexture9*>(texture.Get())->GetLevelDesc(0, &desc[slot])))
                 return false;
         }
-        return IsMaterialLayout(desc[0].Width, desc[0].Height, desc[1].Width, desc[1].Height);
+        if (IsMaterialLayout(desc[0].Width, desc[0].Height, desc[1].Width, desc[1].Height))
+            return true;
+        if (!IsRippleLookup(desc[0].Width, desc[0].Height) ||
+            !desc[1].Width || desc[1].Width != desc[1].Height)
+            return false;
+
+        // StateBlock::Apply can bypass SetShader hooks. Only use the mirror's
+        // hashes when its identities match the shaders ACTUALLY bound now.
+        Microsoft::WRL::ComPtr<IDirect3DVertexShader9> vs;
+        Microsoft::WRL::ComPtr<IDirect3DPixelShader9> ps;
+        if (FAILED(device->GetVertexShader(vs.GetAddressOf())) || !vs ||
+            FAILED(device->GetPixelShader(ps.GetAddressOf())) || !ps)
+            return false;
+        const auto& tracked = g_trackedState;
+        auto& cache = ShaderCache::Instance();
+        const auto vsHash = tracked.currentVS == vs.Get() && tracked.vsHash
+            ? tracked.vsHash : cache.GetShaderHash(vs.Get());
+        const auto psHash = tracked.currentPS == ps.Get() && tracked.psHash
+            ? tracked.psHash : cache.GetShaderHash(ps.Get());
+        return IsMaterialLayout(desc[0].Width, desc[0].Height,
+                                desc[1].Width, desc[1].Height, vsHash, psHash);
     }
 }
