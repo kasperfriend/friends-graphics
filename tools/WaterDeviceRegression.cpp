@@ -370,7 +370,22 @@ int main() try {
     volume::constants[0][0]=1.001f;volume::constants[0][1]=-.1f;
     volume::constants[0][2]=volume::constants[0][3]=1;volume::constants[2][3]=.94f;
     waterreflection::Configure(L".\\");
+    volume::ready=false;
+    const unsigned copiesBeforeCamera=waterreflection::copiedFrames;
     Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+    Require(waterreflection::attempted&&!waterreflection::ready&&!watereffect::reflectionScene,
+        "sweep: first world water without camera consumes the pre-water capture deadline");
+    // Model water reaching the main target before a later camera capture.
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xffff00ff,1,0));
+    volume::ready=true;
+    Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+    Require(!waterreflection::ready&&!watereffect::reflectionScene&&waterreflection::copiedFrames==copiesBeforeCamera,
+        "sweep: late camera cannot capture water already in the scene");
+    waterreflection::Finish();
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+    Check(d->BeginScene());waterreflection::Prepare(d.Get());Check(d->EndScene());
+    Require(waterreflection::copiedFrames==copiesBeforeCamera+1,
+        "sweep: clean next frame retries capture after an early camera miss");
     Require(waterreflection::ready&&watereffect::reflectionScene&&watereffect::reflectionDepth,
         "pre-water scene copy works with reflections disabled");
     waterreflection::Finish();

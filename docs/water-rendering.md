@@ -86,7 +86,7 @@ wrap, and the constants must remain finite after 100000 s of animation.
 
 ## Additional safety sweep (2026-10-14)
 
-Three further defects were found in code:
+Four further defects were found in code:
 
 - All four draw hooks skipped water whenever the legacy highlighter was
   enabled/visible, even if it did not match or install a shader on the draw.
@@ -105,11 +105,20 @@ Three further defects were found in code:
   failures are not cached. Pipeline keys also include bytecode hashes so
   pointers recycled after eviction cannot resurrect old classifications.
 
+- If camera capture was unavailable for the first world water draw, the scene
+  copy could retry later in the same frame, after water was already in the
+  scene. That feeds water back into its own reflections/refraction and gives
+  different tiles different inputs. The first world water draw is now the
+  capture deadline even if its camera is unavailable; the next frame retries.
+  Offscreen draws still do not consume the world's capture opportunity.
+
 The device regression tests COM lifetime/eviction/retry deterministically
 before HAL setup, actual highlighted/unhighlighted water pixels, and the
 **complete production shader's** refraction with sRGB both off and on. For
 128-gray scene color, both paths must produce 128-gray (±2), not approximately
-188-gray from double gamma correction. State restoration is checked afterward.
+188-gray from double gamma correction. State restoration is checked afterward. Capture scheduling tests also verify
+that a late camera cannot copy an already-water-filled scene and that the
+next clean frame can retry.
 These are targeted regression tests, not a claim of an Ascension client replay.
 
 ## Follow-up: texture resolution was used as material identity (2026-10-14)
