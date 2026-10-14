@@ -9,6 +9,7 @@ public:
     bool Load(const std::wstring& path,std::string& error);
     const EnvironmentArea* Area(uint32_t id) const;
     const std::string* Map(uint32_t id) const;
+    const std::map<uint32_t,EnvironmentArea>& Areas() const { return areas; }
     size_t AreaCount() const { return areas.size(); }
     bool Authoritative() const {return authoritative;}
 private:

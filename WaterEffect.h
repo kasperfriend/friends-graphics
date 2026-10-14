@@ -114,6 +114,24 @@ float4 waveLattice:register(c201);
 // because each is reduced into a period of its own train, the wrap costs this stage
 // nothing - the displacement needs no anchor of its own.
 float4 wavePhase:register(c202);
+// xy=the camera anchor for the low-frequency, world-anchored wave warp. Its
+// phase is reduced in the warp noise's own frequency/period, not borrowed from
+// the higher-frequency chop's phase.
+float4 waveWarpPhase:register(c203);
+// The low-frequency warp uses the same bounded value-noise hash as the pixel
+// stage. This compact vertex copy keeps lifted crests on the same irregular
+// swell field the pixel shader shades.
+float3 noiseGradient(float2 p) {
+    float2 i=floor(p),f=p-i;
+    i-=floor(i*(1.0/64.0))*64.0;
+    float4 h=frac((i.x+i.y*64.0+float4(0,1,64,65))*.1031);
+    h*=h+33.33;
+    h=frac(h*(h+h));
+    float2 u=f*f*(3-2*f),du=6*f*(1-f);
+    float k=h.x-h.y-h.z+h.w;
+    return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
+                  du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
+}
 // The two longest swell trains, spelled exactly as src/Water/WaveField.h carries them:
 // unit directions in lattice space, k = 2pi over the wavelength in cells, and the share
 // of the authored amplitude each one lifts. The ten yard train is shaded but NOT
@@ -126,7 +144,7 @@ static const float kRadA=0.39269908;
 static const float kRadB=0.78539816;
 static const float kWeightA=1.0;
 static const float kWeightB=0.5;
-struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;};
+struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float3 waveWarp:TEXCOORD7;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
@@ -153,19 +171,32 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     // ever built from, and neither half can be a frame or a camera behind the other.
     float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));
     float2 cell=float2(dot(rel,waveLattice.xy),dot(rel,waveLattice.zw));
+    // A slowly varying pseudorandom domain warp bends long crests over the
+    // surface instead of repeating three perfect sine trains. c203 carries the
+    // camera contribution after this scale/rotation, so `cell` remains relative
+    // and the field does not slide at tile seams or when the camera moves.
+    float2 warpCoord=float2(dot(cell,float2(.8253356,.5646425)),
+                            dot(cell,float2(-.5646425,.8253356)))*.07142857+waveWarpPhase.xy;
+    float3 waveWarp=noiseGradient(warpCoord);
+    float warp=(waveWarp.x-.5)*3.2;
+    float2 warpGradient=.07142857*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
+                                         waveWarp.y*.5646425+waveWarp.z*.8253356);
+    float2 swellCell=cell+warp*float2(.6,.8);
     // Gerstner waves: lift the surface, then slide it toward the coming crest. The slide
     // is the part that makes water read as a body moving in three dimensions - crests
     // pinch and steepen, troughs open out and flatten - and it is why the same amplitude
     // looks like a sea rather than like a sine viewed from the side. Both come from the
     // trains the pixel stage shades, from the shared phase above, so a crest that is
     // lifted is a crest that is lit.
-    float thetaA=kRadA*(dot(kDirA,cell)+wavePhase.x);
-    float thetaB=kRadB*(dot(kDirB,cell)+wavePhase.y);
+    float thetaA=kRadA*(dot(kDirA,swellCell)+wavePhase.x);
+    float thetaB=kRadB*(dot(kDirB,swellCell)+wavePhase.y);
     float sinA,cosA,sinB,cosB;
     sincos(thetaA,sinA,cosA);
     sincos(thetaB,sinB,cosB);
     float lift=waveControl.x*(kWeightA*sinA+kWeightB*sinB);
-    float2 slide=waveControl.y*(kWeightA*cosA*kDirA+kWeightB*cosB*kDirB);
+    float2 warpedDirA=kDirA+3.2*dot(kDirA,float2(.6,.8))*warpGradient;
+    float2 warpedDirB=kDirB+3.2*dot(kDirB,float2(.6,.8))*warpGradient;
+    float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB);
     // slide is in lattice axes; waveControl.w turns the scaled lattice rows back into the
     // unit world directions they were built from, and the same three axes carry the result
     // into view space. Displacement happens after the view transform and along the world
@@ -181,14 +212,18 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
     // viewPos is the DISPLACED point, so the surface depth the atmosphere marches to and
     // the column the absorption measures are the water the player can actually see;
-    // worldRel is the undisplaced lattice coordinate, which is what the pixel stage must
-    // evaluate the field at so its shading lands on the vertex that was moved.
+    // worldRel is the undisplaced lattice coordinate where the pixel stage evaluates the
+    // swell trains, while the broad warp sample is passed separately for interpolation.
     o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=rel;
     // The wave gradient is expressed in world axes; the same three axis vectors rotate it
     // into view space here so the pixel shader only has to scale them by the wave slope:
     // no screen-space approximation and no per-triangle winding flip in the shading normal.
     o.waveTangent=axisX*waveLattice.x+axisY*waveLattice.y;
     o.waveBitangent=axisX*waveLattice.z+axisY*waveLattice.w;
+    // Pass the broad warp and its gradient to the pixel stage. At its 35-yard
+    // lattice scale the field is smooth across the liquid mesh, so perspective
+    // interpolation is accurate while avoiding a second noise evaluation per pixel.
+    o.waveWarp=waveWarp;
     return o;
 }
 )HLSL";
@@ -300,7 +335,7 @@ static const float kSwellToUnit=0.28409091;
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
 struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
-WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6) {
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float3 waveWarp:TEXCOORD7) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
@@ -311,14 +346,22 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // crest and the light on it cannot drift apart - and only the chop on top of it is
     // noise.
     float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
+    // The vertex stage sampled this broad, world-anchored warp and its gradient
+    // at the same lattice point. Its 35-yard scale is smooth over the liquid mesh,
+    // so interpolating it here preserves the bent crests without another pixel-noise
+    // evaluation (the fine chop below remains per-pixel).
+    float warp=(waveWarp.x-.5)*3.2;
+    float2 warpGradient=.07142857*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
+                                         waveWarp.y*.5646425+waveWarp.z*.8253356);
+    float2 swellPlane=plane+warp*float2(.6,.8);
     float2 footprint=fwidth(plane);
     // Fade the unresolved octave by the pixel's own footprint. The swell is never
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
-    float thetaA=kRadA*(dot(kDirA,plane)+wavePhase.z);
-    float thetaB=kRadB*(dot(kDirB,plane)+wavePhase.w);
-    float thetaC=kRadC*(dot(kDirC,plane)+waveFlow.z);
+    float thetaA=kRadA*(dot(kDirA,swellPlane)+wavePhase.z);
+    float thetaB=kRadB*(dot(kDirB,swellPlane)+wavePhase.w);
+    float thetaC=kRadC*(dot(kDirC,swellPlane)+waveFlow.z);
     float sinA,cosA,sinB,cosB,sinC,cosC;
     sincos(thetaA,sinA,cosA);
     sincos(thetaB,sinB,cosB);
@@ -326,8 +369,12 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float swell=kWgtA*sinA+kWgtB*sinB+kWgtC*sinC;
     // The exact gradient of that height field, in lattice axes, times the authored swell
     // response: the same slope the geometry was lifted by, so shading and silhouette agree.
-    float2 swellSlope=((kWgtA*kRadA*cosA)*kDirA+(kWgtB*kRadB*cosB)*kDirB
-                      +(kWgtC*kRadC*cosC)*kDirC)*foreverStyle.x;
+    float2 swellSlope=(kWgtA*kRadA*cosA*kDirA+kWgtB*kRadB*cosB*kDirB
+                      +kWgtC*kRadC*cosC*kDirC);
+    // Chain rule through p' = p + direction * warp(p), using the interpolated
+    // warp gradient. This keeps the normal on the same gently bent crest the
+    // vertex stage lifted and slid without another per-pixel noise evaluation.
+    swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*3.2)*foreverStyle.x;
     // One minus the Gerstner Jacobian: how hard the surface is pinching at this point.
     // It is the same number the vertex stage's slide was clamped by, so dividing the
     // shading slope by it sharpens normals exactly where the water is really steepening -
@@ -442,15 +489,22 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // that was authored flat, so a calm zone shows no white line at all however high its
     // wind is, and a storm shows one on every third crest.
     float wind=upWind.w;
+    float foamWind=saturate(wind);
     float breaking=saturate(pinch*2.4);
     float capBand=detail.y*1.06+breaking*.30+(detail.x-.5)*.26;
-    float whitecap=smoothstep(.86,1.02,capBand)*wind;
+    // Broad warp noise gives foam its tongue-scale shape; the already drifting
+    // chop sample tears the edges into smaller flecks. The moving threshold
+    // breaks the repeated white stripe without another texture sample.
+    float foamPattern=saturate(.45*waveWarp.x+.55*detail.x);
+    float foamThreshold=.82+(1-foamPattern)*.14;
+    float whitecap=smoothstep(foamThreshold,foamThreshold+.14,capBand);
     // Foam where the bottom comes up fast is the one cue available for a river hitting a
     // rock: the depth buffer is the only geometry this pass can read.
     float shoal=saturate(length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))*bodyStyle.w-.3);
-    float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter);
-    float foamAmount=(shore*waterStyle.z*(.35+.65*wind)
-        +(crestMask*.45+whitecap*1.15+shoal*.6)*wind*foreverStyle.w)*crest;
+    float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter)
+        *(.35+.65*foamPattern);
+    float foamAmount=saturate((shore*waterStyle.z*(.35+.65*foamWind)
+        +(crestMask*.45+whitecap*1.15+shoal*.6)*foamWind*foreverStyle.w)*crest);
     // Foam is not a decal on the water, it is a different surface: it does not mirror the
     // sky and it does not carry the sun road. Adding it to the roughness here spreads the
     // reflection toward the sky term and widens the glint lobe, and the two multipliers
@@ -774,8 +828,8 @@ struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
-    // c200..c211 for the pixel shader, c200..c201 for the vertex shader.
-    float old[68]{},oldVertexControls[12]{},oldLocalLights[68]{};bool localLightsSaved=false;
+    // c200..c217 for the pixel shader, c200..c203 for the vertex shader.
+    float old[72]{},oldVertexControls[16]{},oldLocalLights[68]{};bool localLightsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -870,10 +924,10 @@ struct Scope {
             if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
-            if(FAILED(d->GetPixelShaderConstantF(200,old,17)))return;
+            if(FAILED(d->GetPixelShaderConstantF(200,old,18)))return;
             if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
             localLightsSaved=true;
-            if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,3)))return;
+            if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,4)))return;
             // Relative time avoids both uptime-sized float precision loss and
             // the old discontinuous wave jump every ten minutes. It is integrated by the sea clock
             // rather than read from the counter, because wave travel speed is now something that
@@ -1009,14 +1063,15 @@ struct Scope {
             controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
             controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
             controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
-            // The vertex stage gets the pixel shader's swell phases verbatim, so displaced
-            // crests are the same waves the shading lights, plus its own lift/slide pair and
-            // the cell length that turns lattice axes back into world directions.
-            // Registers: c200 control, c201 lattice, c202 phase.
-            float vertexControls[12]={geometry.amplitude,geometry.lateral,geometry.sigma,
+            // Both stages share the swell phases. The vertex stage also samples the
+            // low-frequency warp from this anchor and interpolates that sample to pixels,
+            // keeping the lifted crest irregular without re-hashing noise per pixel.
+            // Registers: c200 control, c201 lattice, c202 swell phase, c203 warp.
+            float vertexControls[16]={geometry.amplitude,geometry.lateral,geometry.sigma,
                 geometry.cellYards,
                 wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
-                wave.swellPhase[0],wave.swellPhase[1],wave.swellPhase[2],0.f};
+                wave.swellPhase[0],wave.swellPhase[1],wave.swellPhase[2],0.f,
+                wave.warpPhase[0],wave.warpPhase[1],0.f,0.f};
             if(cachedShaderDevice != d) {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
@@ -1063,7 +1118,7 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,17))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,3))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,17))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,4))){Restore();return;}
             {
                 float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();
@@ -1091,8 +1146,8 @@ struct Scope {
         if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
         device->SetPixelShader(original.Get());
         device->SetVertexShader(originalVertex.Get());
-        device->SetPixelShaderConstantF(200,old,17);
-        device->SetVertexShaderConstantF(200,oldVertexControls,3);
+        device->SetPixelShaderConstantF(200,old,18);
+        device->SetVertexShaderConstantF(200,oldVertexControls,4);
         if(extraState) {
             const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
                 D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};

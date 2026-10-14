@@ -134,6 +134,21 @@ jobs:
           & cmd.exe /c tools\Test-OverlayState.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Environment and all-zone read regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Environment.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Environment regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Environment regression results::$flat"
+
       - name: Weather motion regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
@@ -210,6 +225,7 @@ jobs:
       - name: Cloud, timing and device regressions
         run: |
           mkdir -p build
+          python3 tools/GenerateWaterZoneAudit.py --check
           g++ -O2 -std=c++20 -pthread tools/CloudClimateRegression.cpp src/Environment/EnvironmentProfile.cpp src/Environment/EnvironmentDatabase.cpp -o build/cloud-climate-test
           ./build/cloud-climate-test
           g++ -O2 -std=c++20 -pthread tools/CloudLayerRegression.cpp -o build/cloud-layer-test

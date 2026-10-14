@@ -50,4 +50,37 @@ namespace renderer::water
                  dax * ((h[1] - h[0]) + k * uy),
                  day * ((h[2] - h[0]) + k * ux) };
     }
+
+    struct WavePlane
+    {
+        float x = 0.f;
+        float y = 0.f;
+    };
+
+    struct WaveWarpSample
+    {
+        WavePlane plane;
+        float noiseValue = .5f; // broad breakup field reused by the crest-foam mask
+        float gradientX = 0.f; // derivative of the scalar warp with respect to cell X
+        float gradientY = 0.f; // derivative of the scalar warp with respect to cell Y
+    };
+
+    // Bend the broad, analytic swell with a smooth pseudorandom scalar field
+    // along one oblique direction. The first derivatives come from the same
+    // noise sample, so the CPU and pixel shader can apply the exact chain rule
+    // to the analytic swell slope. The CPU phase uses this same rotate/scale
+    // transform, keeping the field anchored across cameras and liquid tiles.
+    inline WaveWarpSample WarpWavePlane(const WaveField& field, float cellX, float cellY)
+    {
+        const float qx = (cellX * kWaveWarpCos + cellY * kWaveWarpSin) * kWaveWarpFrequency
+            + field.warpPhase[0];
+        const float qy = (-cellX * kWaveWarpSin + cellY * kWaveWarpCos) * kWaveWarpFrequency
+            + field.warpPhase[1];
+        const NoiseSample noise = NoiseGradient(qx, qy);
+        const float warp = (noise.value - .5f) * kWaveWarpAmplitude;
+        const float gradientX = kWaveWarpFrequency * (noise.dx * kWaveWarpCos - noise.dy * kWaveWarpSin);
+        const float gradientY = kWaveWarpFrequency * (noise.dx * kWaveWarpSin + noise.dy * kWaveWarpCos);
+        return { { cellX + warp * kWaveWarpDirectionX,
+                   cellY + warp * kWaveWarpDirectionY }, noise.value, gradientX, gradientY };
+    }
 }

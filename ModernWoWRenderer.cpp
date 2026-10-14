@@ -110,13 +110,6 @@ void SetAvailability(renderer::DeviceAvailability next)
         : "Direct3D device restored: effects resumed.");
 }
 
-bool GameIsForeground()
-{
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    return pid == GetCurrentProcessId();
-}
-
 int ReadInt(wchar_t const* key, int fallback)
 {
     return GetPrivateProfileIntW(L"Atmosphere", key, fallback, (g_basePath + L"ModernWoWRenderer.ini").c_str());
@@ -197,13 +190,18 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         }
     }
 
-    // Location IDs do not depend on the terrain-only camera layout. Cities
-    // still render into the captured world depth buffer with other shaders.
-    // The provider separately verifies the executable, coherent IDs and DB hierarchy.
+    // Scene depth is the strongest world-frame signal, but it is optional when
+    // water is configured for waves without any scene-dependent features. In
+    // that case a known terrain draw or accepted liquid-material draw is the
+    // independent signal. A focused menu/loading frame with neither is NOT a
+    // location sample: the provider would return an invalid tuple, whose debounce
+    // eventually clears zone tuning.
     {
-        const bool worldFrame = renderer::DepthCapture::Instance().HasDepth();
+        const bool knownWorldDraw = weathervisuals::worldGeometrySeenThisFrame || watereffect::frameCandidates>0;
+        const bool worldFrame = renderer::HasWorldContext(
+            renderer::DepthCapture::Instance().HasDepth(), knownWorldDraw);
         renderer::EnvironmentProfileManager::Instance().Update(now, worldFrame,
-            renderer::ShouldHoldLocation(worldFrame, GameIsForeground()));
+            renderer::ShouldHoldLocation(worldFrame));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();

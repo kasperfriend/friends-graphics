@@ -101,6 +101,19 @@ namespace renderer::water
     inline constexpr float kUvDriftU = .0019f;        // native detail map creep, uv/s
     inline constexpr float kUvDriftV = -.0011f;
 
+    // A low-frequency, world-anchored domain warp makes the long swell wander
+    // instead of laying down three perfectly repeatable sine trains. Its two
+    // inputs use the same bounded value-noise lattice as the fine chop, but at
+    // roughly one sample per 35 yards; a small displacement in lattice cells
+    // bends a crest over several dozen yards without turning it into noisy chop.
+    // Keep these constants in step with the compact HLSL copy in WaterEffect.h.
+    inline constexpr float kWaveWarpFrequency = .07142857f; // 1 / 14 lattice cells
+    inline constexpr float kWaveWarpCos = .8253356f;         // cos(.6 radians)
+    inline constexpr float kWaveWarpSin = .5646425f;         // sin(.6 radians)
+    inline constexpr float kWaveWarpDirectionX = .6f;        // unit displacement direction
+    inline constexpr float kWaveWarpDirectionY = .8f;
+    inline constexpr float kWaveWarpAmplitude = 3.2f;       // maximum displacement in lattice cells
+
     struct WaveField
     {
         // Rows of the world -> lattice matrix, already scaled by 1/cell. Row 0
@@ -112,6 +125,10 @@ namespace renderer::water
         // period. Both components are wrapped independently because noiseGradient
         // wraps both lattice indices independently.
         float ripplePhase[2] = {0.f, 0.f};
+        // Camera contribution to the low-frequency domain-warp sample. It is
+        // transformed and wrapped in the warp's own noise period (not copied
+        // from ripplePhase, whose 64-cell wrap belongs to an unscaled sample).
+        float warpPhase[2] = {0.f, 0.f};
         // Phase of each swell train, in cells ALONG THAT TRAIN'S OWN DIRECTION and
         // wrapped into that train's own wavelength. Wrapping per train rather than
         // per lattice axis is what lets a directional wave share one small number
@@ -232,6 +249,14 @@ namespace renderer::water
         // neighbouring tiles of the same body of water.
         const double cam0 = cameraValid ? double(cameraX) * field.lattice[0] + double(cameraY) * field.lattice[1] : 0.0;
         const double cam1 = cameraValid ? double(cameraX) * field.lattice[2] + double(cameraY) * field.lattice[3] : 0.0;
+        // The domain warp samples at a different spatial frequency than the chop.
+        // Its own transformed camera phase is therefore reduced only AFTER that
+        // transform; reusing ripplePhase here would make the warp jump when the
+        // camera crosses the chop's 64-cell wrap.
+        const double warp0 = (cam0 * kWaveWarpCos + cam1 * kWaveWarpSin) * kWaveWarpFrequency;
+        const double warp1 = (-cam0 * kWaveWarpSin + cam1 * kWaveWarpCos) * kWaveWarpFrequency;
+        field.warpPhase[0] = float(WrapPeriod(warp0, double(kLatticeWrap)));
+        field.warpPhase[1] = float(WrapPeriod(warp1, double(kLatticeWrap)));
 
         // Speeds in cells per second. Dividing the dispersion speed by the cell is
         // what makes a body of water authored twice the size carry waves that

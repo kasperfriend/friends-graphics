@@ -235,10 +235,11 @@ int main() try
             "cloud shadow strength is continuous inside the fade band");
     Require(CloudShadowElevationFade(1.0f) == 1.0f, "an overhead disc casts full cloud shadows");
 
-    Require(ShouldHoldLocation(false, false), "unfocused frame without world keeps location");
-    Require(!ShouldHoldLocation(true, false), "unfocused frame with world still updates location");
-    Require(!ShouldHoldLocation(false, true), "focused frame without world keeps the normal zone rules");
-    Require(!ShouldHoldLocation(true, true), "focused world frame updates location");
+    Require(!HasWorldContext(false, false), "UI/loading frame with no world evidence is not sampleable");
+    Require(HasWorldContext(false, true), "known terrain or liquid draws keep waves-only frames sampleable without INTZ");
+    Require(HasWorldContext(true, false), "captured depth remains sufficient world evidence");
+    Require(ShouldHoldLocation(HasWorldContext(false, false)), "no-depth frame without terrain holds the confirmed location");
+    Require(!ShouldHoldLocation(HasWorldContext(false, true)), "terrain-only world frame permits location sampling");
 
     std::printf("ALL DEVICE HEALTH TESTS PASSED\n");
     return 0;
