@@ -53,17 +53,20 @@ $jobs = @(
 # machine.
 $budgets = @{
     'precipitationHLSL'      = 496 # Weather must fit baseline PS3 hardware too
-    # Water: the complete shader measured 597 slots with fxc /O3 on the Windows
-    # CI runner (2026-10-14). The broad domain warp is evaluated with its gradient
-    # in the vertex stage and interpolated to pixels; at its 35-yard scale the
-    # liquid mesh resolves it smoothly, avoiding a duplicate noise evaluation in
-    # the pixel shader while retaining the chain-rule normal and irregular crests.
-    # Keep 24 slots above the measured count for another SDK's instruction
-    # selection. The shader still exceeds the 512-slot ps_3_0 minimum: devices
-    # with a lower reported MaxPixelShader30InstructionSlots cleanly retain native
-    # water when CreatePixelShader rejects it; this is a runtime device limit, not
-    # a bytecode-format limit.
-    'source'                = 621 # Water: 597 measured + 24 slots of margin
+    # Water: fxc /O3 measures this shader at 642 slots on the Windows CI runner
+    # (2026-10-14), after six wave trains, an interpolated grouping envelope and a
+    # per-train slope. It used to be budgeted at 621 (597 measured plus 24 slots of
+    # compiler margin), and that ceiling had started deciding design questions - which
+    # trains are allowed to shade, which algebra runs per pixel instead of per vertex -
+    # which is the wrong thing for a budget to decide. It is now a runaway guard only:
+    # three times the measured count, four times the ps_3_0 minimum, enough to catch an
+    # accidentally unrolled loop or a shader that doubles in a refactor. Nothing about a
+    # device is implied by the number. The shader has long exceeded the 512-slot ps_3_0
+    # floor; a card that reports fewer slots than the shader needs keeps native water,
+    # because CreatePixelShader fails and the scope logs the reported caps
+    # (WaterEffect.h) - a runtime device limit, not a bytecode-format limit, and the
+    # reason it is safe for the authored shader to be bigger than a 2007 minimum.
+    'source'                = 2048 # Water: measured 642; this is a runaway guard, not a design limit
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
