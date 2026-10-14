@@ -62,6 +62,8 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Scene\DrawCallClassifier.h" />
     <ClInclude Include="src\Diagnostics\RendererDiagnostics.h" />
     <ClInclude Include="src\Diagnostics\PerformanceProfiler.h" />
+    <ClInclude Include="src\Water\WaterMaterial.h" />
+    <ClInclude Include="src\Water\WaterPolicy.h" />
     <ClInclude Include="src\D3D9\DepthCapture.h" />
     <ClInclude Include="src\D3D9\DepthCapturePolicy.h" />
     <ClInclude Include="src\D3D9\CameraCapture.h" />

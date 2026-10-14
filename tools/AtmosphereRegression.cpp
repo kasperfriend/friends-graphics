@@ -149,6 +149,10 @@ int main() try {
  Require(diff(resized,0xff202020)>8 && diff(resized,resizedAgain)<=1,"quality resize preserves first-frame fog");
  settings.debugMode=VolumetricDebugMode::BoundaryDepth;encode(120,.94f);DWORD boundary=render(true);
  fill(mask.Get(),0xffffffff);DWORD water=render(true);Require((boundary&255)>(water&255)+30,"water stops atmosphere at surface, not seabed");
+ // Equal linear depths must produce equal normalized boundary values, even
+ // when WoW compresses the viewport depth range to .94.
+ fill(mask.Get(),0);encode(20,.94f);DWORD sameDepthWithoutWater=render(true);
+ Require(diff(water,sameDepthWithoutWater)<=1,"water and terrain share the same normalized depth at MaxZ .94");
  fill(mask.Get(),0);settings.debugMode=VolumetricDebugMode::None;
  settings.edgeFogEnabled=true;settings.edgeFogDistance=30;settings.edgeFogPower=2;
  encode(120,.94f);DWORD edgeFog=render(false);Require(diff(edgeFog,0xff202020)>25,"world edge fog works with global and local fog disabled");
@@ -401,7 +405,7 @@ int main() try {
  Check(D3DCompile(waterShader.data(),waterShader.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,waterCode.GetAddressOf(),error.GetAddressOf()));
  Check(d->CreatePixelShader((DWORD*)waterCode->GetBufferPointer(),waterPS.GetAddressOf()));Require(bool(waterPS),"complete production water shader accepted by D3D9");
  auto beginLocal=waterShader.find("    float3 localReflection=0;"),endLocal=waterShader.find("    // 4. Celestial",beginLocal);
- std::string reflectionShader="float4 localPosition[8]:register(c180);float4 localColor[8]:register(c188);float4 localControl:register(c196);float3 safeNormalize(float3 v){return normalize(v);}float4 main():COLOR0{float3 rgb=0,viewPos=float3(0,0,5),wave=float3(0,0,-1),v=wave;"+waterShader.substr(beginLocal,endLocal-beginLocal)+"return float4(rgb,1);}";
+ std::string reflectionShader="float4 localPosition[8]:register(c180);float4 localColor[8]:register(c188);float4 localControl:register(c196);float3 safeNormalize(float3 v){return normalize(v);}float4 main():COLOR0{float3 rgb=0,viewPos=float3(0,0,5),wave=float3(0,0,-1),v=wave;float foreverFresnel=pow(1-saturate(dot(wave,v)),2);"+waterShader.substr(beginLocal,endLocal-beginLocal)+"return float4(rgb,1);}";
  {std::ofstream out("build/water-reflection-test.hlsl");out<<reflectionShader;}
  waterCode.Reset();waterPS.Reset();Check(D3DCompile(reflectionShader.data(),reflectionShader.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,waterCode.GetAddressOf(),nullptr));Check(d->CreatePixelShader((DWORD*)waterCode->GetBufferPointer(),waterPS.GetAddressOf()));
  auto reflectedLight=[&](float radius,float enabled){float lights[17][4]{};lights[0][3]=radius;lights[8][0]=10;lights[8][1]=5;lights[8][2]=1;lights[8][3]=1;lights[16][0]=1;lights[16][1]=enabled;

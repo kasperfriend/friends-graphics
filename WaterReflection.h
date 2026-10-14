@@ -6,32 +6,16 @@ struct Resources{
     ComPtr<IDirect3DTexture9> scene;
     ComPtr<IDirect3DSurface9> surface;
     UINT width=0, height=0;
+    D3DFORMAT format=D3DFMT_UNKNOWN;
     IDirect3DDevice9* owner=nullptr;
 };
 inline Resources& resources=*new Resources;
-inline bool ready=false;
-inline unsigned copiedFrames=0,failedFrames=0;
+inline bool ready=false,attempted=false;
+inline unsigned copiedFrames=0,failedFrames=0,presentedFrames=0;
 inline std::wstring logPath;
 
 inline void Configure(const std::wstring& base){logPath=base+L"WaterReflection.log";}
 inline void ClearInput(){watereffect::reflectionScene=nullptr;watereffect::reflectionDepth=nullptr;memset(watereffect::reflectionData,0,sizeof(watereffect::reflectionData));}
-
-inline bool IsWater(IDirect3DDevice9* d){
- // This must use exactly the same material identity as watereffect::Scope.
- // A shader whitelist here caused the pre-water scene copy to happen only
- // after an unlisted liquid tile had already rendered. The copy consequently
- // contained part of the water surface itself and later tiles sampled a
- // different SSR/refraction input, producing large geometric seams whose
- // position changed with draw order/camera angle.
- if(!d)return false;
- ComPtr<IDirect3DBaseTexture9> tex0,tex1;
- if(FAILED(d->GetTexture(0,tex0.GetAddressOf()))||!tex0||tex0->GetType()!=D3DRTYPE_TEXTURE||
-    FAILED(d->GetTexture(1,tex1.GetAddressOf()))||!tex1||tex1->GetType()!=D3DRTYPE_TEXTURE)return false;
- D3DSURFACE_DESC d0{},d1{};
- if(FAILED(static_cast<IDirect3DTexture9*>(tex0.Get())->GetLevelDesc(0,&d0))||
-    FAILED(static_cast<IDirect3DTexture9*>(tex1.Get())->GetLevelDesc(0,&d1)))return false;
- return d0.Width==8&&d0.Height==64&&d1.Width==512&&d1.Height==512;
-}
 
 inline void Expose(){
  if(!ready||!resources.scene)return;
@@ -44,18 +28,28 @@ inline void Expose(){
 }
 
 inline void Prepare(IDirect3DDevice9* d){
- if(!watereffect::enabled||!watereffect::active||!watereffect::effectEnabled||
-    !watereffect::reflectionsEnabled||volume::internal||!IsWater(d))return;
- if(ready){Expose();return;}
- if(volume::owner!=d||!volume::ready||!volume::target||!volume::depth)return;
+ // A previous world capture must not leak into an offscreen water draw.
+ // The owned copy stays ready and is re-exposed on the next valid world tile.
+ ClearInput();
+ if(!watereffect::NeedsScene()||volume::internal||!renderer::water::IsMaterial(d))return;
+ if(volume::owner!=d||!volume::ready||volume::composed||!volume::target||!volume::depth)return;
+ // Never capture a shadow/offscreen target or expose another device's scene.
+ ComPtr<IDirect3DSurface9> current;
+ if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=volume::target.Get())return;
+ if(ready&&resources.owner==d){Expose();return;}
+ // If the first copy fails, retry next frame, not after native/modern water
+ // has already entered the color buffer. Every tile needs the same input.
+ if(attempted)return;
+ attempted=true;
  D3DSURFACE_DESC desc{};
  if(FAILED(volume::target->GetDesc(&desc))||desc.MultiSampleType!=D3DMULTISAMPLE_NONE){++failedFrames;return;}
- if(resources.owner!=d||resources.width!=desc.Width||resources.height!=desc.Height||!resources.scene||!resources.surface){
+ if(resources.owner!=d||resources.width!=desc.Width||resources.height!=desc.Height||resources.format!=desc.Format||!resources.scene||!resources.surface){
      resources.scene.Reset();
      resources.surface.Reset();
      resources.owner=d;
      resources.width=desc.Width;
      resources.height=desc.Height;
+     resources.format=desc.Format;
      if(FAILED(d->CreateTexture(desc.Width,desc.Height,1,D3DUSAGE_RENDERTARGET,desc.Format,D3DPOOL_DEFAULT,resources.scene.GetAddressOf(),nullptr))||
         FAILED(resources.scene->GetSurfaceLevel(0,resources.surface.GetAddressOf()))){
          ++failedFrames;return;
@@ -68,7 +62,7 @@ inline void Prepare(IDirect3DDevice9* d){
  if(copiedFrames==1)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR source captured before first confirmed water draw "<<desc.Width<<'x'<<desc.Height<<'\n';
 }
 
-inline void Finish(){ClearInput();ready=false;}
-inline void Reset(IDirect3DDevice9* /*d*/){Finish();resources.surface.Reset();resources.scene.Reset();resources.owner=nullptr;resources.width=resources.height=0;}
-inline void Present(){if((copiedFrames+failedFrames)%600==120)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"copied="<<copiedFrames<<" failed="<<failedFrames<<'\n';Finish();}
+inline void Finish(){ClearInput();ready=attempted=false;}
+inline void Reset(IDirect3DDevice9* /*d*/){Finish();resources.surface.Reset();resources.scene.Reset();resources.owner=nullptr;resources.width=resources.height=0;resources.format=D3DFMT_UNKNOWN;}
+inline void Present(){if(++presentedFrames%600==120)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"copied="<<copiedFrames<<" failed="<<failedFrames<<'\n';Finish();}
 }

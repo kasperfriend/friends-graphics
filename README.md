@@ -83,6 +83,8 @@ of the cloud shader, at the shipped defaults.*
 
 ### Water
 
+See [water rendering, verification and troubleshooting](docs/water-rendering.md).
+
 - Screen-space reflections and environment fallback reflections.
 - Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
@@ -201,6 +203,8 @@ The repository includes focused regression and shader checks:
 tools\Test-DeviceHealth.cmd
 tools\Test-FrameClock.cmd
 tools\Test-Atmosphere.cmd
+tools\Test-Water.cmd
+tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 

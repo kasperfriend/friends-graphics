@@ -359,6 +359,9 @@ void Finish(IDirect3DDevice9* d) {
     renderer::DepthCapture::Instance().OnFrameEnd(d);
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
+    watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+    auto& frame = renderer::FrameContext::Current();
+    frame.waterMaskTexture = frame.waterDepthTexture = nullptr;
 }
 
 void Reset(IDirect3DDevice9* d) {
@@ -424,7 +427,7 @@ inline bool HasActiveEffects() {
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
-    if (!enabled || !active || internal) return;
+    if (internal || (!(enabled && active) && !watereffect::NeedsScene())) return;
     if (!renderer::DepthCapture::Instance().BeforeClear(d, count, rects, flags, z)) return;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
     renderer::RendererDiagnostics::Instance().OnFrameBegin();
@@ -452,41 +455,46 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         // depth-based reconstruction unreliable right at the water plane.
         // Sized to the real render target, cleared fresh every frame before
         // any water draws happen.
+        watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
+        frameCtx.waterMaskTexture = frameCtx.waterDepthTexture = nullptr;
         D3DSURFACE_DESC targetDesc{};
         if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
-            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
-                resources.waterMaskHeight != targetDesc.Height || !resources.waterMaskSurface) {
-                resources.waterMask.Reset(); resources.waterMaskSurface.Reset();
-                resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
-                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)) &&
-                    SUCCEEDED(resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf()))) {
-                    resources.waterMaskOwner = d;
-                    resources.waterMaskWidth = targetDesc.Width;
-                    resources.waterMaskHeight = targetDesc.Height;
-                }
+            const bool sizeChanged = resources.waterMaskOwner != d ||
+                !renderer::water::TargetsMatch(targetDesc.Width, targetDesc.Height,
+                                               resources.waterMaskWidth, resources.waterMaskHeight);
+            if (sizeChanged) {
+                // Invalidate the pair BEFORE updating dimensions. Previously
+                // the mask updated the shared dimensions first, leaving the
+                // depth texture at its old size after a window resize.
+                resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+                resources.waterDepthSurface.Reset(); resources.waterDepth.Reset();
+                resources.waterMaskOwner = d;
+                resources.waterMaskWidth = targetDesc.Width;
+                resources.waterMaskHeight = targetDesc.Height;
             }
-            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
-                resources.waterMaskHeight != targetDesc.Height || !resources.waterDepthSurface) {
-                resources.waterDepth.Reset(); resources.waterDepthSurface.Reset();
-                D3DFORMAT depthFmt = D3DFMT_R32F;
-                if (FAILED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr))) {
-                    depthFmt = D3DFMT_A16B16G16R16F;
-                    d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
-                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr);
-                }
-                if (resources.waterDepth)
+            if (!resources.waterMaskSurface) {
+                resources.waterMask.Reset();
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)))
+                    resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf());
+            }
+            if (!resources.waterDepthSurface) {
+                resources.waterDepth.Reset();
+                // R32F keeps all three MRTs at 32 bits per pixel. A 64-bit
+                // fallback is invalid on devices without independent MRT bit depths.
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_R32F, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr)))
                     resources.waterDepth->GetSurfaceLevel(0, resources.waterDepthSurface.GetAddressOf());
             }
-            if (resources.waterMaskSurface) {
-                d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0);
+            // A mask without matching, freshly cleared depth would stop air at
+            // stale water. Expose both or neither, and fail without disabling water.
+            if (resources.waterMaskSurface && resources.waterDepthSurface &&
+                SUCCEEDED(d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0)) &&
+                SUCCEEDED(d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0))) {
+                watereffect::waterTargetSurface = target.Get();
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
-                frameCtx.waterMaskTexture = resources.waterMask.Get();
-            }
-            if (resources.waterDepthSurface) {
-                d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0);
                 watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
+                frameCtx.waterMaskTexture = resources.waterMask.Get();
                 frameCtx.waterDepthTexture = resources.waterDepth.Get();
             }
         }
@@ -1443,7 +1451,7 @@ bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
 }
 
 void BeforeDraw(IDirect3DDevice9* d) {
-    if (!enabled || !active || internal || owner != d || composed) return;
+    if (internal || owner != d || composed || (!(enabled && active) && !watereffect::NeedsScene())) return;
 
     bool isUi = (renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                  renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull);
@@ -1467,6 +1475,9 @@ void BeforeDraw(IDirect3DDevice9* d) {
         }
     }
 
+    // Water can borrow depth/camera capture with the atmosphere switched off.
+    // Do not accidentally enable atmosphere/postprocessing in that mode.
+    if (!enabled || !active) return;
     if (!ready && isUi) { composed=PostProcessWithoutCamera(d); return; }
     if (!ready || !isUi) return;
 
