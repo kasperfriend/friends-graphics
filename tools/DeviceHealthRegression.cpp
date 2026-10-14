@@ -79,31 +79,49 @@ int main() try
         // capture checks (v[0..3]) plus the viewport size.
         auto viewFor = [](float px, float py, float pz, float yaw, float translation[4], float basis[3][4]) {
             const float c = std::cos(yaw), s = std::sin(yaw);
-            const float rows[3][3] = {{c, s, 0.f}, {-s, c, 0.f}, {0.f, 0.f, 1.f}};
+            const float rows[3][3] = {{c, -s, 0.f}, {s, c, 0.f}, {0.f, 0.f, 1.f}};
             for (int r = 0; r < 3; ++r) {
                 for (int j = 0; j < 3; ++j) basis[r][j] = rows[r][j];
                 basis[r][3] = 0.f;
-                translation[r] = -(rows[r][0] * px + rows[r][1] * py + rows[r][2] * pz);
+                // Row-vector world->view translation: t = -cameraWorld * R (column j dot cameraWorld).
+                translation[r] = -(rows[0][r] * px + rows[1][r] * py + rows[2][r] * pz);
             }
             translation[3] = 1.f;
         };
         float t[4], basis[3][4];
         CameraContinuityGate gate;
-        viewFor(100.f, 200.f, 10.f, .4f, t, basis);
+        viewFor(5100.f, -3200.f, 110.f, .4f, t, basis);
         Require(gate.Accept(t, basis, 1920, 1080), "the first full-frame camera anchors the gate");
         // A portrait camera: close-up, differently aimed, small viewport.
-        viewFor(102.f, 198.f, 12.f, 2.6f, t, basis);
+        viewFor(5102.f, -3198.f, 112.f, 2.6f, t, basis);
         Require(!gate.Accept(t, basis, 256, 256), "a portrait-viewport camera cannot take over the frame's light");
         // Even a full-frame interloper from somewhere else is not this camera.
         Require(!gate.Accept(t, basis, 1920, 1080), "a distant, differently aimed camera cannot take over either");
-        // The real camera next frame: a few yards on, barely turned.
-        viewFor(104.f, 203.f, 10.5f, .47f, t, basis);
+        // The real camera next frame: a few yards on at continental coordinates, barely turned.
+        viewFor(5104.f, -3197.f, 110.5f, .47f, t, basis);
         Require(gate.Accept(t, basis, 1920, 1080), "the scene camera still latches after the interloper was refused");
         // A teleport: three consistent candidates re-anchor, no sooner.
         viewFor(800.f, -400.f, 30.f, .47f, t, basis);
         Require(!gate.Accept(t, basis, 1920, 1080), "a teleport is not believed on the first frame");
         Require(!gate.Accept(t, basis, 1920, 1080), "nor on the second");
         Require(gate.Accept(t, basis, 1920, 1080), "three consistent candidates re-anchor after a teleport");
+        // Looking straight up at the sky: when terrain/WMO draws are culled,
+        // the skybox D3DTS_VIEW basis tracks pitch up to the zenith while
+        // preserving the anchored world camera position.
+        for (float pitch : {.3f, .8f, 1.3f, 1.56f}) {
+            const float cy = std::cos(.47f), sy = std::sin(.47f);
+            const float cp = std::cos(pitch), sp = std::sin(pitch);
+            float skyBasis[3][4] = {
+                {cy, -sy * cp, sy * sp, 0.f},
+                {sy,  cy * cp, -cy * sp, 0.f},
+                {0.f, sp,       cp,      0.f}};
+            Require(gate.MatchesBasis(skyBasis, 1920, 1080), "upward-pitching sky basis stays continuous with the scene camera");
+            gate.UpdateBasis(skyBasis, 1920, 1080);
+            Require(std::fabs(gate.Position()[0] - 800.f) < 1e-3f &&
+                    std::fabs(gate.Position()[1] + 400.f) < 1e-3f &&
+                    std::fabs(gate.Position()[2] - 30.f) < 1e-3f,
+                "updating the sky basis preserves the anchored world camera position");
+        }
         gate.Reset();
         viewFor(0.f, 0.f, 0.f, 0.f, t, basis);
         Require(gate.Accept(t, basis, 1920, 1080), "a reset gate anchors on the next camera it sees");
@@ -113,17 +131,17 @@ int main() try
         // Moon lighting following the camera: a view-space disc direction is
         // only a world direction once the frame's real camera converts it.
         // For a fixed moon, every camera yaw must recover the same world
-        // vector - build the view direction the way the scene itself would
-        // (vd is the world direction read against the camera basis rows) and
-        // convert it back through viewRaw.
+        // vector - build the view direction the way TransformPointRowVector
+        // and the shaders themselves do (pos_view = pos_world * V, i.e.
+        // column dots) and convert it back through viewRaw (row dots, V^T).
         const Vec3 moonWorld = Normalize({.35f, -.62f, .70f});
         for (float yaw : {0.f, .7f, 1.9f, 3.4f, 5.8f}) {
             const float c = std::cos(yaw), s = std::sin(yaw);
-            float viewRaw[16] = {c, s, 0.f, 0.f, -s, c, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+            float viewRaw[16] = {c, -s, 0.f, 0.f, s, c, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
             const float viewDir[3] = {
-                viewRaw[0] * moonWorld.x + viewRaw[1] * moonWorld.y + viewRaw[2] * moonWorld.z,
-                viewRaw[4] * moonWorld.x + viewRaw[5] * moonWorld.y + viewRaw[6] * moonWorld.z,
-                viewRaw[8] * moonWorld.x + viewRaw[9] * moonWorld.y + viewRaw[10] * moonWorld.z};
+                viewRaw[0] * moonWorld.x + viewRaw[4] * moonWorld.y + viewRaw[8] * moonWorld.z,
+                viewRaw[1] * moonWorld.x + viewRaw[5] * moonWorld.y + viewRaw[9] * moonWorld.z,
+                viewRaw[2] * moonWorld.x + viewRaw[6] * moonWorld.y + viewRaw[10] * moonWorld.z};
             float world[3];
             ViewDirectionToWorld(viewRaw, viewDir, world);
             const float dot = world[0] * moonWorld.x + world[1] * moonWorld.y + world[2] * moonWorld.z;
@@ -137,6 +155,10 @@ int main() try
         const auto capture = Read("src/D3D9/CameraCapture.cpp");
         Require(Contains(capture, "if (!fullFrame)") && Contains(capture, "m_cameraGate.Accept(v[3], v, vp.Width, vp.Height)"),
             "camera capture demands a full-frame, continuous camera before latching the frame's light");
+        Require(Contains(capture, "CameraCapture::ObserveSkyFallback") &&
+                Contains(capture, "CameraCapture::ApplySkyFallback") &&
+                Contains(composite, "CaptureSkyFallback()"),
+            "sky fallback camera capture keeps clouds alive when looking straight up and terrain is culled");
     }
 
     {

@@ -1,5 +1,7 @@
 #include "CelestialTracker.h"
 #include "CelestialStability.h"
+#include "CameraContinuity.h"
+#include "../Core/FrameContext.h"
 #include <wrl/client.h>
 #include <cmath>
 #include <algorithm>
@@ -11,7 +13,7 @@ namespace renderer
         using Microsoft::WRL::ComPtr;
 
         void UpdateBody(CelestialBody& body, float cx, float cy, float cz,
-            const D3DMATRIX& view, const D3DMATRIX& proj, uint64_t frameIndex)
+            const D3DMATRIX& view, const D3DMATRIX& proj, uint64_t frameIndex, bool cameraRelative)
         {
             float len = std::sqrt(cx * cx + cy * cy + cz * cz);
             if (!std::isfinite(len) || len < 1e-4f)
@@ -21,11 +23,18 @@ namespace renderer
 
             // World-space direction: VIEW is a row-vector world->view
             // transform, so invert its rotation by multiplying with the
-            // transpose. The previous code dotted against VIEW's columns,
-            // effectively reapplying the forward camera rotation: the
-            // confirmed moon's world direction then rotated with the camera,
-            // so clouds and their projected ground shadows followed every pan.
-            const Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            // transpose. For the camera-relative moon billboard, the draw's
+            // own D3DTS_VIEW has an identity 3x3 rotation and carries only the
+            // view-space translation, so invert against the captured scene
+            // camera (FrameContext::viewRaw) whenever available.
+            Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            const FrameContext& frameCtx = FrameContext::Current();
+            if (cameraRelative && frameCtx.viewRawValid)
+            {
+                float worldOut[3]{ worldDir.x, worldDir.y, worldDir.z };
+                ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &viewDir.x, worldOut);
+                worldDir = { worldOut[0], worldOut[1], worldOut[2] };
+            }
 
             float p00 = proj.m[0][0], p11 = proj.m[1][1];
             if (!(p00 > 0.0f) || !(p11 > 0.0f))
@@ -51,6 +60,15 @@ namespace renderer
         m_frameIndex = frameIndex;
         m_sun.visible = false;
         m_moon.visible = false;
+    }
+
+    void CelestialTracker::RefreshWorldDirections(const float viewRaw[16])
+    {
+        if (!viewRaw || !m_moon.visible)
+            return;
+        float worldOut[3]{ m_moon.worldSpaceDirection.x, m_moon.worldSpaceDirection.y, m_moon.worldSpaceDirection.z };
+        ViewDirectionToWorld(viewRaw, &m_moon.viewSpaceDirection.x, worldOut);
+        m_moon.worldSpaceDirection = { worldOut[0], worldOut[1], worldOut[2] };
     }
 
     void CelestialTracker::Observe(IDirect3DDevice9* device, UINT primitiveCount)
@@ -125,7 +143,7 @@ namespace renderer
 
         if (viewTranslationZero && worldIsLargeScale && texW >= 200)
         {
-            UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex);
+            UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex, false);
         }
         else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 4.0f && viewTransZ < 16.0f
             && texW >= 96 && texW <= 160)
@@ -135,7 +153,7 @@ namespace renderer
             // low as 8.93 (from ~12 near center), so a tight range isn't
             // safe on its own. The texW filter (96-160, i.e. ~128 and
             // explicitly excluding the ~64 impostor) does the real work.
-            UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex);
+            UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex, true);
         }
     }
 }
