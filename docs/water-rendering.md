@@ -367,8 +367,9 @@ matters: `Scope` has only *read* device state by the point it attempts creation 
 samplers, MRT bindings and constants are all touched after - so a device that refuses the shader
 is left exactly as it was found, and `shaderCreationFailed` keeps it from trying per tile.
 Water effects therefore require a GPU that reports more than 512 slots, which in practice means
-anything newer than the GeForce 6/7 and Radeon X1xxx generation that the 512 minimum was written
-for; recent drivers report the maximum. That is a player-visible limitation and is in
+anything later than the GeForce 6/7 and Radeon X1xxx generation the 512 minimum was written for -
+the cap is a per-device number, and this runner's fxc is not the thing that gets to answer it.
+That is a player-visible limitation and is in
 `changelog.d`, not only here.
 
 The alternative was considered and rejected: a `WATER_COMPACT` compile of the same shader text,
