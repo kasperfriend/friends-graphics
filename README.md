@@ -184,9 +184,11 @@ The installable output is written to `build\Release\`. The post-build step copie
 
 ## Continuous integration and releases
 
-`.github/workflows/build.yml` builds both Debug and Release configurations for every pull request targeting `main` and every push to `main`. It uses GitHub's `windows-2025-vs2026` image and verifies the DLL and both configuration files.
+`.github/workflows/build.yml` builds Release for each pull request targeting `main` and each push to `main`. Feature-branch pushes are not built a second time alongside their PR. A manual Build run is also available for any branch; enable its `debug` option when a Debug build is needed.
 
-Every successful push to `main` also creates a GitHub Release containing an install-ready ZIP with:
+Normal CI has two jobs: the Windows Release build (including shader validation, water/weather device tests, package verification and artifact upload), and the fast portable regressions on Linux. Changelog validation runs separately only when fragments or its workflow change. Tests for current renderer behavior are retained; duplicate runs and separate runner startups are removed.
+
+Each successful Release build uploads an install-ready artifact containing:
 
 - `d3d9.dll`
 - `ModernWoWRenderer.ini`
@@ -195,7 +197,7 @@ Every successful push to `main` also creates a GitHub Release containing an inst
 - required `MaterialCache` manifests
 - packaged weather textures
 
-The Release build is also retained as a workflow artifact for 14 days.
+Artifacts are retained for 14 days, including PR and manual builds. Publishing a GitHub Release is separate: run the manual `Release` workflow to build, validate and publish the ZIP. Ordinary pushes do not publish releases.
 
 ## Validation
 

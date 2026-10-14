@@ -19,7 +19,8 @@ g++ -std=c++20 -Wall -Wextra -Werror -pedantic \
 ./build/overlay-test
 ```
 
-Also runs in the Build workflow as **F7 tabs, dragging and resizing**.
+Also runs in the Build workflow under **Portable regressions**, alongside the
+other fast CPU tests.
 
 Coverage:
 

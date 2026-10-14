@@ -8,17 +8,23 @@ on:
   push:
     branches:
       - main
-      - 'arena/**'
+  # PR updates already cover feature-branch commits; do not also build their pushes.
   pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      debug:
+        description: Also build Debug (Release and its artifact are always produced).
+        type: boolean
+        default: false
   # Called by the manual release workflow so a release always ships exactly
   # the binaries this CI produced, from the same steps.
   workflow_call:
     inputs:
       configurations:
-        description: JSON array of MSBuild configurations to build.
+        description: JSON array of MSBuild configurations to build (include Release for an artifact).
         type: string
-        default: '["Debug","Release"]'
+        default: '["Release"]'
       artifact-name:
         description: Name of the uploaded Release package artifact.
         type: string
@@ -44,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: ${{ fromJSON(inputs.configurations || '["Debug","Release"]') }}
+        configuration: ${{ fromJSON(inputs.configurations || (inputs.debug && '["Debug","Release"]' || '["Release"]')) }}
 
     steps:
       - name: Checkout
@@ -92,6 +98,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+
+      # Shader strings are compiled at runtime, not by MSBuild. Validate them
+      # once on the existing Windows runner instead of starting a separate job.
+      - name: Validate HLSL
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: ./tools/ValidateShaders.ps1
 
       - name: Water device regressions
         if: matrix.configuration == 'Release'
@@ -175,27 +188,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  shaders:
-    name: Validate HLSL
-    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-2025-vs2026' }}
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Compile embedded shaders with fxc
-        shell: pwsh
-        run: ./tools/ValidateShaders.ps1
-
-  cloud-regression:
-    name: Cloud climate and continuity
+  regressions:
+    name: Portable regressions
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build and run portable cloud regressions
+      - name: Cloud, timing and device regressions
         run: |
           mkdir -p build
           g++ -O2 -std=c++20 -pthread tools/CloudClimateRegression.cpp src/Environment/EnvironmentProfile.cpp src/Environment/EnvironmentDatabase.cpp -o build/cloud-climate-test
@@ -209,13 +209,6 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
           ./build/device-health-test
 
-  overlay-regression:
-    name: F7 tabs, dragging and resizing
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
       - name: Build and run portable overlay regressions
         run: |
           mkdir -p build
