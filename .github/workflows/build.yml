@@ -122,6 +122,13 @@ jobs:
           }
           Write-Output "::notice title=Water regression results::$flat"
 
+      - name: F7 overlay state regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          & cmd.exe /c tools\Test-OverlayState.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Weather motion regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
@@ -214,3 +221,5 @@ jobs:
           mkdir -p build
           g++ -std=c++20 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -g tools/OverlayLayoutRegression.cpp -o build/overlay-test
           ./build/overlay-test
+          g++ -std=c++20 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -g tools/TrackedRenderStateRegression.cpp -o build/tracked-state-test
+          ./build/tracked-state-test

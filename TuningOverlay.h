@@ -12,6 +12,7 @@
 #include "src/Environment/EnvironmentProfileManager.h"
 #include "src/Environment/MenuDiagnostics.h"
 #include "src/Environment/OverlayLayout.h"
+#include "src/D3D9/ScopedStateBlock.h"
 
 namespace tuningoverlay {
 inline std::wstring ini;
@@ -198,7 +199,8 @@ inline void Draw(IDirect3DDevice9* d){
  if(!visible||!d)return;
  static std::map<std::string,HRESULT> lastErrors;
  auto check=[&](HRESULT result,const char* stage){auto& previous=lastErrors[stage];if(FAILED(result)&&result!=previous)renderer::menudiagnostics::Write(std::string("DRAW FAILED ")+stage+" HRESULT="+std::to_string(result));previous=result;return SUCCEEDED(result);};
- IDirect3DStateBlock9* raw=nullptr;if(!check(d->CreateStateBlock(D3DSBT_ALL,&raw),"CreateStateBlock"))return;if(!check(raw->Capture(),"Capture")){raw->Release();return;}
+ renderer::ScopedStateBlock state(d);
+ if(!check(state.CaptureResult(),"CaptureState"))return;
  D3DVIEWPORT9 viewport{};d->GetViewport(&viewport);D3DDEVICE_CREATION_PARAMETERS creation{};d->GetCreationParameters(&creation);
  if(creation.hFocusWindow)gameWindow=creation.hFocusWindow;
  environmentLines=renderer::EnvironmentProfileManager::Instance().CompactDebugLines();
@@ -297,6 +299,6 @@ inline void Draw(IDirect3DDevice9* d){
  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
  d->SetRenderState(D3DRS_COLORWRITEENABLE,15);check(d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V)),"DrawPrimitiveUP");
  if(hasFont)for(const auto& l:labels)font.Draw(d,l.x,l.y,l.text,l.color,l.right);
- check(raw->Apply(),"RestoreState");raw->Release();
+ check(state.Restore(),"RestoreState");
 }
 }
