@@ -1,6 +1,7 @@
 // Portable policy regressions. Run from any directory; no Windows SDK needed.
 #include "../src/Water/WaterPolicy.h"
 #include "../src/Water/WaveField.h"
+#include "../src/Water/WaterSeaState.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -211,6 +212,84 @@ int main() try
         Require(std::isfinite(blind.lattice[0])&&std::isfinite(blind.phase[2]),
                 "the anchor fallback stays usable by both shader stages");
     }
+    // ---- zone and weather driven sea state ----------------------------------------------
+    {
+        using renderer::water::SeaTuning; using renderer::water::SeaWeather;
+        using renderer::water::TargetSeaState; using renderer::water::SeaStateFilter;
+        using renderer::water::SeaMotionClock;
+        const SeaState calm = TargetSeaState(SeaTuning{}, SeaWeather{});
+        // An untuned zone under a clear sky has to be exactly the old water: every multiplier 1
+        // and no shear. This is what lets the feature ship switched on.
+        Require(calm.agitation == 1.f && calm.motion == 1.f && calm.shear == 0.f && calm.wind == 1.f,
+                "an untuned zone in clear weather is the identity, so per-zone waves default on safely");
+        const SeaTuning exposed{1.45f, 1.f, 1.f}, sheltered{.45f, 1.f, 1.f};
+        const SeaWeather rain{1, .95f};
+        const SeaState e = TargetSeaState(exposed, SeaWeather{}), s = TargetSeaState(sheltered, SeaWeather{});
+        Require(e.agitation > 1.f && e.motion > 1.f && e.wind > 1.f
+                && s.agitation < 1.f && s.motion < 1.f && s.wind < 1.f,
+                "an exposed coast carries more water than a sheltered pond, in every term");
+        const SeaState eStorm = TargetSeaState(exposed, rain), sStorm = TargetSeaState(sheltered, rain);
+        Require(eStorm.agitation > e.agitation && sStorm.agitation > s.agitation
+                && eStorm.motion > e.motion && sStorm.motion > s.motion,
+                "weather roughens both, and quickens both");
+        Require(eStorm.motion > e.motion * 1.5f && eStorm.motion <= 3.f,
+                "a blow at least halves the time between crests, and stays inside the clock's range");
+        Require(eStorm.shear > e.shear && sStorm.shear > s.shear && eStorm.shear <= 1.f,
+                "weather puts a cross-chop on top of the swell instead of just scaling it");
+        // A storm must not be able to make a sheltered pond rougher than an exposed coast at rest:
+        // that inversion is what would make the whole idea read as a random brightness of waves.
+        Require(sStorm.agitation < e.agitation,
+                "a storm on still water stays calmer than an exposed coast in calm air");
+        // The crisp form of "off": with no weather response, a storm is indistinguishable from a
+        // clear sky in every term - not merely smaller, which is what a clamp would also satisfy.
+        const SeaTuning damped{1.45f, 0.f, 1.f};
+        const SeaState off = TargetSeaState(damped, rain), offClear = TargetSeaState(damped, SeaWeather{});
+        Require(off.agitation == offClear.agitation && off.motion == offClear.motion
+                && off.shear == offClear.shear && off.wind == offClear.wind && off.agitation == 1.45f,
+                "WeatherResponsePercent=0 pins a zone to its authored waves whatever the sky does");
+        const SeaTuning noWind{1.45f, 1.f, 0.f};
+        Require(TargetSeaState(noWind, rain).wind == 0.f,
+                "an authored WIND of zero keeps a river foamless through a storm");
+        const SeaState huge = TargetSeaState(SeaTuning{1e9f, 1e9f, 1e9f}, SeaWeather{9, -5.f});
+        Require(std::isfinite(huge.agitation) && huge.agitation <= 2.6f && huge.motion <= 3.f
+                && huge.shear >= 0.f && huge.shear <= 1.f && huge.wind >= 0.f && huge.wind <= 2.5f,
+                "absurd authored values stay finite and inside the shader's range");
+        const SeaState nan = TargetSeaState(SeaTuning{NAN, NAN, NAN}, SeaWeather{1, NAN});
+        Require(std::isfinite(nan.agitation) && std::isfinite(nan.motion) && std::isfinite(nan.wind),
+                "a NaN tuning value cannot reach the shader");
+
+        SeaStateFilter filter;
+        const float build = 14.f;
+        const SeaState afterOneStep = filter.Observe(exposed, SeaWeather{}, build, build);
+        const float covered = 1.f - std::abs(afterOneStep.agitation - e.agitation) / std::abs(e.agitation - 1.f);
+        Require(covered > .949f && covered < 1.001f,
+                "one time constant of easing covers 95% of the step, whatever the frame rate");
+        SeaStateFilter fine;
+        float per = 1.f;
+        for (int i = 0; i < 100; ++i) per = fine.Observe(exposed, SeaWeather{}, build / 100.f, build).agitation;
+        Require(std::abs(per - afterOneStep.agitation) < .01f * std::abs(e.agitation - 1.f),
+                "the same transition at 100 fps lands within a hundredth of a step");
+        SeaStateFilter down;
+        for (int i = 0; i < 100; ++i) down.Observe(exposed, SeaWeather{}, build / 100.f, build);
+        const float clearing = down.Observe(SeaTuning{}, SeaWeather{}, build / 100.f, build).agitation;
+        Require(clearing > e.agitation - .06f * (e.agitation - 1.f),
+                "clearing drains slower than a squall arrives, so open water does not snap flat");
+        Require(std::isfinite(down.Observe(exposed, SeaWeather{}, -1.f, build).agitation)
+                && std::isfinite(down.Observe(exposed, SeaWeather{}, 1e6f, build).agitation),
+                "a stalled or backwards frame cannot break the eased state");
+
+        SeaMotionClock clock;
+        for (int i = 0; i < 60; ++i) clock.Observe(1.f / 60.f, 1.f);
+        const double beforeChange = clock.Time();
+        Require(std::abs(beforeChange - 1.0) < 1e-5,
+                "the wave clock integrates one second of calm to a float's precision");
+        for (int i = 0; i < 60; ++i) clock.Observe(1.f / 60.f, 2.f);
+        Require(clock.Time() > beforeChange * 2.5, "doubling the speed doubles future travel only");
+        const double held = clock.Time();
+        clock.Observe(1e9f, 1.f); clock.Observe(NAN, 1.f); clock.Observe(.01f, NAN);
+        Require(clock.Time() >= held && clock.Time() < held + .2f,
+                "a loading screen or a NaN cannot teleport the field forward");
+    }
     {
         const std::string shader = ReadAlongside("../WaterEffect.h");
         Require(bool(shader.size() > 4096), "production water shader source is readable");
@@ -225,7 +304,49 @@ int main() try
                 "sun glint is compensated for its own lobe width");
         Require(shader.find("celestialPath*controls.w*.0992") != std::string::npos,
                 "the glint's output gain does not double-count the normalization");
+        // The look normalizations and the sea state are only trustworthy while the shader and the
+        // previewer keep deriving their numbers from the same place.
+        Require(shader.find("seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds)") != std::string::npos
+                && shader.find("watereffect::FeedWeather") == std::string::npos,
+                "water is eased once per frame and is fed its weather rather than reading the client");
+        Require(shader.find("const double elapsed=seaMotion_.Time();") != std::string::npos
+                && shader.find("BuildWaveField(elapsed,1.f,") != std::string::npos,
+                "the wave field runs on the integrated clock, and speed is not re-multiplied into it");
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
+        Require(mirror.find("TargetSeaState(tuning, weather)") != std::string::npos,
+                "the game and the CPU preview ease the same sea state through one function");
+        const std::string profiles = ReadAlongside("../EnvironmentProfiles.ini");
+        {
+            // The key's own length, and a section lookup that cannot be fooled by the file's header
+            // comment, which mentions `[Zone.33]` while explaining what the ids mean.
+            constexpr size_t keyLength = 25;   // strlen("WaterAgitationMultiplier=")
+            const auto valueFor=[&](const char* section)->std::string
+            {
+                const size_t at = profiles.find('\n' + std::string(section));
+                if (at == std::string::npos) return {};
+                const size_t start = at + 1 + std::string(section).size();   // past the header line
+                const size_t end = profiles.find("\n[", start);
+                const std::string body = profiles.substr(start, end == std::string::npos ? end : end - start);
+                const size_t key = body.find("WaterAgitationMultiplier=");
+                if (key == std::string::npos) return {};
+                std::string value = body.substr(key + keyLength);
+                const size_t stop = value.find_first_of("\r\n");
+                return value.substr(0, stop == std::string::npos ? value.size() : stop);
+            };
+            Require(valueFor("[Zone.33]") == "1.45", "Stranglethorn Vale is authored as an active coast");
+            Require(valueFor("[Zone.12]") == ".45", "Elwynn Forest is authored as sheltered water");
+            Require(valueFor("[Default]") == "1.0", "an untuned zone inherits a neutral sea state");
+            Require(valueFor("[Zone.1497]") == ".3", "Undercity is nearly a mirror, being underground");
+            int tuned = 0;
+            for (size_t at = profiles.find("WaterAgitationMultiplier="); at != std::string::npos;
+                 at = profiles.find("WaterAgitationMultiplier=", at + 1))
+            {
+                const float v = std::stof(profiles.substr(at + keyLength));
+                tuned += v != 1.f ? 1 : 0;
+                Require(v >= 0.f && v <= 4.f, "shipped per-zone sea state stays in the accepted range");
+            }
+            Require(tuned >= 60, "the verified zones all carry a sea state, not a handful of examples");
+        }
         Require(mirror.find("* (sharpness + 2.f) * fresnel") != std::string::npos
                 && mirror.find(".17f / (phaseDen * std::sqrt(phaseDen))") != std::string::npos,
                 "the CPU preview carries both normalizations, so it stays a mirror");
