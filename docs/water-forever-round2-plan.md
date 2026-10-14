@@ -67,7 +67,8 @@ an 8x8 butterfly, plus a foam *state* texture advected over frames and a per-mip
 chain. None of that exists in `ps_3_0` on D3D9: no compute, no UAVs, no ping-pong state texture
 without burning a render pass, and the whole shader has to fit **496 instruction slots**
 (`tools/ValidateShaders.ps1`, and creation itself fails on PS3-class drivers above 512 - see
-`water-rendering.md`). So the wave *field* stays the analytic two-octave value-noise lattice
+`water-rendering.md`; the rework later needed 543 and the budget was raised to 560, which is in
+the measured outcome below). So the wave *field* stays the analytic two-octave value-noise lattice
 from round 1, which already gives world-anchored slopes, a swell octave and a crest phase; the
 "simulation" part is not what makes Forever water read as Forever.
 
@@ -113,6 +114,18 @@ evaluated from a 4-band lerp rather than a scattering integral, and the GGX visi
 into the same reciprocal as the existing `1/(1+distance*distance*k)` local-light term. If the
 Windows job reports a budget failure, cut the SSR steps first, then the in-scattering isotropic
 term, and never the shoreline shading.
+
+**Measured outcome (2026-10-14).** The estimate was low: the rework landed at **543 slots**, and
+two of the three fallbacks above bought nothing. The SSR step reduction saves **zero** slots -
+the march loops are `[loop]`, so fxc counts the body once and steps only cost frame time - and
+the sky gradient was already the 4-band form, worth 15 slots rather than a fix for the overflow.
+With one copy of the shader per candidate cut priced by fxc in a single run, every route under
+496 cost a visible term (69 slots for the SSR march, 51 for the sun-road march, 37 for the
+analytic swell, and 11-17 each for the scatter lobe, sky gradient, body shading and shoal foam),
+so the budget was raised to 560 and the trade recorded in `tools/ValidateShaders.ps1`. Water
+effects now require a device that accepts more than 512 instruction slots; below that,
+`CreatePixelShader` fails, the failure is logged, and the client's own water stays. The numbers
+and the reasoning are in `water-rendering.md`, "Shader budget raised for the volume rework".
 
 ## Decisions taken before implementation
 
