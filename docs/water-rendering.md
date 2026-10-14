@@ -266,9 +266,10 @@ size - seventeen pixel registers and three vertex registers - because nothing ne
 only rearranged.
 
 Round 4 grew both stages by the minimum: the vertex stage gained `c204` (the grouping field's
-camera anchor) and one interpolant, and the pixel stage gained `c217` (the four shading-only
-trains' phases, in one contiguous `float4`). The scope now saves and restores eighteen pixel and
-five vertex registers, `controls` is 72 floats and `vertexControls` is 20.
+camera anchor) and the pixel stage `c217` (the four shading-only trains' phases, in one
+contiguous `float4`). The scope now saves and restores eighteen pixel and five vertex registers,
+`controls` is 72 floats and `vertexControls` is 20. **No interpolant was added, because there was
+no room for one** - see the register note below.
 
 | register | contents, as of round 4 |
 |---|---|
@@ -281,9 +282,20 @@ five vertex registers, `controls` is 72 floats and `vertexControls` is 20.
 | `c211` (PS) | texture creep (xy), unused (z), the wave gate (w) |
 | `c217` (PS) | the phases of the four trains only the shading carries |
 
-The grouping value and its gradient arrive as `TEXCOORD8`, the warp and its gradient as
-`TEXCOORD7`; the pixel shader samples no low-frequency noise at all, which is what keeps a set
-nailed to the terrain for one multiply and one `dot`.
+The warp value and its gradient arrive as `TEXCOORD7` (a `float4`: xyz the sample, w the
+grouping gain) and `TEXCOORD4` (a `float4`: xy the lattice coordinate, zw the grouping gradient).
+The pixel shader samples no low-frequency noise at all, which is what keeps a set nailed to the
+terrain for one multiply and one `dot`.
+
+That packing is not tidiness, it is the only option. Without a register declared as `psize0`,
+`vs_3_0` gives the vertex stage eleven `o#` registers and `ps_3_0` accepts ten `v#` ones - this
+Output struct was already at eleven fields, so a twelfth interpolant is not "a bit more bandwidth",
+it is `error X5622: Too many output registers declared (12)` and `error X5300: Invalid register
+number: 10` from fxc, which is exactly how round 4's first version failed CI. Both stages were
+already carrying a `float3` and a `float2` whose spare lanes could hold the envelope, so the
+envelope costs nothing. `tools/WaterRegression.cpp` now counts the Output fields and the pixel
+stage's parameters and refuses any other number, because that limit is invisible in the source
+and absolute at compile time.
 
 ### Looking at changes without a GPU
 
@@ -530,7 +542,8 @@ of how much of the complaint each one owns:
 * **A grouping envelope.** A third world-anchored noise field at one sample per 115 yards produces
   a gain in `.52 .. 1.14`, and it multiplies the lift, the Gerstner slide, the shading slope, the
   pinch, the chop riding on the swell and therefore the whitecaps. It is sampled ONCE, in the
-  vertex stage, and handed to the pixels through `TEXCOORD8` with its gradient. The slope carries
+  vertex stage, and handed to the pixels in the spare lanes of `TEXCOORD7`/`TEXCOORD4` with its
+  gradient (there is no twelfth interpolant register to spare). The slope carries
   it by the product rule - `dh = gain*dswell + swell*dgain` - so the flank of a set tilts the
   water as well as dimming it, which is the difference between waves that fade out and waves that
   run out. A ceiling just over 1 is deliberate: every fold-safe clamp, foam threshold and crest

@@ -120,8 +120,9 @@ float4 wavePhase:register(c202);
 float4 waveWarpPhase:register(c203);
 // xy=the camera anchor for the wave-grouping envelope, in that field's own noise
 // period. It never reaches the pixel stage: these pixels get the interpolated value
-// and gradient through TEXCOORD8 instead, which is what keeps a set of waves nailed to
-// the terrain while costing the pixel shader one multiply.
+// and gradient through the spare lanes of TEXCOORD4/TEXCOORD7 instead, which is what keeps a
+// set of waves nailed to the terrain while costing the pixel shader one multiply and no
+// interpolant register (see Output below for why there is no twelfth one).
 float4 waveGroupPhase:register(c204);
 // The low-frequency warp and the grouping envelope use the same bounded value-noise
 // hash as the pixel stage. This compact vertex copy keeps lifted crests on the same
@@ -161,7 +162,13 @@ static const float kStartB=4.255;      // .37 of train B's own wavelength
 static const float kGroupBase=0.52;
 static const float kGroupDepth=0.62;
 static const float kGroupScale=0.01347826;
-struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float2 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float3 waveWarp:TEXCOORD7;float4 waveGroup:TEXCOORD8;};
+// Twelve interpolants would be one too many: without a register declared as psize0,
+// vs_3_0 offers eleven o# registers and ps_3_0 accepts ten v# registers, and fxc says so with
+// X5622/X5300 rather than with anything a reader can guess from the source. The envelope is
+// therefore packed into the lanes that were already there - the gain rides in waveWarp.w, the
+// gradient in worldRel.zw - because both of those registers exist for other reasons and each
+// had a free component. Costs nothing; a twelfth interpolant costs the whole shader.
+struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float4 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float4 waveWarp:TEXCOORD7;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
@@ -246,7 +253,7 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     // the column the absorption measures are the water the player can actually see;
     // worldRel is the undisplaced lattice coordinate where the pixel stage evaluates the
     // swell trains, while the broad warp sample is passed separately for interpolation.
-    o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=rel;
+    o.viewPos=p.xyz;o.viewNormal=n;o.worldRel=float4(rel,groupGradient);
     // The wave gradient is expressed in world axes; the same three axis vectors rotate it
     // into view space here so the pixel shader only has to scale them by the wave slope:
     // no screen-space approximation and no per-triangle winding flip in the shading normal.
@@ -256,8 +263,9 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     // pixel stage. At their fifty and hundred and fifteen yard scales both fields are
     // smooth across the liquid mesh, so perspective interpolation is accurate while
     // avoiding a second and third noise evaluation per pixel.
-    o.waveWarp=waveWarp;
-    o.waveGroup=float4(waveGroup.x,groupGradient.x,groupGradient.y,0);
+    // xyz = the warp's value and its gradient in lattice-cell axes; w = the grouping gain,
+    // which the pixel stage multiplies into exactly the quantities this stage used it on.
+    o.waveWarp=float4(waveWarp,gain);
     return o;
 }
 )HLSL";
@@ -400,7 +408,7 @@ static const float kGroupDepth=0.62;
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
 struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
-WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float2 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float3 waveWarp:TEXCOORD7,float4 waveGroup:TEXCOORD8) {
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float4 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float4 waveWarp:TEXCOORD7) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
@@ -410,11 +418,12 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
     // crest and the light on it cannot drift apart - and only the chop on top of it is
     // noise.
-    float2 plane=float2(dot(worldRel,waveLattice.xy),dot(worldRel,waveLattice.zw));
+    float2 plane=float2(dot(worldRel.xy,waveLattice.xy),dot(worldRel.xy,waveLattice.zw));
     // The vertex stage sampled this broad, world-anchored warp and its gradient
     // at the same lattice point. Its fifty yard scale is smooth over the liquid mesh,
     // so interpolating it here preserves the bent crests without another pixel-noise
-    // evaluation (the fine chop below remains per-pixel).
+    // evaluation (the fine chop below remains per-pixel). The fourth lane is the
+    // grouping gain, which travelled here because this register had it spare.
     float warp=(waveWarp.x-.5)*5.0;
     float2 warpGradient=.05*float2(waveWarp.y*.8253356-waveWarp.z*.5646425,
                                    waveWarp.y*.5646425+waveWarp.z*.8253356);
@@ -422,8 +431,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // How much of its swell this patch of water is carrying: the SET it sits in. The
     // vertex stage sampled that envelope and its gradient and passed both down, so the
     // grouping costs one multiply and one dot here, and the wave field a player sees
-    // changes as it travels instead of repeating at one amplitude forever.
-    float gain=kGroupBase+kGroupDepth*waveGroup.x;
+    // changes as it travels instead of repeating at one amplitude forever. The gain is in
+    // the warp's spare lane and the gradient in worldRel.zw, for the register-count reason
+    // spelled out on the vertex stage's Output struct.
+    float gain=kGroupBase+kGroupDepth*waveWarp.w;
     float2 footprint=fwidth(plane);
     // Fade the unresolved octave by the pixel's own footprint. The swell is never
     // faded: a forty yard wave is still resolvable at any distance a lake can be
@@ -449,7 +460,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // so dh = gain*dswell + swell*dgain. The second term is what makes the flank of a set
     // tilt the water as well as dim it, which is the difference between waves that fade
     // out (a mask over one pattern) and waves that run out (a sea).
-    swellSlope=swellSlope*gain+swell*waveGroup.yz;
+    swellSlope=swellSlope*gain+swell*worldRel.zw;
     swell*=gain;
     // One minus the Gerstner Jacobian: how hard the surface is pinching at this point.
     // It is the same number the vertex stage's slide was clamped by, so dividing the

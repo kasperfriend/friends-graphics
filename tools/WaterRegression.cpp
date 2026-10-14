@@ -3,6 +3,7 @@
 #include "../src/Water/WaveField.h"
 #include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -696,26 +697,50 @@ int main() try
         // belongs on the sea. Multiplying them in either order is the same product, but only
         // one of them survives a `swellSlope*gain+swell*dgain` product rule - differentiating
         // an envelope that already carries the slider would scale the slider by dgain too.
-        Require(pixel.find("swellSlope=swellSlope*gain+swell*waveGroup.yz;")!=std::string::npos&&
+        Require(pixel.find("swellSlope=swellSlope*gain+swell*worldRel.zw;")!=std::string::npos&&
                 pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*5.0)*foreverStyle.x;")
-                    <pixel.find("swellSlope=swellSlope*gain+swell*waveGroup.yz;"),
+                    <pixel.find("swellSlope=swellSlope*gain+swell*worldRel.zw;"),
                 "the slope differentiates the envelope (product rule) after the slider, not before");
         Require(pixel.find("swell*=gain;")!=std::string::npos&&
                 pixel.find("float2 slopes=(ripple.yz*.72*filter*gain+swellSlope)*waveFlow.w;")!=std::string::npos,
                 "the swell height and the chop on top of it ride the same set");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
-                vertex.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
-                vertex.find("float4 waveGroup:TEXCOORD8")!=std::string::npos&&
-                vertex.find("o.waveWarp=waveWarp;")!=std::string::npos&&
-                vertex.find("o.waveGroup=float4(waveGroup.x,groupGradient.x,groupGradient.y,0);")!=std::string::npos&&
-                pixel.find("float3 waveWarp:TEXCOORD7")!=std::string::npos&&
-                pixel.find("float4 waveGroup:TEXCOORD8")!=std::string::npos&&
+                vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
+                vertex.find("o.waveWarp=float4(waveWarp,gain);")!=std::string::npos&&
+                vertex.find("o.worldRel=float4(rel,groupGradient);")!=std::string::npos&&
+                pixel.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
+                pixel.find("float4 worldRel:TEXCOORD4")!=std::string::npos&&
+                pixel.find("dot(worldRel.xy,waveLattice.xy)")!=std::string::npos&&
                 pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
                 pixel.find("noiseGradient(groupCoord)")==std::string::npos&&
                 code.find("SetPixelShaderConstantF(200,controls,18)")!=std::string::npos&&
                 code.find("SetVertexShaderConstantF(200,vertexControls,5)")!=std::string::npos,
                 "the vertex stage anchors the warp AND the set envelope and interpolates both to pixels without resampling");
+        // The envelope has to ride the lanes the two stages already had. Interpolator counts
+        // are a hardware rule, not a style preference: with no register declared psize0,
+        // vs_3_0 gives the vertex stage eleven o# registers and ps_3_0 accepts ten v# ones,
+        // and fxc answers a twelfth with X5622/X5300 - which is exactly what happened when
+        // this round first added one. Counting them here says it in the source language, in
+        // the second it is broken, instead of an hour later in a Windows job log.
+        const auto between=[](const std::string& text,const char* open,const char* close) {
+            const size_t a=text.find(open); if (a==std::string::npos) return std::string();
+            const size_t b=text.find(close,a); return b==std::string::npos?std::string():text.substr(a,b-a);
+        };
+        const auto semantics=[](const std::string& text) {
+            size_t n=0;
+            for (const char* needle : {":POSITION",":COLOR0",":FOG",":TEXCOORD"})
+                for (size_t at=text.find(needle); at!=std::string::npos; at=text.find(needle,at+1)) ++n;
+            return n;
+        };
+        Require(semantics(between(vertex,"struct Output","}"))==11,
+                "the vertex stage uses exactly vs_3_0's eleven output registers, no more");
+        const std::string psInputs=between(pixel,"WaterOutput main(",")");
+        Require(!psInputs.empty()&&1+std::count(psInputs.begin(),psInputs.end(),',')==10,
+                "the pixel stage takes exactly ps_3_0's ten input registers, no more");
+        Require(vertex.find("TEXCOORD8")==std::string::npos&&pixel.find("TEXCOORD8")==std::string::npos&&
+                pixel.find("waveGroup")==std::string::npos&&vertex.find("o.waveGroup=")==std::string::npos,
+                "the envelope is packed into TEXCOORD4/TEXCOORD7 rather than appended as a twelfth");
         // The save/restore window has to grow with the register block or a native water draw
         // that runs after ours keeps OUR constants: 18 float4 of pixels (c200..c217) and 5 of
         // vertices (c200..c204), which is also what the Get* calls must fetch.
@@ -782,7 +807,7 @@ int main() try
         // whose constants disagree between stages is a set that dims the shading but not the
         // geometry, which is exactly the artefact class this round was cut for.
         Require(vertex.find("float gain=kGroupBase+kGroupDepth*waveGroup.x;")!=std::string::npos&&
-                pixel.find("float gain=kGroupBase+kGroupDepth*waveGroup.x;")!=std::string::npos&&
+                pixel.find("float gain=kGroupBase+kGroupDepth*waveWarp.w;")!=std::string::npos&&
                 vertex.find("static const float kGroupBase=0.52;")!=std::string::npos&&
                 pixel.find("static const float kGroupDepth=0.62;")!=std::string::npos&&
                 vertex.find("static const float kGroupScale=0.01347826;")!=std::string::npos&&
