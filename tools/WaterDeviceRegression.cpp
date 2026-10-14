@@ -1,5 +1,6 @@
 // Tests the production water Scope, not a second implementation of it.
 #include "../WaterEffect.h"
+#include "../WaterDiagnostics.h"
 #include "../src/Scene/DrawCallClassifier.h"
 // The capture provider is controlled here; Prepare itself is production code.
 namespace volume {
@@ -84,6 +85,84 @@ void TestWaterSettings(WaterSettings& settings) {
     Require(!watereffect::active,"water edits do not override F11 master OFF");
     watereffect::active=true;
 }
+std::string ReadText(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    return std::string(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
+}
+void SetDiagnostics(const WaterSettings& settings,bool on,bool automatic=false) {
+    const auto ini=settings.directory/L"ModernWoWRenderer.ini";
+    Require(WritePrivateProfileStringW(L"Diagnostics",L"Enabled",on?L"1":L"0",ini.c_str())!=0,"write diagnostic enable");
+    Require(WritePrivateProfileStringW(L"Diagnostics",L"AutoCapture",automatic?L"1":L"0",ini.c_str())!=0,"write diagnostic auto capture");
+    waterdiag::Configure(settings.base); // The same reload now called by F12.
+}
+void TestDiagnosticFiles(WaterSettings& settings) {
+    SetDiagnostics(settings,false);
+    Require(!waterdiag::enabled&&!std::filesystem::exists(waterdiag::root),"disabled diagnostics do not create a capture directory");
+    waterdiag::OnPresent(nullptr,true,true);
+    auto text=ReadText(waterdiag::statusPath);
+    Require(text.find("F8 ignored")!=std::string::npos,"disabled F8 explains missing capture in existing water log");
+    waterdiag::OnPresent(nullptr,true,true);
+    Require(ReadText(waterdiag::statusPath)==text,"holding F8 does not spam the log");
+    waterdiag::OnPresent(nullptr,false,true);
+    waterdiag::OnPresent(nullptr,true,false);
+    Require(ReadText(waterdiag::statusPath)==text,"background F8 does not request capture");
+    waterdiag::OnPresent(nullptr,false,true);
+    SetDiagnostics(settings,true,true);
+    Require(waterdiag::enabled&&waterdiag::autoCapture,"reload enables and arms capture without restarting");
+    text=ReadText(waterdiag::statusPath);
+    Require(text.find("configured enabled=1 auto=1")!=std::string::npos&&text.find("ModernWoWRenderer.ini")!=std::string::npos,
+        "configuration status identifies effective enable and input path");
+    // A regular file where a directory belongs deterministically reproduces
+    // write failure without depending on elevation or filesystem ACLs.
+    const auto blocker=settings.directory/L"blocked";
+    {std::ofstream out(blocker);out<<"not a directory";}
+    waterdiag::root=blocker;
+    Require(!waterdiag::OpenCapture()&&!waterdiag::enabled&&!waterdiag::active,"directory failure disables capture safely");
+    text=ReadText(waterdiag::statusPath);
+    Require(text.find("create directory failed code=")!=std::string::npos&&text.find("blocked")!=std::string::npos,
+        "directory failure reports error code and path outside failed directory");
+    SetDiagnostics(settings,true);
+    Require(waterdiag::OpenCapture(),"reload recovers filesystem capture after failure");
+    // Deliberately poison the stream to model disk-full/failed writes.
+    waterdiag::active=true;
+    waterdiag::log.setstate(std::ios::badbit);
+    waterdiag::Finish("test-write-failure");
+    Require(!waterdiag::enabled&&!waterdiag::active&&!waterdiag::log.is_open(),"failed write closes and disables capture");
+    Require(ReadText(waterdiag::statusPath).find("write/close failed")!=std::string::npos,"write failure is reported");
+    SetDiagnostics(settings,true);
+    Require(waterdiag::OpenCapture(),"failed stream can be reopened after reload");
+    waterdiag::active=true;waterdiag::Configure(settings.base);
+    Require(!waterdiag::active&&!waterdiag::log.is_open(),"reload closes an in-progress capture");
+    SetDiagnostics(settings,false);
+}
+void TestDiagnosticDevice(WaterSettings& settings,IDirect3DDevice9* device) {
+    waterdiag::captures=0; // Independent fixture; production keeps its session cap.
+    SetDiagnostics(settings,true,true);
+    waterdiag::OnPresent(device,true,true); // F8 + auto request together.
+    Require(waterdiag::active&&!waterdiag::autoCapture&&waterdiag::captures==1,"auto and F8 start exactly one capture");
+    auto file=waterdiag::folder/L"draws.txt";
+    waterdiag::OnPresent(device,false,true);
+    Require(!waterdiag::active&&ReadText(file).find("captured=0 observed=0")!=std::string::npos,
+        "frame with no draw callbacks still produces an explicit zero-draw capture");
+    SetDiagnostics(settings,true,true);
+    waterdiag::OnPresent(device,false,true);
+    file=waterdiag::folder/L"draws.txt";
+    waterdiag::Draw(device,"DrawPrimitive",D3DPT_TRIANGLELIST,2);
+    waterdiag::OnPresent(device,false,true);
+    const auto text=ReadText(file);
+    Require(text.find("DRAW 0")!=std::string::npos&&text.find("VS vs_")!=std::string::npos&&
+        text.find("T 0 hr=0")!=std::string::npos&&text.find("captured=1 observed=1")!=std::string::npos,
+        "device capture records native shaders, textures and completion");
+    Require(waterdiag::shaders.size()==2,"device capture writes both shader bytecodes");
+    SetDiagnostics(settings,true,true);waterdiag::OnPresent(device,false,true);
+    waterdiag::Reset(device);
+    Require(!waterdiag::active&&!waterdiag::log.is_open(),"reset closes diagnostic capture");
+    waterdiag::captures=8;
+    SetDiagnostics(settings,true,true);waterdiag::OnPresent(device,false,true);
+    Require(!waterdiag::active&&!waterdiag::autoCapture&&ReadText(waterdiag::statusPath).find("capture limit reached")!=std::string::npos,
+        "capture limit is bounded and reported instead of silently ignoring requests");
+    SetDiagnostics(settings,false);
+}
 // Inject one real COM failure after stage 2 has already changed. This
 // reproduces the original partial-setup leak without maintaining a fake device.
 using SetTextureFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,IDirect3DBaseTexture9*);
@@ -112,6 +191,7 @@ struct TextureFailure {
 int main() try {
     WaterSettings settings;
     TestWaterSettings(settings);
+    TestDiagnosticFiles(settings);
     // The test sits beside the built proxy DLL. Load the system runtime
     // explicitly so the proxy cannot hook and double-apply our test scopes.
     wchar_t systemPath[MAX_PATH]{};GetSystemDirectoryW(systemPath,MAX_PATH);
@@ -330,5 +410,7 @@ int main() try {
     watereffect::Reset(d.Get());Require(!watereffect::cachedReplacementPS&&!watereffect::cachedReplacementVS,"reset releases cached shaders");
     {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"replacement recreated after reset");}
     restored();watereffect::Reset(d.Get());
+    TestDiagnosticDevice(settings,d.Get());
+    restored();
     std::puts("Water GPU regressions passed");return 0;
 } catch(const std::exception& e) {std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}

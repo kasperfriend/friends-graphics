@@ -118,8 +118,22 @@ the reporting player's machine. In-game confirmation still matters.
    lamp. Test reflections off with refraction/depth/foam on, atmosphere off,
    F11 off/on, window resize, and Alt+Tab. Native lava/slime and unsupported
    texture layouts must not become water.
-6. If magenta never appears, enable `[Diagnostics] Enabled=1` and use F8 to
-   capture one frame, then include `WaterEffect.log`, `WaterReflection.log`,
-   `VolumeEffects.log`, and `WaterDiagnostics/<timestamp>/` with the report.
-   This identifies different material layouts without broadly replacing
-   unrelated transparent geometry.
+6. If magenta never appears, edit the existing `[Diagnostics]` section in
+   **ModernWoWRenderer.ini** (not GraphicsEffects.ini): `Enabled=1`,
+   `AutoCapture=1`, `MaxDraws=8192`, `SkipDraws=0`. While looking at the broken
+   water, press F12. This reloads diagnostics and arms **one frame**, without
+   requiring F8 or a restart. For manual F8 captures use `AutoCapture=0`.
+   Include `WaterEffect.log`, `WaterReflection.log`, `VolumeEffects.log`, and
+   the newly reported `WaterDiagnostics/<timestamp>/` folder (draws.txt and
+   shader binaries). Turn diagnostics off and press F12 after collecting it.
+   Capture is observation-only and also works with F11 OFF.
+7. If there is no capture folder, read `water diagnostics:` entries in
+   **WaterEffect.log**. They identify the exact configuration and output paths,
+   effective enable/auto values, disabled F8 presses, the eight-capture limit,
+   directory/file failures, start and completion counts. If that log is also
+   unwritable, messages go to the Windows debugger output. A zero-draw frame
+   still creates a capture file: missing output is not evidence of missing
+   water. Earlier DLLs silently ignored disabled F8 presses/file failures and
+   did **not** reload diagnostics with F12; they require a restart after editing
+   the section. These diagnostic changes do not broaden water detection or
+   claim to resolve an unobserved liquid layout.

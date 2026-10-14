@@ -229,7 +229,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini and EnvironmentProfiles.ini");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     waterhighlight::Present();
@@ -405,6 +405,8 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDraw(d,t,start,n);
     if(volume::internal||weathervisuals::internal)return originalDraw(d,t,start,n);
+    // Observe native state before effect setup, including with F11 OFF.
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
@@ -414,7 +416,6 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
         volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,start,n,false);
@@ -435,6 +436,8 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    // Observe native state before effect setup, including with F11 OFF.
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
@@ -444,7 +447,6 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,base,start,n);
@@ -474,6 +476,8 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawUP(d,t,n,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawUP(d,t,n,v,stride);
+    // Observe native state before effect setup, including with F11 OFF.
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
@@ -483,7 +487,6 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
         volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,false,v,stride);
@@ -505,6 +508,8 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    // Observe native state before effect setup, including with F11 OFF.
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
@@ -514,7 +519,6 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,true,v,stride,indices,f,min+vertices);
