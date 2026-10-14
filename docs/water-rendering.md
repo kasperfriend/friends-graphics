@@ -135,9 +135,10 @@ changing the wrap fails the build rather than sliding the waves apart by eye.
 The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
-state without spending a render pass, and **560 instruction slots** enforced by
-`tools/ValidateShaders.ps1` (the shader measures 542 - 543 before the doubled tint came out;
-the budget was raised from 496 for this rework rather than cut a visible term - see "Shader
+state without spending a render pass, and **608 instruction slots** enforced by
+`tools/ValidateShaders.ps1` (the shader measured 542 - 543 before the doubled tint came out and
+before round 3 below added its third train, its Jacobian and its whitecaps; the budget was
+raised from 496 for this rework rather than cut a visible term - see "Shader
 budget raised for the volume rework" below, which also records what a 512-slot device does). So each of those has a substitute
 here: an analytic two-train swell plus bounded value noise for the simulation, a roughness mix
 toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent carries both
@@ -336,7 +337,9 @@ than a reference screenshot can and less than an in-game pass does: the frames c
 detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
 in-game pass. The
 slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
-cannot run fxc, so "it fits in 560 slots" is a CI result there, not a local one.
+cannot run fxc, so "it fits in the budgeted slots" is a CI result there, not a local one - and
+since round 3 the budget line itself carries that caveat, because 608 is an estimate awaiting
+the next Windows run's measured count.
 
 ## Full rework round 3: motion, mass and foam (2026-10-14)
 
@@ -632,9 +635,11 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation measures **542 slots** and enforces a **560-slot budget** (the 496-slot
+shader validation enforces a **608-slot budget** on it (measured 542 before round 3's third
+train, Jacobian and whitecaps; the 496-slot
 budget it used to enforce stood below the 512-slot hardware minimum until the volume rework of
-2026-10-14 above outgrew both). Device-creation failures log the HRESULT and device instruction
+2026-10-14 above outgrew both, and round 3's count is an estimate this environment could not
+compile). Device-creation failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
 This is a verified failure path in the code, not a diagnosis from a capture of
@@ -678,7 +683,8 @@ the reporting player's machine. In-game confirmation still matters.
 ## Tests
 
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 560 static instruction slots (542 measured; the ceiling was raised from 496 - see
+  exceeds 608 static instruction slots (542 measured before round 3, whose ~40 added slots are
+  an estimate awaiting fxc; the ceiling was raised from 496 - see
   "Shader budget raised for the volume rework") or its instruction count cannot be read.
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
