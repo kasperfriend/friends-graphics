@@ -84,6 +84,9 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"ClarityPercent","WATER CLARITY",5,200,5,100},
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WIND",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
+ {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},
+ {KIND_SLIDER,L"Water",L"WeatherResponsePercent","WEATHER RESPONSE",0,200,5,100},
+ {KIND_TOGGLE,L"Water",L"ZoneWaves","PER-ZONE SEA STATE",0,1,1,1},
 
  // === LOCAL LIGHTING ===
  {KIND_HEADER,nullptr,nullptr,"--- LOCAL LIGHTING ---",0,0,0,0},
