@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: Water keeps its zone tuning through menus and loading screens
+title: Water sea states now cover every map-root zone
 ---
-The last confirmed zone no longer gets cleared by UI or loading frames that have no world depth. Water sea states are now explicitly tuned for all 158 non-placeholder root areas across Eastern Kingdoms, Kalimdor, Outland and Northrend.
+Every root zone in the verified area database now has an explicit water setting: enclosed water stays calm, exposed seas stay livelier, and dry or development maps stay neutral. Child areas continue to inherit map, zone and area overrides.

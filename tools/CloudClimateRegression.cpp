@@ -65,27 +65,22 @@ int main() try
     EnvironmentDatabase db;
     Require(db.Load(L"data/areas.txt",error)&&db.Authoritative(),"zone IDs validated against shipped authoritative database");
     constexpr std::array<uint32_t,4> outdoorMaps{0,1,530,571};
-    // These seven root records are known unused/debug entries in the verified
-    // table, not player-facing world zones. Every other root area on the four
-    // outdoor continents must explicitly author its own sea-state multiplier.
-    constexpr std::array<uint32_t,7> nonPlayableRoots{30,276,296,1579,2280,9998,9999};
-    size_t outdoorRoots=0, intentionallyUnprofiled=0;
+    size_t rootAreas=0,outdoorRoots=0;
     for (const auto& [id,area]:db.Areas())
     {
-        if (area.parentId || std::find(outdoorMaps.begin(),outdoorMaps.end(),area.mapId)==outdoorMaps.end()) continue;
-        ++outdoorRoots;
-        if (std::find(nonPlayableRoots.begin(),nonPlayableRoots.end(),id)!=nonPlayableRoots.end())
-        {
-            ++intentionallyUnprofiled;
-            if (config.zones.count(id)) throw std::runtime_error("Unused/debug root received a zone profile " + std::to_string(id));
-            continue;
-        }
+        if (area.parentId) continue;
+        ++rootAreas;
+        if (std::find(outdoorMaps.begin(),outdoorMaps.end(),area.mapId)!=outdoorMaps.end()) ++outdoorRoots;
         const auto authored=config.zones.find(id);
         if (authored==config.zones.end() || !authored->second.values[WaterAgitation])
-            throw std::runtime_error("Missing explicit sea state for world root " + std::to_string(id) + " (" + area.name + ")");
+            throw std::runtime_error("Missing readable sea state for root " + std::to_string(id) + " on map "
+                                     + std::to_string(area.mapId) + " (" + area.name + ")");
+        const auto resolved=ResolveEnvironment(config,{area.mapId,id,0,true});
+        if (!Near(resolved.state[WaterAgitation],*authored->second.values[WaterAgitation]))
+            throw std::runtime_error("The resolver did not apply the sea state for root " + std::to_string(id));
     }
-    Require(outdoorRoots==165&&intentionallyUnprofiled==7&&config.zones.size()==158,
-            "all 158 non-placeholder roots across Eastern Kingdoms, Kalimdor, Outland and Northrend have explicit sea states");
+    Require(rootAreas==414&&outdoorRoots==165&&config.zones.size()==414,
+            "every one of the 414 AreaTable roots has a directly resolved per-zone sea state");
     for (const auto& [id,profile]:config.zones)
     {
         const auto* area=db.Area(id);
@@ -109,9 +104,10 @@ int main() try
             ResolveEnvironment(config,{}).state[CloudType]==0,"unknown/invalid locations have neutral fallback");
     // Water rides the same authoring layer, so the same two things have to hold: a zone line that
     // only names a sea state keeps its climate, and a climate cannot move the water on its own.
-    Require(Near(env(33)[WaterAgitation],1.45f)&&Near(env(12)[WaterAgitation],.45f)&&
+    Require(Near(env(33)[WaterAgitation],1.45f)&&Near(env(38)[WaterAgitation],.65f)&&
+            Near(env(3518)[WaterAgitation],.9f)&&Near(env(12)[WaterAgitation],.45f)&&
             Near(env(1497)[WaterAgitation],.3f),
-            "the shipped sea state runs from a Stranglethorn coast to an Undercity cistern");
+            "Stranglethorn stays exposed while Loch Modan, Nagrand and Undercity are calmer");
     Require(env(33)[CloudCoverage]>1.f&&Near(env(33)[CloudFeatureSize],.9f),
             "a water-only zone line inherits its climate profile instead of replacing it");
     Require(env(214)[WaterAgitation]>1.3f&&env(308)[WaterAgitation]>1.3f&&

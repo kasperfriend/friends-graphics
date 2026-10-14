@@ -133,6 +133,21 @@ int main() try {
  const auto bundledDatabase=std::filesystem::path("data/areas.txt");
  EnvironmentDatabase bundled;Require(bundled.Load(bundledDatabase.wstring(),error)&&bundled.Authoritative()&&bundled.AreaCount()==2849,"release bundles verified Ascension location database");
  Require(bundled.Area(10221)&&bundled.Area(10221)->parentId==1519,"bundled database includes custom Stormwind area");
+ // Point the real provider reader at this test process's known globals and
+ // sweep every authoritative root tuple. This proves every profile key is
+ // representable as a coherent Map/Zone/Area sample, not just parseable text.
+ writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
+ Require(provider.Verified(),"the synthetic exact-hash provider is enabled for the root-zone read sweep");
+ size_t readableRootZones=0;
+ for(const auto& [id,area]:bundled.Areas())if(!area.parentId) {
+  testMap=area.mapId;testZone=id;testArea=id;
+  const auto sample=provider.Sample(bundled,true);
+  if(!sample.valid||sample.mapId!=area.mapId||sample.zoneId!=id||sample.areaId!=id)
+   throw std::runtime_error("the location provider could not read root zone "+std::to_string(id));
+  ++readableRootZones;
+ }
+ Require(readableRootZones==414,"all 414 authoritative root-zone IDs pass the provider read sweep");
+ testMap=0;testZone=12;testArea=87;std::filesystem::remove(providerFile);
  const auto actual=std::filesystem::path("build/client-research/areas.txt");
  if(std::filesystem::exists(actual)) {EnvironmentDatabase exported;Require(exported.Load(actual.wstring(),error)&&exported.AreaCount()==2849&&!exported.Authoritative(),"real Ascension custom database loads with diagnostic-only gate");}
  std::cout<<"Environment regression passed\n";return 0;
