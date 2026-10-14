@@ -304,6 +304,13 @@ int main() try
                 "sun glint is compensated for its own lobe width");
         Require(shader.find("celestialPath*controls.w*.0992") != std::string::npos,
                 "the glint's output gain does not double-count the normalization");
+        // The per-body tint is a multiply whose identity is 0x808080, because the CPU uploads
+        // the colour bytes divided by 128. Any gain applied to it in the shader is a gain applied
+        // to every zone in the game, and it is exactly what an already-bright scene cannot
+        // survive: the device sweep samples a captured 128 gray through the whole shader and
+        // requires 128 back, and a `*2.0` here turned that into 255.
+        Require(shader.find("waterBody*=waterTint.rgb;") != std::string::npos,
+                "the per-body water tint stays a neutral-at-0x808080 multiply");
         // The look normalizations and the sea state are only trustworthy while the shader and the
         // previewer keep deriving their numbers from the same place.
         Require(shader.find("seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds)") != std::string::npos
@@ -315,6 +322,11 @@ int main() try
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(mirror.find("TargetSeaState(tuning, weather)") != std::string::npos,
                 "the game and the CPU preview ease the same sea state through one function");
+        // The look was tuned against this file, so a gain that exists in one copy and not the
+        // other is a frame nobody has looked at. Pin the mirror to the same neutral multiply.
+        Require(mirror.find("Mul(waterBody, tint)") != std::string::npos
+                && mirror.find("Mul(tint, 2.f)") == std::string::npos,
+                "the CPU mirror multiplies the same tint with no gain of its own");
         const std::string profiles = ReadAlongside("../EnvironmentProfiles.ini");
         {
             // The key's own length, and a section lookup that cannot be fooled by the file's header

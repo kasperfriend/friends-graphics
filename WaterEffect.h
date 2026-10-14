@@ -434,7 +434,12 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     }
     // Per-body colour authoring multiplies rather than replaces, so the zone's own
     // painted water survives tinted instead of being overwritten: 0x808080 neutral.
-    waterBody*=waterTint.rgb*2.0;
+    // The CPU uploads the bytes divided by 128, so the register already carries 1.0 at
+    // neutral and there is no gain to apply here. Doubling it (as an earlier revision of
+    // this line did) puts every authored colour a stop high and clips the bright ones:
+    // `tools/WaterDeviceRegression.cpp` renders a captured 128 gray through the whole
+    // shader and requires 128 back, which is where that doubling showed up as 255.
+    waterBody*=waterTint.rgb;
     rgb=waterBody;
     // Direct reflection of actual local emitters on the same wave normal.
     // This does not depend on SSR finding an opaque flame in scene depth.

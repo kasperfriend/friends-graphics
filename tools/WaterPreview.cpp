@@ -733,7 +733,9 @@ int main(int argc, char** argv)
                         V3 body = Lerp(rgb, bottom, validDepth * Saturate(refractionStrength));
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));
                     }
-                    waterBody = Mul(waterBody, Mul(tint, 2.f));
+                    // Same neutral-at-0x808080 contract as the shader: tint is uploaded as
+                    // bytes/128, so 1.0 is neutral and no gain belongs here.
+                    waterBody = Mul(waterBody, tint);
                     rgb = waterBody;
                     rgb = Lerp(rgb, reflected, Saturate(fresnel * (1.f - .5f * rough)
                         * (environmentStrength * .5f + ssrStrength * hit * 1.5f)));

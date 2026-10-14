@@ -386,6 +386,15 @@ Four further defects were found in code:
   capture deadline even if its camera is unavailable; the next frame retries.
   Offscreen draws still do not consume the world's capture opportunity.
 
+- The per-body `WaterColour` multiply carried a `*2.0` gain. The tint is uploaded as the
+  colour bytes over 128, so the documented neutral `0x808080` already arrives as 1.0, and
+  the doubling put every authored colour a stop high and clipped the bright ones - the
+  complete-shader sweep read a captured 128 gray back as 255. `tools/WaterPreview.cpp`
+  carried the same gain, so the preview sheets the look was tuned against were tuned bright
+  with it; the fix lands on both copies, and the two sheets under `Screenshots/` were
+  regenerated from the corrected mirror. A portable pin in `tools/WaterRegression.cpp` now
+  holds the shader and its CPU mirror to the one neutral multiply.
+
 The device regression tests COM lifetime/eviction/retry deterministically
 before HAL setup, actual highlighted/unhighlighted water pixels, and the
 **complete production shader's** refraction with sRGB both off and on. For
