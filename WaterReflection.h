@@ -32,15 +32,18 @@ inline void Prepare(IDirect3DDevice9* d){
  // The owned copy stays ready and is re-exposed on the next valid world tile.
  ClearInput();
  if(!watereffect::NeedsScene()||volume::internal||!renderer::water::IsMaterial(d))return;
- if(volume::owner!=d||!volume::ready||volume::composed||!volume::target||!volume::depth)return;
+ if(volume::owner!=d||volume::composed||!volume::target||!volume::depth)return;
  // Never capture a shadow/offscreen target or expose another device's scene.
  ComPtr<IDirect3DSurface9> current;
  if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=volume::target.Get())return;
- if(ready&&resources.owner==d){Expose();return;}
- // If the first copy fails, retry next frame, not after native/modern water
- // has already entered the color buffer. Every tile needs the same input.
+ if(ready&&resources.owner==d){if(volume::ready)Expose();return;}
+ // The FIRST world water draw is the capture deadline, even when camera
+ // capture is not ready yet. A later retry would include water already drawn
+ // into the color buffer (self-reflection/refraction and inconsistent tiles).
+ // Offscreen draws above do not consume this world's capture opportunity.
  if(attempted)return;
  attempted=true;
+ if(!volume::ready)return;
  D3DSURFACE_DESC desc{};
  if(FAILED(volume::target->GetDesc(&desc))||desc.MultiSampleType!=D3DMULTISAMPLE_NONE){++failedFrames;return;}
  if(resources.owner!=d||resources.width!=desc.Width||resources.height!=desc.Height||resources.format!=desc.Format||!resources.scene||!resources.surface){
