@@ -107,7 +107,7 @@ See [water rendering, verification and troubleshooting](docs/water-rendering.md)
 
 | Key | Action |
 | --- | --- |
-| `F7` | Open or close the grouped in-game tuning menu. |
+| `F7` | Open or close the tabbed in-game tuning menu. |
 | `F9` | Capture one diagnostic frame when celestial diagnostics are enabled. |
 | `F10` | Toggle weather visuals. |
 | `F11` | Toggle all injected graphics effects. |
@@ -115,7 +115,9 @@ See [water rendering, verification and troubleshooting](docs/water-rendering.md)
 
 `F8` is reserved for the unfinished AI Materials development path and is not a supported user control.
 
-F7 saves atmospheric, lighting, water and weather settings separately for each location. Select `Entire zone` to edit settings inherited by its subareas, or `This subarea` for a more specific override. Subarea values take priority over zone values. The `IMAGE & COLOR (GLOBAL)` block always uses the shared `GraphicsEffects.ini`, including the post-process toggle. Existing local color overrides are ignored.
+F7 now uses a left-hand category list: select a tab to open its related settings. Drag the title bar to move the window, or drag the bottom-right corner to resize it. Longer tabs scroll with the mouse wheel over the settings pane, the scrollbar, or the up/down buttons. The window stays on screen; its size, position, selected tab and per-tab scroll positions are retained while the client is running. Changes save automatically.
+
+F7 saves atmospheric, lighting, water and weather settings separately for each location. Select `Entire zone` to edit settings inherited by its subareas, or `This subarea` for a more specific override. Subarea values take priority over zone values. The `IMAGE & COLOR (GLOBAL)` tab always uses the shared `GraphicsEffects.ini`, including the post-process toggle. Existing local color overrides are ignored.
 
 Location presets automatically recognize the verified Ascension executable SHA-256 `e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6` when `[LocationProvider] ExeSHA256` is blank. Releases include `data/areas.txt`, exported from the verified client's loaded tables. Keep the `data` folder next to the DLL. Other executable versions need [environment setup and validation](docs/ENVIRONMENT-SYSTEM-RU.md). Unknown clients keep local presets locked; global image/color remains editable. Existing explicit client configurations are respected.
 
@@ -182,9 +184,11 @@ The installable output is written to `build\Release\`. The post-build step copie
 
 ## Continuous integration and releases
 
-`.github/workflows/build.yml` builds both Debug and Release configurations for every pull request targeting `main` and every push to `main`. It uses GitHub's `windows-2025-vs2026` image and verifies the DLL and both configuration files.
+`.github/workflows/build.yml` builds Release for each pull request targeting `main` and each push to `main`. Feature-branch pushes are not built a second time alongside their PR. A manual Build run is also available for any branch; enable its `debug` option when a Debug build is needed.
 
-Every successful push to `main` also creates a GitHub Release containing an install-ready ZIP with:
+Normal CI has two jobs: the Windows Release build (including shader validation, water/weather device tests, package verification and artifact upload), and the fast portable regressions on Linux. Changelog validation runs separately only when fragments or its workflow change. Tests for current renderer behavior are retained; duplicate runs and separate runner startups are removed.
+
+Each successful Release build uploads an install-ready artifact containing:
 
 - `d3d9.dll`
 - `ModernWoWRenderer.ini`
@@ -193,7 +197,7 @@ Every successful push to `main` also creates a GitHub Release containing an inst
 - required `MaterialCache` manifests
 - packaged weather textures
 
-The Release build is also retained as a workflow artifact for 14 days.
+Artifacts are retained for 14 days, including PR and manual builds. Publishing a GitHub Release is separate: run the manual `Release` workflow to build, validate and publish the ZIP. Ordinary pushes do not publish releases.
 
 ## Validation
 

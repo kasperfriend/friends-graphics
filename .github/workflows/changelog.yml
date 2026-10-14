@@ -2,12 +2,18 @@ name: changelog
 # Checks the changelog.d/ fragment files with the shared rules (https://github.com/Corfirean/coa-server-build/blob/main/changelog/GUIDE.md).
 on:
   push:
-    paths: ['changelog.d/**']
+    branches: [main]
+    paths: ['changelog.d/**', '.github/workflows/changelog.yml']
   pull_request:
-    paths: ['changelog.d/**']
+    branches: [main]
+    paths: ['changelog.d/**', '.github/workflows/changelog.yml']
 
 permissions:
   contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
