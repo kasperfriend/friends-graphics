@@ -238,8 +238,9 @@ int main() try
     Require(!HasWorldContext(false, false), "UI/loading frame with no world evidence is not sampleable");
     Require(HasWorldContext(false, true), "known terrain or liquid draws keep waves-only frames sampleable without INTZ");
     Require(HasWorldContext(true, false), "captured depth remains sufficient world evidence");
-    Require(ShouldHoldLocation(HasWorldContext(false, false)), "no-depth frame without terrain holds the confirmed location");
-    Require(!ShouldHoldLocation(HasWorldContext(false, true)), "terrain-only world frame permits location sampling");
+    Require(ShouldHoldLocation(HasWorldContext(false, false), true), "no-depth frame without terrain holds a confirmed location");
+    Require(!ShouldHoldLocation(HasWorldContext(false, false), false), "no-depth frame with nothing confirmed still polls, so a first location can arrive");
+    Require(!ShouldHoldLocation(HasWorldContext(false, true), true), "terrain-only world frame permits location sampling");
 
     std::printf("ALL DEVICE HEALTH TESTS PASSED\n");
     return 0;

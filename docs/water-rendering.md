@@ -135,12 +135,17 @@ changing the wrap fails the build rather than sliding the waves apart by eye.
 The comparison implementation runs a Tessendorf FFT wave simulation and an advected foam state
 texture on compute shaders, samples a mip-blurred reflection chain, and shades with full
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
-state without spending a render pass, and a **621-slot validation budget** enforced by
-`tools/ValidateShaders.ps1` (fxc /O3 measured the current shader at 597 slots on Windows CI on
-2026-10-14, with 24 slots held back for compiler variation. Round 3 initially estimated 608;
-the measured shader was 633, so the broad warp was moved to the vertex stage and interpolated
-to pixels rather than cutting foam or raising the budget blindly. Earlier rounds and the device
-fallback are recorded under "Shader budget raised for the volume rework" below). So each of those
+state without spending a render pass, and no ceiling on how many instruction slots the water pixel
+stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
+run, and lets it be (fxc /O3 put the current shader at 642 slots on Windows CI on 2026-10-14; it had
+been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
+which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
+than re-negotiating it. The count is still the number to argue about, and the reason to keep measuring
+at all is Round 3: it estimated 608, the shader measured 633, and instead of a zero-margin budget or
+cut visible shading the broad warp moved to the vertex stage and is interpolated to pixels - the slot
+count came down by changing *where* the work happens, not by removing work. Earlier rounds, the device
+fallback, and why the volume and cloud raymarches *are* still capped, are recorded under
+"Shader budget raised for the volume rework" below). So each of those
 has a substitute here: an analytic multi-train swell plus bounded value noise for the simulation,
 a roughness mix toward the sky for the blurred chain, and a shaped-exponent lobe whose exponent
 carries both the roughness and the sun's height for GGX with Smith visibility - a low sun smears the road
@@ -265,6 +270,38 @@ from the same matrix the displacement uses. `watereffect::Scope`'s save/restore 
 size - seventeen pixel registers and three vertex registers - because nothing new was added,
 only rearranged.
 
+Round 4 grew both stages by the minimum: the vertex stage gained `c204` (the grouping field's
+camera anchor) and the pixel stage `c217` (the four shading-only trains' phases, in one
+contiguous `float4`). The scope now saves and restores eighteen pixel and five vertex registers,
+`controls` is 72 floats and `vertexControls` is 20. **No interpolant was added, because there was
+no room for one** - see the register note below.
+
+| register | contents, as of round 4 |
+|---|---|
+| `c200` (VS) | amplitude, slide, sigma, one cell in yards |
+| `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
+| `c202` (VS) | xy = the phases of the two displaced trains; the PS's `c210.zw`, verbatim |
+| `c203` (VS) | xy = the domain warp's camera anchor, wrapped in the warp's own period |
+| `c204` (VS) | xy = the grouping field's camera anchor; never reaches the pixel stage |
+| `c210` (PS) | chop phase (xy), then the displaced pair's phases (zw) |
+| `c211` (PS) | texture creep (xy), unused (z), the wave gate (w) |
+| `c217` (PS) | the phases of the four trains only the shading carries |
+
+The warp value and its gradient arrive as `TEXCOORD7` (a `float4`: xyz the sample, w the
+grouping gain) and `TEXCOORD4` (a `float4`: xy the lattice coordinate, zw the grouping gradient).
+The pixel shader samples no low-frequency noise at all, which is what keeps a set nailed to the
+terrain for one multiply and one `dot`.
+
+That packing is not tidiness, it is the only option. Without a register declared as `psize0`,
+`vs_3_0` gives the vertex stage eleven `o#` registers and `ps_3_0` accepts ten `v#` ones - this
+Output struct was already at eleven fields, so a twelfth interpolant is not "a bit more bandwidth",
+it is `error X5622: Too many output registers declared (12)` and `error X5300: Invalid register
+number: 10` from fxc, which is exactly how round 4's first version failed CI. Both stages were
+already carrying a `float3` and a `float2` whose spare lanes could hold the envelope, so the
+envelope costs nothing. `tools/WaterRegression.cpp` now counts the Output fields and the pixel
+stage's parameters and refuses any other number, because that limit is invisible in the source
+and absolute at compile time.
+
 ### Looking at changes without a GPU
 
 `tools/WaterPreview.cpp` is a CPU mirror of the water pixel shader - the same wave field from `src/Water/WaveField.h`,
@@ -337,10 +374,12 @@ bright the disc is - were set against `tools/WaterPreview.cpp` above, which says
 than a reference screenshot can and less than an in-game pass does: the frames carry no client
 detail maps, no mip filtering and no vertex stage. The final check stays the F11 capture plus an
 in-game pass. The
-slot budget, the MSVC build and the device test all run on the Windows CI job; this environment
-cannot run fxc, so the **597-slot measurement** is a CI result, not a local one. The current
-621-slot ceiling keeps 24 slots of headroom for another SDK's instruction selection. In-game
-waves, transitions and foam still require a live-client pass.
+slot count, the MSVC build and the device test all run on the Windows CI job; this environment
+cannot run fxc, so every **slot measurement** in this document is a CI result, not a local one. The
+water pixel stage carries no ceiling any more, which puts the constraint on the measured number
+itself: the count is annotated on every run, so a change that moves it by tens of slots is something
+a reviewer reads and weighs, in the pull request that made it, rather than something a stale number
+decides. In-game waves, transitions and foam still require a live-client pass.
 
 ## Full rework round 3: motion, mass and foam (2026-10-14)
 
@@ -457,7 +496,134 @@ Windows run measured 633, not 608. Rather than accept a zero-margin increase or 
 shading, the broad domain warp and its gradient moved to the vertex stage and are interpolated
 through `TEXCOORD7`; the liquid mesh resolves this 35-yard-scale field smoothly, while the fine
 chop remains per pixel. That kept the same warped crest and chain-rule normal and measured **597**
-slots. `tools/ValidateShaders.ps1` now budgets 621 (597 measured plus 24 slots of compiler margin).
+slots. `tools/ValidateShaders.ps1` budgeted 621 for it at that point - the 597 measurement plus
+24 slots of compiler margin - a ceiling round 4 replaced, below.
+
+## Full rework round 4: the comb, and the sets (2026-10-14)
+
+The report after round 3 was not "the water is flat" any more. It was: *the waves still go in
+lines - I can clearly see line by line of waves going and going*, with a repeating pattern a
+player can count. Round 3 had fixed the sea following the camera, its pace, and its mass. It had
+not fixed the shape of the surface, and the reason is worth writing down because it is not
+obvious from a screenshot.
+
+### What was actually being seen
+
+A probe along a screen row in the mid-distance measured crest after crest at a spacing of exactly
+forty yards - train B's wavelength, in the 40/20/10 table - in perfectly straight lines, and the
+blob that the domain warp produced travelled with the camera. Three things produced that, in order
+of how much of the complaint each one owns:
+
+1. **Three sinusoids are a rhythm.** With weights 1/.5/.26 the forty-yard train carries the
+   silhouette, and the pixel stage is the only place the ten yard train exists at all: the client's
+   liquid grid is about four yards apart, so the vertex stage displaces the two long trains and the
+   short one contributes nothing to a crest. Two displaced trains a factor of two apart realign
+   every other crest, which IS a comb. The far field was worse than a comb: the chop's
+   `filter=rsqrt(1+footprint)` term fades the six-octave noise to almost nothing at distance, so
+   distant water was ONE sine at 40 yards with nothing on top of it. Straight, evenly spaced,
+   repeating: exactly the report.
+2. **The warp was too weak to bend a comb.** 3.2 cells of displacement at a 1/14-cell (35 yard)
+   scale bends a forty-yard crest by a few yards over its own length - visible as a wobbling line,
+   still a line. A wave that keeps its wavelength is a wave that keeps its spacing, however much it
+   curves.
+3. **Nothing decided where the waves were.** The amplitude was the same in every square yard of
+   the body, so the pattern had no reason not to repeat: a real sea arrives in SETS, five or six
+   tall crests and then flat water, because a band of wavenumbers carries its energy in a
+   modulated envelope.
+
+### What changed
+
+* **Six trains, in a table, with a start of their own.** Wavelengths 16, 11.5, 8, 5.8, 4.4 and
+  3.4 cells (40 down to 8.5 yards at the shipped wave size) - a ratio of about 1.35 between
+  neighbours and never an integer one - in six directions whose crest lines are never closer than
+  21 degrees, with weights 1/.62/.34/.19/.12/.075 falling off so that the summed SLOPE stays at
+  the value the shading's Jacobian was authored against, and a fixed phase offset per train
+  (`.37`, `.71`, `.19`, `.55`, `.83` of that train's own wavelength) so no two crests cross
+  lattice zero together. Two of the six are displaced, all six are shaded, exactly as before:
+  the mesh budget did not change.
+* **One stronger warp instead of two weak ones.** `.05` frequency (one sample per 50 yards) and
+  `5.f` cells of amplitude, displacing the crest ALONG the field. Five cells of bend on an
+  eleven-cell wavelength moves a crest fifteen yards sideways and back, which stretches the
+  spacing here and doubles crests up there: a bent train has no constant wavelength left to read
+  as a rhythm. The second decorrelated warp and the vortices from the previous round were cut -
+  they could not break a comb and they cost slots to prove it.
+* **A grouping envelope.** A third world-anchored noise field at one sample per 115 yards produces
+  a gain in `.52 .. 1.14`, and it multiplies the lift, the Gerstner slide, the shading slope, the
+  pinch, the chop riding on the swell and therefore the whitecaps. It is sampled ONCE, in the
+  vertex stage, and handed to the pixels in the spare lanes of `TEXCOORD7`/`TEXCOORD4` with its
+  gradient (there is no twelfth interpolant register to spare). The slope carries
+  it by the product rule - `dh = gain*dswell + swell*dgain` - so the flank of a set tilts the
+  water as well as dimming it, which is the difference between waves that fade out and waves that
+  run out. A ceiling just over 1 is deliberate: every fold-safe clamp, foam threshold and crest
+  mask is authored against the table's own maximum, and a gain that only ever goes down cannot
+  invent a second sea state in a sheltered bay.
+* **`detail.x` (the foam pattern) is NOT enveloped,** and the authored swell response
+  (`foreverStyle.x`) is applied BEFORE the gain: it is a slider on the wave, and differentiating an
+  envelope that already carried the slider would scale the slider by `dgain` too.
+
+What did not move is the core the task asked to keep: one world-anchored lattice, phases computed
+in double on the CPU from the draw's own matrix, per-train deep-water dispersion, the same analytic
+trains displaced and shaded, the client's detail map creeping underneath, and the Gerstner slide
+that makes a crest read as a body.
+
+### Registers, the slot count, and the interpolant ceiling
+
+The pixel stage grew one register (`c217`, the four shading-only trains' phases in one contiguous
+`float4` rather than gathered across three) and the vertex stage one (`c204`, the grouping field's
+anchor), so `watereffect::Scope` now saves and restores 18 pixel registers and 5 vertex ones. The
+`controls` array is 72 floats and `vertexControls` is 20.
+
+Before this round the pixel shader measured 597 slots of a 621-slot budget, and the estimate in
+this document was "about ten slots higher". The measured answer was **642**, and getting there
+taught two things that are worth keeping because neither is visible in the source.
+
+* The first Windows run did not fail on slots. It failed on interpolants: with the envelope added
+  the vertex stage had twelve outputs and the pixel stage eleven inputs, and with no register
+  declared `psize0` vs_3_0 offers eleven `o#` registers and ps_3_0 accepts ten `v#` ones -
+  `error X5622: Too many output registers declared (12)`, `error X5300: Invalid register
+  number: 10`. Nothing was dropped to fix it: the gain rides `waveWarp.w` and the set's gradient
+  rides `worldRel.zw`, spare lanes of registers already travelling to the pixel stage for other
+  reasons. `tools/WaterRegression.cpp` now counts the `Output` fields and the pixel stage's
+  parameters and refuses any other number, because a limit that only fxc knows about is a limit
+  that gets discovered an hour later in a Windows job log.
+* Six trains cost 45 slots, not ten. Two vectorised `sincos` batches, a chain rule and a
+  differentiated envelope all fold into one instruction per lane, so the price per train is
+  invisible to a reader counting terms in the source. The estimate was not paranoid enough. The
+  four short trains' slope terms remain the first thing to cut if this shader ever needs to
+  shrink - the heights matter more to the silhouette than their exact slopes do - and the
+  envelope is not on that list, because it is the one addition that no train can substitute for.
+
+The ceiling then went away, which is a decision rather than a measurement: the sea is not asked
+to shed visible features to keep the shape the shader had in October. `source` moved out of
+`$budgets` in `tools/ValidateShaders.ps1` and into `$measureOnly`, where fxc's count is still read,
+printed and annotated on every run - and still fails the job if it cannot be read at all. The other
+entries keep their budgets, because a raymarch loop that unrolls past what a driver accepts is a
+different failure from an expensive line of shading.
+
+What replaced the ceiling is the review, and it is worth being blunt that this is now a weaker
+guard than the number it replaced: the protection against a 900-slot water shader is a human
+reading an annotated count, so the number above is the thing a change has to answer for. The
+hardware limit was never the budget anyway - it is `MaxPixelShader30InstructionSlots`, and a card
+under it keeps native water because `CreatePixelShader` fails.
+
+### Verification
+
+* `tools/WaterRegression.cpp` holds the table to the properties that make it a sea: wavelengths
+  strictly decreasing and never an octave or a unison apart, no two trains parallel IN LINE SPACE
+  (a crest line has no direction, so the test takes the cross product and checks it modulo a half
+  turn), weights falling, each start inside its own train's wavelength, and every literal the
+  shaders spell equal to the header's - including the `0.01347826` in both stages being exactly
+  `kGroupFrequency * kGroupDepth`, and the fold clamp being written against `kGeometryPinch *
+  kGroupMax` rather than the unhistoried `kMaxPinch`. The first version of the direction table put
+  the two shortest trains at -71 and 104 degrees, which is five degrees apart in line space - one
+  comb with two teeth - and that test is what caught it.
+* The CPU mirror (`tools/WaterPreview.cpp`) carries the same warp, gain, product rule, pinch and
+  chop scaling, so the published frames are of the water the client draws. Before/after frames at
+  the same camera (`build/look-before.png`, `build/look-after.png`, not committed) show the
+  mid-distance changing from evenly spaced parallel bands into crossing crests at several angles
+  with visibly grouped heights.
+* Still open, in `TODO.md`: the `fxc` slot count, and a look in-world - a CPU mirror can prove the
+  numbers agree and cannot prove the water looks right at 40 feet above a harbour.
 
 ## Shader budget raised for the volume rework (2026-10-14)
 
@@ -639,10 +805,12 @@ The replacement now uses real loops for SSR and light occlusion, a vectorized
 noise hash, two wave octaves, CPU-side uniform rotation, and a single celestial
 specular lobe. These keep waves, SSR, sky reflections, refraction, absorption,
 foam, celestial glint, and local-light reflections in the same pass. Windows
-shader validation enforces a **621-slot budget** on it (597 measured with fxc /O3 on 2026-10-14,
-plus 24 slots of margin; the broad domain warp is vertex-sampled and interpolated to keep the
-pixel shader within budget without removing foam or its chain-rule normal). Earlier shader-budget
-history, including why the original 496-slot ceiling moved, is recorded above. Device-creation
+shader validation measured it against a **621-slot budget** (597 slots with fxc /O3 plus 24 of
+margin; the broad domain warp is vertex-sampled and interpolated to keep the pixel shader inside that
+number without removing foam or its chain-rule normal). That budget no longer exists for water - the
+round that retired it and the measurement that prompted it are described under "Full rework round 4"
+above. Earlier shader-budget history, including why the original 496-slot ceiling moved, is recorded
+above. Device-creation
 failures log the HRESULT and device instruction
 limit once, and retry after reset rather than on every tile.
 
@@ -686,10 +854,11 @@ the reporting player's machine. In-game confirmation still matters.
 
 ## Tests
 
-- `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if water
-  exceeds 621 static instruction slots (597 measured with fxc /O3 on Windows CI on 2026-10-14,
-  plus 24 slots of compiler margin; the ceiling was raised from 496 - see "Shader budget raised
-  for the volume rework") or its instruction count cannot be read.
+- `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
+  compile, if the water instruction count cannot be read, or if any *budgeted* shader - the volume
+  and cloud raymarches and weather - exceeds its ceiling. The water pixel stage is measured and
+  annotated but not capped (fxc /O3: 642 slots on Windows CI on 2026-10-14; the 621 it used to be
+  held to is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the

@@ -200,8 +200,9 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         const bool knownWorldDraw = weathervisuals::worldGeometrySeenThisFrame || watereffect::frameCandidates>0;
         const bool worldFrame = renderer::HasWorldContext(
             renderer::DepthCapture::Instance().HasDepth(), knownWorldDraw);
-        renderer::EnvironmentProfileManager::Instance().Update(now, worldFrame,
-            renderer::ShouldHoldLocation(worldFrame));
+        auto& environment = renderer::EnvironmentProfileManager::Instance();
+        environment.Update(now, worldFrame,
+            renderer::ShouldHoldLocation(worldFrame, environment.Location().valid));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();

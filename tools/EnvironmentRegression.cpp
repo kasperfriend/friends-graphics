@@ -97,8 +97,9 @@ int main() try {
  writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
  Require(provider.Verified()&&provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==87,"exact-hash provider reads validated live test-process image globals");
  Require(!provider.Sample(db,false).valid,"provider rejects absent world context instead of guessing from stale IDs");
- Require(ShouldHoldLocation(HasWorldContext(false,false)),"HookedPresent holds a confirmed zone when a no-depth sample would be invalid");
- Require(!ShouldHoldLocation(HasWorldContext(false,true)),"a known-draw waves-only frame re-enables verified location sampling");
+ Require(ShouldHoldLocation(HasWorldContext(false,false),true),"HookedPresent holds a confirmed zone when a no-depth sample would be invalid");
+ Require(!ShouldHoldLocation(HasWorldContext(false,false),false),"no confirmed location is never a reason to stop polling");
+ Require(!ShouldHoldLocation(HasWorldContext(false,true),true),"a known-draw waves-only frame re-enables verified location sampling");
  testArea=12345;Require(provider.Sample(db,true).valid,"provider accepts unknown custom area with known zone and map");testArea=87;
  testArea=0;Require(provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==0,"zero subarea preserves validated zone/map without inventing AreaID");testArea=87;
  writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");std::filesystem::remove(providerFile);

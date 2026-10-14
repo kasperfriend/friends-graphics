@@ -147,7 +147,13 @@ F7 now uses a left-hand category list: select a tab to open its related settings
 
 F7 saves atmospheric, lighting, water and weather settings separately for each location. Select `Entire zone` to edit settings inherited by its subareas, or `This subarea` for a more specific override. Subarea values take priority over zone values. The `IMAGE & COLOR (GLOBAL)` tab always uses the shared `GraphicsEffects.ini`, including the post-process toggle. Existing local color overrides are ignored.
 
-Location presets automatically recognize the verified Ascension executable SHA-256 `e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6` when `[LocationProvider] ExeSHA256` is blank. Releases include `data/areas.txt`, exported from the verified client's loaded tables. Keep the `data` folder next to the DLL. Other executable versions need [environment setup and validation](docs/ENVIRONMENT-SYSTEM-RU.md). Unknown clients keep local presets locked; global image/color remains editable. Existing explicit client configurations are respected.
+Location presets automatically recognize the verified Ascension executable SHA-256 `e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6` when `[LocationProvider] ExeSHA256` is blank. Releases include `data/areas.txt`, exported from the verified client's loaded tables. Keep the `data` folder next to the DLL. Other executable versions need [environment setup and validation](docs/ENVIRONMENT-SYSTEM-RU.md) The fingerprints of a stock 3.3.5a build 12340 `wow.exe` are recorded as a comment on
+`[LocationProvider]` in `EnvironmentProfiles.ini`: copying that SHA-256 into `ExeSHA256` and naming researched
+RVAs is what opts that client in, because nothing is ever read from an executable the configuration has not been
+told about, and F7 names the step that refused. Unknown clients keep local presets locked; global image/color
+remains editable. Existing explicit client configurations are respected.
+
+If the header says `Location unavailable`, the reason follows it on the same line: `not configured` means `EnvironmentProfiles.ini` is not next to `d3d9.dll`, `unrecognized executable` means your client build has no verified location addresses yet (its SHA-256 is recorded in `ModernWoWRenderer.log`), `ids fail area database` means `data\areas.txt` is missing or was not exported from the client you are running, and `no world frame yet` clears itself once the world is drawn. `F12` retries after you fix a file.
 
 If F7 is locked, unresponsive, or fails to save, open F7 and reproduce the problem, then send `MenuDiagnostics.log` from the client directory with a screenshot. It records the build, executable hash, location validation, database status, viewport/client sizes, and save/render failures. It rotates at 1 MiB to `MenuDiagnostics.log.previous`. If no log exists, include `ModernWoWRenderer.log`. F12 reloads both settings and the area database; installing a new DLL requires restarting the game.
 
@@ -155,7 +161,7 @@ If F7 is locked, unresponsive, or fails to save, open F7 and reproduce the probl
 
 1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
 2. Extract its contents into the Ascension client directory, next to the game executable.
-3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, and `GraphicsEffects.ini` are in that directory. Keep the packaged `textures` and `MaterialCache` directories beside them.
+3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, and `EnvironmentProfiles.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
 4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` by hand.
 
 Example layout:

@@ -20,11 +20,21 @@ void EnvironmentProfileManager::Reload() {
     // F12 must also recover after installing/fixing the location database.
     std::string databaseError;
     if(!database.Load(basePath+L"data\\areas.txt",databaseError))menudiagnostics::Write("DATABASE reload failed: "+databaseError);
+    // The provider is configured FIRST and from its own INI section. It used to sit below
+    // the EnvironmentProfiles.ini parse, so a client folder without that file - which the
+    // install instructions do not require, and which the profile parser rejects outright
+    // for one bad key - returned here and never configured the provider. Every zone then
+    // read "Location unavailable" with the ids at 0 / 0 / 0, and a typo in an unrelated
+    // [Zone.1] value cost the player their location system. Location is not a profile
+    // setting; it must come up even when the profile file is missing or unusable.
+    provider.Configure(basePath+L"EnvironmentProfiles.ini");
+    Log(provider.Status());
+    if(!provider.Available())Log("Location unavailable: "+std::string(LocationFailureText(provider.Failure()))+LocationFailureHint(provider.Failure(),database.Authoritative()));
     std::ifstream input{std::filesystem::path(basePath+L"EnvironmentProfiles.ini")};std::ostringstream text;text<<input.rdbuf();
     EnvironmentConfiguration next;std::string error;
-    if(!input||!ParseEnvironmentConfiguration(text.str(),next,error)) {Log("Reload rejected; retaining previous config: "+error);menudiagnostics::Write("CONFIG reload rejected: "+(input?error:"EnvironmentProfiles.ini missing/unreadable"));return;}
-    config=std::move(next);provider.Configure(basePath+L"EnvironmentProfiles.ini");
-    Log(provider.Status());debounce.Reset();lastPoll=0;
+    if(!input||!ParseEnvironmentConfiguration(text.str(),next,error)) {Log("Profile reload rejected; retaining previous config: "+(input?error:"EnvironmentProfiles.ini missing/unreadable"));menudiagnostics::Write("CONFIG reload rejected: "+(input?error:"EnvironmentProfiles.ini missing/unreadable"));debounce.Reset();lastPoll=0;Retarget();WriteMenuReport("reload");return;}
+    config=std::move(next);
+    debounce.Reset();lastPoll=0;
     Retarget();
     WriteMenuReport("reload");
 }
@@ -50,7 +60,12 @@ void EnvironmentProfileManager::Update(uint64_t now,bool world,bool hold) {
         // particle/camera gaps cannot oscillate the environment.
         if(debounce.Confirm(sample,location,now,config.debounceMs)) {
             const auto revision=location.revision+1;location=sample;location.revision=revision;
-            Log(location.valid?"Location changed: Map="+std::to_string(location.mapId)+" Zone="+std::to_string(location.zoneId)+" Area="+std::to_string(location.areaId):"Location unavailable; Default environment");Retarget();
+            // The invalid branch is the line a supporter needs, so it names the cause and
+            // the raw ids: "unrecognized executable" and "ids fail area database" are
+            // two different failures with two different fixes, and both used to log as
+            // one identical "Location unavailable; Default environment" line.
+            Log(location.valid?"Location changed: Map="+std::to_string(location.mapId)+" Zone="+std::to_string(location.zoneId)+" Area="+std::to_string(location.areaId)
+                :"Location unavailable: "+std::string(LocationFailureText(provider.Failure()))+" ("+provider.ValidationStatus()+"), ids "+LocationIdsText(provider.Sampled(),provider.RawSample().mapId,provider.RawSample().zoneId,provider.RawSample().areaId));Retarget();
             WriteMenuReport("location changed");
         }
     }
@@ -67,8 +82,13 @@ std::vector<std::string> EnvironmentProfileManager::DebugLines() const {
         lines.push_back("AreaID: "+std::to_string(location.areaId)+"  "+name(location.areaId));
     } else {
         const auto& raw=provider.RawSample();
-        lines.push_back("Location unavailable - Environment: Default");
-        lines.push_back("Raw Map/Zone/Area: "+std::to_string(raw.mapId)+" / "+std::to_string(raw.zoneId)+" / "+std::to_string(raw.areaId));
+        const auto reason=provider.Failure();
+        lines.push_back("Location unavailable ("+std::string(LocationFailureText(reason))+") - Environment: Default");
+        const auto hint=LocationFailureHint(reason,database.Authoritative());
+        // The hint carries a " - " separator for the log line it was written to sit on;
+        // here it starts a line of its own, so the separator goes away.
+        if(!hint.empty())lines.push_back("Try: "+hint.substr(hint.find_first_not_of(" -")));
+        lines.push_back("Raw Map/Zone/Area: "+LocationIdsText(provider.Sampled(),raw.mapId,raw.zoneId,raw.areaId));
     }
     lines.push_back("Validation: "+provider.ValidationStatus());
     lines.push_back("Profile: "+resolved.profile+"  Source: "+resolved.source);
@@ -82,7 +102,7 @@ std::vector<std::string> EnvironmentProfileManager::CompactDebugLines() const {
  const auto map=database.Map(raw.mapId);
  std::vector<std::string> lines;
  if(location.valid)lines.push_back("Map "+std::to_string(raw.mapId)+" "+(map?*map:"Unknown")+"   |   Zone "+std::to_string(raw.zoneId)+" "+name(raw.zoneId)+"   |   Area "+std::to_string(raw.areaId)+" "+name(raw.areaId));
- else lines.push_back("Location unavailable  |  Raw Map / Zone / Area: "+std::to_string(raw.mapId)+" / "+std::to_string(raw.zoneId)+" / "+std::to_string(raw.areaId));
+ else lines.push_back("Location unavailable: "+std::string(LocationFailureText(provider.Failure()))+"  |  Map/Zone/Area: "+LocationIdsText(provider.Sampled(),raw.mapId,raw.zoneId,raw.areaId));
  lines.push_back("Profile: "+resolved.profile+"  |  Source: "+resolved.source+"  |  Transition: "+std::to_string(int(progress*100))+"%");
  lines.push_back("Location: "+provider.ValidationStatus()+"  |  "+provider.Status());
  lines.push_back(provider.Verified()&&database.Authoritative()&&location.valid?"Automatic environment active":"Automatic environment: pending location / database verification");

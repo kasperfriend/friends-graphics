@@ -101,8 +101,15 @@ namespace renderer
     // sample to the debounce path eventually clears a valid zone and silently
     // disables its map/zone/area tuning. Hold until either trusted render signal
     // says this is a world frame, whether or not the game window has focus.
-    constexpr bool ShouldHoldLocation(bool worldFrame) noexcept
+    //
+    // A hold defends a confirmed location, so it needs one: with nothing confirmed yet
+    // there is nothing to protect, and holding a no-depth frame also stalled the FIRST
+    // read in any session that reached a login/character screen with no terrain draw and
+    // no captured depth. The poll cadence and the world-frame precondition in the manager
+    // still gate the sample itself, so relaxing the hold cannot make a UI frame resolve a
+    // location; it only stops "no location yet" from becoming "no location ever".
+    constexpr bool ShouldHoldLocation(bool worldFrame, bool haveConfirmedLocation) noexcept
     {
-        return !worldFrame;
+        return !worldFrame && haveConfirmedLocation;
     }
 }
