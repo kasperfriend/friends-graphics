@@ -156,6 +156,10 @@ int main() try
             "Sample no longer collapses every unavailable provider into not configured");
         Require(Contains(provider, "failure=configureFailure=LocationFailure::NoWorldContext;"),
             "a configured provider waiting on a world frame says so instead of not configured");
+        Require(Contains(provider, "57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da") &&
+                Contains(provider, "HasVerified12340CodeSignature") &&
+                Contains(provider, "StockParentZone"),
+            "stock 3.3.5a build 12340 and its starter-valley parent zones are recognized out of the box");
     }
     {
         // The hold defended a confirmed zone against a frame with no world evidence. It

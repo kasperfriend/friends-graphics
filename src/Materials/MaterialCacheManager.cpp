@@ -3,6 +3,7 @@
 #include "TextureHashLookup.h"
 #include "WicTextureLoader.h"
 #include "../Core/FrameContext.h"
+#include "../D3D9/CameraContinuity.h"
 #include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedRenderState.h"
 #include "../D3D9/TrackedRenderState.h"
@@ -23,6 +24,44 @@ namespace renderer
         if (logPath.empty()) return;
         std::ofstream out(logPath, std::ios::app);
         if (out) out << msg << '\n';
+    }
+
+    static Vec3 ResolveMaterialLightWorldDirection(const FrameContext& frame)
+    {
+        static Vec3 s_lastLightWorld{ 0.577f, -0.577f, 0.577f };
+        const CelestialBody& sun = CelestialTracker::Instance().Sun();
+        const CelestialBody& moon = CelestialTracker::Instance().Moon();
+        const bool nightDominant = frame.moonlightFactor > frame.daylightFactor;
+        const bool useMoon = moon.visible && (nightDominant || !sun.visible);
+        const bool useSun = sun.visible && !useMoon;
+        const CelestialBody* activeBody = useSun ? &sun : (useMoon ? &moon : nullptr);
+        if (activeBody)
+        {
+            Vec3 world = activeBody->worldSpaceDirection;
+            if (frame.viewRawValid)
+            {
+                float resolved[3]{ world.x, world.y, world.z };
+                ViewDirectionToWorld(&frame.viewRaw.m[0][0], &activeBody->viewSpaceDirection.x, resolved);
+                world = { resolved[0], resolved[1], resolved[2] };
+            }
+            const float len = std::sqrt(world.x * world.x + world.y * world.y + world.z * world.z);
+            if (std::isfinite(len) && len > 1e-4f)
+            {
+                s_lastLightWorld = { world.x / len, world.y / len, world.z / len };
+                return s_lastLightWorld;
+            }
+        }
+        if (frame.directLightValid)
+        {
+            const Vec3& d = frame.directLightDirectionWorld;
+            const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+            if (std::isfinite(len) && len > 1e-4f)
+            {
+                s_lastLightWorld = { d.x / len, d.y / len, d.z / len };
+                return s_lastLightWorld;
+            }
+        }
+        return s_lastLightWorld;
     }
 
     MaterialCacheManager& MaterialCacheManager::Instance()
@@ -654,17 +693,14 @@ float4 main(PS_IN input) : COLOR0
         D3DVIEWPORT9 viewport{};device->GetViewport(&viewport);
         if(!viewport.Width||!viewport.Height)return;
 
-        const CelestialBody& sun=CelestialTracker::Instance().Sun();
-        const CelestialBody& moon=CelestialTracker::Instance().Moon();
-        const CelestialBody* body=sun.visible?&sun:(moon.visible?&moon:nullptr);
-        float wx=.577f,wy=-.577f,wz=.577f;
-        if(body){wx=body->worldSpaceDirection.x;wy=body->worldSpaceDirection.y;wz=body->worldSpaceDirection.z;}
         const FrameContext& frame=FrameContext::Current();
+        const Vec3 lightWorld=ResolveMaterialLightWorldDirection(frame);
+        float wx=lightWorld.x,wy=lightWorld.y,wz=lightWorld.z;
         float vx=wx,vy=wy,vz=wz;
-        if(frame.cameraValid){
-            vx=wx*frame.view.m[0][0]+wy*frame.view.m[1][0]+wz*frame.view.m[2][0];
-            vy=wx*frame.view.m[0][1]+wy*frame.view.m[1][1]+wz*frame.view.m[2][1];
-            vz=wx*frame.view.m[0][2]+wy*frame.view.m[1][2]+wz*frame.view.m[2][2];}
+        if(frame.viewRawValid){
+            vx=wx*frame.viewRaw.m[0][0]+wy*frame.viewRaw.m[1][0]+wz*frame.viewRaw.m[2][0];
+            vy=wx*frame.viewRaw.m[0][1]+wy*frame.viewRaw.m[1][1]+wz*frame.viewRaw.m[2][1];
+            vz=wx*frame.viewRaw.m[0][2]+wy*frame.viewRaw.m[1][2]+wz*frame.viewRaw.m[2][2];}
         float screenLen=std::sqrt(vx*vx+vy*vy+1e-6f);vx/=screenLen;vy=-vy/screenLen;
         float strength=std::clamp(material->normalStrength*(m_globalNormalStrength/.35f)*1.25f*profile.normal,.10f,2.0f);
         float c12[4]={vx,vy,vz,strength};
@@ -777,18 +813,8 @@ float4 main(PS_IN input) : COLOR0
         // In WoW world: X is North, Y is West, Z is Up
         // Terrain UVs: U corresponds to -Y, V corresponds to -X
         // Tangent frame: T = (0, -1, 0), B = (-1, 0, 0), N = (0, 0, 1)
-        float sx = 0.577f, sy = -0.577f, sz = 0.577f;
-
-        const CelestialBody& sun = CelestialTracker::Instance().Sun();
-        const CelestialBody& moon = CelestialTracker::Instance().Moon();
-        const CelestialBody* activeBody = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
-
-        if (activeBody)
-        {
-            sx = activeBody->worldSpaceDirection.x;
-            sy = activeBody->worldSpaceDirection.y;
-            sz = activeBody->worldSpaceDirection.z;
-        }
+        const Vec3 lightWorld = ResolveMaterialLightWorldDirection(FrameContext::Current());
+        float sx = lightWorld.x, sy = lightWorld.y, sz = lightWorld.z;
 
         // Transform light into terrain tangent space
         float tx = -sy;
@@ -804,8 +830,8 @@ float4 main(PS_IN input) : COLOR0
         float vsRow[3][4]{};
         if (SUCCEEDED(device->GetVertexShaderConstantF(0, vsRow[0], 3)))
         {
-            float fx = vsRow[2][0];
-            float fy = vsRow[2][1];
+            float fx = vsRow[0][2];
+            float fy = vsRow[1][2];
             float fz = vsRow[2][2];
             vx = fy;
             vy = fx;
@@ -1071,16 +1097,8 @@ float4 main(PS_IN input) : COLOR0
             LogMessage(m_logPath, msg);
         }
 
-        float sx = 0.577f, sy = -0.577f, sz = 0.577f;
-        const CelestialBody& sun = CelestialTracker::Instance().Sun();
-        const CelestialBody& moon = CelestialTracker::Instance().Moon();
-        const CelestialBody* activeBody = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
-        if (activeBody)
-        {
-            sx = activeBody->worldSpaceDirection.x;
-            sy = activeBody->worldSpaceDirection.y;
-            sz = activeBody->worldSpaceDirection.z;
-        }
+        const Vec3 lightWorld = ResolveMaterialLightWorldDirection(FrameContext::Current());
+        float sx = lightWorld.x, sy = lightWorld.y, sz = lightWorld.z;
 
         float tx = -sy, ty = -sx, tz = std::max(0.15f, sz);
         float invLen = 1.0f / std::sqrt(tx * tx + ty * ty + tz * tz + 1e-6f);
@@ -1090,8 +1108,8 @@ float4 main(PS_IN input) : COLOR0
         float vsRow[3][4]{};
         if (SUCCEEDED(device->GetVertexShaderConstantF(0, vsRow[0], 3)))
         {
-            vx = vsRow[2][1];
-            vy = vsRow[2][0];
+            vx = vsRow[1][2];
+            vy = vsRow[0][2];
             vz = std::max(0.2f, -vsRow[2][2]);
             float invVLen = 1.0f / std::sqrt(vx * vx + vy * vy + vz * vz + 1e-6f);
             vx *= invVLen; vy *= invVLen; vz *= invVLen;
