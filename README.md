@@ -83,7 +83,9 @@ of the cloud shader, at the shipped defaults.*
 
 ### Water
 
-See [water rendering, verification and troubleshooting](docs/water-rendering.md).
+See [water rendering, verification and troubleshooting](docs/water-rendering.md), and
+[the plan for the next water pass](docs/water-forever-round2-plan.md) for what the shading
+model is being moved to and which parts of it a `ps_3_0` shader can and cannot carry.
 
 - Screen-space reflections and environment fallback reflections.
 - Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
