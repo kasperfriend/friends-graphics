@@ -55,7 +55,7 @@ static void ReachEverySetting(OverlayLayout& l) {
     assert(count==int(seen.size()));
 }
 int main() {
-    assert(Tabs().size()==10);
+    assert(Tabs().size()==11);
     std::set<std::pair<std::wstring,std::wstring>> keys;
     for(const auto& item:items)if(item.kind!=KIND_HEADER) {
         assert(keys.emplace(item.section,item.key).second);
