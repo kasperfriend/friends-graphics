@@ -77,6 +77,7 @@ struct BladeShader
     unsigned materialTries = 0; // draws whose material looked like foliage
     bool structureRefused = false; // no anchor, temps in the way, no texture coordinate
     int bladeVSign = 0;        // measured from the vertices; 0 = the reference convention
+    float greenPercent = -1.f; // how much of the card's texture is green, when that was readable
     // The block this shader is drawn with: the frame's own rows, with c19 taken
     // from this shader's measured blade direction.
     float rows[renderer::kGrassBladeRows][4]{};
@@ -366,12 +367,30 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
         char text[520]{};
         std::snprintf(text, sizeof(text),
             "Grass blade sway: the client draws its grass with a vertex shader this build has now bent - %s, %u "
-            "bytes, texture coordinate v%u, blade upright %s (measured from the draw's own vertices). Every draw of "
-            "it now moves with the wind; the HUD counts them as `blades`.",
+            "bytes, texture coordinate v%u, blade upright %s (measured from the draw's own vertices), card "
+            "%.0f%% green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
             model, bytes, injection.texcoordRegister,
-            entry.bladeVSign > 0 ? "the other way up" : "as the reference client has it");
+            entry.bladeVSign > 0 ? "the other way up" : "as the reference client has it",
+            double(entry.greenPercent < 0.f ? 0.f : entry.greenPercent * 100.f));
         Log(text);
     }
+}
+
+// The entry for a shader the device is drawing with - the client's own copy of a
+// shader this build has bent, or the bent one itself. Both have to find the same
+// entry: the SetVertexShader hook swaps the pointer on the way in, so every
+// later read of "what is bound" returns the BENT object, and without this a
+// bent shader would look like a new discovery on the next draw - it would be
+// examined again, refused for using its own scratch registers, and logged as a
+// refusal that means nothing.
+inline BladeShader* FindBladeShader(IDirect3DVertexShader9* shader) noexcept
+{
+    if (!shader) return nullptr;
+    auto found = g_blades.find(static_cast<const void*>(shader));
+    if (found != g_blades.end()) return &found->second;
+    for (auto& entry : g_blades)
+        if (entry.second.injected.Get() == shader) return &entry.second;
+    return nullptr;
 }
 
 // The client is binding `shader`: give it the bent one instead, when there is
@@ -503,9 +522,8 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
         return;
     }
 
-    BladeShader* entry = nullptr;
-    auto found = g_blades.find(static_cast<const void*>(shader));
-    if (found == g_blades.end())
+    BladeShader* entry = FindBladeShader(shader);
+    if (!entry)
     {
         if (g_blades.size() >= kMaxBladeShaders) return;
         BladeShader fresh;
@@ -515,13 +533,18 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     }
     else
     {
-        entry = &found->second;
         if (entry->injected)
         {
             // The common case by far: a shader this build has already bent. The
-            // only work left is the frame's constants, written before the draw.
+            // only work left is the frame's constants, written before the draw -
+            // and, for a client that binds its shaders through state blocks
+            // (which never reach this project's Set hook), the bind itself: if
+            // the device is about to draw with the client's own copy of a shader
+            // this build has bent, the bent one goes in here, where this draw has
+            // already been proven to be a blade card.
             ++g_status.bladeDraws;
             Upload(device, frame.frameIndex, *entry);
+            if (shader == entry->original.Get()) device->SetVertexShader(entry->injected.Get());
             return;
         }
         // A shader whose structure cannot take the block never can, and one whose
@@ -531,18 +554,25 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
         if (entry->structureRefused || entry->materialTries >= kMaterialRetries) return;
     }
 
-    // The material: a plant is a card cut out of a transparent image whose
-    // visible texels are green. The same witness the model path's material gate
-    // uses, for the same reason - the state mirror cannot be trusted to say, and
-    // skin, metal, cloth and leather are cut out as rarely as they are green.
+    // The material: a card cut out of a transparent image, which is what a blade
+    // is. Whether its texels are GREEN is deliberately not asked here, and the
+    // difference from the model path's gate one branch above is the point: the
+    // grass a player stands in has to be bent on any zone and any season, and a
+    // dry, autumn or snow-covered field is as much of a blade card as a green
+    // one. Nothing that could be mistaken for a player's gear can reach this
+    // path at all - a character, a weapon, a mount, a cape and every other
+    // attached model carries bone indices in its declaration and is judged by
+    // the model path above, which is where the green test earns its keep - so
+    // asking about colour here would refuse the very field this exists for.
     ++entry->materialTries;
     ++g_status.foliageDraws;
     const renderer::TextureAlphaProbe texture = material();
-    if (texture.verdict != renderer::TextureCutout::Cutout || !texture.foliage)
+    if (texture.verdict != renderer::TextureCutout::Cutout)
     {
         ++g_status.materialRefused;
         return;
     }
+    if (texture.readable()) entry->greenPercent = texture.greenFraction();
 
     // The declaration's own texture coordinate has to be the register the shader
     // reads. A shader compiled for one layout drawn through another is a mistake

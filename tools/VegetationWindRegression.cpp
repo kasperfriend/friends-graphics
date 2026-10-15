@@ -1320,6 +1320,12 @@ static void TestConfigurationAndWiring()
           sway.find("instanceCutout = stateCutout ?") != sway.npos,
         "the state answers the cut-out half, and the texture is asked the half the state cannot answer: whether it "
         "is green");
+    Check(Read("src/Effects/GrassBladeSway.h").find("if (texture.verdict != renderer::TextureCutout::Cutout)") !=
+          std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("!texture.foliage") == std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("greenPercent = texture.greenFraction();") != std::string::npos,
+        "a blade card is judged on being cut out at all and never on its colour - an autumn field has to bend too - "
+        "while the colour it did have is reported once, for the log");
     Check(sway.find("if (instanceCutout && !texture.foliage && texture.readable())") != sway.npos &&
           sway.find("g_reportedNotFoliage") != sway.npos &&
           Read("src/Core/TextureCutout.h").find("probe.foliage = probe.verdict == TextureCutout::Cutout") != sway.npos,
@@ -1968,6 +1974,24 @@ static void TestGrassBlades()
             "and it adds its displacement to the view position the engine built, from two travelling waves");
         Check(block.find("c19.x, c19.y") != std::string::npos,
             "with the blade's own direction (which way its texture runs) read from a constant");
+        Check(block.find("mul_sat r5.z, r5.z, c18.x") != std::string::npos &&
+              block.find("mul_sat r5.z, r5.z, r5.w") != std::string::npos &&
+              block.find("mov_sat") == std::string::npos,
+            "and its two clamps are the one saturate modifier the reference module proved on this hardware");
+        Check(block.find("frc r3.x, r3.x") != std::string::npos && block.find("frc r3.y") == std::string::npos,
+            "the per-blade random is taken with the write mask the fractional instruction requires");
+        Check(block.find("mul r3.x, r2.x, c19.z") != std::string::npos &&
+              block.find("mad r3.x, r2.y, c19.w, r3.x") != std::string::npos,
+            "and its own random takes both world axes, so a field does not stripe");
+        // The one piece of assembly syntax the compiler versions do not have to
+        // agree on, and the reason the block reads scalars from its own constants
+        // instead: no immediate float operand anywhere in the injected text.
+        bool immediate = false;
+        for (size_t i = 0; i + 2 < block.size(); ++i)
+            if (std::isdigit(static_cast<unsigned char>(block[i])) && block[i + 1] == '.' &&
+                std::isdigit(static_cast<unsigned char>(block[i + 2])))
+                immediate = true;
+        Check(!immediate, "the injected block carries no immediate float operand: every scalar it reads is in c14..c19");
     }
 
     // The constants: one block, six rows, every component accounted for.
@@ -2004,11 +2028,13 @@ static void TestGrassBlades()
             "turned off the wind by the cross angle, as the setting says");
         Check(Near(packed.rows[3][0], .5f) && Near(packed.rows[3][1], 1.5f) && Near(packed.rows[3][3], -.01f),
             "the two phases travel with the frame, and the range fade is written as a fall-off per yard");
-        Check(Near(packed.rows[4][0], 1.f / .75f) && Near(packed.rows[4][1], -.25f / .75f) &&
+        Check(Near(packed.rows[4][0], 1.f / .75f) && Near(packed.rows[4][1], -.25f) &&
               Near(packed.rows[4][2], .7f) && Near(packed.rows[4][3], .6f),
             "the ramp holds the bottom share of the blade rigid, and every blade gets its own amplitude within the variance");
         Check(Near(packed.rows[5][0], -1.f) && Near(packed.rows[5][1], 1.f),
             "and the default blade runs the reference client's way up: 1 at the base, 0 at the tip");
+        Check(Near(packed.rows[5][2], .618034f) && Near(packed.rows[5][3], .381966f),
+            "and its own random is hashed out of both world axes with the block's own basis");
         const GrassBladeConstants flipped = PackGrassBladeConstants(frame, 1);
         Check(Near(flipped.rows[5][0], 1.f) && Near(flipped.rows[5][1], 0.f),
             "a blade whose own vertices measured the other way up is bent by the same block with that sign flipped");
@@ -2113,6 +2139,15 @@ static void TestGrassBlades()
         Check(blades.find("entry.structureRefused = true;") != blades.npos &&
               blades.find("g_status.refused;") != blades.npos,
             "and every refusal is recorded on the shader that failed, so nothing is examined twice");
+        Check(blades.find("BladeShader* entry = FindBladeShader(shader);") != blades.npos &&
+              blades.find("for (auto& entry : g_blades)") != blades.npos &&
+              blades.find("if (entry.second.injected.Get() == shader) return &entry.second;") != blades.npos,
+            "a bent shader that is what the device is drawing with maps back to its own entry - the swap means every "
+            "later read of \"what is bound\" returns the bent object, and it must not be examined twice");
+        Check(blades.find("if (shader == entry->original.Get()) device->SetVertexShader(entry->injected.Get());") !=
+              blades.npos,
+            "and a client that binds its shaders through state blocks - which never reach the Set hook - still draws "
+            "the bent one, because the draw that proved it is a blade card binds it");
     }
     Pass("grass blade wind: a shader text, the block injected into it, the constants it reads, and the wiring");
 }

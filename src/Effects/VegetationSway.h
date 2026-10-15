@@ -486,7 +486,7 @@ namespace detail
         if (!stored.layout.valid && report && !stored.reported)
         {
             stored.reported = true;
-            char text[320]{};
+            char text[512]{};
             if (stored.read)
             {
                 char described[256]{};

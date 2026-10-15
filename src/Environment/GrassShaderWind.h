@@ -114,8 +114,8 @@ namespace renderer
     // c15 = { primary  dir * k, primary  dir * amplitude }
     // c16 = { crosst    dir * k, cross    dir * amplitude }
     // c17 = { phasePrimary, phaseCross, jitter, -1/distance }
-    // c18 = { bendScale, bendShift, varianceCentre, varianceSpread }
-    // c19 = { bladeVScale, bladeVOffset, 0, 0 }
+    // c18 = { bendScale, -anchor, varianceCentre, varianceSpread }
+    // c19 = { bladeVScale, bladeVOffset, hashX, hashY }
     //
     // The two rows per wave carry the same heading twice: `dir * k` is what the
     // phase is built from (dot(worldPosition, dir * k)), and `dir * amplitude` is
@@ -179,12 +179,15 @@ namespace renderer
         // mad, so the fade arrives as saturate(1 - depth/distance).
         c17[3] = -1.f / std::max(1.f, frame.distanceYards);
 
-        // The ramp: saturate(a * bendScale + bendShift) is 0 for the first
-        // `anchor` share of the blade and 1 at its tip. Both numbers are the
-        // anchor's, divided out here so the shader never has to.
+        // The ramp, as the one multiply the block can clamp: the input it is
+        // given (v * vScale + vOffset, which is 0 at the blade's base and 1 at
+        // its tip either way up) has the rigid share subtracted from it, and
+        // `mul_sat` by the anchor's own scale turns that into 0 for the first
+        // `anchor` share of the blade and 1 at its tip. Both numbers are divided
+        // out here so the shader never has to.
         const float anchor = std::clamp(settings.anchor, 0.f, .9f);
         c18[0] = 1.f / (1.f - anchor);
-        c18[1] = -anchor / (1.f - anchor);
+        c18[1] = -anchor;
         const float variance = std::clamp(settings.variance, 0.f, 1.f);
         c18[2] = 1.f - variance * .5f;  // every blade's amplitude is this ...
         c18[3] = variance;              // ... plus this much of its own random
@@ -194,6 +197,13 @@ namespace renderer
         // the draw's vertices say nothing either way.
         c19[0] = bladeVSign > 0 ? 1.f : -1.f;
         c19[1] = bladeVSign > 0 ? 0.f : 1.f;
+        // The basis a blade's own random is hashed out of its world position with.
+        // Two incommensurate numbers (the golden ratio and its complement) so that
+        // blades sharing an X do not share a phase and the field does not read as
+        // vertical stripes; they are constants of the block rather than settings,
+        // because the hash has to keep working when every setting is at zero.
+        c19[2] = .618034f;
+        c19[3] = .381966f;
         return out;
     }
 
@@ -258,8 +268,9 @@ namespace renderer
     //     the engine's own modelview rows (c0/c1/c2 hold the world axes for a
     //     batch that is drawn unrotated, which is what a baked doodad batch is),
     //     plus the camera position this renderer passes in c14;
-    //   * a blade's own random phase is a hash of its world position, so it keeps
-    //     its identity while the camera moves and never shimmers frame to frame;
+    //   * a blade's own random phase is a hash of its world position (`c19.z`/`w`),
+    //     so it keeps its identity while the camera moves and never shimmers frame
+    //     to frame;
     //   * the bend weight is the blade's texture v, held rigid at the base and
     //     squared towards the tip, faded with the distance from the camera, and
     //     varied from blade to blade;
@@ -270,7 +281,10 @@ namespace renderer
     //
     // r0 is the shader's position and r1 is the engine's own scratch; the block
     // uses r2..r5 and NOTHING else, which is why the caller refuses to inject into
-    // any shader that touches them (see GrassBladeTempsUsed below).
+    // any shader that touches them (see GrassBladeTempsUsed below). It carries no
+    // immediate float operands at all: every scalar it reads is a component of
+    // c14..c19, which the caller writes itself, so the text has nothing in it the
+    // two versions of the compiler could read differently.
     //
     // `texcoord` is the v register of the blade's texture coordinate, taken from
     // the shader's own declaration line rather than assumed: a client that
@@ -284,42 +298,43 @@ namespace renderer
             "    add r2.x, r2.x, c14.x\n"
             "    dp3 r2.y, c1.xyz, r0.xyz\n"
             "    add r2.y, r2.y, c14.y\n"
-            "    mul r3.x, r2.x, 0.618034\n"
-            "    frc r3.y, r3.x\n"
+            "    mul r3.x, r2.x, c19.z\n"
+            "    mad r3.x, r2.y, c19.w, r3.x\n"
+            "    frc r3.x, r3.x\n"
             "    mad r5.z, %s.y, c19.x, c19.y\n"
-            "    mad_sat r5.z, r5.z, c18.x, c18.y\n"
+            "    add r5.z, r5.z, c18.y\n"
+            "    mul_sat r5.z, r5.z, c18.x\n"
             "    mul r5.z, r5.z, r5.z\n"
+            "    mad r3.y, r3.x, c18.w, c18.z\n"
             "    mad r5.w, r0.z, c17.w, c14.z\n"
-            "    mul_sat r5.w, r5.w, c14.z\n"
-            "    mul r5.z, r5.z, r5.w\n"
-            "    mad r3.x, r3.y, c18.w, c18.z\n"
-            "    mul r5.z, r5.z, r3.x\n"
+            "    mul_sat r5.z, r5.z, r5.w\n"
+            "    mul r5.z, r5.z, r3.y\n"
             "    mul r3.z, r2.x, c15.x\n"
             "    mad r3.z, r2.y, c15.y, r3.z\n"
             "    add r3.z, r3.z, c17.x\n"
-            "    mad r3.z, r3.y, c17.z, r3.z\n"
+            "    mad r3.z, r3.x, c17.z, r3.z\n"
             "    sincos r4.xy, r3.z\n"
             "    add r4.y, r4.y, c14.w\n"
-            "    mul r3.w, r2.x, c16.x\n"
-            "    mad r3.w, r2.y, c16.y, r3.w\n"
-            "    add r3.w, r3.w, c17.y\n"
-            "    mad r3.w, r3.y, c17.z, r3.w\n"
-            "    sincos r5.xy, r3.w\n"
+            "    mul r3.y, r2.x, c16.x\n"
+            "    mad r3.y, r2.y, c16.y, r3.y\n"
+            "    add r3.y, r3.y, c17.y\n"
+            "    mad r3.y, r3.x, c17.z, r3.y\n"
+            "    sincos r5.xy, r3.y\n"
             "    mul r3.z, r4.y, c15.z\n"
             "    mul r3.w, r4.y, c15.w\n"
             "    mad r3.z, r5.y, c16.z, r3.z\n"
             "    mad r3.w, r5.y, c16.w, r3.w\n"
             "    mul r3.z, r3.z, r5.z\n"
             "    mul r3.w, r3.w, r5.z\n"
-            "    mul r3.x, r3.z, c0.x\n"
-            "    mad r3.x, r3.w, c1.x, r3.x\n"
-            "    mul r2.z, r3.z, c0.y\n"
-            "    mad r2.z, r3.w, c1.y, r2.z\n"
-            "    mul r2.w, r3.z, c0.z\n"
-            "    mad r2.w, r3.w, c1.z, r2.w\n"
-            "    add r0.x, r0.x, r3.x\n"
-            "    add r0.y, r0.y, r2.z\n"
-            "    add r0.z, r0.z, r2.w\n",
+            "    mul r2.z, r3.z, c0.x\n"
+            "    mad r2.z, r3.w, c1.x, r2.z\n"
+            "    mul r2.w, r3.z, c0.y\n"
+            "    mad r2.w, r3.w, c1.y, r2.w\n"
+            "    mul r3.x, r3.z, c0.z\n"
+            "    mad r3.x, r3.w, c1.z, r3.x\n"
+            "    add r0.x, r0.x, r2.z\n"
+            "    add r0.y, r0.y, r2.w\n"
+            "    add r0.z, r0.z, r3.x\n",
             texcoord ? texcoord : "v3");
         return text;
     }
