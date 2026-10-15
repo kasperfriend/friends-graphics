@@ -538,10 +538,17 @@ inline bool VegetationCarriesManyPlants(const VegetationBones& bones, float meas
 // The other positive witness: a plant stands ON its origin, a joint attachment
 // hangs FROM it. Measured in world space, from the draw's own vertices through
 // their own bone blocks, so it costs no extra read.
-inline bool VegetationHangsFromItsOrigin(const VegetationMeasurement& measured, const float origin[3]) noexcept
+// A plant's own base is its origin, so the slack is a share of the model's own
+// height - not a fixed half yard, which a shoulder pad's origin sits inside with
+// room to spare. A TUFT of grass is a few tenths of a yard tall and still has to
+// pass, which is what the absolute floor is for.
+inline constexpr float kVegetationBelowPivotShare = .1f;
+inline bool VegetationHangsFromItsOrigin(const VegetationMeasurement& measured, const float origin[3],
+    float heightYards = 0.f) noexcept
 {
     if (!measured.valid || !origin) return false;
-    return origin[2] - measured.lowest[2] > kVegetationBelowPivot;
+    const float slack = std::max(kVegetationBelowPivot, kVegetationBelowPivotShare * heightYards);
+    return origin[2] - measured.lowest[2] > slack;
 }
 
 // The palette is passed as the raw float4 registers the client uploaded, in the

@@ -280,6 +280,7 @@ inline bool g_reportedSize = false;
 inline bool g_reportedMoved = false;
 inline bool g_reportedMerged = false;
 inline bool g_reportedLean = false;
+inline bool g_reportedNotFoliage = false;
 inline bool g_reportedSkeleton = false;
 inline bool g_reportedGround = false;
 inline bool g_reportedUnreadableGeometry = false;
@@ -338,6 +339,7 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_reportedMoved = false;
     g_reportedMerged = false;
     g_reportedLean = false;
+    g_reportedNotFoliage = false;
     g_reportedSkeleton = false;
     g_reportedGround = false;
     g_reportedUnidentifiedShader = false;
@@ -1111,56 +1113,81 @@ struct Scope
         // draw is refused here only when the state says solid AND its texture was
         // read AND that texture has no transparency in it - which is what a
         // crate, a boulder and a piece of armour look like.
-        const bool foliageMaterial = detail::TransparentMaterial(device);
+        const bool stateCutout = detail::TransparentMaterial(device);
         bool instanceCutout = false;
         // Only the solid-batch path below sets this: it is the model a solid batch
         // turned out to belong to, proved by its own vertex buffer.
         Instance* known = nullptr;
-        if (foliageMaterial)
         {
-            instanceCutout = true;
-        }
-        else
-        {
+            // The material has to be a CUT-OUT and it has to be FOLIAGE, and the
+            // second half is the one that keeps gear out of the wind. A cape, a
+            // shoulder pad, a saddle and a sword are attached to a body that is
+            // not moving, so no motion witness can refuse them; what they are not
+            // is green. The texture decides both halves - the transparent texels
+            // say "this is drawn as a card", the green ones say "this is a
+            // plant" - and it is read from the DEVICE, never from the state
+            // mirror, because the client's own cached state blocks never reach the
+            // Set hooks.
+            //
+            // The state is still the cheap first answer for the cut-out half: a
+            // material the device says is alpha tested or blended has already
+            // passed it, and the texture is then asked only the question the state
+            // cannot answer. A draw whose texture could not be read at all is left
+            // exactly as the client drew it.
+            const renderer::TextureAlphaProbe texture = detail::TextureIsCutout(device);
+            instanceCutout = stateCutout ? texture.verdict != renderer::TextureCutout::Opaque
+                                         : texture.verdict == renderer::TextureCutout::Cutout;
+            if (instanceCutout && !texture.foliage && texture.readable())
             {
-                // The draw's own texture, and nothing else: a placement point that
-                // matches some leaning model nearby is not evidence about THIS
-                // draw. A rider sits at their mount's placement point, and taking
-                // that match for an answer is how a cloak in the wind leans the
-                // mount underneath it.
-                const renderer::TextureAlphaProbe texture = detail::TextureIsCutout(device);
-                instanceCutout = texture.verdict == renderer::TextureCutout::Cutout;
-                if (!instanceCutout)
+                // A cut-out that is not green: a cloak, a shoulder pad, a saddle,
+                // a weapon, a banner - or a plant whose texture this build does
+                // not read as green. Refused, and named in the log, because both
+                // of those are answers a report needs.
+                instanceCutout = false;
+                if (!g_reportedNotFoliage)
                 {
-                    ++Status().skippedMaterial;
-                    // Two refusals, two messages, because they are two different
-                    // bugs: a texture that was READ and has no transparency is a
-                    // solid prop for certain, while a texture that could not be
-                    // read at all leaves the question open - and this is the line
-                    // that says which of the two is on the gate row.
-                    if (texture.verdict == renderer::TextureCutout::Opaque && !g_reportedSolidTexture)
-                    {
-                        g_reportedSolidTexture = true;
-                        char text[420]{};
-                        std::snprintf(text, sizeof(text),
-                            "Vegetation sway: a model draw has alpha test and alpha blend BOTH off and its stage 0 "
-                            "texture has no transparent texel in it (%u texels examined), so it is a solid prop and "
-                            "not foliage (shader hash=0x%016llx). The HUD counts these as `solid`.",
-                            texture.texels, static_cast<unsigned long long>(shader.hash));
-                        Log(text);
-                    }
-                    else if (texture.verdict == renderer::TextureCutout::Unknown && !g_reportedUnreadableTexture)
-                    {
-                        g_reportedUnreadableTexture = true;
-                        char text[420]{};
-                        std::snprintf(text, sizeof(text),
-                            "Vegetation sway: a model draw has alpha test and alpha blend BOTH off, and its stage 0 "
-                            "texture could not be read as a cut-out (no texture bound, not a texture, not level 0 "
-                            "lockable, or a format this reader cannot decode). The HUD counts these as `solid`; if "
-                            "foliage is among them, this is why it does not lean (shader hash=0x%016llx).",
-                            static_cast<unsigned long long>(shader.hash));
-                        Log(text);
-                    }
+                    g_reportedNotFoliage = true;
+                    char text[420]{};
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: a model draw's material is a cut-out, but only %.0f%% of the %u visible "
+                        "texels in its stage 0 texture are green, so it is not foliage - skin, metal, cloth, leather "
+                        "and a saddle all look like this, and so would a plant whose texture does not read as green. "
+                        "The HUD counts these as `solid` (shader hash=0x%016llx).",
+                        double(texture.greenFraction() * 100.f), texture.texels - texture.transparent,
+                        static_cast<unsigned long long>(shader.hash));
+                    Log(text);
+                }
+            }
+            if (!instanceCutout)
+            {
+                ++Status().skippedMaterial;
+                // Two refusals, two messages, because they are two different
+                // bugs: a texture that was READ and has no transparency is a
+                // solid prop for certain, while a texture that could not be
+                // read at all leaves the question open - and this is the line
+                // that says which of the two is on the gate row.
+                if (texture.verdict == renderer::TextureCutout::Opaque && !g_reportedSolidTexture)
+                {
+                    g_reportedSolidTexture = true;
+                    char text[420]{};
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: a model draw has alpha test and alpha blend BOTH off and its stage 0 "
+                        "texture has no transparent texel in it (%u texels examined), so it is a solid prop and "
+                        "not foliage (shader hash=0x%016llx). The HUD counts these as `solid`.",
+                        texture.texels, static_cast<unsigned long long>(shader.hash));
+                    Log(text);
+                }
+                else if (texture.verdict == renderer::TextureCutout::Unknown && !g_reportedUnreadableTexture)
+                {
+                    g_reportedUnreadableTexture = true;
+                    char text[420]{};
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: a model draw has alpha test and alpha blend BOTH off, and its stage 0 "
+                        "texture could not be read as a cut-out (no texture bound, not a texture, not level 0 "
+                        "lockable, or a format this reader cannot decode). The HUD counts these as `solid`; if "
+                        "foliage is among them, this is why it does not lean (shader hash=0x%016llx).",
+                        static_cast<unsigned long long>(shader.hash));
+                    Log(text);
                 }
             }
         }
@@ -1266,7 +1293,7 @@ struct Scope
             // shoulder pad hangs below the point the model is placed at.
             const auto solidMeasured = renderer::MeasureVegetationGeometry(solidModel.sample, solidModel.samples,
                 registers, bound, &frame.viewRaw.m[0][0], &frame.cameraPosition.x);
-            if (renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot))
+            if (renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot, known->height))
             {
                 known->notPlant = true;
                 StopLeaning(*known);
@@ -1482,7 +1509,7 @@ struct Scope
         // - has its geometry below its own origin. Nothing about a standing
         // character moves, so the motion witnesses cannot refuse its shoulder
         // pads; this one can, and it refuses them on the model's shape alone.
-        if (renderer::VegetationHangsFromItsOrigin(measured, origin))
+        if (renderer::VegetationHangsFromItsOrigin(measured, origin, height))
         {
             instance->notPlant = true;
             StopLeaning(*instance);

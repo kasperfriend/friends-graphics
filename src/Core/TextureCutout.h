@@ -60,9 +60,24 @@ namespace renderer
         uint64_t hash = 0;        // FNV-1a over the bytes that were examined
         unsigned texels = 0;      // texels examined, never padding
         unsigned transparent = 0; // how many of those are transparent
+        unsigned green = 0;       // opaque texels that are green-dominant
         float fraction = 0.f;     // transparent / texels
 
         bool readable() const noexcept { return verdict != TextureCutout::Unknown; }
+        // green / (texels - transparent): what share of the visible texture is
+        // green. Zero when nothing was read.
+        float greenFraction() const noexcept
+        {
+            const unsigned opaque = texels > transparent ? texels - transparent : 0u;
+            return opaque ? float(green) / float(opaque) : 0.f;
+        }
+        // A FOLIAGE texture: a cut-out whose visible texels are largely green - a
+        // leaf, a blade of grass, a canopy. This is the second, positive half of
+        // the material gate, and the D3D-side answer to the question the WXL
+        // modules answer with a model's file name: skin, metal, cloth, leather,
+        // a saddle, a shoulder pad and a sword are cut out as rarely as they are
+        // green, and when they are (a ragged cloak) they are not green either.
+        bool foliage = false;
     };
 
     // A texture is a cut-out when at least this share of it is transparent. A
@@ -76,6 +91,13 @@ namespace renderer
     // and is read whole; anything larger is sampled across the whole image by
     // taking every k-th row, so a transparent corner is found wherever it is.
     inline constexpr size_t kTextureAlphaScanBytes = 256u * 1024u;
+    // What "green" means, in the same spirit as the cut-out share: the green
+    // channel has to lead both others by a margin, and be bright enough to be a
+    // plant and not a dark shadow of one.
+    inline constexpr unsigned kTextureGreenLeadPercent = 108; // green >= 1.08x red and blue
+    inline constexpr unsigned kTextureGreenFloor = 40;        // of 255
+    // And this much of the visible texture has to be green before it is foliage.
+    inline constexpr unsigned kTextureFoliageGreenPercent = 25;
 
     inline constexpr uint64_t kTextureAlphaHashOffset = 0xcbf29ce484222325ull;
     inline constexpr uint64_t kTextureAlphaHashPrime = 0x100000001b3ull;
@@ -128,6 +150,98 @@ namespace renderer
         }
 
         inline bool IsCompressed(TextureFormat format) noexcept { return BlockBytes(format) != 0; }
+
+        // Is one decoded texel a plant's colour? Green leading both other
+        // channels and bright enough to be lit foliage. Alpha is not looked at
+        // here: the caller only asks about texels that are not transparent.
+        inline bool IsGreenTexel(unsigned r, unsigned g, unsigned b) noexcept
+        {
+            return g >= kTextureGreenFloor && g * 100 >= r * kTextureGreenLeadPercent &&
+                g * 100 >= b * kTextureGreenLeadPercent;
+        }
+
+        // The four colours of one DXT colour block, in the format's own order:
+        // the two endpoints, then the two interpolated entries - which depend on
+        // which endpoint is larger, exactly as the block's transparency does.
+        inline void DxtColourBlock(const uint8_t* block, unsigned char rgb[16][3]) noexcept
+        {
+            const uint16_t c0 = ReadU16(block), c1 = ReadU16(block + 2);
+            const auto expand = [](uint16_t c, unsigned char out[3]) {
+                const unsigned r = (c >> 11) & 0x1Fu, g = (c >> 5) & 0x3Fu, b = c & 0x1Fu;
+                out[0] = static_cast<unsigned char>((r << 3) | (r >> 2));
+                out[1] = static_cast<unsigned char>((g << 2) | (g >> 4));
+                out[2] = static_cast<unsigned char>((b << 3) | (b >> 2));
+            };
+            unsigned char entry[4][3]{};
+            expand(c0, entry[0]);
+            expand(c1, entry[1]);
+            for (int i = 0; i < 3; ++i)
+            {
+                if (c0 > c1)
+                {
+                    entry[2][i] = static_cast<unsigned char>((2 * unsigned(entry[0][i]) + unsigned(entry[1][i])) / 3);
+                    entry[3][i] = static_cast<unsigned char>((unsigned(entry[0][i]) + 2 * unsigned(entry[1][i])) / 3);
+                }
+                else
+                {
+                    entry[2][i] = static_cast<unsigned char>((unsigned(entry[0][i]) + unsigned(entry[1][i])) / 2);
+                    entry[3][i] = 0;
+                }
+            }
+            uint32_t indices = 0;
+            for (int i = 0; i < 4; ++i) indices |= uint32_t(block[4 + i]) << (8 * i);
+            for (int i = 0; i < 16; ++i)
+            {
+                const unsigned char* from = entry[(indices >> (2 * i)) & 3u];
+                rgb[i][0] = from[0];
+                rgb[i][1] = from[1];
+                rgb[i][2] = from[2];
+            }
+        }
+
+        inline void BlockColourIndices(TextureFormat format, const uint8_t* block,
+            unsigned char rgb[16][3]) noexcept
+        {
+            if (format == TextureFormat::Dxt4 || format == TextureFormat::Dxt5)
+                DxtColourBlock(block + 8, rgb); // the eight alpha bytes come first
+            else
+                DxtColourBlock(block, rgb);
+        }
+
+        // The colour of one unpacked texel, as 0..255 per channel. Luminance-only
+        // formats read as grey, which is never green: a luminance texture is not
+        // a leaf.
+        inline void TexelColour(TextureFormat format, const uint8_t* texel, unsigned char rgb[3]) noexcept
+        {
+            switch (format)
+            {
+            case TextureFormat::A8R8G8B8:
+            case TextureFormat::X8R8G8B8:
+                rgb[0] = texel[2];
+                rgb[1] = texel[1];
+                rgb[2] = texel[0];
+                return;
+            case TextureFormat::A4R4G4B4:
+            {
+                const uint16_t value = ReadU16(texel);
+                rgb[0] = static_cast<unsigned char>(((value >> 8) & 0xF) * 17);
+                rgb[1] = static_cast<unsigned char>(((value >> 4) & 0xF) * 17);
+                rgb[2] = static_cast<unsigned char>((value & 0xF) * 17);
+                return;
+            }
+            case TextureFormat::A1R5G5B5:
+            {
+                const uint16_t value = ReadU16(texel);
+                rgb[0] = static_cast<unsigned char>((((value >> 10) & 0x1F) * 255) / 31);
+                rgb[1] = static_cast<unsigned char>((((value >> 5) & 0x1F) * 255) / 31);
+                rgb[2] = static_cast<unsigned char>(((value & 0x1F) * 255) / 31);
+                return;
+            }
+            default: // A8, L8 and anything else: grey
+                rgb[0] = rgb[1] = rgb[2] = texel[0];
+                return;
+            }
+        }
 
         // One 4x4 block, as "is this texel transparent" in row-major order. The
         // 4-bit and interpolated blocks are decoded from the format's own
@@ -227,7 +341,12 @@ namespace renderer
             {
                 const uint8_t* data = base + size_t(unit) * unitBytes;
                 bool transparent[16]{};
-                if (compressed) BlockTransparency(format, data, transparent);
+                unsigned char colour[16][3]{};
+                if (compressed)
+                {
+                    BlockTransparency(format, data, transparent);
+                    BlockColourIndices(format, data, colour);
+                }
                 // Padding is never counted: a texture whose width is not a
                 // multiple of four would otherwise look transparent at its edge,
                 // and an opaque crate would read as a leaf.
@@ -242,7 +361,24 @@ namespace renderer
                         const bool clear = compressed ? transparent[j * 4 + i]
                             : AlphaOfTexel(format, data) < 128;
                         ++probe.texels;
-                        if (clear) ++probe.transparent;
+                        if (clear)
+                        {
+                            ++probe.transparent;
+                            continue;
+                        }
+                        // Only the texels that survive the cut-out are asked
+                        // about colour: a transparent texel's colour is whatever
+                        // the encoder left there, and it is not on screen.
+                        unsigned char rgb[3]{};
+                        if (compressed)
+                        {
+                            rgb[0] = colour[j * 4 + i][0];
+                            rgb[1] = colour[j * 4 + i][1];
+                            rgb[2] = colour[j * 4 + i][2];
+                        }
+                        else
+                            TexelColour(format, data, rgb);
+                        if (IsGreenTexel(rgb[0], rgb[1], rgb[2])) ++probe.green;
                     }
                 }
             }
@@ -253,6 +389,8 @@ namespace renderer
         if (probe.texels < kTextureAlphaMinTexels) return probe;
         probe.verdict = uint64_t(probe.transparent) * 100 >= uint64_t(probe.texels) * kTextureCutoutPercent
             ? TextureCutout::Cutout : TextureCutout::Opaque;
+        probe.foliage = probe.verdict == TextureCutout::Cutout &&
+            uint64_t(probe.green) * 100 >= uint64_t(probe.texels - probe.transparent) * kTextureFoliageGreenPercent;
         return probe;
     }
 }

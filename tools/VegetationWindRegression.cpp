@@ -1157,12 +1157,12 @@ static void TestConfigurationAndWiring()
     // The witnesses a standing character cannot pass by not moving: its items hang
     // from joints and its body references a whole skeleton, and both verdicts are
     // about the MODEL, so they are recorded and never re-opened.
-    Check(sway.find("if (renderer::VegetationHangsFromItsOrigin(measured, origin))") != sway.npos &&
-          sway.find("renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot)") != sway.npos &&
+    Check(sway.find("if (renderer::VegetationHangsFromItsOrigin(measured, origin, height))") != sway.npos &&
+          sway.find("renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot, known->height)") != sway.npos &&
           sway.find("instance->notPlant = true;") != sway.npos &&
           sway.find("if (instance->notPlant)") != sway.npos &&
           sway.find("if (owner->notPlant)") != sway.npos &&
-          wind.find("return origin[2] - measured.lowest[2] > kVegetationBelowPivot;") != sway.npos &&
+          wind.find("return origin[2] - measured.lowest[2] > slack;") != sway.npos &&
           hud.find("report(\"ground\", status.skippedGround);") != sway.npos,
         "a model that hangs from its placement point, or whose vertices reference a body's skeleton, is not a plant, "
         "and no batch of it ever leans");
@@ -1241,7 +1241,7 @@ static void TestConfigurationAndWiring()
         "both transparent modes are read from that device call");
     Check(sway.find("renderer::g_trackedState.alphaBlend || renderer::g_trackedState.alphaTest") != sway.npos,
         "and the mirror only answers when the device cannot be asked at all");
-    const auto materialGate = sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);");
+    const auto materialGate = sway.find("const bool stateCutout = detail::TransparentMaterial(device);");
     const auto cameraGate = sway.find("if (!frame.cameraValid || !frame.viewRawValid)");
     Check(materialGate != sway.npos && materialGate > layoutGate && materialGate > shaderGate &&
           materialGate < cameraGate,
@@ -1279,10 +1279,16 @@ static void TestConfigurationAndWiring()
         "read as the device has it bound, read-only, so the client's texture is never disturbed");
     Check(sway.find("ClassifyTextureCutout(") != sway.npos,
         "and decoded by the portable classifier, which is what the suite above tests");
-    Check(sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);") <
+    Check(sway.find("const bool stateCutout = detail::TransparentMaterial(device);") <
           sway.find("detail::TextureIsCutout(device)") &&
-          sway.find("if (foliageMaterial)") != sway.npos,
-        "the state is asked first: a cutout material is the common case and costs no lock");
+          sway.find("instanceCutout = stateCutout ?") != sway.npos,
+        "the state answers the cut-out half, and the texture is asked the half the state cannot answer: whether it "
+        "is green");
+    Check(sway.find("if (instanceCutout && !texture.foliage && texture.readable())") != sway.npos &&
+          sway.find("g_reportedNotFoliage") != sway.npos &&
+          Read("src/Core/TextureCutout.h").find("probe.foliage = probe.verdict == TextureCutout::Cutout") != sway.npos,
+        "a cut-out that is not green is gear (a cape, a shoulder pad, a saddle, a sword) and is refused, with the "
+        "share of green texels named in the log");
     Check(sway.find("instance->swaying = true;") != sway.npos &&
           sway.find("if (!owner || !owner->swaying)") != sway.npos,
         "leaning is the proof a model's other batches look for, and it stops the moment the model moves");
@@ -1583,6 +1589,48 @@ static void TestTextureCutoutDecode()
             "an image larger than the scan budget is sampled, not skipped");
         Check(probe.hash != 0 && probe.hash != kTextureAlphaHashOffset && probe.hash != 0xFFFFFFFFFFFFFFFFull,
             "and the bytes that were read are hashed, so a texture can be named in the log");
+    }
+    // And the half of the material gate that the WXL tree module answers with a
+    // model's file name: is this texture FOLIAGE? A plant's cut-out card is
+    // green; a cape, a shoulder pad, a saddle and a sword are not green whatever
+    // else they are, and that is what keeps gear out of a wind that cannot tell a
+    // standing character from a bush.
+    {
+        const auto foliageBlock = [](uint8_t* block, bool green, bool cut) {
+            // Endpoint 0 is black so the pair is always in the 1-bit-alpha order,
+            // endpoint 1 is what the texels show, and index 3 is the hole. A "no
+            // holes" block inverts the pair, which makes it opaque by DXT1's own
+            // definition whatever the indices are.
+            const uint16_t visible = cut ? (green ? 0x07E0 : 0x7BEF) : 0xFFFF;
+            const uint16_t colour0 = cut ? 0x0000 : 0xFFFF;
+            const uint16_t colour1 = cut ? visible : 0x0000;
+            block[0] = uint8_t(colour0 & 0xFF); block[1] = uint8_t(colour0 >> 8);
+            block[2] = uint8_t(colour1 & 0xFF); block[3] = uint8_t(colour1 >> 8);
+            const uint32_t indices = cut ? 0x555555FFu : 0x00000000u; // texels 0-3 of 16 are holes
+            for (int i = 0; i < 4; ++i) block[4 + i] = uint8_t((indices >> (8 * i)) & 0xFF);
+        };
+        const unsigned size = 64;
+        const size_t pitch = size_t(size / 4) * 8;
+        auto leaves = DxtImage(size, size, 8, [&](uint8_t* block, unsigned, unsigned) { foliageBlock(block, true, true); });
+        auto metal = DxtImage(size, size, 8, [&](uint8_t* block, unsigned, unsigned) { foliageBlock(block, false, true); });
+        auto solid = DxtImage(size, size, 8, [&](uint8_t* block, unsigned, unsigned) { foliageBlock(block, true, false); });
+        const auto leaf = ClassifyTextureCutout(TextureFormat::Dxt1, leaves.data(), pitch, size, size, leaves.size());
+        const auto plate = ClassifyTextureCutout(TextureFormat::Dxt1, metal.data(), pitch, size, size, metal.size());
+        const auto wall = ClassifyTextureCutout(TextureFormat::Dxt1, solid.data(), pitch, size, size, solid.size());
+        Check(leaf.verdict == TextureCutout::Cutout && leaf.foliage,
+            "a green cut-out is a leaf: the card is drawn with holes in it and what is left is green");
+        Check(plate.verdict == TextureCutout::Cutout && !plate.foliage,
+            "a grey cut-out is a cloak or a shoulder pad, not a plant - the hole says card, the colour says what");
+        Check(wall.verdict == TextureCutout::Opaque && !wall.foliage,
+            "and a texture with no holes is never foliage whichever colour it is");
+        Check(leaf.greenFraction() > .5f && plate.greenFraction() < .1f,
+            "the share of green texels is what the log names, so a refusal can be read as a number");
+        Check(ClassifyTextureCutout(TextureFormat::A8R8G8B8, leaves.data(), pitch, 4, 4, leaves.size()).foliage == false,
+            "and a texture too small to judge is never called foliage");
+        Check(leaf.greenFraction() > .5f && plate.greenFraction() < .1f,
+            "the share of green texels is what the log names, so a refusal can be read as a number");
+        Check(ClassifyTextureCutout(TextureFormat::A8R8G8B8, leaves.data(), pitch, 4, 4, leaves.size()).foliage == false,
+            "and a texture too small to judge is never called foliage");
     }
     Pass("texture cut-out decode: every format a client uploads, and never a hole it did not have");
 }
