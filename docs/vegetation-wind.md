@@ -179,9 +179,14 @@ Those draws are bent in **the client's own vertex shader** instead:
    count as `decl`.
 2. Its vertex declaration has to carry a **`FLOAT2` texture coordinate** - that
    coordinate is the bend weight, and it is also what the injected code reads -
-   and its stage 0 texture has to be a **green cut-out**: the same witness the
-   material gate uses above, for the same reason. A cut-out that is not green
-   (a cloak, a shoulder pad, a banner) is refused and never looked at again.
+   and its stage 0 texture has to be a **cut-out**. Whether that cut-out is
+   `GREEN` is deliberately not asked here, unlike the material gate the model
+   path uses: a dry, autumn or snow-covered field is as much of a blade card as a
+   green one, and asking about colour on this path refused the very field the
+   feature exists for. Nothing that could be mistaken for gear can reach this
+   path at all - a character, a weapon, a mount, a cape and every other attached
+   model carries bone indices in its declaration and is judged by the model path
+   instead - so a cut-out is the whole material proof a blade needs.
 3. The shader it is drawn with is looked at **once per session**. Its bytecode is
    taken from the device, disassembled (`D3DDisassemble`), and a motion block is
    inserted after the instruction that finishes the world-to-view transform
@@ -204,17 +209,57 @@ Those draws are bent in **the client's own vertex shader** instead:
    downwind at 3 yards per second. The constants ride in the block at
    **c14..c19**, whose rows are written before each bent draw and re-armed if the
    client writes over them.
-5. Every refusal is structural and one-shot logged: an empty disassembly, a
+5. The draw's own vertices decide whether it is a card worth bending. Its
+   texture coordinate, its height and the base/tip pairs in it are measured from
+   the vertices the draw consumes (a strict fit: an element that ends exactly on
+   the stride's last byte is inside the vertex - the client's tight
+   `POSITION@0 COLOUR@12 TEXCOORD@16` cards are 24 bytes and were refused by a
+   `<=` that treated them as out of bounds), and a card that is measurably flat -
+   a decal or a shadow blob in a cut-out material - is refused on that geometry
+   and never looked at again. A draw whose vertices cannot be read at all (a
+   stream that will not lock, a batch that is not a triangle list) proves
+   *nothing* either way, and is bent with the reference client's blade convention
+   with a one-shot line saying so: refusing it is what leaves a field still, and
+   the measurement only decides which way up a blade's texture runs.
+6. Every refusal is structural and one-shot logged: an empty disassembly, a
    shader that is not `vs_2_0`/`vs_3_0`, scratch registers the block would need
    already in use, no transform anchor, no position output, a declaration whose
-   texture coordinate is not the register the shader reads, or an assembler that
-   refuses the text. In that last case the shader's **whole disassembly** goes to
-   `ModernWoWRenderer.log` once, so the next build can be written against the
-   exact code the client ships.
+   texture coordinate is not the register the shader reads, a card that was read
+   and lies flat, or an assembler that refuses the text. In that last case the
+   shader's **whole disassembly** goes to `ModernWoWRenderer.log` once, so the
+   next build can be written against the exact code the client ships.
+7. What the shader *is* is judged the same way the model path judges it, with one
+   deliberate difference. The passes this project has already identified as
+   never-a-model - the native shadow casters, UI, precipitation and water - are
+   refused here too, because an interface icon is a cut-out card with a texture
+   coordinate, exactly the shape a blade has. The **world's own projection**
+   (`c4..c7`) is *not* refused on this path: that verdict says a shader binds the
+   WMO/terrain layout, which is a real suspicion on the model path where a model
+   is supposed to carry its bones at `c31` - and an unskinned card has no bones
+   at all, so an object -> world matrix is simply how the client draws its grass.
+   Refusing it there turned away **376** foliage draws in one real session (the
+   HUD read `world 376`) and left the field perfectly still. Such a shader is
+   recorded instead - the HUD's `Blades world-path` row counts it - and bent on
+   the geometry and material proofs above.
 
 The switch is `[Vegetation] GrassBlades` (F7 → `GRASS BLADE WIND`, on by
 default). Off, every plant with a skeleton still sways and no shader is ever
 rewritten.
+
+Its rows in the debug view (F7 → WIND, with `GRASS BLADE WIND` on) are:
+
+- `Blades: N swaying, M blocks/s | X.XX yd at the tip` - how many draws in this
+  frame were handed the bent shader, how often the constant block had to be
+  rewritten, and how far a blade's tip moves at the current wind strength.
+- `Blades gate: N looked at, M bent | ...` - the blade path's own census, in the
+  same style as the model row above: `mat` (a material that is not a cut-out:
+  opaque scenery), `never` (the interface, precipitation, the liquid variants and
+  the shadow casters), `decl` (a draw with no `FLOAT2` coordinate), `card` (a card
+  that was measured and lies flat), `read` (a card whose vertices could not be
+  read at all), `vs` (a coordinate that is not the register the shader reads) and
+  `asm` (a shader that could not be disassembled, reassembled or created).
+- `Blades world-path: N bent` - shaders that were bent and bind the world's own
+  projection. It is a note, not a refusal: see point 7 above.
 
 ## What it refuses to touch
 
