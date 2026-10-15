@@ -92,7 +92,7 @@ inline bool Save(Item& i){
 inline bool ResetActiveTab(){
  if(layout.activeTab<0||layout.activeTab>=int(Tabs().size()))return false;
  const auto tab=Tabs()[layout.activeTab];bool changed=false,failed=false;
- for(int index=tab.begin+1;index<tab.end;++index){
+ for(int index=tab.begin;index<tab.end;++index){
   auto& item=items[index];const int value=std::clamp(defaults[index],item.lo,item.hi);
   const bool itemChanged=item.value!=value;item.value=value;
   if(Save(item))changed=itemChanged||changed;else failed=true;

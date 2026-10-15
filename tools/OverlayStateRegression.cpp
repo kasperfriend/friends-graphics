@@ -5,6 +5,7 @@
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 
 using Microsoft::WRL::ComPtr;
@@ -90,7 +91,43 @@ void CheckRestored(IDirect3DDevice9* d, const TrackedRenderState& before) {
     const bool expected[] = {before.zEnable, before.zWrite, before.alphaBlend, before.alphaTest};
     for (unsigned i = 0; i < 4; ++i) { Check(d->GetRenderState(states[i], &value)); Require((value != 0) == expected[i], "F7 leaked actual depth/blend/test state"); }
 }
+// Persistence is CPU-only: run this before the optional HAL checks so a
+// headless CI runner still verifies every tab, including the new wind tab.
+void TestResetDefaults() {
+    const auto directory = std::filesystem::absolute("build/overlay-state-reset");
+    std::filesystem::create_directories(directory);
+    const auto base = directory.wstring() + L"\\";
+    renderer::menudiagnostics::Configure(base);
+    renderer::locationtuning::Sync(base, {571, 65, 4164, true}, false);
+    tuningoverlay::Configure(base);
+    using namespace tuningoverlay;
+    for (int tabIndex = 0; tabIndex < int(Tabs().size()); ++tabIndex) {
+        const auto tab = Tabs()[tabIndex];
+        std::vector<int> expected;
+        for (const auto& item : items) expected.push_back(item.value);
+        // begin already points past the header; do not skip the first toggle.
+        for (int index = tab.begin; index < tab.end; ++index) {
+            auto& item = items[index];
+            item.value = defaults[index] == item.lo ? item.hi : item.lo;
+            Require(Save(item), "Could not persist nondefault tab setting");
+            expected[index] = defaults[index];
+        }
+        layout.SelectTab(tabIndex);
+        Require(ResetActiveTab(), "Reset Defaults did not report changed settings");
+        for (int index = 0; index < int(items.size()); ++index) {
+            const auto& item = items[index];
+            if (item.kind == KIND_HEADER) continue;
+            Require(item.value == expected[index], "Reset Defaults skipped a setting or changed another tab");
+            Require(renderer::locationtuning::ReadEditorInt(item.section, item.key, defaults[index], ini.c_str()) == expected[index],
+                "Reset Defaults did not persist every setting or changed another tab's file values");
+        }
+        Require(!ResetActiveTab(), "Reset Defaults was not idempotent");
+    }
+    layout.SelectTab(0);
+    std::printf("PASS F7 Reset Defaults restores and persists all settings in all ten tabs, without changing other tabs\n");
+}
 int main() try {
+    TestResetDefaults();
     wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path, L"\\d3d9.dll");
     auto runtime = LoadLibraryW(path); Require(runtime != nullptr, "system D3D9 loaded");
     auto create = reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(runtime, "Direct3DCreate9"));

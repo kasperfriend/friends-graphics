@@ -47,10 +47,14 @@ int main() try {
   }
   if(!resolutionFound)throw std::runtime_error("Cloud resolution slider missing");
   tuningoverlay::Configure(L"build\\overlay-preview\\global-fallback\\");
-  const int waterTab=4;const auto waterRows=tuningoverlay::Tabs()[waterTab];
+  int waterTab=-1;
+  for(int tab=0;tab<int(tuningoverlay::Tabs().size());++tab)
+   if(tuningoverlay::CompactLabel(tuningoverlay::items[tuningoverlay::Tabs()[tab].header])=="WATER & REFLECTIONS")waterTab=tab;
+  if(waterTab<0)throw std::runtime_error("Water tab missing");
+  const auto waterRows=tuningoverlay::Tabs()[waterTab];
   auto& unrelated=tuningoverlay::items[1];unrelated.value=0;
   if(!tuningoverlay::Save(unrelated))throw std::runtime_error("Could not prepare unrelated tab setting");
-  for(int index=waterRows.begin+1;index<waterRows.end;++index){
+  for(int index=waterRows.begin;index<waterRows.end;++index){
    auto& control=tuningoverlay::items[index];
    control.value=tuningoverlay::defaults[index]==control.lo?control.hi:control.lo;
    if(!tuningoverlay::Save(control))throw std::runtime_error("Could not prepare nondefault water tab value");
@@ -58,7 +62,7 @@ int main() try {
   tuningoverlay::layout.SelectTab(waterTab);
   if(!tuningoverlay::ResetActiveTab())throw std::runtime_error("Reset current tab reported no changed values");
   const auto resetFile=L"build\\overlay-preview\\global-fallback\\GraphicsEffects.ini";
-  for(int index=waterRows.begin+1;index<waterRows.end;++index){
+  for(int index=waterRows.begin;index<waterRows.end;++index){
    const auto& control=tuningoverlay::items[index];
    if(control.value!=tuningoverlay::defaults[index]||
       renderer::locationtuning::ReadEditorInt(control.section,control.key,-1,resetFile)!=tuningoverlay::defaults[index])
