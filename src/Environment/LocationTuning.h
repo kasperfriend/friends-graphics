@@ -27,46 +27,26 @@ inline std::wstring Scope(unsigned level) {
 // re-reads every one of its rows whenever the place changes
 // (tuningoverlay::Configure -> ReadEditorInt, one row per control) and this
 // client's place flaps across a boundary while the player walks it, so that
-// probe is what a crossing spends its time in. The key set of a scoped section
-// is a property of the file, not of the key being asked for: read it once with
-// GetPrivateProfileSectionW and answer every later probe from memory.
-// A key counts as present only when it has a non-blank value, which is exactly
-// what the probe tested: `Key=` and `Key=   ` are absent to the profile API.
+// probe is what a crossing spends its time in.
 //
-// The VALUES are memoized the same way, one section at a time and per file, and
-// that is the other half of the crossing's cost: the nine tuning reloads and the
-// F7 menu's rows between them read on the order of a hundred keys, and each
-// GetPrivateProfileStringW parses the whole file - 125 to 200 ms per crossing in
-// a real session, measured. Every read still checks the file's own identity (its
-// write time and size) first, so an edit to either file is visible to the very
-// next read, and the check costs microseconds.
-inline std::unordered_map<std::wstring,std::unordered_set<std::wstring>>& ScopedKeys() {
-    static std::unordered_map<std::wstring,std::unordered_set<std::wstring>> keys;
-    return keys;
-}
-// InvalidateScopedKeys lives below, next to the value cache it also drops.
-// The identity of the file the memo was filled from. A memo of a scoped section
-// is a property of the FILE - which keys it has and what they hold - and not of
-// the place that happens to be active, so the one thing that has to drop it is a
-// change to the file itself: a different path, a hand edit, a save. A place
-// change is not a file change, and clearing on one is what made a crossing
-// re-read the whole scoped file, section by section, while the place flapped.
-inline ULONGLONG memoWritten=0;
-inline DWORD memoBytes=0;
-inline void RememberScopedFile() {
-    memoWritten=0;memoBytes=0;
-    WIN32_FILE_ATTRIBUTE_DATA info{};
-    if(!localFile.empty()&&GetFileAttributesExW(localFile.c_str(),GetFileExInfoStandard,&info)) {
-        memoWritten=(static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
-        memoBytes=info.nFileSizeLow;
-    }
-}
-inline bool ScopedFileUnchanged() {
-    WIN32_FILE_ATTRIBUTE_DATA info{};
-    if(!GetFileAttributesExW(localFile.c_str(),GetFileExInfoStandard,&info))return memoWritten==0&&memoBytes==0;
-    const ULONGLONG written=(static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
-    return written==memoWritten&&info.nFileSizeLow==memoBytes;
-}
+// That answer came from two caches: one of "which keys does this scope hold", one
+// entry per scope, and the values behind it, one section per file. The second one
+// is all the first ever needed - the key set of a scope IS the key set of the
+// section the value cache holds, down to the same rule that `Key=` counts as
+// absent - and keeping both is what a crossing paid for. The key cache had a 96
+// entry ceiling, and a real session's place still flaps across more scopes than
+// that inside a single apply: every level of every section the nine tuning reloads
+// and the F7 menu's hundred-odd rows ask about. So the ceiling was reached, the
+// whole memo was dropped in the middle of the apply, and every read that followed
+// fell back to a GetPrivateProfileSectionW - a whole-file parse, one per scope per
+// level. 46 to 78 ms per settled crossing, dozens of them in a session's log, and
+// what a player feels as the stall.
+//
+// There is one cache now. It is revalidated against the file's own identity - its
+// write time and size - on every read, so an edit to either file is visible to the
+// very next read and the check costs microseconds, and it answers presence and
+// value with the same lookup. A key counts as present only when it has a
+// non-blank value: `Key=` and `Key=   ` are absent to the profile API.
 inline std::wstring LowerKeyName(const wchar_t* key) {
     std::wstring text=key?key:L"";
     for(auto& c:text)if(c>=L'A'&&c<=L'Z')c=static_cast<wchar_t>(c+(L'a'-L'A'));
@@ -77,32 +57,6 @@ inline std::wstring LowerKeyName(const wchar_t* key) {
 inline std::wstring& LowerInPlace(std::wstring& text) {
     for(auto& c:text)if(c>=L'A'&&c<=L'Z')c=static_cast<wchar_t>(c+(L'a'-L'A'));
     return text;
-}
-inline const std::unordered_set<std::wstring>* ScopedKeysFor(const std::wstring& scope) {
-    if(localFile.empty())return nullptr;
-    auto& cache=ScopedKeys();
-    const auto found=cache.find(scope);
-    if(found!=cache.end())return &found->second;
-    // The first section of a fresh memo: from here on, the file this was read
-    // from is the memo's own identity, and Sync compares against it.
-    if(cache.empty())RememberScopedFile();
-    if(cache.size()>=96)cache.clear();
-    // Sized to the profile API's own ceiling for a section string (32767 wide
-    // characters), so the key set of a section is never read in half: the editor
-    // writes at most one value per control per scope, and a section that could
-    // overflow this cannot come from this renderer at all.
-    std::vector<wchar_t> buffer(32768);
-    const DWORD length=GetPrivateProfileSectionW(scope.c_str(),buffer.data(),static_cast<DWORD>(buffer.size()),localFile.c_str());
-    std::unordered_set<std::wstring> keys;
-    if(length)for(const wchar_t* line=buffer.data();*line;line+=std::wcslen(line)+1) {
-        const wchar_t* equals=std::wcschr(line,L'=');
-        if(!equals)continue;
-        const wchar_t* value=equals+1;
-        while(*value==L' '||*value==L'\t')++value;
-        if(!*value)continue;
-        keys.emplace(LowerKeyName(std::wstring(line,equals).c_str()));
-    }
-    return &cache.emplace(scope,std::move(keys)).first->second;
 }
 // ---------------------------------------------------------------------------
 // The values, read once per file identity.
@@ -140,6 +94,11 @@ inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path) {
     }
     return true;
 }
+// What the cache actually did, for the line a report is read from: settings reads
+// answered out of a section already in memory, and whole-file parses made to fill
+// it. The reload line carries the difference per apply.
+inline uint64_t profileReads=0;
+inline uint64_t profileParses=0;
 inline const std::unordered_map<std::wstring,std::wstring>* ProfileSection(ProfileValues& file,
     const std::wstring& path,LPCWSTR section) {
     const std::wstring name=LowerKeyName(section);
@@ -147,7 +106,8 @@ inline const std::unordered_map<std::wstring,std::wstring>* ProfileSection(Profi
     if(found!=file.sections.end())return &found->second;
     // The profile API's own ceiling for a section string; a section that could
     // overflow this cannot come from this renderer at all.
-    if(file.sections.size()>=512)file.sections.clear();
+    if(file.sections.size()>=4096)file.sections.clear();
+    ++profileParses;
     std::vector<wchar_t> buffer(32768);
     const DWORD length=GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str());
     std::unordered_map<std::wstring,std::wstring> values;
@@ -177,15 +137,21 @@ inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWS
         const size_t length=text.size()<size-1?text.size():size-1;
         if(length)std::wmemcpy(output,text.c_str(),length);
         output[length]=0;
+        ++profileReads;
         return static_cast<DWORD>(length);
     }
+    ++profileParses;
     return GetPrivateProfileStringW(section,key,fallback,output,size,path);
 }
 // Every cached section of every file this module reads. A write invalidates them:
 // see WriteProfile.
 inline void InvalidateProfileValues() { ProfileCache().clear(); }
-// What F12 and an editor save mean: drop the key memo AND the values behind it.
-inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }
+// What F12, an editor save and this module's own scoped writes mean: drop what was
+// read. The file's identity is not a reliable signal right after a write of ours -
+// NTFS updates a last-write time lazily, and a write of the same length does not
+// change the size either - so a write drops rather than hopes. One cache, so one
+// thing to drop.
+inline void InvalidateScopedKeys() { InvalidateProfileValues(); }
 // The file's own identity is NOT a reliable signal right after a write of ours:
 // NTFS updates a file's last-write time lazily, so a stat taken straight after
 // WritePrivateProfileStringW can still report the old time, and a value of the
@@ -201,9 +167,29 @@ inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value) {
     if(written)InvalidateProfileValues();
     return written;
 }
+// The section a scope names, through the same identity-checked cache every other
+// read uses: one lookup answers both "does this scope hold the key" and "what does
+// it say". nullptr still means "there is no scoped file to answer from", the one
+// answer ReadAtLevel's walk treats as a reason to stop.
+inline const std::unordered_map<std::wstring,std::wstring>* ScopedValuesFor(const std::wstring& scope) {
+    if(localFile.empty())return nullptr;
+    ProfileValues& file=ProfileCache()[localFile];
+    ProfileIdentity(file,localFile);
+    return ProfileSection(file,localFile,scope.c_str());
+}
+// Whether the file the scoped reads were taken from is still the file on disk: the
+// question Sync asks before deciding that a place change needs nothing re-read.
+// Nothing read yet answers false, which is the safe direction - the next settle
+// applies instead of skipping.
+inline bool ScopedFileUnchanged() {
+    if(localFile.empty())return false;
+    if(ProfileCache().find(localFile)==ProfileCache().end())return false;
+    ProfileValues& file=ProfileCache()[localFile];
+    return ProfileIdentity(file,localFile);
+}
 inline bool ScopedValuePresent(const std::wstring& scope,LPCWSTR key) {
-    const auto* keys=ScopedKeysFor(scope);
-    return keys&&keys->find(LowerKeyName(key))!=keys->end();
+    const auto* values=ScopedValuesFor(scope);
+    return values&&values->find(LowerKeyName(key))!=values->end();
 }
 // The overlay's third scope: an explicit override that outranks every location.
 // It lives in the same scoped file as the location scopes, so it is answered from
@@ -463,10 +449,12 @@ inline void MarkTuningApplied(const LocationContext& location,bool verified) {
 }
 inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
     if(!IsGlobal(section)&&editable&&path&&baseFile==path) {
+        const std::wstring wanted=LowerKeyName(key);
         for(int level=topLevel;level>=0;--level) {
             const auto scope=Scope(level)+L"."+section;
-            if(!ScopedKeysFor(scope))break;
-            if(!ScopedValuePresent(scope,key))continue;
+            const auto* values=ScopedValuesFor(scope);
+            if(!values)break;
+            if(values->find(wanted)==values->end())continue;
             return ReadProfileString(scope.c_str(),key,fallback,output,size,localFile.c_str());
         }
     }
@@ -498,10 +486,12 @@ inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
 inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
     if(HasGlobalValue(section,key))return true;
     if(!editable||localFile.empty())return false;
+    const std::wstring wanted=LowerKeyName(key);
     for(int level=active.areaId?2:1;level>=0;--level) {
         const auto scope=Scope(level)+L"."+section;
-        if(!ScopedKeysFor(scope))break;
-        if(ScopedValuePresent(scope,key))return true;
+        const auto* values=ScopedValuesFor(scope);
+        if(!values)break;
+        if(values->find(wanted)!=values->end())return true;
     }
     return false;
 }

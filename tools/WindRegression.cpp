@@ -580,29 +580,62 @@ static void TestConfigurationAndWiring()
           tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
           tuning.find("inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value)") != tuning.npos &&
           tuning.find("if(written)InvalidateProfileValues();") != tuning.npos &&
-          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }") != tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { InvalidateProfileValues(); }") != tuning.npos &&
           tuning.find("if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
           tuning.find("if(!editable)return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
           tuning.find("const bool written=WriteProfile(localFile.c_str(),scope.c_str(),key,value);") != tuning.npos,
-          "and every write it makes drops the cached values as well as the key memo, so a saved toggle is what the "
-          "next read answers");
-    Check(tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
-          tuning.find("inline const std::unordered_set<std::wstring>* ScopedKeysFor(") != tuning.npos,
-          "the memo answers both the read path and HasScopedValue, so the water colours see the same file view");
+          "and every write it makes drops the cached values, so a saved toggle is what the next read answers");
+    // ONE cache, and that is a correctness fact rather than a tidying: until this
+    // sweep the key sets of a scope lived in a second cache with a ceiling of 96
+    // scopes, and a real apply - nine tuning reloads plus the F7 menu's hundred-odd
+    // rows, each read at every level of its own section - asks about more scopes
+    // than that. The ceiling was reached in the middle of the apply, the whole key
+    // cache was dropped, and every read after it paid a GetPrivateProfileSectionW:
+    // a whole-file parse per scope per level, dozens of them in a session's log,
+    // while the place kept flapping. A crossing's cost must not depend on how many
+    // scopes the apply happens to walk.
+    Check(tuning.find("inline const std::unordered_map<std::wstring,std::wstring>* ScopedValuesFor(") != tuning.npos &&
+          tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
+          tuning.find("return values&&values->find(LowerKeyName(key))!=values->end();") != tuning.npos &&
+          tuning.find("ScopedKeys") == tuning.npos &&
+          tuning.find("RememberScopedFile") == tuning.npos &&
+          tuning.find(">=4096") != tuning.npos,
+          "one identity-checked cache answers both presence and value for a scope, so the read path, HasScopedValue "
+          "and the water colours see one file view - and no second key-only memo is left to overflow in the middle "
+          "of an apply");
     Check(tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
           tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos &&
           tuning.find("inline bool ScopedFileUnchanged() {") != tuning.npos &&
-          tuning.find("if(cache.empty())RememberScopedFile();") != tuning.npos,
+          tuning.find("return ProfileIdentity(file,localFile);") != tuning.npos &&
+          tuning.find("++profileReads;") != tuning.npos &&
+          tuning.find("++profileParses;") != tuning.npos,
           "a different base directory, a file changed underneath the memo and an editor save all drop what was read "
           "out of the scoped file - and a PLACE change does not, which is what a crossing used to spend its second "
           "re-reading section by section");
+    // And a crossing must not WRITE for the sake of writing. Three stages appended a
+    // line about their own tuning on every settled place, and in the game folder a
+    // line is an open, a write and a close - milliseconds each on a machine whose
+    // antivirus watches that folder, on exactly the path a player walks a border on.
+    // Each of them now writes only when its numbers change, which is the only time
+    // the line says anything new.
+    Check(Read("WaterEffect.h").find("if(lastRow!=row.str()){lastRow=row.str();") != std::string::npos &&
+          Read("VolumeIntegration.h").find(
+              "if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}") !=
+              std::string::npos &&
+          Read("src/Materials/MaterialCacheManager.cpp").find("if (lastTuningLine != line)") != std::string::npos,
+        "the per-crossing log lines are written when their numbers change, not once per settled place");
     Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
           main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
           main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
           main.find("if(locationTuningChanged){\n        g_placePending=false;g_locationConfigured=true;") != main.npos &&
-          main.find("if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}") != main.npos,
+          main.find("if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}") != main.npos &&
+          main.find("if(now-g_staleLoggedAt>=1000){") != main.npos &&
+          main.find("++g_placeSkipped;") != main.npos &&
+          main.find("answered %llu read(s) from memory with %llu whole-file parse(s)") != main.npos,
           "a location change is applied once the place has held still, one reload per gap, and the first one at once so "
-          "startup configures itself - while a place whose tuning is already in force is skipped without spending the gap");
+          "startup configures itself - while a place whose tuning is already in force is skipped without spending the "
+          "gap, and a walk along a border does not write a log line per sample about it: the line says how many reads "
+          "the apply answered from memory and how many whole-file parses it paid");
     Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(") != tuning.npos &&
           tuning.find("GetPrivateProfileSectionNamesW(") != tuning.npos &&
           tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") != tuning.npos &&
@@ -716,6 +749,37 @@ static void TestConfigurationAndWiring()
     locationtuning::Sync(base, saved, true);
     Check(!locationtuning::AppliedTuningStillInForce(saved, true),
           "an edited value refuses the skip with nothing else changed");
+    // And what a crossing COSTS, counted rather than argued: a walk that walks more
+    // scopes than the old key memo could hold - nine tuning reloads and the F7
+    // menu's hundred-odd rows, every level of every section - must be answered out
+    // of the sections already in memory, with no whole-file parse behind it however
+    // many samples the place flaps across. This is the assertion that fails if a
+    // crossing ever re-reads the file again: whether the memo comes back with a
+    // ceiling, or the values are dropped because the PLACE changed rather than
+    // because the FILE did.
+    // One crossing, exactly as the chain reads one: the nine tuning reloads' own
+    // keys, the water colours' "does this scope hold it" question, and a row of the
+    // F7 menu - against a place that flaps between two areas.
+    const auto crossing = [&](int sample) {
+        const auto place = (sample % 2) ? saved : neighbour;   // the flap this client's Area=0/Area=223 produces
+        locationtuning::Sync(base, place, true);
+        (void)load();
+        (void)locationtuning::HasScopedValue(L"Water", L"WaterColour");
+        (void)locationtuning::ReadEditorInt(L"Wind", L"Direction", 0, file.c_str());
+    };
+    locationtuning::MarkTuningApplied(saved, true);
+    // Warm-up first, and the counters are taken after it: the FIRST read of a
+    // section is a whole-file parse by definition, and that is the one parse a
+    // crossing is allowed to pay. What this asserts is that it pays no more.
+    for (int sample = 0; sample < 16; ++sample) crossing(sample);
+    const uint64_t parsesBefore = locationtuning::profileParses;
+    const uint64_t readsBefore = locationtuning::profileReads;
+    for (int sample = 0; sample < 400; ++sample) crossing(sample);
+    Check(locationtuning::profileParses == parsesBefore &&
+          locationtuning::profileReads > readsBefore,
+          "400 crossings over a real INI - more scopes than the old key memo could hold - answer every settings read "
+          "out of memory and pay zero whole-file parses: the cost of a crossing does not depend on how many scopes "
+          "the apply walks, and does not come back when the place changes");
     Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence, manual reload and the "
          "crossing gate over real files");
 #endif

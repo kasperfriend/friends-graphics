@@ -80,6 +80,16 @@ namespace renderer
         bool foliage = false;
     };
 
+    // The verdict in the words a log line carries. One helper, because two
+    // modules report it - the model path's declaration log and the blade path's -
+    // and a report is read by comparing those lines.
+    inline const char* TextureCutoutText(const TextureAlphaProbe& probe) noexcept
+    {
+        return probe.verdict == TextureCutout::Cutout ? "a cut-out (foliage-like!)"
+            : probe.verdict == TextureCutout::Opaque ? "opaque (scenery, not foliage)"
+            : "not readable as a cut-out";
+    }
+
     // A texture is a cut-out when at least this share of it is transparent. A
     // foliage texture is mostly holes (its leaves sit in a corner of it), while
     // a solid texture with one transparent row along an edge is not foliage.

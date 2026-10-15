@@ -202,7 +202,18 @@ Those draws are bent in **the client's own vertex shader** instead:
    count as `decl`.
 2. Its vertex declaration has to carry a **`FLOAT2` texture coordinate** - that
    coordinate is the bend weight, and it is also what the injected code reads -
-   and its stage 0 texture has to be a **cut-out**. Whether that cut-out is
+   **or no texture coordinate at all**. A whole family of this client's foliage
+   arrives that way: `POSITION + NORMAL` and a cut-out atlas, 1.2 million such
+   draws in one real session against the 49 that reached the material gate, which
+   is why a report could say a shader was bent while the field stood still. Those
+   cards are bent by the **vertex's own height** instead - the block reads that
+   register's `z`, and the ramp is the card's own measured floor and height, the
+   same zero-at-the-base, one-at-the-tip weight the coordinate gave. Nothing else
+   about the admission changes: the material still has to measure as a cut-out,
+   the draw's own vertices still have to measure as a blade of a blade's size, and
+   the shader still has to be one the client's library says is not the interface,
+   the precipitation or the liquid. And its stage 0 texture has to be a
+   **cut-out**. Whether that cut-out is
    `GREEN` is deliberately not asked here, unlike the material gate the model
    path uses: a dry, autumn or snow-covered field is as much of a blade card as a
    green one, and asking about colour on this path refused the very field the
@@ -246,9 +257,10 @@ Those draws are bent in **the client's own vertex shader** instead:
    correct only when the captured camera is the matrix the shader was drawn with -
    a real session's grass shook while the player walked because it was not, and
    the world position a wave is built from now has no term from the frame in it at
-   all. The bend weight is the blade's own texture coordinate: zero at its
-   base, growing towards the tip, with the bottom third held rigid
-   (`anchor`, 0.3) and faded with distance. At reference strength a blade's tip
+   all. The bend weight is the blade's own texture coordinate - or, for a card
+   that carries none, its own height above the floor its vertices measured: zero
+   at the base either way, growing towards the tip, with the bottom third held
+   rigid (`anchor`, 0.3) and faded with distance. At reference strength a blade's tip
    sways about a foot over a wave five yards long travelling downwind at two and
    a half yards per second - a crest every two seconds, which is what makes the
    field read as moving from a walking pace. The first shipped numbers were five
@@ -282,13 +294,14 @@ Those draws are bent in **the client's own vertex shader** instead:
    (`kBladeCardTries`) before it is taken as final: the first draw of a chunk is
    not always a blade.
 6. Every refusal is structural and one-shot logged: an empty disassembly, a
-   shader that is not `vs_2_0`/`vs_3_0`, a declaration that never gives the block a
-   texture coordinate, a shader that never lands its vertex in `r0` before a
+   shader that is not `vs_2_0`/`vs_3_0`, a declaration that gives the block
+   neither a texture coordinate nor a position to read a height from, a shader that never lands its vertex in `r0` before a
    clip-space output reads it, a scratch register the shader still needs **across**
    the insertion point (a register the shader redefines *after* the block is not a
    conflict - three of the five foliage shaders of a real session keep their
    normals and their lighting in `r2`/`r3`), a declaration whose texture coordinate
-   is not the register the shader reads, a card that was read and lies flat, or an
+   is not the register the shader reads - the coordinate on one ramp, the position
+   on the other - a card that was read and lies flat, or an
    assembler that refuses the text. In that last case the shader's **whole
    disassembly** goes to `ModernWoWRenderer.log` once, so the next build can be
    written against the exact code the client ships.

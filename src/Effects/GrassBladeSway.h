@@ -38,6 +38,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <wrl/client.h>
 #include "../Core/FrameContext.h"
@@ -92,6 +93,14 @@ struct BladeShader
     int bladeVSign = 0;        // measured from the vertices; 0 = the reference convention
     float bladeExtentYards = 0.f; // how tall the draw's own vertices were
     unsigned bladePairs = 0;   // and how many of them looked like a base and its tip
+    // Which ramp this block reads: the texture's own v (false), or - for the family
+    // whose declaration carries no texture coordinate at all - the vertex's own
+    // height (true). The block was built for one of the two, so the frame's rows
+    // have to be packed for the same one: `rampScale`/`rampOffset` are the card's
+    // own floor and height, which is what turns the stored z into a 0..1 weight.
+    bool rampByHeight = false;
+    float rampScale = 1.f;
+    float rampOffset = 0.f;
     bool cardReported = false; // the one-shot line for a card whose vertices could not be read
     unsigned cardTries = 0;    // cards of this shader measured and found not to be a blade
     bool worldShaped = false;  // its constants bind the world's projection: recorded, not refused
@@ -122,7 +131,12 @@ inline uint64_t g_uploadedFrame = ~0ull;
 inline const void* g_uploadedShader = nullptr;
 inline float g_phasePrimary = 0.f, g_phaseCross = 0.f;
 inline bool g_reportedCompiler = false;
-inline bool g_dumpedNoCoordinate = false;
+// The family that carries no texture coordinate: reported once per shader, up to
+// a few, because a report's first question is what those vertices DO carry - the
+// declaration and the texture verdict answer it without the game being run again.
+inline unsigned g_noCoordinateReports = 0;
+inline constexpr unsigned kNoCoordinateReports = 3;
+inline std::unordered_set<const void*> g_noCoordinateReported;
 inline bool g_reportedInjection = false;
 inline bool g_reportedRefusal = false;
 
@@ -196,11 +210,17 @@ inline std::string DisassembleShader(IDirect3DVertexShader9* shader, uint32_t& b
 // the ground has no height for a bend weight to run along, and a block whose
 // weight is the same everywhere translates the card instead of bending it.
 inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const renderer::M2VertexLayout& layout,
-    const renderer::M2DrawCall& draw) noexcept
+    const renderer::M2DrawCall& draw, bool rampByHeight) noexcept
 {
     using Microsoft::WRL::ComPtr;
     renderer::GrassBladeCard card;
-    if (!device || !layout.position || !layout.texcoord || !layout.texcoordIsFloat2) return card;
+    // A card bent along its texture's v needs that coordinate to be two floats; a
+    // card bent along its own height needs the height, which is the position it
+    // already has. One of the two has to be there, and which one is the caller's
+    // own decision - the same one the shader's block was built from, because a
+    // block that reads a lane the draw never fed bends nothing.
+    if (!device || !layout.position) return card;
+    if (!rampByHeight && (!layout.texcoord || !layout.texcoordIsFloat2)) return card;
     const UINT count = draw.type == D3DPT_TRIANGLELIST ? draw.primitives * 3 :
         draw.type == D3DPT_TRIANGLESTRIP ? draw.primitives + 2 : 0;
     if (count < 4) return card;
@@ -212,7 +232,8 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     // packs tight, and a `<=` here is what refused every one of them (measured,
     // in a real session: the blade path examined five foliage shaders and read
     // 0.0000 yd of card out of all of them).
-    if (stride < layout.texcoordOffset + 8u || stride < layout.positionOffset + 12u) return card;
+    if (stride < layout.positionOffset + 12u) return card;
+    if (!rampByHeight && stride < layout.texcoordOffset + 8u) return card;
     D3DVERTEXBUFFER_DESC streamDesc{};
     if (FAILED(stream->GetDesc(&streamDesc))) return card;
 
@@ -272,6 +293,7 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     const unsigned char* bytes = static_cast<const unsigned char*>(locked);
 
     float samples[kBladeVertexSamples][3]{};
+    float heights[kBladeVertexSamples]{};
     unsigned taken = 0;
     const UINT span = high - low + 1;
     const UINT wanted = (std::min)(kBladeVertexSamples, span);
@@ -294,12 +316,21 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
         }
         const unsigned char* at = bytes + uint64_t(vertex - low) * stride;
         float position[3]{};
-        float uv[2]{};
         std::memcpy(position, at + layout.positionOffset, sizeof(position));
-        std::memcpy(uv, at + layout.texcoordOffset, sizeof(uv));
-        if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]) ||
-            !std::isfinite(uv[0]) || !std::isfinite(uv[1]))
+        if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))
             continue;
+        if (rampByHeight)
+        {
+            // The card's own stored height, which is what its shader reads into the
+            // register the block takes its weight from. No floor is subtracted here:
+            // the block is given the floor instead, because it works on the raw value.
+            heights[taken] = position[2]; // WoW's world is Z-up, and a blade grows up
+            ++taken;
+            continue;
+        }
+        float uv[2]{};
+        std::memcpy(uv, at + layout.texcoordOffset, sizeof(uv));
+        if (!std::isfinite(uv[0]) || !std::isfinite(uv[1])) continue;
         samples[taken][0] = uv[0];
         samples[taken][1] = uv[1];
         samples[taken][2] = position[2]; // WoW's world is Z-up, and a blade grows up
@@ -308,6 +339,9 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     stream->Unlock();
     if (lockedIndices) indicesBuffer->Unlock();
     if (taken < 4) return card;
+    // A card with no texture coordinate is measured by its height - the same
+    // vertices, the other ramp - and the card carries the floor the block needs.
+    if (rampByHeight) return renderer::MeasureGrassBladeCardByHeight(heights, taken);
 
     // Heights relative to the lowest sampled vertex, so the vote is about the
     // blades rather than about the slope the whole patch sits on.
@@ -352,7 +386,7 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
     uint32_t bytes = 0;
     const std::string disassembly = DisassembleShader(entry.original.Get(), bytes);
     const renderer::GrassBladeInjection injection =
-        renderer::BuildGrassBladeInjection(disassembly, model);
+        renderer::BuildGrassBladeInjection(disassembly, model, entry.rampByHeight);
     if (!injection.ok)
     {
         entry.structureRefused = true;
@@ -505,7 +539,8 @@ inline void Reset() noexcept
     g_status = {};
     g_reportedInjection = false;
     g_reportedRefusal = false;
-    g_dumpedNoCoordinate = false;
+    g_noCoordinateReports = 0;
+    g_noCoordinateReported.clear();
 }
 
 // The frame's own constants: the wind's heading and strength, the camera, the
@@ -545,8 +580,19 @@ inline void Update(const renderer::FrameContext& frame, float gain) noexcept
         BladeShader& entry = shader.second;
         if (!entry.injected) continue;
         std::memcpy(entry.rows, g_constants.rows, sizeof(entry.rows));
-        entry.rows[renderer::kGrassBladeRows - 1][0] = entry.bladeVSign > 0 ? 1.f : -1.f;
-        entry.rows[renderer::kGrassBladeRows - 1][1] = entry.bladeVSign > 0 ? 0.f : 1.f;
+        if (entry.rampByHeight)
+        {
+            // A card bent by its height: the ramp is the card's own floor and
+            // height, so the weight is 0 at the base and 1 at the tip with no
+            // up-or-down question to answer.
+            entry.rows[renderer::kGrassBladeRows - 1][0] = entry.rampScale;
+            entry.rows[renderer::kGrassBladeRows - 1][1] = entry.rampOffset;
+        }
+        else
+        {
+            entry.rows[renderer::kGrassBladeRows - 1][0] = entry.bladeVSign > 0 ? 1.f : -1.f;
+            entry.rows[renderer::kGrassBladeRows - 1][1] = entry.bladeVSign > 0 ? 0.f : 1.f;
+        }
         if (entry.worldSpace)
         {
             // A shader whose vertex is already in the world when the block runs:
@@ -604,32 +650,45 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     if (!device || !shader) return;
     if (!enabled || !active || !settings.enabled) return;
     if (!frame.wind.DrivesVegetation()) return;
-    if (!layout.texcoord || !layout.texcoordIsFloat2)
+    // Which ramp this card can be bent by. The texture's v is the reference
+    // client's own and stays first: it is the blade's height in texture space, and
+    // the block reads it whenever the draw carries that coordinate as two floats.
+    //
+    // The family that carries no coordinate at all is the one this path used to
+    // refuse, and refusing it is what left the field still while the log said a
+    // shader was bent: 1.2 million of those draws in one session against 49 that
+    // reached the material gate and 4 to 17 that went out bent. Those cards are
+    // bent by their own height instead - the block reads the vertex's z, and the
+    // ramp is the card's own measured floor and height - which is the same 0-at-
+    // the-base, 1-at-the-tip weight the coordinate gave, taken from the one thing
+    // those vertices do carry. Nothing else about the funnel changes: the material
+    // has to measure as a cut-out, the draw's own vertices have to measure as a
+    // blade of a blade's size, and the shader still has to be one the client's
+    // shader library says is not the interface, the precipitation or the liquid.
+    const bool rampByHeight = !(layout.texcoord && layout.texcoordIsFloat2);
+    if (rampByHeight)
     {
-        // A draw with no texture coordinate in its vertices is not a blade card by
-        // the rule this path was built on: the bend weight IS that coordinate. But a
-        // real session refused 1.2 million of these draws while 49 reached this
-        // module's material gate and 4 to 17 went out bent - a field the player can
-        // see, a whole family of foliage drawn through a declaration of POSITION and
-        // NORMAL only, textured with a cut-out atlas. So the first one is dumped
-        // here, once: a card whose weight has to come from its own vertices instead
-        // of from a coordinate that is not there needs a different ramp, and writing
-        // that ramp starts with reading the shader that draws the field.
         ++g_status.noTexcoord;
-        if (!g_dumpedNoCoordinate && shader && device)
+        if (g_noCoordinateReports < kNoCoordinateReports && shader && device &&
+            g_noCoordinateReported.find(shader) == g_noCoordinateReported.end())
         {
             uint32_t bytes = 0;
             const std::string disassembly = DisassembleShader(shader, bytes);
             if (!disassembly.empty())
             {
-                g_dumpedNoCoordinate = true;
-                Log("Grass blade sway: a foliage draw whose declaration carries no texture coordinate is refused, and "
-                    "its shader follows once, so the next build can bend a card of this family from its own vertices "
-                    "instead of from a coordinate that is not there (" + std::to_string(bytes) + " bytes):");
+                ++g_noCoordinateReports;
+                g_noCoordinateReported.insert(shader);
+                const renderer::TextureAlphaProbe texture = material();
+                char text[512]{};
+                std::snprintf(text, sizeof(text),
+                    "Grass blade sway: a foliage draw carries no texture coordinate; its declaration is %s, and its "
+                    "blade is bent by the vertex's own height instead. Stage 0 measures %s [%u texel(s) examined]. Its "
+                    "shader (%u bytes) follows once:", layout.description, renderer::TextureCutoutText(texture),
+                    texture.texels, bytes);
+                Log(text);
                 Log(disassembly.c_str());
             }
         }
-        return;
     }
 
     BladeShader* entry = FindBladeShader(shader);
@@ -695,14 +754,19 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     const std::string disassembly = DisassembleShader(entry->original.Get(), bytes);
     if (!disassembly.empty())
     {
-        const unsigned declared = renderer::GrassBladeTexcoordRegister(disassembly);
-        if (declared && declared != layout.texcoordRegister)
+        unsigned declared = 0;
+        const bool declaredHere = rampByHeight
+            ? renderer::GrassBladePositionRegister(disassembly, declared)
+            : renderer::GrassBladeTexcoordRegister(disassembly, declared);
+        const unsigned carried = rampByHeight ? layout.positionRegister : layout.texcoordRegister;
+        if (declaredHere && declared != carried)
         {
             entry->structureRefused = true;
             ++g_status.refused;
             ++g_status.registerMismatch;
-            Log("Grass blade sway: a foliage draw declares its texture coordinate in v" +
-                std::to_string(layout.texcoordRegister) + " while its shader reads v" + std::to_string(declared) +
+            Log(std::string("Grass blade sway: a foliage draw declares its ") +
+                (rampByHeight ? "vertex position" : "texture coordinate") + " in v" + std::to_string(carried) +
+                " while its shader reads v" + std::to_string(declared) +
                 ", so this build will not bend it - the bend weight would come from the wrong channel.");
             return;
         }
@@ -711,7 +775,7 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     // Which way up a blade's texture runs, from the draw's own vertices: the
     // reference client has v = 1 at the base, and a shader whose blades are the
     // other way up is bent by the same block with one constant's sign flipped.
-    const renderer::GrassBladeCard card = MeasureBladeCard(device, layout, draw);
+    const renderer::GrassBladeCard card = MeasureBladeCard(device, layout, draw, rampByHeight);
     // A shader is bent only when the draw's OWN vertices say it is a blade: a
     // measurable card, of a blade's size, with at least one base-and-tip pair in
     // it. Nothing else is admitted - not a card that could not be read, not a card
@@ -755,6 +819,15 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     entry->bladeVSign = card.sign;
     entry->bladeExtentYards = card.extentYards;
     entry->bladePairs = card.pairs;
+    entry->rampByHeight = rampByHeight;
+    if (rampByHeight)
+    {
+        // The weight the block builds from the vertex's own height: the card's
+        // measured floor and height, so the ramp runs 0 at the base to 1 at the
+        // tip of the card that was measured - the same shape the texture's v gave.
+        entry->rampScale = card.extentYards > 0.f ? 1.f / card.extentYards : 1.f;
+        entry->rampOffset = -card.baseYards * entry->rampScale;
+    }
     BuildInjectedShader(device, *entry);
     if (entry->injected && entry->worldShaped && !entry->worldReported)
     {

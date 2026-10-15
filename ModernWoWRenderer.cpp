@@ -201,6 +201,8 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 // renderer has configured itself for a place at all yet. See HookedPresent.
 uint64_t g_placeChangedAt = 0;
 uint64_t g_locationAppliedAt = 0;
+uint64_t g_staleLoggedAt = 0;
+unsigned g_placeSkipped = 0;
 bool g_placePending = false;
 bool g_locationConfigured = false;
 constexpr uint64_t kLocationSettleMs = 300;   // the environment manager's own area debounce
@@ -306,9 +308,19 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     if(locationTuningChanged){
         g_placePending=false;g_locationConfigured=true;
         if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}
-        else if(!f7Edited)
-            Log("Location tuning reloaded in 0 us - the place that settled is the one already in force: its own scoped "
-                "settings resolve to the values the nine subsystems are already running with, and neither file changed");
+        else if(!f7Edited){
+            // The place that settled adds nothing to the files, so the nine reloads
+            // are let alone - and the line is written at most once a second. A walk
+            // along a border hands a fresh place to this branch several times a
+            // second, and a log line is a file open, a write and a close; the line
+            // itself must not become the stall it is reporting on.
+            ++g_placeSkipped;
+            if(now-g_staleLoggedAt>=1000){
+                g_staleLoggedAt=now;
+                Log("Location tuning reloaded in 0 us - the place that settled is the one already in force: its own scoped "
+                    "settings resolve to the values the nine subsystems are already running with, and neither file changed");
+            }
+        }
     }
     if(f7Edited||(locationTuningChanged&&placeTuningStale)){
         // How long a crossing's own work takes, in the line the next report will
@@ -328,6 +340,11 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         // and 47 ms for a chain that costs two.
         std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
         const auto stage=[&mark,reloadFrequency](std::int64_t& out){const std::int64_t nowTick=renderer::PerformanceCounter();out=nowTick-mark;mark=nowTick;};
+        // What the settings reads behind this apply actually did, so the next report
+        // can answer the one question a stall asks: was the cost in the reads, and
+        // were any of them a whole-file parse? (LocationTuning.h counts both.)
+        const uint64_t readsBefore=renderer::locationtuning::profileReads;
+        const uint64_t parsesBefore=renderer::locationtuning::profileParses;
         ReloadWindTuning();stage(tWind);
         watereffect::ReloadTuning();stage(tWater);
         distancefog::ReloadTuning();stage(tFog);
@@ -338,17 +355,22 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
         weathervisuals::ReloadTuning();stage(tWeather);
         const auto micros=[reloadFrequency](std::int64_t ticks){return ticks*1000000/reloadFrequency;};
-        char reloadLine[360]{};
+        char reloadLine[512]{};
         std::snprintf(reloadLine,sizeof(reloadLine),
             "Location tuning reloaded in %lld us (wind %lld water %lld fog %lld volume %lld celestial %lld shadow %lld "
-            "material %lld lights %lld weather %lld) - the place was seen %lld ms before this line",
+            "material %lld lights %lld weather %lld) - the place was seen %lld ms before this line, and the settings "
+            "behind it answered %llu read(s) from memory with %llu whole-file parse(s), after %u settled place(s) "
+            "that needed nothing re-read",
             static_cast<long long>(micros(renderer::PerformanceCounter()-reloadBegan)),
             static_cast<long long>(micros(tWind)),static_cast<long long>(micros(tWater)),
             static_cast<long long>(micros(tFog)),static_cast<long long>(micros(tVolume)),
             static_cast<long long>(micros(tCelestial)),static_cast<long long>(micros(tShadow)),
             static_cast<long long>(micros(tMaterial)),static_cast<long long>(micros(tLights)),
             static_cast<long long>(micros(tWeather)),
-            static_cast<long long>(now-g_placeChangedAt));
+            static_cast<long long>(now-g_placeChangedAt),
+            static_cast<unsigned long long>(renderer::locationtuning::profileReads-readsBefore),
+            static_cast<unsigned long long>(renderer::locationtuning::profileParses-parsesBefore),
+            g_placeSkipped);
         Log(reloadLine);
         renderer::locationtuning::MarkTuningApplied(environmentManager.Location(),environmentManager.LocationTuningVerified());
     }

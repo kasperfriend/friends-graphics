@@ -81,7 +81,7 @@ namespace renderer
         unsigned uploads = 0;        // blocks written this frame (one per frame in practice)
         unsigned foliageDraws = 0;   // unskinned foliage draws offered to this path
         unsigned materialRefused = 0;// of those, the ones whose texture was not a green cut-out
-        unsigned noTexcoord = 0;     // draws with no texture coordinate to bend a blade by
+        unsigned noTexcoord = 0;     // draws with no texture coordinate: bent by the vertex's own height
         unsigned registerMismatch = 0;// draws whose coordinate is not where the shader reads it
         unsigned neverModel = 0;     // refused: a pass this project knows is not a model (the interface!)
         // The blade path never refuses a shader for binding the world's own
@@ -261,6 +261,12 @@ namespace renderer
         int sign = 0;              // -1: v = 1 at the base (the reference client); +1: the other way up
         float extentYards = 0.f;   // how tall the sampled vertices are, in yards
         unsigned pairs = 0;        // sampled pairs that looked like a base and its tip
+        // The card's own lowest vertex, in the frame its vertices are stored in.
+        // A card that carries a texture coordinate does not need it - its bend
+        // weight is that coordinate, and the device half reads it relative to the
+        // draw's own floor. A card that carries none is bent by its height, which
+        // is the stored value itself, so the block is told where the floor is.
+        float baseYards = 0.f;
         // False when the draw's vertices could not be read at all: a zero extent
         // and no pair then mean "no measurement", not "a flat card", and the two
         // must not be refused for the same reason.
@@ -323,6 +329,50 @@ namespace renderer
         }
         if (falling == rising) return card;
         card.sign = falling > rising ? -1 : 1;
+        return card;
+    }
+
+    // The same card, measured by its own height, for the family a real session
+    // offers a million times over: unskinned cards whose declaration carries
+    // POSITION and NORMAL and NO texture coordinate at all, whose stage-0 texture
+    // measures as a cut-out - foliage drawn with nothing to read a blade's v from.
+    // Refusing them left the field still while the log said a shader was bent, so
+    // the weight comes from the vertex itself: a blade's height above its own base
+    // IS its position in the ramp, and `heights` is that stored value, one per
+    // sampled vertex, in the units the draw keeps them in (yards).
+    //
+    // What a height ramp loses, and why the other measurement stays first: there
+    // is no v to vote with, so the up/down question cannot be asked - a height
+    // always runs base to tip, which is why `sign` is +1 here and the block is
+    // given the base offset instead. The pairs that prove a card is a blade of
+    // some kind are the consecutive vertices that step up the blade, which is the
+    // same requirement the v measurement makes (a decal lying flat, or a single
+    // quad whose vertices all sit at one height, has none).
+    inline GrassBladeCard MeasureGrassBladeCardByHeight(const float* heights, unsigned count) noexcept
+    {
+        GrassBladeCard card;
+        if (!heights || count < 4) return card;
+        float lowest = 0.f, highest = 0.f;
+        unsigned finite = 0;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            if (!std::isfinite(heights[i])) continue;
+            if (!finite) lowest = highest = heights[i];
+            ++finite;
+            lowest = (std::min)(lowest, heights[i]);
+            highest = (std::max)(highest, heights[i]);
+        }
+        if (finite < 4) return card;
+        card.measured = true;
+        card.baseYards = lowest;
+        card.extentYards = highest - lowest;
+        card.sign = 1; // a height ramp runs base to tip by definition
+        for (unsigned i = 1; i < count; ++i)
+        {
+            const float step = std::fabs(heights[i] - heights[i - 1]);
+            if (step < .02f || step > 4.f) continue;
+            ++card.pairs;
+        }
         return card;
     }
 
@@ -394,8 +444,16 @@ namespace renderer
     // here - the whole field stayed as the client drew it over one multiply. The
     // fade is two instructions now, and the portable suite scans both variants of
     // this block for the shape: one constant register per instruction, always.
-    inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace,
-        unsigned firstRegister = kGrassBladeFirstRegister, const char* translation = nullptr)
+    // `rampComponent` is which lane of that register the bend weight is read
+    // from: `y` for a card bent by its texture's v (the reference client's own
+    // blade), `z` for one bent by its own height, which is the only ramp a card
+    // with no texture coordinate has (see MeasureGrassBladeCardByHeight). Which
+    // lane is a per-shader decision made from the shader's own declaration line and
+    // the draw's own vertices; the arithmetic after the read is identical, because
+    // both are the same 0..1 ramp along the blade.
+    inline std::string GrassBladeMotionBlock(const char* rampRegister, bool worldSpace,
+        unsigned firstRegister = kGrassBladeFirstRegister, const char* translation = nullptr,
+        char rampComponent = 'y')
     {
         // Where the vertex is, as the two coordinates the wave field and the
         // per-blade hash are built from.
@@ -456,7 +514,7 @@ namespace renderer
             "    mul r3.x, r2.x, c19.z\n"
             "    mad r3.x, r2.y, c19.w, r3.x\n"
             "    frc r3.x, r3.x\n"
-            "    mad r5.z, %s.y, c19.x, c19.y\n"
+            "    mad r5.z, %s.%c, c19.x, c19.y\n"
             "    add r5.z, r5.z, c18.y\n"
             "    mul_sat r5.z, r5.z, c18.x\n"
             "    mul r5.z, r5.z, r5.z\n"
@@ -483,7 +541,7 @@ namespace renderer
             "    mul r3.z, r3.z, r5.z\n"
             "    mul r3.w, r3.w, r5.z\n"
             "%s",
-            place, texcoord ? texcoord : "v3", shear);
+            place, rampRegister ? rampRegister : "v3", rampComponent, shear);
         std::string block = text;
         // And the rows move to wherever this shader's own constants are not: the
         // text is written against c14..c19 (the reference module's own free block)
@@ -575,11 +633,16 @@ namespace renderer
         return word.size() == length || word[length] == '.';
     }
 
-    // The register a texture coordinate is declared in, from the shader's own
-    // declaration line. 0 means the shader does not declare one at all, which is
-    // a shader this build cannot bend: the bend weight IS that coordinate.
-    inline unsigned GrassBladeTexcoordRegister(const std::string& disassembly) noexcept
+    // Where any input is declared, from the shader's own `dcl_` line - the texture
+    // coordinate the bend weight normally comes from, and the position a card with
+    // no coordinate at all is bent by instead. False means the shader does not
+    // declare that input at all; `reg` carries its register number, which is 0 for
+    // the first input of a declaration and therefore cannot double as the absent
+    // answer.
+    inline bool GrassBladeDeclaredRegister(const std::string& disassembly, const char* usage,
+        size_t usageLength, unsigned& reg) noexcept
     {
+        reg = 0;
         size_t at = 0;
         while (at <= disassembly.size())
         {
@@ -587,7 +650,7 @@ namespace renderer
             const std::string line = GrassBladeTrimmed(disassembly.substr(at,
                 end == std::string::npos ? std::string::npos : end - at));
             const std::vector<std::string> words = GrassBladeWords(line);
-            if (words.size() >= 2 && words[0].compare(0, 12, "dcl_texcoord") == 0)
+            if (words.size() >= 2 && words[0].compare(0, usageLength, usage) == 0)
                 for (size_t i = 1; i < words.size(); ++i)
                     if (words[i].size() >= 2 && words[i][0] == 'v')
                     {
@@ -601,12 +664,44 @@ namespace renderer
                         // vs_2_0 and vs_3_0 have sixteen input registers and no
                         // more: anything above that is not a texture coordinate
                         // this block can read, and is left alone.
-                        if (digits && value < 16u) return value;
+                        if (digits && value < 16u) { reg = value; return true; }
                     }
             if (end == std::string::npos) break;
             at = end + 1;
         }
-        return 0;
+        return false;
+    }
+
+    // The register a texture coordinate is declared in, and whether the shader
+    // declares one at all - the same shape as the position's answer, so a caller
+    // that has to compare what the shader reads against what the draw feeds reads
+    // both of them the same way.
+    inline bool GrassBladeTexcoordRegister(const std::string& disassembly, unsigned& reg) noexcept
+    {
+        return GrassBladeDeclaredRegister(disassembly, "dcl_texcoord", 12, reg);
+    }
+
+    // The register a texture coordinate is declared in. 0 means the shader does not
+    // declare one - and every shader this build has ever seen declares its position
+    // first, so no coordinate of a real client lands in v0 where the two answers
+    // would be the same one.
+    inline unsigned GrassBladeTexcoordRegister(const std::string& disassembly) noexcept
+    {
+        unsigned reg = 0;
+        GrassBladeTexcoordRegister(disassembly, reg);
+        return reg;
+    }
+
+    // Whether the vertex's own position is declared, and in which register. The
+    // bool is the answer and not the number: v0 is the ordinary register for a
+    // position, and "declared in v0" must never read as "not declared". D3D9 hands
+    // the elements of a declaration their input registers in the order they are
+    // written, so this reads the same way the texture coordinate does - and it is
+    // the value the draw's own vertices carry, which is what a bend weight built
+    // from the vertex needs.
+    inline bool GrassBladePositionRegister(const std::string& disassembly, unsigned& reg) noexcept
+    {
+        return GrassBladeDeclaredRegister(disassembly, "dcl_position", 12, reg);
     }
 
     // A register operand as an instruction writes it: `-r0` and `r0_abs` are r0
@@ -909,6 +1004,14 @@ namespace renderer
         const char* reason = "";          // why not, in one line, for the log
         std::string text;                 // the shader text to assemble
         unsigned texcoordRegister = 0;    // the v register the block reads
+        // The ramp this block was built for. False (and `texcoordRegister` set) is
+        // the reference client's card, bent along its texture's v. True is a card
+        // whose vertices carry no texture coordinate at all, bent along its own
+        // height: `positionRegister` is the register that height is read from, and
+        // the caller - which is the half that has the draw's vertices - decides
+        // which one applies before it calls this, because the two must agree.
+        bool rampByHeight = false;
+        unsigned positionRegister = 0;    // the v register of the vertex's own height
         size_t anchorLine = 0;
         // Which frame the block's input is in: r0 is the view position, or - when
         // the anchor line places the vertex through the engine's own instance rows
@@ -937,23 +1040,50 @@ namespace renderer
     //
     // Every refusal below is a structure, not a guess, and each one is a shader
     // this build cannot bend without breaking it:
-    //   * no texture coordinate: the bend weight IS that coordinate;
+    //   * no texture coordinate, when the caller asked for one: the bend weight IS
+    //     that coordinate - unless the caller asked for the height ramp instead,
+    //     which is what a card from the family that carries no coordinate at all
+    //     is bent by, and then it is the position that has to be there;
     //   * no position: the projection never reads r0, so there is no line the
     //     block can sit after with the vertex in hand;
     //   * a scratch register the shader still needs across the insertion point;
     //   * no free constant register to define the world axes in (the world-space
     //     family only), which no foliage shader in a real session has hit.
-    inline GrassBladeInjection BuildGrassBladeInjection(const std::string& disassembly, const char* model)
+    inline GrassBladeInjection BuildGrassBladeInjection(const std::string& disassembly, const char* model,
+        bool rampByHeight = false)
     {
         GrassBladeInjection out;
         if (disassembly.empty()) { out.reason = "the shader could not be disassembled"; return out; }
         if (!model || !model[0]) { out.reason = "the shader's model token is unknown"; return out; }
 
-        const unsigned texcoord = GrassBladeTexcoordRegister(disassembly);
-        if (!texcoord)
+        // Which ramp this shader is bent by, from its own declaration: the caller
+        // knows from the draw's vertices whether there is a texture coordinate to
+        // read, and the two have to agree or the block would read a register the
+        // draw never fed - a lane that holds (0,0,0,1) for every vertex is a
+        // constant weight, and a constant weight translates a card instead of
+        // bending it.
+        unsigned rampRegister = 0;
+        char rampComponent = 'y';
+        if (rampByHeight)
         {
-            out.reason = "the shader does not declare a texture coordinate, so a blade has no height to bend";
-            return out;
+            if (!GrassBladePositionRegister(disassembly, rampRegister))
+            {
+                out.reason = "the shader declares no vertex position, so a blade has no height to bend by";
+                return out;
+            }
+            out.rampByHeight = true;
+            out.positionRegister = rampRegister;
+            rampComponent = 'z';
+        }
+        else
+        {
+            rampRegister = GrassBladeTexcoordRegister(disassembly);
+            if (!rampRegister)
+            {
+                out.reason = "the shader does not declare a texture coordinate, so a blade has no height to bend";
+                return out;
+            }
+            out.texcoordRegister = rampRegister;
         }
         const size_t anchor = GrassBladeAnchorLine(disassembly);
         if (anchor == ~size_t(0))
@@ -987,11 +1117,11 @@ namespace renderer
         }
         out.firstRegister = base;
 
-        char texcoordName[16]{};
-        std::snprintf(texcoordName, sizeof(texcoordName), "v%u", texcoord);
+        char rampName[16]{};
+        std::snprintf(rampName, sizeof(rampName), "v%u", rampRegister);
         if (!out.worldSpace) out.viewTranslation = GrassBladeViewTranslation(disassembly, anchor);
-        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace, out.firstRegister,
-            out.viewTranslation.c_str());
+        const std::string block = GrassBladeMotionBlock(rampName, out.worldSpace, out.firstRegister,
+            out.viewTranslation.c_str(), rampComponent);
 
         // The assembled text: the shader's own lines, with the block after the line
         // that lands the vertex's position. The model token is prepended when the
@@ -1016,7 +1146,6 @@ namespace renderer
         }
         out.ok = true;
         out.text = text;
-        out.texcoordRegister = texcoord;
         out.anchorLine = anchor;
         return out;
     }

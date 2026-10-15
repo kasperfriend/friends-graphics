@@ -59,6 +59,17 @@ struct M2VertexLayout
     bool texcoordIsFloat2 = false; // the block reads .y, so two floats are what it needs
     unsigned texcoordRegister = 0;
     unsigned texcoordOffset = 0;
+    // Where the position itself lands. A card bent along its texture's v does not
+    // need it, but a card whose vertices carry NO texture coordinate is bent by
+    // its own height - which is this register's z - and the shader's own
+    // `dcl_position` has to name the same register for the block to read the right
+    // input (see MeasureGrassBladeCardByHeight).
+    unsigned positionRegister = 0;
+    // The declaration as one line of text, filled by whoever read the elements
+    // (DescribeVertexDeclaration). The blade path logs it for the family that
+    // carries no texture coordinate: what a report has to say is what the vertices
+    // DO carry.
+    char description[192]{};
 };
 
 inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned count, M2VertexLayout& out) noexcept
@@ -83,6 +94,7 @@ inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned coun
         {
             out.position = true;
             out.positionOffset = element.Offset;
+            out.positionRegister = inputRegister;
         }
         // UBYTE4N as well as UBYTE4: a normalised byte pair is the same four
         // bytes to a shader that reads them as an index; only the declaration's

@@ -480,7 +480,12 @@ namespace detail
         MeshProfile profile;
         const HRESULT queried = declaration->GetDeclaration(elements, &count);
         profile.read = SUCCEEDED(queried);
-        if (profile.read) renderer::ParseM2VertexLayout(elements, count, profile.layout);
+        if (profile.read)
+        {
+            renderer::ParseM2VertexLayout(elements, count, profile.layout);
+            renderer::DescribeVertexDeclaration(elements, count, profile.layout.description,
+                sizeof(profile.layout.description));
+        }
         profile.lastSeenFrame = frame;
         auto inserted = g_meshes.emplace(static_cast<const void*>(declaration), profile).first;
         MeshProfile& stored = inserted->second;
@@ -500,9 +505,7 @@ namespace detail
                 // palette can ever lean, while an opaque one is scenery and the
                 // plants are on the model path after all.
                 const renderer::TextureAlphaProbe texture = TextureIsCutout(device);
-                const char* verdict = texture.verdict == renderer::TextureCutout::Cutout ? "a cut-out (foliage-like!)"
-                    : texture.verdict == renderer::TextureCutout::Opaque ? "opaque (scenery, not foliage)"
-                    : "not readable as a cut-out";
+                const char* verdict = renderer::TextureCutoutText(texture);
                 std::snprintf(text, sizeof(text),
                     "Vegetation sway: a draw is not using a vertex declaration this reader can measure - POSITION + "
                     "BLENDINDICES in stream 0 is what makes a draw the client's skinned model path (%s). Its stage 0 "

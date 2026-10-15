@@ -318,7 +318,18 @@ void ReloadTuning() {
     gammaPercent = std::clamp(ReadTuning(L"GammaPercent", 100, L"PostProcess"), 50, 180);
     sharpnessPercent = std::clamp(ReadTuning(L"SharpnessPercent", 35, L"PostProcess"), 0, 100);
     postProcessEffectEnabled = ReadTuning(L"Enabled", 1, L"PostProcess") != 0;
-    {char message[160];sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);if(!logPath.empty())Log(message);}
+    // One line per CHANGE, not one per reload: this runs on every settled crossing
+    // as well as at startup, and a line here is an open, a write and a close of a
+    // file in the game folder - which a scanner watching that folder turns into
+    // milliseconds, on exactly the path a player walks a border on. The text is
+    // unchanged, so an existing log still reads the same way.
+    {
+        char message[160];
+        sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
+            postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);
+        static std::string lastPostProcessLine;
+        if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}
+    }
     sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 300);
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
