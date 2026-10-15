@@ -19,6 +19,19 @@ shared.
 - **F7 → WIND → `VEGETATION SWAY`** turns the effect off and on; the link itself
   is **F7 → WIND → `DRIVE PLANTS & TREES`**, next to `DRIVE WAVES` and
   `DRIVE CLOUDS`.
+- The model half has a **second lock** for a player who turns `TREES & BUSHES
+  SWAY` on: **`GRASS HEIGHT LIMIT (YD)`** (`[Vegetation] GrassLimitYards`, 2 by
+  default) refuses any model taller than a tuft of grass, and the HUD counts what
+  it refused as `tall`. A real session's log measures the grass-shaped draws at
+  0.16 to 0.38 yd leaning the full 20 degrees, while the draws a player reports as
+  trees measure 3.40 to 11.03 yd and lean 0.2 to 1.6 degrees; the limit sits
+  between them.
+- The blade path writes one line to `ModernWoWRenderer.log` every ten seconds of
+  play while it is doing anything, `blade wind: …`, carrying the same counters the
+  HUD row shows (`drew`, `bent`, `looked at`, `mat/never/decl/card/read/vs/asm`,
+  the tip amplitude) - so "the field is green and nothing moves" can be answered
+  from a log alone: `drew 0` narrows it to the gate, and a nonzero `drew` with a
+  still field narrows it to the bend.
 - Settings live in the `[Vegetation]` section of `GraphicsEffects.ini` and obey
   the same per-location overrides as every other section (global, zone, subarea).
 - The optional diagnostic **F7 → WIND → `VEGETATION DEBUG VIEW`** adds two rows

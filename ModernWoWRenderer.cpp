@@ -83,15 +83,40 @@ std::once_flag g_initialize;
 thread_local bool g_drawingOverlay = false;
 std::wstring g_basePath;
 
+// The log every subsystem writes to. Each call used to open the file, write one
+// line and close it again, and an area crossing writes a handful of lines - which
+// a scanner watching a game folder turns into milliseconds each. That is what the
+// "Location tuning reloaded in 47 ms" line in a player's log was made of, and it
+// was still true after the settings themselves had been made to read from memory.
+// Lines are buffered here and written once per frame (Present flushes; so does a
+// device-loss transition), so a hundred lines cost what one did and a frame with
+// nothing to say touches no file at all. The file is NOT held open between
+// flushes: a player can still move or delete it while the game runs, which is how
+// this log gets looked at in the first place.
+std::string g_logPending;
+void FlushLog()
+{
+    if(g_logPending.empty())return;
+    std::ofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
+    out << g_logPending;
+    out.flush();
+    g_logPending.clear();
+}
 void Log(char const* text)
 {
-    std::wofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
-    out << text << '\n';
+    if(!text)return;
+    g_logPending += text;
+    g_logPending += '\n';
+    // A burst goes out on the spot past a few kilobytes, so a crash can never take
+    // more than one frame's worth of lines with it.
+    if(g_logPending.size() >= 8192)FlushLog();
 }
 
 void SetAvailability(renderer::DeviceAvailability next)
 {
     if (next == g_availability) return;
+    // Whatever is pending belongs to the state this transition is about to change.
+    FlushLog();
     g_availability = next;
     // Presents keep arriving while the device is lost, so the frame-gap check
     // alone would not notice. History from either side of the transition is stale.
@@ -200,7 +225,32 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             waterreflection::Finish();
             volume::Finish(d);
             weathervisuals::Present(d, true);
+            FlushLog();
             return originalPresent(d, a, b, w, r);
+        }
+    }
+
+    // What the blade path did with the frame that just ended, every ten seconds
+    // of play and only when it has something to say. This is the line a report can
+    // be answered from without a screenshot - "the field the player stands in" is
+    // `drew` draws that went out with a shader this build rewrote, and a report
+    // that shows a green field with `drew 0` has narrowed the fault to the gate
+    // (the counters next to it) rather than to the bend itself.
+    {
+        const uint64_t frameIndex = renderer::FrameContext::Current().frameIndex;
+        if (frameIndex && frameIndex % 600 == 0) {
+            const renderer::GrassBladeStatus& blades = grassblade::Status();
+            if (blades.bladeDraws || blades.injected || blades.refused || blades.noTexcoord) {
+                char bladeLine[360]{};
+                std::snprintf(bladeLine, sizeof(bladeLine),
+                    "blade wind: %u draw(s) bent this frame, %u block upload(s) | %u shader(s) bent, %u looked at | "
+                    "mat %u never %u decl %u card %u read %u vs %u asm %u | %.2f yd at the tip",
+                    blades.bladeDraws, blades.uploads, blades.injected, blades.examined,
+                    blades.materialRefused, blades.neverModel, blades.noTexcoord, blades.cardRefused,
+                    blades.cardUnreadable, blades.registerMismatch, blades.refused,
+                    double(blades.amplitudeYards));
+                Log(bladeLine);
+            }
         }
     }
 
@@ -240,18 +290,59 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&
         (now-g_locationAppliedAt>=kLocationReloadGapMs||!g_locationConfigured);
     const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);
-    if(locationTuningChanged){g_placePending=false;g_locationAppliedAt=now;g_locationConfigured=true;tuningoverlay::Configure(g_basePath);}
-    if(tuningoverlay::Update()||locationTuningChanged){
+    // An F7 edit is always applied; a settled place is applied only when what is
+    // in force is NOT already that place's tuning. The place that settled being
+    // the one already applied - with neither file changed underneath it - means
+    // every scoped read the nine reloads would make already returned this answer,
+    // so there is nothing to re-read, nothing to reconfigure and nothing for the
+    // player to feel. That is the case this client's `Area=0`/`Area=223` flap
+    // produces on every other sample of a walk across a border.
+    const bool f7Edited=tuningoverlay::Update();
+    // An F7 edit always re-reads everything; a settled place is skipped when
+    // nothing about it can differ from what is already in force.
+    const bool placeTuningStale=!f7Edited&&locationTuningChanged&&
+        !renderer::locationtuning::AppliedTuningStillInForce(
+            environmentManager.Location(),environmentManager.LocationTuningVerified());
+    if(locationTuningChanged){
+        g_placePending=false;g_locationConfigured=true;
+        if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}
+        else if(!f7Edited)
+            Log("Location tuning reloaded in 0 ms - the place that settled is the one already in force, and neither settings file changed");
+    }
+    if(f7Edited||(locationTuningChanged&&placeTuningStale)){
         // How long a crossing's own work takes, in the line the next report will
         // carry: the numbers a player's log can be read for. A reload that reads
         // the tuning of a place that adds nothing to the file is already skipped
         // inside the scoped cache (see LocationTuning.h), so what is left here is
         // only ever a reload that had something to read.
         const uint64_t reloadBegan=GetTickCount64();
-        ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();
-        char reloadLine[128]{};
-        std::snprintf(reloadLine,sizeof(reloadLine),"Location tuning reloaded in %llu ms",static_cast<unsigned long long>(GetTickCount64()-reloadBegan));
+        // Each stage is timed, and the line carries all nine: a crossing that
+        // still costs something has to say WHICH reload cost it, in the log a
+        // player sends, or the next round of this is guesswork again. The sum is
+        // the number this line has always carried.
+        uint64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
+        const auto stage=[&mark](uint64_t& out){const uint64_t nowTick=GetTickCount64();out=nowTick-mark;mark=nowTick;};
+        ReloadWindTuning();stage(tWind);
+        watereffect::ReloadTuning();stage(tWater);
+        distancefog::ReloadTuning();stage(tFog);
+        volume::ReloadTuning();stage(tVolume);
+        celestialhighlight::ReloadTuning(g_basePath);stage(tCelestial);
+        nativeshadowdiag::ReloadEnhancement();stage(tShadow);
+        renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);stage(tMaterial);
+        renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
+        weathervisuals::ReloadTuning();stage(tWeather);
+        char reloadLine[320]{};
+        std::snprintf(reloadLine,sizeof(reloadLine),
+            "Location tuning reloaded in %llu ms (wind %llu water %llu fog %llu volume %llu celestial %llu shadow %llu "
+            "material %llu lights %llu weather %llu)",
+            static_cast<unsigned long long>(GetTickCount64()-reloadBegan),
+            static_cast<unsigned long long>(tWind),static_cast<unsigned long long>(tWater),
+            static_cast<unsigned long long>(tFog),static_cast<unsigned long long>(tVolume),
+            static_cast<unsigned long long>(tCelestial),static_cast<unsigned long long>(tShadow),
+            static_cast<unsigned long long>(tMaterial),static_cast<unsigned long long>(tLights),
+            static_cast<unsigned long long>(tWeather));
         Log(reloadLine);
+        renderer::locationtuning::MarkTuningApplied(environmentManager.Location(),environmentManager.LocationTuningVerified());
     }
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
@@ -298,6 +389,8 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     nativeshadowdiag::OnPresent(d);
     renderer::RendererDiagnostics::Instance().OnFrameEnd();
     const HRESULT presentResult = originalPresent(d,a,b,w,r);
+    // One write per frame for every line the frame produced: see Log.
+    FlushLog();
     SetAvailability(renderer::ClassifyDeviceResult(presentResult));
     return presentResult;
 }

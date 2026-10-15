@@ -274,6 +274,7 @@ inline bool g_reportedSolidTexture = false;
 inline bool g_reportedUnreadableTexture = false;
 inline bool g_reportedShape = false;
 inline bool g_reportedSize = false;
+inline bool g_reportedTall = false;
 inline bool g_reportedMoved = false;
 inline bool g_reportedMerged = false;
 inline bool g_reportedLean = false;
@@ -1550,6 +1551,32 @@ struct Scope
                     "between " + std::to_string(renderer::kVegetationMinModelHeight) + " and " +
                     std::to_string(renderer::kVegetationMaxModelHeight) + "), so there is nothing to bend in it. The "
                     "HUD counts these as `size`.");
+            }
+            return;
+        }
+        // Only grass leans. The models the client draws with bones are its grass
+        // tufts, and they are SMALL - a real session's log has 0.16, 0.38 and 0.8
+        // yd models leaning up to 20 degrees, which is the field a player sees
+        // moving - while everything a player reports as a tree, a bush or a piece
+        // of the building is 3 to 11 yd (the same log: 3.40, 3.81, 5.66 and 10.77
+        // yd models, the last with thirteen bones, leaning 0.2 to 1.6 degrees). A
+        // canopy moving a hand's width is still the world moving, which is the one
+        // thing this feature must not do, so the height limit is the rule and the
+        // switch above is only a player's override. It is a setting because a
+        // field's grass is not every field's grass: raise it where the tufts are
+        // tall, and the log line below says what it refused.
+        const float grassLimit = std::clamp(settings.grassLimitYards, 1.f, 8.f);
+        if (height > grassLimit)
+        {
+            Status().lastMeasured = height;
+            ++Status().skippedTall;
+            if (!g_reportedTall)
+            {
+                g_reportedTall = true;
+                Log("Vegetation sway: a model draw measured " + std::to_string(height) + " yd tall, which is above the "
+                    "grass height limit of " + std::to_string(grassLimit) + " yd, so it is a bush, a canopy, a tree or a "
+                    "piece of scenery rather than a tuft of grass and is left standing (GRASS HEIGHT LIMIT in F7 -> WIND). "
+                    "The HUD counts these as `tall`.");
             }
             return;
         }

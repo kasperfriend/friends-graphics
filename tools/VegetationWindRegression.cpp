@@ -673,14 +673,18 @@ static void TestStrengthSizesAndGates()
     const float tree = SampleAt(vegetation, wind, 0.f, 0.f, 18.f).angleDegrees;
     Check(grass > bush && bush > tree, "small plants lean further than trees in the same air");
     Check(grass <= settings.maxAngle + 1e-4f, "the ceiling holds for the smallest plant");
-    Check(tree > 0.f, "a tree still leans");
+    // The tree band is the part a player reported as the world moving: it ships
+    // refused (the height limit on the model path) and at a zero tree gain, so
+    // the same air that leans a tuft leaves a tree standing.
+    Check(tree == 0.f && grass > 0.f, "a tree is left standing while the grass in the same air leans");
 
     // Taller plants put their tips further downwind.
     const auto move = [&](float height) {
         const auto s = SampleAt(vegetation, wind, 0.f, 0.f, height);
         return double(height) * std::sin(s.angleDegrees * 0.017453292519943295);
     };
-    Check(move(18.f) > move(2.5f), "a tree's canopy travels further than a bush top");
+    Check(move(2.5f) > 0.0 && move(18.f) == 0.0,
+        "a bush top travels downwind while the tree above it does not move at all");
 
     // A storm leans harder than a breeze; a stronger wind eventually saturates
     // at the ceiling for grass but never for a tree.
@@ -690,8 +694,8 @@ static void TestStrengthSizesAndGates()
     strong.Update(storm);
     const float stormGrass = SampleAt(strong, storm, 0.f, 0.f, .4f).angleDegrees;
     const float stormTree = SampleAt(strong, storm, 0.f, 0.f, 18.f).angleDegrees;
-    Check(stormGrass >= grass && stormTree > tree && stormTree <= settings.maxAngle,
-        "wind strength raises the lean and the ceiling still holds");
+    Check(stormGrass >= grass && stormTree == tree && stormGrass <= settings.maxAngle,
+        "wind strength raises the lean and the ceiling still holds, and the tree band stays at zero in a storm too");
 
     // The ceiling is honoured for arbitrary settings and absurd inputs.
     VegetationSettings extreme = settings;
@@ -950,7 +954,8 @@ static std::map<std::wstring, int> VegetationValues(const VegetationSettings& s)
     return {{L"Enabled",s.enabled},{L"SwayPercent",int(std::lround(s.sway * 100))},
         {L"GustPercent",int(std::lround(s.gust * 100))},{L"FlutterPercent",int(std::lround(s.flutter * 100))},
         {L"MaxAngleDegrees",int(std::lround(s.maxAngle))},{L"PlantPercent",int(std::lround(s.plantGain * 100))},
-        {L"TreePercent",int(std::lround(s.treeGain * 100))},{L"DistanceYards",int(std::lround(s.distance))},
+        {L"TreePercent",int(std::lround(s.treeGain * 100))},
+        {L"GrassLimitYards",int(std::lround(s.grassLimitYards))},{L"DistanceYards",int(std::lround(s.distance))},
         {L"SwayModels",s.swayModels},
         {L"GrassBlades",s.grassBlades},{L"SwayAnimatedModels",s.animatedModels},{L"DebugView",s.debugView}};
 }

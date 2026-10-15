@@ -43,7 +43,7 @@ struct VegetationSettings
     float flutter = 1.f;         // FlutterPercent: the small fast shimmer, mostly grass/bushes
     float maxAngle = 20.f;       // MaxAngleDegrees: hard ceiling so nothing can fold over
     float plantGain = 1.f;       // PlantPercent: grass/bush gain (models below ~1.5 yards)
-    float treeGain = 1.f;        // TreePercent: tree gain (models above ~6 yards)
+    float treeGain = 0.f;        // TreePercent: tree gain (models above ~6 yards); ships 0
     float distance = 120.f;      // DistanceYards: sway fades out to nothing by this range
     // GrassBlades: the grass the client bakes into its own meshes has no bones to
     // turn, so it is bent in the client's own vertex shader instead (one shader
@@ -55,8 +55,16 @@ struct VegetationSettings
     // trees and bushes of a real client are drawn as cards and canopies that do
     // not read as a plant from the outside, so a player sees parts of the scenery
     // move with them. Grass, which is the part that was asked for, is the blade
-    // path below and is unaffected by this switch.
+    // path below and is unaffected by this switch. The height limit under it is
+    // the SECOND lock, and it is the one that holds when a player turns this on:
+    // a real session leans 3.40, 3.81, 5.66 and 10.77 yd models (the last with
+    // thirteen bones) while its grass measures 0.16 to 0.38 yd.
     bool swayModels = false;
+    // GrassLimitYards: the tallest model that may lean. Above it the draw is not
+    // a tuft of grass: a bush, a canopy, a tree, a fence or a piece of scenery,
+    // and a lean on one of those is what a player sees as the world moving. See
+    // the size gate in src/Effects/VegetationSway.h.
+    float grassLimitYards = 2.f;
     bool grassBlades = true;
     bool animatedModels = false; // SwayAnimatedModels: also lean models the client animates
     bool debugView = false;      // DebugView: extra diagnostic HUD line
@@ -100,6 +108,7 @@ struct VegetationStatus
     unsigned skippedAnimated = 0; // the client's own animation is moving the model
     unsigned skippedShape = 0;    // a body's worth of bones, or longer than it is tall
     unsigned skippedSize = 0;     // outside the supported size range
+    unsigned skippedTall = 0;     // taller than a grass tuft: a bush, a canopy, a tree
     unsigned skippedGround = 0;   // hangs from its origin instead of standing on it
     unsigned skippedRange = 0;    // beyond DistanceYards
     unsigned skippedCalm = 0;     // inside the range, but the wind leaves a zero angle here
@@ -220,7 +229,7 @@ public:
         settings.flutter = std::clamp(WindFinite(settings.flutter, 1.f), 0.f, 2.f);
         settings.maxAngle = std::clamp(WindFinite(settings.maxAngle, 20.f), 1.f, 30.f);
         settings.plantGain = std::clamp(WindFinite(settings.plantGain, 1.f), 0.f, 2.f);
-        settings.treeGain = std::clamp(WindFinite(settings.treeGain, 1.f), 0.f, 2.f);
+        settings.treeGain = std::clamp(WindFinite(settings.treeGain, 0.f), 0.f, 2.f);
         settings.distance = std::clamp(WindFinite(settings.distance, 120.f), 20.f, 300.f);
         m_settings = settings;
     }

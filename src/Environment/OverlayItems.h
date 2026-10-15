@@ -66,12 +66,13 @@ inline std::vector<Item> items={
  // creature that stands still lean in the wind.
  {KIND_TOGGLE,L"Vegetation",L"Enabled","VEGETATION SWAY",0,1,1,1},
  {KIND_TOGGLE,L"Vegetation",L"SwayModels","TREES & BUSHES SWAY",0,1,1,0},
+ {KIND_SLIDER,L"Vegetation",L"GrassLimitYards","GRASS HEIGHT LIMIT (YD)",1,8,1,2},
  {KIND_SLIDER,L"Vegetation",L"SwayPercent","SWAY STRENGTH (%)",0,300,5,100},
  {KIND_SLIDER,L"Vegetation",L"GustPercent","SWAY GUSTS (%)",0,100,5,45},
  {KIND_SLIDER,L"Vegetation",L"FlutterPercent","GRASS FLUTTER (%)",0,200,5,100},
  {KIND_SLIDER,L"Vegetation",L"MaxAngleDegrees","MAX LEAN (DEGREES)",2,30,1,20},
  {KIND_SLIDER,L"Vegetation",L"PlantPercent","GRASS & BUSH GAIN (%)",0,200,5,100},
- {KIND_SLIDER,L"Vegetation",L"TreePercent","TREE GAIN (%)",0,200,5,100},
+ {KIND_SLIDER,L"Vegetation",L"TreePercent","TREE GAIN (%)",0,200,5,0},
  {KIND_SLIDER,L"Vegetation",L"DistanceYards","SWAY DISTANCE (YARDS)",20,300,10,120},
  // The grass the client bakes into its own meshes has no bones to turn, so it
  // is bent inside the client's own vertex shader instead (one shader rewritten

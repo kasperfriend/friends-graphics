@@ -231,6 +231,25 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
     baseFile=nextBase;localFile=nextLocal;
     active=location;editable=location.valid&&verified;return changed;
 }
+// What the last apply was FOR, and whether the same thing is still in force.
+// This client's place flaps across a boundary while the player walks it (`Area=0`
+// and `Area=223` trading places, each alternation a settle), and a settle of a
+// place whose tuning is already in force needs no re-read at all: the values can
+// only differ if one of the two files changed in between, and both are checked
+// here by their own identity - the same stat a read would make. This is the
+// difference between a crossing that re-reads nine subsystems and one that does
+// nothing, and it is what the log line of the next report is read for.
+inline LocationContext appliedPlace;
+inline bool appliedEditable=false,appliedKnown=false;
+inline bool AppliedTuningStillInForce(const LocationContext& location,bool verified) {
+    if(!appliedKnown||!appliedPlace.SamePlace(location)||appliedEditable!=(location.valid&&verified))return false;
+    if(!ScopedFileUnchanged())return false;
+    if(!baseFile.empty()&&!ProfileIdentity(ProfileCache()[baseFile],baseFile))return false;
+    return true;
+}
+inline void MarkTuningApplied(const LocationContext& location,bool verified) {
+    appliedPlace=location;appliedEditable=location.valid&&verified;appliedKnown=true;
+}
 inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
     if(!IsGlobal(section)&&editable&&path&&baseFile==path) {
         for(int level=topLevel;level>=0;--level) {

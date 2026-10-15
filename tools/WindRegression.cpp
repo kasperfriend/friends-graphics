@@ -533,10 +533,20 @@ static void TestConfigurationAndWiring()
     const auto snapshot = main.find("nextFrame.wind=g_windSystem.Update", present);
     const auto sea = main.find("    watereffect::Present();", present);
     Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
-    Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){") != main.npos &&
-          main.find("ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();") != main.npos &&
+    // The chain is one reload per subsystem, each one timed by the line a
+    // player's log carries, and it runs on an F7 edit or a settled place - never
+    // on a place whose tuning is already in force, which is the crossing this
+    // client's `Area=0`/`Area=223` flap produces on every other sample.
+    Check(main.find("if(f7Edited||(locationTuningChanged&&placeTuningStale)){") != main.npos &&
+          main.find("ReloadWindTuning();stage(tWind);") != main.npos &&
+          main.find("watereffect::ReloadTuning();stage(tWater);") != main.npos &&
+          main.find("volume::ReloadTuning();stage(tVolume);") != main.npos &&
+          main.find("weathervisuals::ReloadTuning();stage(tWeather);") != main.npos &&
+          main.find("AppliedTuningStillInForce(") != main.npos &&
+          main.find("the place that settled is the one already in force") != main.npos &&
           main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
-          "F7/location/F12 all reload wind, and F12 drops the scoped read cache so a hand-edited file is picked up");
+          "F7/location/F12 all reload wind, F12 drops the scoped read cache so a hand-edited file is picked up, and a "
+          "crossing that settles on the place already in force reloads nothing");
     // A crossing must not stall the frame. This client's place flaps across a
     // boundary while the player walks it, and a change used to re-read every
     // scoped key of GraphicsEffects.ini (per-key probes) AND every row of the
@@ -589,8 +599,10 @@ static void TestConfigurationAndWiring()
     Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
           main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
           main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
-          main.find("if(locationTuningChanged){g_placePending=false;g_locationAppliedAt=now;g_locationConfigured=true;tuningoverlay::Configure(g_basePath);}") != main.npos,
-          "a location change is applied once the place has held still, one reload per gap, and the first one at once so startup configures itself");
+          main.find("if(locationTuningChanged){\n        g_placePending=false;g_locationConfigured=true;") != main.npos &&
+          main.find("if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}") != main.npos,
+          "a location change is applied once the place has held still, one reload per gap, and the first one at once so "
+          "startup configures itself - while a place whose tuning is already in force is skipped without spending the gap");
     const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");

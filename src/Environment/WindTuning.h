@@ -37,7 +37,8 @@ template<class Reader> VegetationSettings ReadVegetationSettings(Reader read)
     s.flutter = std::clamp(read(L"FlutterPercent", 100), 0, 200) * .01f;
     s.maxAngle = float(std::clamp(read(L"MaxAngleDegrees", 20), 2, 30));
     s.plantGain = std::clamp(read(L"PlantPercent", 100), 0, 200) * .01f;
-    s.treeGain = std::clamp(read(L"TreePercent", 100), 0, 200) * .01f;
+    s.treeGain = std::clamp(read(L"TreePercent", 0), 0, 200) * .01f;
+    s.grassLimitYards = float(std::clamp(read(L"GrassLimitYards", 2), 1, 8));
     s.distance = float(std::clamp(read(L"DistanceYards", 120), 20, 300));
     s.animatedModels = read(L"SwayAnimatedModels", 0) != 0;
     s.swayModels = read(L"SwayModels", 0) != 0;

@@ -163,6 +163,7 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("geo", status.skippedGeometry);
     report("shape", status.skippedShape);
     report("size", status.skippedSize);
+    report("tall", status.skippedTall);
     report("ground", status.skippedGround);
     report("move", status.skippedAnimated);
     report("far", status.skippedRange);
