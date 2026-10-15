@@ -17,8 +17,7 @@ was already available or exactly zero:
   formulas. It no longer repeats the long pair's projections and `sincos`
   evaluations for every covered pixel. No interpolator, texture, sampler or
   authored coefficient was added or removed; `.xy` remains the native UV ABI.
-- SSR and celestial rays skip depth reads when a sample is outside the capture.
-  SSR no longer reads scene colour on a depth miss and stops once hit coverage is
+- SSR no longer reads scene colour on a depth miss and stops once hit coverage is
   complete. Celestial occlusion stops only when visibility is exactly zero.
   Local lights reject pixels at or beyond their squared radius before vector
   normalization and the exponent-64 specular lobe. Fractional edge visibility,

@@ -723,7 +723,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                    .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
             float inside=step(.05,samplePosition.z)*saturate(min(min(sampleUV.x,sampleUV.y),
                                       min(1-sampleUV.x,1-sampleUV.y))*8);
-            [branch] if(inside<=0) continue;
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
@@ -788,7 +787,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                   .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
             float inside=step(.05,lightSample.z)*saturate(min(min(lightUV.x,lightUV.y),
                                     min(1-lightUV.x,1-lightUV.y))*8);
-            [branch] if(inside<=0) continue;
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
             // Anything nearer than the sample point occludes the source: a single
