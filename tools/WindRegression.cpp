@@ -406,10 +406,11 @@ static std::map<std::wstring, int> SettingValues(const WindSettings& s)
         {L"StrengthPercent",int(std::lround(s.strength * 100))},{L"GustPercent",int(std::lround(s.gustAmount * 100))},
         {L"GustSeconds",int(s.gustSeconds)},{L"DirectionChangeSeconds",int(s.directionSeconds)},
         {L"TransitionSeconds",int(s.transitionSeconds)},{L"WeatherResponsePercent",int(std::lround(s.weatherResponse * 100))},
-        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},
-        // The vegetation link is part of this section: one switch per consumer,
-        // each one restoring that consumer's legacy behaviour on its own.
-        {L"AffectVegetation",s.affectVegetation},{L"DebugView",s.debugView}};
+        // One switch per consumer, each one restoring that consumer's legacy
+        // behaviour on its own. There is no vegetation consumer any more: the
+        // wind reaches the waves, the clouds and the precipitation drift, and
+        // nothing that is drawn.
+        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},{L"DebugView",s.debugView}};
 }
 static void TestConfigurationAndWiring()
 {
@@ -510,6 +511,55 @@ static void TestConfigurationAndWiring()
     }
     Check(count == defaults.size(), "every supported wind option has an F7 control");
     const auto main = Read("ModernWoWRenderer.cpp");
+
+    // The vegetation sway is GONE, and it is gone in every place a feature can be
+    // switched on from. Each of these is a way for it to come back without
+    // anybody noticing: a file restored by a merge, a section still read from the
+    // INI, a toggle still drawn in F7, a HUD row still printed, a library still
+    // compiled. What it must never be is an off-by-default switch - a player
+    // would still be paying for it, and a later edit would turn it back on.
+    {
+        for (const char* path : {"src/Effects/VegetationSway.h", "src/Effects/GrassBladeSway.h",
+                "src/Environment/GrassShaderWind.h", "src/Environment/VegetationWind.h",
+                "src/Core/M2DrawGeometry.h", "src/Core/M2ShaderProbe.h", "src/Core/TextureCutout.h",
+                "docs/vegetation-wind.md", "tools/VegetationWindRegression.cpp",
+                "tools/Test-VegetationWind.cmd", "tools/VegetationPreview.cpp"})
+            Check(!std::filesystem::exists(path), "the sway's own file is deleted, not disabled");
+        Check(ini.find("[Vegetation]") == ini.npos && ini.find("AffectVegetation") == ini.npos &&
+              ini.find("GrassBlades") == ini.npos && ini.find("SwayModels") == ini.npos,
+              "no sway section, no plant link and no sway key is shipped");
+        for (const auto& item : tuningoverlay::items)
+        {
+            const std::wstring section(item.section ? item.section : L"");
+            const std::wstring key(item.key ? item.key : L"");
+            Check(section != L"Vegetation" && key != L"AffectVegetation" && key != L"SwayModels" &&
+                  key != L"GrassBlades" && key != L"SwayAnimatedModels" && key != L"TreePercent" &&
+                  key != L"GrassLimitYards",
+                  "F7 has no sway control left, not even a hidden one");
+        }
+        const auto windSystem = Read("src/Environment/WindSystem.h");
+        const auto windTuning = Read("src/Environment/WindTuning.h");
+        const auto windDebug = Read("src/Environment/WindDebug.h");
+        Check(windSystem.find("affectVegetation") == windSystem.npos &&
+              windSystem.find("DrivesVegetation") == windSystem.npos &&
+              windTuning.find("ReadVegetationSettings") == windTuning.npos,
+              "the shared wind has no vegetation consumer to drive");
+        Check(windDebug.find("Plants") == windDebug.npos && windDebug.find("Blades") == windDebug.npos &&
+              windDebug.find("Waves: ") != windDebug.npos && windDebug.find("Rain drift: ") != windDebug.npos,
+              "the wind HUD keeps its own rows and none of the sway rows");
+        Check(main.find("vegetation::") == main.npos && main.find("grassblade::") == main.npos &&
+              main.find("ReloadVegetationTuning") == main.npos &&
+              main.find("SetVertexShaderConstantF") == main.npos,
+              "the renderer has no sway path, no sway reload and no blade-constant hook left");
+        const auto project = Read("ModernWoWRenderer.vcxproj");
+        const auto workflow = Read(".github/workflows/build.yml");
+        Check(project.find("Vegetation") == project.npos && project.find("GrassBlade") == project.npos &&
+              project.find("TextureCutout") == project.npos,
+              "the project file does not compile the sway");
+        Check(workflow.find("VegetationWindRegression") == workflow.npos &&
+              workflow.find("Test-VegetationWind") == workflow.npos,
+              "no CI job builds the sway suite");
+    }
     Check(Read("ModernWoWRenderer.ini").find("\n[Atmosphere]\n") == std::string::npos &&
           main.find("DrawAtmosphere") == main.npos && main.find("ReloadSettings()") == main.npos,
           "dead flat Atmosphere controls no longer compete with the live volume settings");

@@ -57,31 +57,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Wind",L"WeatherResponsePercent","WEATHER RESPONSE (%)",0,200,5,100},
  {KIND_TOGGLE,L"Wind",L"AffectWaves","DRIVE WAVES",0,1,1,1},
  {KIND_TOGGLE,L"Wind",L"AffectClouds","DRIVE CLOUDS",0,1,1,1},
- {KIND_TOGGLE,L"Wind",L"AffectVegetation","DRIVE PLANTS & TREES",0,1,1,1},
  {KIND_TOGGLE,L"Wind",L"DebugView","WIND DEBUG VIEW",0,1,1,0},
- // The client's own grass, bushes, plants and trees, tilted about the point
- // where each model meets the ground and put back right after its draw. Models
- // the client is already animating (characters, creatures, mounts) are skipped
- // unless SWAY ANIMATED MODELS is on - which is why it ships off: it can make a
- // creature that stands still lean in the wind.
- {KIND_TOGGLE,L"Vegetation",L"Enabled","VEGETATION SWAY",0,1,1,1},
- {KIND_TOGGLE,L"Vegetation",L"SwayModels","TREES & BUSHES SWAY",0,1,1,0},
- {KIND_SLIDER,L"Vegetation",L"GrassLimitYards","GRASS HEIGHT LIMIT (YD)",1,8,1,2},
- {KIND_SLIDER,L"Vegetation",L"SwayPercent","SWAY STRENGTH (%)",0,300,5,100},
- {KIND_SLIDER,L"Vegetation",L"GustPercent","SWAY GUSTS (%)",0,100,5,45},
- {KIND_SLIDER,L"Vegetation",L"FlutterPercent","GRASS FLUTTER (%)",0,200,5,100},
- {KIND_SLIDER,L"Vegetation",L"MaxAngleDegrees","MAX LEAN (DEGREES)",2,30,1,20},
- {KIND_SLIDER,L"Vegetation",L"PlantPercent","GRASS & BUSH GAIN (%)",0,200,5,100},
- {KIND_SLIDER,L"Vegetation",L"TreePercent","TREE GAIN (%)",0,200,5,0},
- {KIND_SLIDER,L"Vegetation",L"DistanceYards","SWAY DISTANCE (YARDS)",20,300,10,120},
- // The grass the client bakes into its own meshes has no bones to turn, so it
- // is bent inside the client's own vertex shader instead (one shader rewritten
- // per session, see src/Environment/GrassShaderWind.h). It is a switch of its
- // own because it is the one part of the sway that rewrites something the
- // client compiled: off, every plant with a skeleton still sways.
- {KIND_TOGGLE,L"Vegetation",L"GrassBlades","GRASS BLADE WIND",0,1,1,1},
- {KIND_TOGGLE,L"Vegetation",L"SwayAnimatedModels","SWAY ANIMATED MODELS (MAY MOVE CREATURES)",0,1,1,0},
- {KIND_TOGGLE,L"Vegetation",L"DebugView","VEGETATION DEBUG VIEW",0,1,1,0},
 
  // Raymarched volumetric cloud deck. Advanced scattering knobs stay ini-only.
  {KIND_HEADER,nullptr,nullptr,"--- VOLUMETRIC CLOUDS ---",0,0,0,0},

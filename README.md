@@ -85,15 +85,10 @@ of the cloud shader, at the shipped defaults.*
 
 - One invisible, world-space wind drives wave direction/sea strength and cloud drift/shear; the optional camera-relative precipitation continuity layer projects that same wind onto the screen.
 - Eight meteorological compass bearings (the direction wind comes from), smooth turns, time-varying gusts and native-weather response. Strength rises during rain, snow and sandstorms and eases as weather clears.
-- **F7 → WIND** controls direction, strength, gusts, timing, weather response and the wave/cloud/vegetation links, with an optional diagnostic HUD. It does not alter the game's native particle motion.
-- Motion phases survive tuning reloads and device resets. The same state drives waves, clouds, the precipitation continuity layer and vegetation sway.
-- **Plants, bushes and trees** (grass, shrubs, canopies) lean and shimmer in it. The client's own models are used, so nothing is repainted and nothing the client animates is touched; see [how vegetation bends in the wind and what it refuses to touch](docs/vegetation-wind.md).
+- **F7 → WIND** controls direction, strength, gusts, timing, weather response and the wave/cloud links, with an optional diagnostic HUD. It does not alter the game's native particle motion.
+- Motion phases survive tuning reloads and device resets. The same state drives waves, clouds and the precipitation continuity layer.
+- Nothing in the world sways with it: grass, plants, bushes and trees are drawn exactly as the client drew them. Wind here is weather, not vegetation.
 - See [wind controls, conventions and validation](docs/wind-system.md).
-
-![Vegetation sway](Screenshots/vegetation-wind.png)
-
-*Calm, breeze, strong wind and a storm - rendered by `tools/VegetationPreview.cpp`, which drives the same wind
-simulation and the same sway policy the renderer runs and prints the mean lean of each panel.*
 
 ### Water
 
@@ -208,8 +203,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
 | `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain/snow rendering speed, occlusion, lens droplets and continuity-layer mist; added precipitation tilt follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
-| `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud/vegetation links, continuity-layer drift and diagnostic HUD. |
-| `[Vegetation]` | Grass swaying in that shared wind: strength, gusts, flutter, gains, sway range, the grass-blade switch and the diagnostic rows (what leans, which gate refused the rest, and the build that drew them). `SwayModels` keeps the model path - trees, bushes and the plants drawn as models - switched off by default; `[Wind] AffectVegetation` is the link itself. |
+| `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links, continuity-layer drift and diagnostic HUD. |
 | `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
