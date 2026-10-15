@@ -135,7 +135,7 @@ Checked in the same pass, no defect found:
   and the slider label column holds 17-28 em against the longest label's ~12 em. The figures
   use Segoe UI advance ratios (~0.55 em digits, ~0.62 em capitals); the device test's PPM
   frames are what would confirm the exact rasterization on Windows.
-* No dead controls: all 91 keys are read by the renderer, and every control's section
+* No dead controls: all 106 keys are read by the renderer, and every control's section
   exists in the shipped `GraphicsEffects.ini` (the three keys absent from the file -
   `ShaftsEnabled`, `FogEnabled`, `UseEnvironmentFog` - are read with the same fallback the
   menu displays).
@@ -159,14 +159,17 @@ Checked in the same pass, no defect found:
 
 ## Follow-up (2026-10-16, the sway is gone)
 
-The wind-driven vegetation sway was removed from the renderer outright: the
+The wind-driven vegetation sway was removed from the renderer outright, on the
+tree `origin/main` carried once the sway PR had been merged there: the
 `[Vegetation]` section of `GraphicsEffects.ini`, the `[Wind] AffectVegetation`
-link, the fourteen menu rows that belonged to it (`VEGETATION SWAY`, `TREES &
-BUSHES SWAY`, `GRASS HEIGHT LIMIT (YD)`, `SWAY STRENGTH`, `SWAY GUSTS`, `GRASS
-FLUTTER`, `MAX LEAN`, `GRASS & BUSH GAIN`, `TREE GAIN`, `SWAY DISTANCE`, `GRASS
-BLADE WIND`, `SWAY ANIMATED MODELS`, `VEGETATION DEBUG VIEW` and `DRIVE PLANTS &
-TREES`), the two HUD blocks that reported it (`Plants:` / `Plants gate:` and
-`Blades:` / `Blades gate:`) and the code behind all of it. The menu is 90
-controls on the same tabs; the wind's own rows and `WIND DEBUG VIEW` are
-untouched, because the wind still drives the waves, the clouds and the
-precipitation drift. No world geometry moves with it any more.
+link, the eleven menu rows that belonged to it (`VEGETATION SWAY`, `SWAY
+STRENGTH`, `SWAY GUSTS`, `GRASS FLUTTER`, `MAX LEAN`, `GRASS & BUSH GAIN`, `TREE
+GAIN`, `SWAY DISTANCE`, `SWAY ANIMATED MODELS`, `VEGETATION DEBUG VIEW` and
+`DRIVE PLANTS & TREES`), the HUD that reported it (`Plants:` in the wind row and
+the whole `VegetationDebugLine` block, which on this branch had grown the
+`Plants gate:`, `Blades:` and `Blades gate:` rows) and the code behind all of it
+- the sway and blade-wind headers, the vertex-shader constant hook, the tests,
+the tools, the preview screenshot and the documentation. The menu is 106 controls
+on the same tabs; the wind's own rows and `WIND DEBUG VIEW` are untouched,
+because the wind still drives the waves, the clouds and the precipitation drift.
+No world geometry moves with it any more.

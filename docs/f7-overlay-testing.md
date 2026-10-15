@@ -6,7 +6,7 @@ Local Lighting, Global Illumination, Dynamic Shadows, Ambient Occlusion,
 AI Materials & Relief, and Image & Color.
 `OverlayItems.h` holds all 106 controls with their keys, defaults, ranges and
 save semantics - the original 69 plus the wind, cloud-resolution, water,
-ambient-occlusion and global-illumination controls added since, less the fourteen
+ambient-occlusion and global-illumination controls added since, less the eleven
 vegetation-sway rows that were removed with that feature. `OverlayLayout.h` is
 platform-independent and supplies the
 rectangles used by both Direct3D drawing and Win32 hit testing, including the
