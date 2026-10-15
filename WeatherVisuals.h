@@ -1,5 +1,6 @@
-#include "src/Environment/LocationTuning.h"
 #pragma once
+#include "src/Environment/LocationTuning.h"
+#include "src/Effects/PrecipitationMotion.h"
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
@@ -39,12 +40,10 @@ inline bool internal = false;
 inline int mode = 0; // 0=Auto/native, 1=Rain texture hint, 2=Snow texture hint
 inline float intensity = 1.0f;
 inline float speed = 1.2f;
-inline float windStrength = 0.35f;
-inline float windAngle = 15.0f;
+inline renderer::PrecipitationMotion precipitationMotion;
 inline bool depthOcclusion = true;
 inline bool lensDroplets = true;
 inline float lensStrength = 0.60f;
-inline bool surfaceSplashes = true;
 inline float atmosphereHaze = 1.20f;
 
 inline std::wstring mainIni, tuningIni, logPath, basePath;
@@ -86,9 +85,9 @@ sampler2D mistTex : register(s3);
 
 // c0: x=projA, y=projB, z=scaleX, w=scaleY
 float4 projection : register(c0);
-// c1: x=time, y=intensity, z=mode (1=Rain, 2=Snow, 3=Sandstorm), w=speed
+// c1: x=integrated fall phase, y=intensity, z=mode (1=Rain, 2=Snow, 3=Sandstorm)
 float4 weatherParams : register(c1);
-// c2: x=windX, y=windY, z=haze strength, w=indoorFactor
+// c2: xy=integrated projected downwind offset, z=haze, w=indoorFactor
 float4 windParams : register(c2);
 // c3: x=resX, y=resY, z=invResX, w=invResY
 float4 screenParams : register(c3);
@@ -123,7 +122,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     if (intensity <= 0.001)
         return baseColor;
         
-    float t = weatherParams.x * weatherParams.w;
+    float t = weatherParams.x;
     float2 aspect = float2(screenParams.x * screenParams.w, 1.0);
     float3 accum = float3(0, 0, 0);
     float totalAlpha = 0.0;
@@ -144,7 +143,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         float occlusion = (lightColor.w > 0.5) ? smoothstep(lz * 0.75, lz * 1.15, sceneZ) : 1.0;
         if (occlusion <= 0.001) continue;
         
-        float2 windOffset = float2(windParams.x, windParams.y) * (t * layerSpeeds[i]);
+        float2 windOffset = windParams.xy * layerSpeeds[i];
         float2 layerUV = uv * aspect * layerScales[i];
         
         if (isSnow > 0.5)
@@ -197,7 +196,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // Add subtle ambient mist during heavy rain/snow at mid-distances
     if (isSand < 0.5 && sceneZ > 6.0)
     {
-        float2 mistUV = uv * aspect * 1.5 - float2(windParams.x * t * 0.2, t * 0.15);
+        float2 mistUV = uv * aspect * 1.5 - float2(windParams.x * 0.2, t * 0.15);
         float mistSamp = tex2D(mistTex, frac(mistUV)).a;
         float mistDepthFade = smoothstep(6.0, 40.0, sceneZ);
         // Apply intensity once, below, just like the drops. Squaring it here
@@ -493,12 +492,9 @@ inline void ReloadTuning()
     mode = std::clamp(ReadTuningInt(L"Mode", 0), 0, 2);
     intensity = std::clamp(ReadTuningInt(L"IntensityPercent", 100), 0, 300) * 0.01f;
     speed = std::clamp(ReadTuningInt(L"RainSpeedPercent", 120), 10, 400) * 0.01f;
-    windStrength = std::clamp(ReadTuningInt(L"WindStrengthPercent", 35), 0, 300) * 0.01f;
-    windAngle = float(ReadTuningInt(L"WindAngle", 15));
     depthOcclusion = ReadTuningInt(L"DepthOcclusion", 1) != 0;
     lensDroplets = ReadTuningInt(L"LensDroplets", 1) != 0;
     lensStrength = std::clamp(ReadTuningInt(L"LensDropletStrength", 60), 0, 200) * 0.01f;
-    surfaceSplashes = ReadTuningInt(L"SurfaceSplashes", 1) != 0;
     atmosphereHaze = std::clamp(ReadTuningInt(L"AtmosphereHazePercent", 120), 0, 300) * 0.01f;
     showStatus = ReadTuningInt(L"ShowStatus", 0) != 0;
 }
@@ -696,13 +692,22 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     DWORD now = GetTickCount();
     float dt = (now >= lastTick) ? (now - lastTick) * 0.001f : 0.016f;
     lastTick = now;
-    dt = std::clamp(dt, 0.001f, 0.1f);
-    elapsedTime += dt;
+    dt = std::clamp(dt, 0.f, 0.1f);
+    elapsedTime += dt; // lens animation is independent of rain fall speed
+
+    // The camera-relative continuity layer samples the same published wind
+    // snapshot as water/clouds, projected through this frame's view basis.
+    // Integrate phases once before any GPU early-out; neither a change in
+    // speed/direction nor a device reset can rephase the whole session.
+    const renderer::FrameContext& frame = renderer::FrameContext::Current();
+    precipitationMotion.Advance(dt, speed, frame.wind,
+        {frame.viewRaw.m[0][0], frame.viewRaw.m[1][0]},
+        {frame.viewRaw.m[0][1], frame.viewRaw.m[1][1]},
+        frame.cameraValid && frame.viewRawValid);
 
     // Depth is optional for the visible precipitation/lens layers. If INTZ
     // capture is unavailable, only roof occlusion is disabled; returning here
     // used to make the menu say RAIN ON while drawing absolutely nothing.
-    const renderer::FrameContext& frame = renderer::FrameContext::Current();
     const bool hasCapturedDepth = renderer::DepthCapture::Instance().GetOwner() == device &&
         renderer::DepthCapture::Instance().HasDepth() &&
         renderer::DepthCapture::Instance().GetDepthTexture() && frame.cameraValid &&
@@ -761,10 +766,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     device->SetVertexDeclaration(nullptr);
     device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 
-    // Compute wind vector
-    float rad = windAngle * 0.0174532925f;
-    float windX = std::sin(rad) * windStrength;
-    float windY = std::cos(rad) * windStrength * 0.2f;
+    const auto motion = precipitationMotion.Phase();
 
     // Setup shader constants
     // c0: Projection params from CameraCapture / frame constants
@@ -776,9 +778,9 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     // c1: Weather params
     // A restrained layer supplements native particles rather than doubling
     // their density. It remains camera-relative, so mount speed cannot outrun it.
-    float weatherConst[4] = { elapsedTime, intensity * renderer::FrameContext::Current().environment[renderer::Weather] * .45f, float(renderMode), speed };
-    // c2: Wind params
-    float windConst[4] = { windX, windY, atmosphereHaze, smoothedIndoor };
+    float weatherConst[4] = { motion.fall, intensity * frame.environment[renderer::Weather] * .45f, float(renderMode), 0.f };
+    // c2: Integrated screen-space displacement, not current wind * session age.
+    float windConst[4] = { motion.windX, motion.windY, atmosphereHaze, smoothedIndoor };
     // c3: Screen params
     float screenConst[4] = { float(desc.Width), float(desc.Height), 1.0f / float(desc.Width), 1.0f / float(desc.Height) };
     // c4: Light & occlusion toggle

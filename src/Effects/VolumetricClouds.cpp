@@ -591,19 +591,17 @@ VolumetricClouds& VolumetricClouds::Instance(){static VolumetricClouds clouds;re
 
 void VolumetricClouds::ApplyQualityPreset(uint32_t quality)
 {
- // Steps, light steps, base step and resolution move together: a longer
- // base step with more samples is wasted, and a short one without the
- // samples to back it just stops short of the far clouds.
+ // Keep march quality a single control: sample count, light samples and
+ // base step must agree. Buffer resolution has its own F7 slider and must
+ // not be silently changed by this preset (or vice versa).
  static constexpr uint32_t kSteps[]={48,64,96,128};
  static constexpr uint32_t kLightSteps[]={4,5,6,6};
  static constexpr float kBaseSteps[]={130.f,100.f,70.f,55.f};
- static constexpr float kScales[]={.25f,.25f,.25f,.5f};
  const uint32_t level=std::min(quality,3u);
  m_settings.quality=level;
  m_settings.sampleCount=kSteps[level];
  m_settings.lightSampleCount=kLightSteps[level];
  m_settings.baseStep=kBaseSteps[level];
- m_settings.resolutionScale=kScales[level];
 }
 
 void VolumetricClouds::Configure(const std::wstring& basePath)
@@ -614,11 +612,11 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));};
  m_settings.enabled=read(L"Enabled",1)!=0;
  ApplyQualityPreset(static_cast<uint32_t>(std::clamp(read(L"Quality",2),0,3)));
- // Every preset value stays overridable: the presets only pick the defaults.
- m_settings.sampleCount=static_cast<uint32_t>(std::clamp(read(L"SampleCount",int(m_settings.sampleCount)),8,160));
- m_settings.lightSampleCount=static_cast<uint32_t>(std::clamp(read(L"LightSampleCount",int(m_settings.lightSampleCount)),1,6));
- m_settings.baseStep=float(std::clamp(read(L"BaseStep",int(m_settings.baseStep)),8,600));
- m_settings.resolutionScale=std::clamp(read(L"ResolutionPercent",int(m_settings.resolutionScale*100.f+.5f)),20,100)*.01f;
+ // Older INIs shipped explicit SampleCount/LightSampleCount/BaseStep values
+ // identical to quality 2. Reading them made the F7 quality slider a no-op
+ // on existing installs. Quality is now the sole owner of these three
+ // dependent march settings; resolution remains independently adjustable.
+ m_settings.resolutionScale=std::clamp(read(L"ResolutionPercent",25),20,100)*.01f;
 
  m_settings.coverage=std::clamp(read(L"CoveragePercent",50),0,100)*.01f;
  m_settings.density=std::clamp(read(L"DensityPercent",100),10,400)*.01f;

@@ -4,16 +4,20 @@
 #include "../src/Environment/WindDebug.h"
 #include "../src/Environment/OverlayLayout.h"
 #include "../src/Effects/CloudDynamics.h"
+#include "../src/Effects/PrecipitationMotion.h"
 #include "../src/Water/WaveMotion.h"
 #include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
+#include <cctype>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #if defined(_WIN32)
 #include "../src/Environment/LocationTuning.h"
@@ -241,6 +245,12 @@ static void TestCloudsAndSea()
     Check(sheltered.agitation < exposed.agitation, "shared wind preserves zone exposure");
     tuning.response = 0; const auto noResponse = TargetSeaState(tuning, {1,1});
     Check(noResponse.agitation == 1.45f, "per-water response zero preserves authored energy");
+    tuning.windStrength = 0; const auto stillAir = TargetSeaState(tuning, {1,1});
+    Check(stillAir.agitation == noResponse.agitation && stillAir.wind == 0,
+          "sea energy response off must not invent wind-driven foam in calm air");
+    tuning.windStrength = 2; const auto blownAir = TargetSeaState(tuning, {1,1});
+    Check(blownAir.agitation == stillAir.agitation && blownAir.wind > stillAir.wind,
+          "foam still follows the actual wind when sea energy response is off");
     tuning.authoredWind = 0; Check(TargetSeaState(tuning, {}).wind == 0, "water's foam bias zero still wins");
     tuning.windStrength = NAN; tuning.response = INFINITY; tuning.zoneAgitation = NAN;
     const auto safe = TargetSeaState(tuning, {1,1});
@@ -248,6 +258,52 @@ static void TestCloudsAndSea()
     SeaStateFilter filter; filter.Observe(SeaTuning{}, {}, 0, 14);
     Check(std::isfinite(filter.Observe(tuning, {1,1}, .1f, NAN).agitation), "invalid sea response time cannot poison wind coupling");
     Pass("wave energy/motion/foam coupling, local exposure, zero controls and no doubled storm response");
+}
+static void TestPrecipitationMotion()
+{
+    for (unsigned direction = 0; direction < 8; ++direction)
+    {
+        const auto wind = Air(static_cast<WindDirection>(direction));
+        PrecipitationMotion motion;
+        motion.Advance(.1f, 1.f, wind, {1.f, 0.f}, {0.f, 1.f}, true);
+        const auto phase = motion.Phase();
+        Check(Near(phase.fall, .1f) && Near(phase.windX, wind.direction.x * .035f) &&
+              Near(phase.windY, -wind.direction.y * .007f),
+              "all compass headings project downwind onto camera-right and screen-down");
+        PrecipitationMotion turnedCamera;
+        turnedCamera.Advance(.1f, 1.f, wind, {0.f, -1.f}, {1.f, 0.f}, true);
+        Check(Near(turnedCamera.Phase().windX, -wind.direction.y * .035f) &&
+              Near(turnedCamera.Phase().windY, -wind.direction.x * .007f),
+              "camera turns rotate precipitation drift, not world wind or cloud/wave headings");
+    }
+    PrecipitationMotion motion;
+    const auto east = Air(WindDirection::East);
+    for (int i = 0; i < 2000; ++i)
+        motion.Advance(.1f, 1.f, east, {1.f, 0.f}, {0.f, 1.f}, true);
+    const auto before = motion.Phase();
+    motion.Advance(0, 4.f, Air(WindDirection::West, 3.f), {0.f, -1.f}, {1.f, 0.f}, true);
+    Check(motion.Phase().fall == before.fall && motion.Phase().windX == before.windX &&
+          motion.Phase().windY == before.windY, "speed, heading and camera edits do not multiply session age");
+    motion.Advance(.1f, 4.f, Air(WindDirection::West, 3.f), {0.f, -1.f}, {1.f, 0.f}, true);
+    Check(Near(motion.Phase().fall - before.fall, .4f, 2e-5) &&
+          std::abs(motion.Phase().windX - before.windX) <= .421f,
+          "new speed and direction only change future precipitation motion");
+    PrecipitationMotion noView, calm;
+    noView.Advance(.1f, 1.f, east, {1.f, 0.f}, {0.f, 1.f}, false);
+    calm.Advance(.1f, 1.f, Air(WindDirection::East, 0), {1.f, 0.f}, {0.f, 1.f}, true);
+    Check(noView.Phase().windX == 0 && calm.Phase().windX == 0 &&
+          noView.Phase().fall == calm.Phase().fall && calm.Phase().fall > 0,
+          "missing view or calm wind keeps gravity, without an invented screen-space heading");
+    const auto previous = motion.Phase();
+    motion.Advance(INFINITY, NAN, east, {NAN, 0.f}, {0.f, 1.f}, true);
+    Check(motion.Phase().fall == previous.fall && motion.Phase().windX == previous.windX,
+          "invalid delta, speed or camera cannot corrupt continuity phases");
+    auto disabled = east; disabled.enabled = false;
+    motion.Advance(.1f, 1.f, disabled, {1.f, 0.f}, {0.f, 1.f}, true);
+    Check(motion.Phase().windX == previous.windX &&
+          Near(motion.Phase().fall - previous.fall, .1f, 2e-5),
+          "turning shared wind off removes added drift without freezing rain");
+    Pass("precipitation follows the shared wind in camera space without duplicate angle/speed clocks");
 }
 static void TestWaveMotion()
 {
@@ -356,6 +412,66 @@ static void TestConfigurationAndWiring()
 {
     const auto ini = Read("GraphicsEffects.ini");
     const auto section = ini.substr(ini.find("[Wind]"), ini.find("[VolumetricClouds]") - ini.find("[Wind]"));
+    // Win32 INI readers do not give useful diagnostics for repeated keys;
+    // shipped duplicate cloud resolution/mist values once made edits depend
+    // on whichever occurrence the API happened to pick.
+    std::set<std::string> iniKeys;
+    std::map<std::pair<std::string,std::string>,int> iniDefaults;
+    std::istringstream iniLines(ini);
+    std::string line, group;
+    while (std::getline(iniLines, line))
+    {
+        const auto start = line.find_first_not_of(" \t\r");
+        if (start == line.npos || line[start] == ';' || line[start] == '#') continue;
+        if (line[start] == '[') { group = line.substr(start, line.find(']', start) - start + 1); continue; }
+        const auto equals = line.find('=', start);
+        if (equals == line.npos) continue;
+        const auto end = line.find_last_not_of(" \t", equals - 1);
+        const auto key = line.substr(start, end - start + 1);
+        auto normalized = group + "/" + key;
+        for (char& ch : normalized) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+        Check(iniKeys.emplace(normalized).second,
+              "shipped INI must not define a setting twice in one section (case-insensitive)");
+        try { iniDefaults.emplace(std::pair{group, key}, std::stoi(line.substr(equals + 1))); }
+        catch (const std::invalid_argument&) {} // e.g. a non-integer authored value
+        catch (const std::out_of_range&) {}
+    }
+    for (const auto& item : tuningoverlay::items)
+    {
+        if (item.kind == tuningoverlay::KIND_HEADER) continue;
+        const std::string key(item.key, item.key + std::wcslen(item.key));
+        const std::string groupName(item.section, item.section + std::wcslen(item.section));
+        const auto found = iniDefaults.find({"[" + groupName + "]", key});
+        if (found != iniDefaults.end()) Check(found->second == item.value,
+            "F7 Reset Defaults must restore the shipped INI value, not a contradictory preset");
+    }
+    const auto clouds = ini.substr(ini.find("[VolumetricClouds]"), ini.find("[LocalFog]") - ini.find("[VolumetricClouds]"));
+    Check(clouds.find("Quality=2\n") != clouds.npos && clouds.find("ResolutionPercent=25\n") != clouds.npos &&
+          clouds.find("\nSampleCount=") == clouds.npos && clouds.find("\nLightSampleCount=") == clouds.npos &&
+          clouds.find("\nBaseStep=") == clouds.npos && clouds.find("\nWindAngle=") == clouds.npos,
+          "cloud quality and resolution have one owner; legacy wind angle is not shipped while linked");
+    const auto weatherIni = ini.substr(ini.find("[WeatherVisuals]"), ini.find("[DynamicLighting]") - ini.find("[WeatherVisuals]"));
+    Check(weatherIni.find("\nWindStrengthPercent=") == weatherIni.npos &&
+          weatherIni.find("\nWindAngle=") == weatherIni.npos,
+          "weather continuity layer no longer ships a second direction or wind strength");
+    const auto cloudSource = Read("src/Effects/VolumetricClouds.cpp");
+    Check(cloudSource.find("read(L\"SampleCount\"") == cloudSource.npos &&
+          cloudSource.find("read(L\"LightSampleCount\"") == cloudSource.npos &&
+          cloudSource.find("read(L\"BaseStep\"") == cloudSource.npos,
+          "old explicit march settings cannot silently override F7 quality on existing INIs");
+    const auto weatherSource = Read("WeatherVisuals.h");
+    Check(weatherSource.find("precipitationMotion.Advance(dt, speed, frame.wind") != weatherSource.npos &&
+          weatherSource.find("ReadTuningInt(L\"WindAngle\"") == weatherSource.npos &&
+          weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
+          weatherSource.find("float t = weatherParams.x;") != weatherSource.npos &&
+          weatherSource.find("windParams.xy * layerSpeeds[i]") != weatherSource.npos &&
+          weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos,
+          "production weather shader consumes integrated fall/wind, not age times current settings");
+    const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
+    Check(weatherResetStart != weatherSource.npos &&
+          weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
+              .find("precipitationMotion") == std::string::npos,
+          "device recovery retains precipitation phases while dropping GPU resources");
     std::map<std::wstring, int> readDefaults;
     const auto defaults = SettingValues(ReadWindSettings([&](const wchar_t* key, int value) { readDefaults[key] = value; return value; }));
     Check(defaults == SettingValues(WindSettings{}) && defaults == readDefaults, "configuration defaults match simulation defaults");
@@ -385,6 +501,23 @@ static void TestConfigurationAndWiring()
     }
     Check(count == defaults.size(), "every supported wind option has an F7 control");
     const auto main = Read("ModernWoWRenderer.cpp");
+    Check(Read("ModernWoWRenderer.ini").find("\n[Atmosphere]\n") == std::string::npos &&
+          main.find("DrawAtmosphere") == main.npos && main.find("ReloadSettings()") == main.npos,
+          "dead flat Atmosphere controls no longer compete with the live volume settings");
+    const auto nativeFog = Read("DistanceFog.h");
+    const auto volumeFog = Read("src/Effects/DirectionalVolumetricLighting.cpp");
+    const auto startup = Read("ModernWoWRenderer.ini");
+    const auto nativeSection = startup.substr(startup.find("[DistanceFog]"), startup.find("[Volume]") - startup.find("[DistanceFog]"));
+    Check(nativeSection.find("\nEnabled=") == nativeSection.npos &&
+          nativeFog.find("L\"Enabled\",0,mainIni") == nativeFog.npos &&
+          nativeFog.find("key,fallback,tuningIni.c_str()") != nativeFog.npos,
+          "one F7 edge-fog switch owns both volume and native fallback, not a second startup gate");
+    Check(nativeFog.find("ReadTuning(L\"DistancePercent\",100)") != nativeFog.npos &&
+          nativeFog.find("ReadTuning(L\"PowerPercent\",100)") != nativeFog.npos &&
+          volumeFog.find("ReadInt(L\"DistanceFog\",L\"DistancePercent\",100") != volumeFog.npos &&
+          volumeFog.find("ReadInt(L\"DistanceFog\",L\"PowerPercent\",100") != volumeFog.npos &&
+          Read("src/Materials/MaterialCacheManager.cpp").find("ReadInt(L\"AIMaterials\", L\"Enabled\", 0") != std::string::npos,
+          "fallbacks match F7/INI neutral fog and keep unfinished materials off");
     const auto present = main.find("HRESULT WINAPI HookedPresent");
     const auto fallback = main.find("    volume::Present(d);", present);
     const auto weather = main.find("    weathervisuals::Present(d,tuningoverlay::visible);", present);
@@ -411,8 +544,12 @@ static void TestConfigurationAndWiring()
     auto debug = Air(WindDirection::East, 1.25f);
     const auto lines = WindDebugLines(debug);
     Check(lines[1].find("From E 90.0") != std::string::npos && lines[2].find("125.0%") != std::string::npos &&
-          lines[4].find("not connected") != std::string::npos, "debug reports actual internal state and unwired vegetation honestly");
-    Pass("all 12 INI/F7 defaults/ranges, compass value labels, reload wiring, shared frame ordering and debug text");
+          lines[4].find("Rain drift: wind") != std::string::npos,
+          "debug reports actual heading, strength and rain's link to shared wind");
+    debug.enabled=false;
+    Check(WindDebugLines(debug)[4].find("Rain drift: off") != std::string::npos,
+          "debug reports no added rain drift when shared wind is off");
+    Pass("INI uniqueness, cloud quality, rain link, wind/F7 defaults and frame ordering");
 
 #if defined(_WIN32)
     const auto directory = std::filesystem::absolute("build/wind-tuning-regression");
@@ -444,7 +581,7 @@ static void TestConfigurationAndWiring()
 }
 int main() try
 {
-    TestDirectionsAndTime(); TestWeather(); TestCloudsAndSea(); TestWaveMotion(); TestConfigurationAndWiring();
+    TestDirectionsAndTime(); TestWeather(); TestCloudsAndSea(); TestPrecipitationMotion(); TestWaveMotion(); TestConfigurationAndWiring();
     std::puts("Wind regressions passed");
     return 0;
 }

@@ -593,8 +593,8 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.localFogWakeRadius=float(std::clamp(readLocal(L"WakeRadius",5),2,14));
  m_settings.localFogTrailLength=float(std::clamp(readLocal(L"TrailLength",18),4,40));
  m_settings.edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str())!=0;
- m_settings.edgeFogDistance=float(std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",130,ini.c_str())),10,300));
- m_settings.edgeFogPower=std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",30,ini.c_str())),10,300)*.01f;
+ m_settings.edgeFogDistance=float(std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",100,ini.c_str())),10,300));
+ m_settings.edgeFogPower=std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",100,ini.c_str())),10,300)*.01f;
  m_historyValid=false;
 }
 

@@ -1,8 +1,10 @@
 # Shared dynamic wind
 
 Wind is an **internal world-space value**, not a particle effect or a visible volume.
-One frame-boundary simulation drives cloud drift and water waves. Plants, trees,
-grass, precipitation tilt and local fog are **not connected** by this change.
+One frame-boundary simulation drives cloud drift and water waves; the optional
+camera-relative precipitation continuity layer also follows it. Native WoW
+particles still use the game's own motion. Plants, trees, grass and local fog
+are **not connected**.
 
 ## F7 controls
 
@@ -13,7 +15,7 @@ settings without resetting the wind, its gust phases, or the effect phases.
 
 | Control / INI key | Default | Meaning |
 | --- | --- | --- |
-| Shared wind / `Enabled` | 1 | Connect the shared wind. Off restores legacy authored water/cloud motion; it does not disable those effects. |
+| Shared wind / `Enabled` | 1 | Connect the shared wind. Off restores legacy authored water/cloud motion and removes added continuity-layer rain drift; it does not disable the effects. |
 | Time variation / `Dynamic` | 1 | Slowly choose new compass targets and vary strength over time. Off holds the selected direction and removes gust variation; weather can still change strength. |
 | Base direction / `Direction` | 1 (NE) | Compass bearing the wind comes **from**: `0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW`. The slider displays names. In dynamic mode this is the starting bearing; editing it requests a smooth turn. |
 | Base strength / `StrengthPercent` | 100 | 0–200%. 100% is a reference breeze; 0 remains calm even in a storm. Live strength is bounded to 300% after weather/gust response. |
@@ -32,42 +34,54 @@ convention), not the direction it travels. WoW map axes are **+X north, +Y west*
 source bearings are smoothly interpolated rather than snapping in 45-degree
 steps. The debug HUD reports the current source bearing, nearest sector, target
 bearing, time to the next target, current/target strength, downwind XY velocity,
-native weather input and link status.
+native weather input and wave/cloud/rain drift status.
 
 For a steady test wind, set **Time variation OFF**, **Weather response 0**, select
 a direction and strength, and allow the response to settle. At 0% strength clouds
 stop wind-driven drift/lean; independent cloud evolution and weather-driven
 coverage can continue. Water eases down to residual swell, with no wind-driven
-foam. Wave speed 0 stops wave travel/turning (energy can still respond to wind);
-Water's wave switch removes the waves entirely.
+foam (even if its sea-energy response is 0); continuity rain still falls but
+stops drifting. Wave speed 0 stops wave travel/turning (energy can still respond
+to wind); Water's wave switch removes the waves entirely.
 
 ## Existing effect controls
 
 - `[VolumetricClouds] WindSpeed` is cloud drift speed in world yards/second at
   shared strength 100% (still default 26). It multiplies shared strength, so
   `WindSpeed=0` stops wind advection. `WindShearPercent` is likewise a local gain.
-  `WindAngle` is ignored while linked. When unlinked it retains its legacy
-  **sampling** angle: sampling `p + offset` travels opposite the offset.
+  Optional `WindAngle` is ignored while linked and no longer shipped in the
+  INI. When unlinked it retains its legacy default (25-degree **sampling**
+  angle): sampling `p + offset` travels opposite the offset.
 - `[Water] WindStrengthPercent` remains the body's foam/wind bias; 0 still
   suppresses wind-driven crest/shoal foam. It is not a second global wind.
-- `[Water] WeatherResponsePercent` controls how strongly that body reacts to
-  departures of shared strength from 100%. At 0 its authored energy is retained;
-  direction can still follow wind. When unlinked it reverts to the original
-  direct native-weather response. A storm is **not counted twice**.
+- `[Water] WeatherResponsePercent` controls how strongly that body's **wave
+  energy** reacts to departures of shared strength from 100%. At 0 its authored
+  swell is retained; direction and foam/roughness still follow actual wind, so
+  zero wind cannot produce whitecaps. When unlinked the energy response uses
+  native weather directly. A storm is **not counted twice**.
 - Zone water exposure, wave size/height, wave speed, geometry-wave switches,
   foam limits and the existing sea-state easing remain in effect. Waves have
   additional directional inertia; the HUD calls this out rather than claiming
   that a heavy sea turns instantaneously with the air.
+- The precipitation continuity layer (not the game's native particle motion)
+  projects the same downwind vector into camera space; its visual tilt is 35%
+  at reference strength. `RainSpeedPercent` controls fall speed; speed and wind
+  phases are integrated, so F7/F12 edits do not teleport drops. Old
+  `[WeatherVisuals] WindAngle` / `WindStrengthPercent` settings are ignored.
 - Cloud/water rendering switches and F10 do not stop the wind simulation. F11
   still gates the graphics package. Weather detection is independent of native
-  particle replacement and texture availability.
+  particle replacement and texture availability. `WeatherVisuals.Enabled` and
+  F10 affect **rendering**, not detection or shared wind/cloud/wave response.
 
 Weather is the existing **held native observation**, including its F7/focus-gap
 protection. The native type and authored local intensity are known, not a
-verified server-side severity or forecast. The zone intensity multiplier is
-applied once before the common [0,1] clamp. At full local intensity and 100%
-weather response, target strength multipliers are 1.8 for rain, 1.4 for snow and
-2.1 for sand, before gusts and the 300% ceiling. “Time variation” means elapsed
+verified server-side severity or forecast. `[WeatherVisuals] IntensityPercent`
+(the F7 storm-intensity slider) scales replacement particles **and** the shared
+weather response, even when replacement rendering is off. The zone intensity
+multiplier is applied once before the common [0,1] clamp used by clouds, wind
+and unlinked water. At full local intensity and 100% weather response, target
+strength multipliers are 1.8 for rain, 1.4 for snow and 2.1 for sand, before
+gusts and the 300% ceiling. “Time variation” means elapsed
 simulation time; no unverified in-game time-of-day memory is read.
 
 ## Integration contract
@@ -97,24 +111,29 @@ simulation time; no unverified in-game time-of-day memory is read.
   Each draw still uses its **own** rigid model/view anchor, including reflected
   cameras. Moving the camera alone does not move the field. With no valid
   camera/pivot, turns wait rather than rotating around a fabricated origin.
-- GPU resets drop only GPU resources/obsolete camera anchors, not wind, sea
-  state or accumulated phases. Invalid/negative/non-finite deltas advance
-  nothing; long pauses advance at most 0.1 seconds. No catch-up storm after
-  Alt+Tab. Configuration values and shader-bound outputs are bounded/finite.
+- `src/Effects/PrecipitationMotion.h` projects the same world velocity through
+  the captured camera-right/up basis. The continuity layer integrates fall and
+  downwind phases once per UI boundary; missing views keep rain falling without
+  guessing a heading. Native precipitation remains the client's own draw.
+- GPU resets drop only GPU resources/obsolete camera anchors, not wind, sea,
+  cloud or precipitation phase history. Invalid/negative/non-finite deltas
+  advance nothing; long pauses advance at most 0.1 seconds. No catch-up storm
+  after Alt+Tab. Configuration values and wind/sea/cloud shader outputs are
+  bounded/finite.
 - The wind debug HUD is isolated by the existing device **and tracked-state**
   transaction and has no input hook. Disabled debug performs no device work.
 
 The existing cloud/water offline preview scenes remain **fixed, unlinked
 reference scenes**, not simulations of a live dynamic wind history. The wind
-regression exercises the actual shared wind, cloud policy and wave integrator.
-The wind link itself required no water/cloud shader ABI change; later water
-performance work may change where an already-linked wave is evaluated without
-changing its shared-wind input.
+regression exercises the actual shared wind, cloud policy, wave and
+precipitation integrators. The wind link required no water/cloud shader ABI
+change; the continuity weather shader now receives integrated displacement
+instead of instantaneous wind multiplied by session time.
 
 ## Coupling audit (2026-10-15)
 
-The Booty Bay water-performance pass re-traced both consumers rather than
-assuming the WIND HUD implied linkage:
+The Booty Bay water-performance pass re-traced clouds and water; this settings
+audit also traced the precipitation continuity layer:
 
 1. `ModernWoWRenderer.cpp` advances `WindSystem` once after rendering and
    publishes the resulting immutable sequence in `FrameContext` for the next
@@ -127,15 +146,17 @@ assuming the WIND HUD implied linkage:
    strength and weather into wave energy, future phase speed, cross-current and
    foam wind; `WaveMotion` consumes its direction and advances all long swell,
    short swell, warp, grouping, chop and UV phases once.
-4. `AffectClouds=0` and `AffectWaves=0` independently select each effect's legacy
-   path. They do not mutate the shared snapshot or accidentally disable the
-   other consumer.
+4. `WeatherVisuals::BeforeDraw` projects the same snapshot into camera right/up
+   for the pre-UI gap-filling layer. Fall speed and projected wind are integrated
+   rather than re-multiplied by elapsed session time. The old separate weather
+   angle/strength settings no longer compete with shared wind.
+5. `AffectClouds=0` and `AffectWaves=0` independently select each effect's legacy
+   path. They do not mutate the shared snapshot, the other consumer or rain.
 
-`tools/WindRegression.cpp` pins all eight world-axis travel signs for both
-consumers, cloud strength/shear, wave direction and energy, sequence-once
-advancement, reload/disable continuity, frame publication order and the actual
-production call sites. Both coupling links are therefore present and synchronized;
-a live-client all-heading check remains the visual acceptance test.
+`tools/WindRegression.cpp` pins all eight world-axis travel signs for clouds,
+water and projected precipitation, sea energy vs. wind-driven foam, phase
+continuity, config uniqueness and production wiring. A live-client all-heading
+check remains the visual acceptance test.
 
 ## Validation
 
@@ -150,8 +171,9 @@ g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/WindRegression.cpp -o b
 `tools/Test-Wind.cmd` additionally checks real Windows global/zone/subarea INI
 persistence and reload. `tools/Test-OverlayState.cmd` checks the actual debug
 HUD with hooked D3D9 setters, both with F7 open and closed. Both are wired into
-Windows CI; portable wind tests are wired into Linux CI. Water, cloud, frame
-clock, shader-source and overlay-layout regressions remain required.
+Windows CI; portable wind tests are wired into Linux CI. `tools/Test-Weather.cmd`
+checks the changed precipitation shader phase on a D3D9 device. Water, cloud,
+frame-clock, shader-source and overlay-layout regressions remain required.
 
 In-client acceptance checks (require Windows and the Ascension client):
 
@@ -165,8 +187,11 @@ In-client acceptance checks (require Windows and the Ascension client):
    the deck and wave geometry stay aligned with its shading.
 3. Observe native rain/snow/sand onset and clearing, with precipitation
    replacement both enabled and disabled. No duplicate storm amplification.
-4. Change speed, direction interval and strength after a long session. No
-   phase teleport. Test F7 close/open, F12, location overrides, loading and
-   Alt+Tab/device reset. Confirm debug/graphics state does not leak.
+   Camera-relative continuity rain should tilt downwind as the camera turns;
+   the game's native particles are not redirected.
+4. Change wind speed, heading and rain fall speed after a long session. No
+   cloud, wave or continuity-drop phase teleport. Test F7 close/open, F12,
+   location overrides, loading and Alt+Tab/device reset; verify graphics
+   state does not leak.
 5. Disable each link and the wind master, then re-enable. Legacy effect
    controls remain usable; the shared simulation is not reset by F7 edits.

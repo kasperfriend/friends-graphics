@@ -81,8 +81,10 @@ int main() try {
     const double down=difference(rain0,rain1,0,8),up=difference(rain0,rain1,0,-8);
     std::printf("rain translation error down=%.5f up=%.5f\n",down,up);
     Require(down<.3&&up>down+2,"actual rain pixels move downward between frames");
-    auto wind0=render(1,0,5,0,1,1.2f),wind1=render(1,1.f/60,5,0,1,1.2f);
-    Require(difference(wind0,wind1,8,8)<.3,"rain drifts with positive wind, not against it");
+    // c2.xy is now the INTEGRATED displacement; changing current wind at a
+    // late session time must not multiply that entire age into the offset.
+    auto wind0=render(1,0,5,0,1,0),wind1=render(1,1.f/60,5,0,1,1.2f/60);
+    Require(difference(wind0,wind1,8,8)<.3,"rain drifts with positive projected wind, not against it");
     unsigned longest=0;
     for(UINT x=0;x<size;++x){unsigned run=0;for(UINT y=0;y<size;++y){run=(rain0[y*size+x]&255)>2?run+1:0;longest=std::max(longest,run);}}
     std::printf("longest rain streak=%u pixels of %u\n",longest,size);
@@ -97,7 +99,8 @@ int main() try {
     // with hostile inherited UI state. Snow uses its own texture, not rain's.
     weathervisuals::enabled=weathervisuals::effectEnabled=weathervisuals::active=true;
     weathervisuals::mode=0;weathervisuals::nativeWeatherMode=2;weathervisuals::lensDroplets=false;
-    weathervisuals::intensity=1;weathervisuals::atmosphereHaze=0;weathervisuals::windStrength=0;
+    weathervisuals::intensity=1;weathervisuals::atmosphereHaze=0;
+    renderer::FrameContext::Current().wind.enabled=false;
     weathervisuals::rainDropTex=clear;weathervisuals::snowFlakeTex=drop;weathervisuals::snowMistTex=clear;
     renderer::FrameContext::Current().cameraValid=false;
     renderer::g_trackedState.vsHash=0xd9e7756460af6296ull;

@@ -60,7 +60,7 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 - Distance hazes clouds out, the deck casts moving shadows on the world, and the layer is integrated into the scene before the atmosphere, so haze, the sun halo and god rays react to the clouds above them.
 - Coverage thickens automatically while native rain or snow is falling, and the slider runs from scattered puffs to a solid overcast lid.
 - Cloud-filtered sunlight forms rays through moving gaps; world-anchored ground shadows no longer change with camera height or off-screen sun tracking.
-- Coverage, altitude, thickness, wind, haze, lighting, cloud-ray strength, independent resolution (20–100%) and a four-step quality level are on the F7 menu and in `[VolumetricClouds]`. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
+- Coverage, altitude, thickness, drift gain, haze, lighting, cloud-ray strength, independent resolution (20–100%) and a four-step **march** quality level are on F7 and in `[VolumetricClouds]`. Changing quality now actually changes steps without overriding resolution. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
 
 ![Volumetric clouds](Screenshots/volumetric-clouds.png)
 
@@ -76,16 +76,16 @@ of the cloud shader, at the shipped defaults.*
 
 ### Weather
 
-- Native rain and snow receive replacement textures, intensity, speed, wind, and depth-occlusion controls.
-- A depth-aware continuity layer keeps precipitation visible while moving quickly on a mount.
+- Native rain and snow receive replacement textures, intensity, speed and depth-occlusion controls; native particle direction stays with the game.
+- A depth-aware continuity layer keeps precipitation visible while moving quickly on a mount, drifting with the shared wind instead of a second weather angle/strength.
 - Weather state survives short native-particle gaps caused by opening the F7 menu or returning from Alt+Tab.
-- Optional rain lens droplets and an atmosphere-haze response are available.
+- Optional rain lens droplets and a subtle rain/snow mist within the continuity layer are available; this setting does not also retune the volumetric atmosphere.
 
 ### Shared wind
 
-- One invisible, world-space wind drives wave direction/sea strength and cloud drift/shear.
+- One invisible, world-space wind drives wave direction/sea strength and cloud drift/shear; the optional camera-relative precipitation continuity layer projects that same wind onto the screen.
 - Eight meteorological compass bearings (the direction wind comes from), smooth turns, time-varying gusts and native-weather response. Strength rises during rain, snow and sandstorms and eases as weather clears.
-- **F7 → WIND** controls direction, strength, gusts, timing, weather response and each effect link, with an optional diagnostic HUD. No visible wind effect is added.
+- **F7 → WIND** controls direction, strength, gusts, timing, weather response and wave/cloud links, with an optional diagnostic HUD. It does not alter the game's native particle motion or add a visible wind effect.
 - Motion phases survive tuning reloads and device resets. The shared state is ready for future vegetation consumers; plants, trees and grass are not connected yet.
 - See [wind controls, conventions and validation](docs/wind-system.md).
 
@@ -107,7 +107,7 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 - Per-zone sea state and live weather response: an exposed coast carries more water than a
   sheltered pond, and stronger shared wind roughens and quickens both without counting weather twice.
-  Sea strength eases over `[Water] WeatherEaseSeconds`; unlinked water retains its legacy weather response.
+  Sea strength eases over `[Water] WeatherEaseSeconds`; unlinked water retains its legacy weather response. Turning sea-energy response to zero retains authored swell but does not invent wind-driven foam in calm air.
 - Explicit sea states cover all 414 roots in the verified Ascension patch-M tables. This is a
   custom WotLK 3.3.5-based dataset, including Ascension and expansion-derived map IDs, not the
   stock Wrath zone catalog; the [full zone audit](docs/water-zone-profile-audit.md) documents scope.
@@ -190,7 +190,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 
 ## Configuration
 
-`ModernWoWRenderer.ini` contains proxy-wide switches, depth-capture preferences, and diagnostic controls. Most users should leave it unchanged.
+`ModernWoWRenderer.ini` contains proxy-wide switches, depth-capture preferences, and diagnostic controls. Most users should leave it unchanged. The dead flat `[Atmosphere]` section was removed: live fog, shafts and clouds are controlled by `GraphicsEffects.ini`, while `[Volume] Enabled=0` still intentionally disables the whole volumetric backend.
 
 `GraphicsEffects.ini` contains the live visual settings:
 
@@ -199,13 +199,13 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
-| `[WeatherVisuals]` | Rain/snow intensity, speed, precipitation tilt, occlusion, lens droplets, and haze. |
-| `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links and diagnostic HUD. |
+| `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain/snow rendering speed, occlusion, lens droplets and continuity-layer mist; added precipitation tilt follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
+| `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links, continuity-layer drift and diagnostic HUD. |
 | `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
 | `[PostProcess]` | Global enable switch, brightness, contrast, gamma, and sharpness. Always saved in `GraphicsEffects.ini`; location overrides are ignored. |
-| `[DistanceFog]` | Scaling for the client's native distance fog. |
+| `[DistanceFog]` | One F7 enable/distance/power control for world-edge fog in the volume compositor and its native-shader fallback; neutral reset is 100/100. |
 | `[AIMaterials]` | Unfinished experimental placeholder; keep disabled. |
 
 The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.

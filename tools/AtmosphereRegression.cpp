@@ -590,6 +590,18 @@ int main() try {
  // reduced viewport MaxZ to exercise raw-depth sky classification. The
  // noise fields are deterministic, so coverage is a value assertion.
  auto& clouds=VolumetricClouds::Instance();auto& cloud=clouds.Settings();
+ // The shipped INI used to pin these three fields to quality=2, making F7
+ // CLOUD QUALITY inert. March quality must change all three, never resolution.
+ cloud.resolutionScale=.35f;
+ const uint32_t marchSamples[]={48,64,96,128},lightSamples[]={4,5,6,6};
+ const float baseSteps[]={130.f,100.f,70.f,55.f};
+ for(uint32_t level=0;level<4;++level){
+  clouds.ApplyQualityPreset(level);
+  if(cloud.sampleCount!=marchSamples[level]||cloud.lightSampleCount!=lightSamples[level]||
+     cloud.baseStep!=baseSteps[level]||cloud.resolutionScale!=.35f)
+   throw std::runtime_error("cloud preset/independent resolution changed incorrectly");
+ }
+ Require(true,"all four cloud march presets change samples/step but not resolution");
  clouds.ApplyQualityPreset(1);
  cloud.zoneClouds=false;cloud.evolutionSpeed=0;cloud.transitionSeconds=0;
  cloud.enabled=true;cloud.coverage=1.f;cloud.density=1.f;cloud.weather=CloudWeather::Clear;cloud.weatherStrength=0;

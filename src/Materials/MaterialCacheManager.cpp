@@ -92,7 +92,7 @@ namespace renderer
     void MaterialCacheManager::ReloadTuning(const std::wstring& basePath)
     {
         std::wstring ini = basePath + L"GraphicsEffects.ini";
-        m_enabled = renderer::locationtuning::ReadInt(L"AIMaterials", L"Enabled", 1, ini.c_str()) != 0;
+        m_enabled = renderer::locationtuning::ReadInt(L"AIMaterials", L"Enabled", 0, ini.c_str()) != 0;
         m_showStatus = renderer::locationtuning::ReadInt(L"AIMaterials", L"ShowStatus", 0, ini.c_str()) != 0;
 
         int strengthInt = renderer::locationtuning::ReadInt(L"AIMaterials", L"NormalStrengthPercent", 90, ini.c_str());

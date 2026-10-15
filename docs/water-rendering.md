@@ -256,23 +256,26 @@ clearing twice as slow. Zone exposure and the per-body `WindStrengthPercent`
 foam bias remain independent authoring layers.
 
 For linked water, let `air = clamp(1 + (sharedStrength - 1) * response, 0, 5)`
-and `forcing = max(air - 1, 0)`. Strength 1 is neutral; at 0 a little residual
-swell survives but wind-driven foam vanishes. The native-weather push is not
-added again on top of the already weather-modulated wind.
+and `forcing = max(air - 1, 0)`. Strength 1 is neutral. With response 100% and
+wind at 0, a little residual swell survives; with response 0%, authored swell
+remains, but **neither case creates wind-driven foam without actual wind**.
+The native-weather push is not added again on top of the already
+weather-modulated wind.
 
 | Output | Linked formula / destination |
 | --- | --- |
 | `agitation` | `clamp(zone*(.2+.8*air), .12, 2.6)`; wave/swell/geometry amplitude and foam energy |
 | normal response | `NormalPercent * clamp(sqrt(agitation), 0, 2.5)` |
 | `shear` | `clamp(.25*forcing + (agitation-1)*.12, 0, 1)`; integrated cross-current |
-| `wind` | `clamp(authoredWind*air*(.45+.55*agitation), 0, 2.5)`; shader foam/wind gate |
+| `wind` | `clamp(authoredWind*sharedStrength*(.45+.55*agitation), 0, 2.5)`; shader foam/roughness gate independent of the sea-energy response |
 | `motion` | `clamp(1+(agitation-1)*.55+.8*forcing, .08, 3)`; future phase velocity |
 
 The unlinked model retains `agitation = clamp(zone*(1+.95*push), .12, 2.6)` with
 `push = response * localWeatherAmount`, `forcing = push` and `air = 1` in the
-other formulas. A response of zero keeps the zone's authored energy in either
-mode; direction is separately controlled by the wind link. An authored foam
-bias of zero still suppresses wind-derived foam.
+other formulas (including its legacy wind/foam gate). A response of zero keeps
+the zone's authored energy in either mode; direction is separately controlled
+by the wind link. An authored foam bias of zero still suppresses wind-derived
+foam.
 
 `WaveMotion` now integrates **each** swell/chop/shear/UV phase in double
 precision, wrapping each in its own period. Speed or shear edits never multiply

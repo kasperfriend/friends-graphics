@@ -1,27 +1,28 @@
-#include "src/Environment/LocationTuning.h"
 #pragma once
+#include "src/Environment/LocationTuning.h"
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/Water/WaterPolicy.h"
 namespace distancefog {
-bool enabled=false,active=true,keyDown=false,showStatus=false,hotkey=true,effectEnabled=true;
-float distanceScale=1.2f,powerScale=1.08f;
+bool active=true,keyDown=false,showStatus=false,hotkey=true,effectEnabled=true;
+float distanceScale=1.f,powerScale=1.f;
 unsigned matches=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
-int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"DistanceFog",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"DistanceFog",key,fallback,mainIni.c_str());}
-void ReloadTuning(){effectEnabled=ReadTuning(L"Enabled",1)!=0;distanceScale=std::clamp(ReadTuning(L"DistancePercent",120),10,300)*.01f;powerScale=std::clamp(ReadTuning(L"PowerPercent",108),10,300)*.01f;if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"tuning enabled="<<effectEnabled<<" distance="<<distanceScale<<" power="<<powerScale<<'\n';}
+// One F7/GraphicsEffects.ini owner for BOTH the volume composite's edge fog
+// and this fallback for clients without a usable atmosphere pass. The old
+// startup-file Enabled gate silently disagreed with the live F7 switch.
+int ReadTuning(const wchar_t* key,int fallback){return int(renderer::locationtuning::ReadInt(L"DistanceFog",key,fallback,tuningIni.c_str()));}
+void ReloadTuning(){effectEnabled=ReadTuning(L"Enabled",1)!=0;distanceScale=std::clamp(ReadTuning(L"DistancePercent",100),10,300)*.01f;powerScale=std::clamp(ReadTuning(L"PowerPercent",100),10,300)*.01f;if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"tuning enabled="<<effectEnabled<<" distance="<<distanceScale<<" power="<<powerScale<<'\n';}
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
-    enabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",0,mainIni.c_str())!=0;
     showStatus=renderer::locationtuning::ReadInt(L"DistanceFog",L"ShowStatus",0,mainIni.c_str())!=0;
     ReloadTuning();
     logPath=base+L"DistanceFog.log";
 }
 void Present() {
-    if(!enabled)return;
     bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;
     GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()){active=!active;renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
@@ -33,7 +34,7 @@ struct Scope {
         // The depth compositor now owns the same edge controls for every world
         // shader, including families absent from the legacy hash table.
         if(renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled&&renderer::DirectionalVolumetricLighting::Instance().Settings().enabled)return;
-        if(skip||!enabled||!active||!effectEnabled)return;
+        if(skip||!active||!effectEnabled)return;
         try {
             uint64_t hash = renderer::g_trackedState.vsHash;
             if(!hash)return;
