@@ -551,6 +551,14 @@ static void TestConfigurationAndWiring()
           tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
           tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
           "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
+    Check(tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
+          tuning.find("inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
+          tuning.find("file.sections.clear();") != tuning.npos &&
+          tuning.find("GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)") != tuning.npos &&
+          tuning.find("ProfileValues& file=ProfileCache()[std::wstring(path)];") != tuning.npos,
+          "and the values behind those reads come from a section read once per file identity: a crossing's hundred "
+          "reads are map lookups and a stat each, not a hundred parses of the whole file (measured at 125-200 ms per "
+          "crossing before this)");
     Check(tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
           tuning.find("inline const std::unordered_set<std::wstring>* ScopedKeysFor(") != tuning.npos,
           "the memo answers both the read path and HasScopedValue, so the water colours see the same file view");

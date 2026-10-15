@@ -25,11 +25,17 @@ inline std::wstring Scope(unsigned level) {
 // client's place flaps across a boundary while the player walks it, so that
 // probe is what a crossing spends its time in. The key set of a scoped section
 // is a property of the file, not of the key being asked for: read it once with
-// GetPrivateProfileSectionW and answer every later probe from memory. Only the
-// scoped file is memoized - the global read stays the same call it always was,
-// so an edit to GraphicsEffects.ini is still visible to the very next read.
+// GetPrivateProfileSectionW and answer every later probe from memory.
 // A key counts as present only when it has a non-blank value, which is exactly
 // what the probe tested: `Key=` and `Key=   ` are absent to the profile API.
+//
+// The VALUES are memoized the same way, one section at a time and per file, and
+// that is the other half of the crossing's cost: the nine tuning reloads and the
+// F7 menu's rows between them read on the order of a hundred keys, and each
+// GetPrivateProfileStringW parses the whole file - 125 to 200 ms per crossing in
+// a real session, measured. Every read still checks the file's own identity (its
+// write time and size) first, so an edit to either file is visible to the very
+// next read, and the check costs microseconds.
 inline std::unordered_map<std::wstring,std::unordered_set<std::wstring>>& ScopedKeys() {
     static std::unordered_map<std::wstring,std::unordered_set<std::wstring>> keys;
     return keys;
@@ -88,6 +94,83 @@ inline const std::unordered_set<std::wstring>* ScopedKeysFor(const std::wstring&
     }
     return &cache.emplace(scope,std::move(keys)).first->second;
 }
+// ---------------------------------------------------------------------------
+// The values, read once per file identity.
+//
+// The key-set memo above answers "does this scope have this key" without touching
+// the file; the value still came from a GetPrivateProfileStringW, and that call
+// parses the whole file - measured, in a real session, at 125-200 ms for the nine
+// tuning reloads and the F7 menu's 102 rows together, once per crossing, which is
+// exactly the stall a player feels walking across a border. A profile file is a
+// few kilobytes of key=value text: read a section ONCE, keep it, and answer from
+// memory until the file's own identity (its write time and size) changes. Every
+// read still stats the file first, so an edit is visible to the very next read -
+// the guarantee the old comment made - at microseconds instead of milliseconds.
+// Blank values are absent, exactly as the profile API treats them.
+struct ProfileValues {
+    bool known=false;
+    bool exists=false;
+    ULONGLONG written=0;
+    DWORD bytes=0;
+    std::unordered_map<std::wstring,std::unordered_map<std::wstring,std::wstring>> sections;
+};
+inline std::unordered_map<std::wstring,ProfileValues>& ProfileCache() {
+    static std::unordered_map<std::wstring,ProfileValues> files;
+    return files;
+}
+inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    const bool exists=GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)!=0;
+    const ULONGLONG written=exists?((static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime):0;
+    const DWORD bytes=exists?info.nFileSizeLow:0;
+    if(!file.known||file.exists!=exists||file.written!=written||file.bytes!=bytes) {
+        file.known=true;file.exists=exists;file.written=written;file.bytes=bytes;
+        file.sections.clear();
+        return false;
+    }
+    return true;
+}
+inline const std::unordered_map<std::wstring,std::wstring>* ProfileSection(ProfileValues& file,
+    const std::wstring& path,LPCWSTR section) {
+    const std::wstring name=LowerKeyName(section);
+    const auto found=file.sections.find(name);
+    if(found!=file.sections.end())return &found->second;
+    // The profile API's own ceiling for a section string; a section that could
+    // overflow this cannot come from this renderer at all.
+    if(file.sections.size()>=512)file.sections.clear();
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length=GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str());
+    std::unordered_map<std::wstring,std::wstring> values;
+    if(length)for(const wchar_t* line=buffer.data();*line;line+=std::wcslen(line)+1) {
+        const wchar_t* equals=std::wcschr(line,L'=');
+        if(!equals)continue;
+        const wchar_t* value=equals+1;
+        while(*value==L' '||*value==L'\t')++value;
+        if(!*value)continue;
+        // The profile API hands a value back without the quotes a writer may have
+        // put around it; the cached read has to answer the same way.
+        std::wstring text=value;
+        if(text.size()>=2&&text.front()==L'"'&&text.back()==L'"')text=text.substr(1,text.size()-2);
+        values[LowerKeyName(std::wstring(line,equals).c_str())]=std::move(text);
+    }
+    return &file.sections.emplace(name,std::move(values)).first->second;
+}
+// The profile string a caller would have read, from memory when the file has not
+// changed: same section, same key, same fallback, same truncation.
+inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
+    if(!section||!key||!output||!size||!path)return GetPrivateProfileStringW(section,key,fallback,output,size,path);
+    ProfileValues& file=ProfileCache()[std::wstring(path)];
+    ProfileIdentity(file,path);
+    if(const auto* values=ProfileSection(file,path,section)) {
+        const auto found=values->find(LowerKeyName(key));
+        const std::wstring text=found==values->end()?std::wstring(fallback?fallback:L""):found->second;
+        const size_t length=text.size()<size-1?text.size():size-1;
+        if(length)std::wmemcpy(output,text.c_str(),length);
+        output[length]=0;
+        return static_cast<DWORD>(length);
+    }
+    return GetPrivateProfileStringW(section,key,fallback,output,size,path);
+}
 inline bool ScopedValuePresent(const std::wstring& scope,LPCWSTR key) {
     const auto* keys=ScopedKeysFor(scope);
     return keys&&keys->find(LowerKeyName(key))!=keys->end();
@@ -115,10 +198,10 @@ inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR out
             const auto scope=Scope(level)+L"."+section;
             if(!ScopedKeysFor(scope))break;
             if(!ScopedValuePresent(scope,key))continue;
-            return GetPrivateProfileStringW(scope.c_str(),key,fallback,output,size,localFile.c_str());
+            return ReadProfileString(scope.c_str(),key,fallback,output,size,localFile.c_str());
         }
     }
-    return GetPrivateProfileStringW(section,key,fallback,output,size,path);
+    return ReadProfileString(section,key,fallback,output,size,path);
 }
 inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
     return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1);

@@ -189,13 +189,29 @@ Those draws are bent in **the client's own vertex shader** instead:
    instead - so a cut-out is the whole material proof a blade needs.
 3. The shader it is drawn with is looked at **once per session**. Its bytecode is
    taken from the device, disassembled (`D3DDisassemble`), and a motion block is
-   inserted after the instruction that finishes the world-to-view transform
-   (`add r0, r0, c3`) - the point where the draw's own view-space position is
-   known and the draw's own free scratch registers can be used. The text is then
-   reassembled (`D3DAssemble`) and created on the device, and from that draw on
-   the client is handed the bent shader instead of its own whenever it binds it.
-   Both compiler entry points come from `d3dcompiler_47.dll`; if that library is
-   not there, the path switches itself off and says so.
+   inserted after the line that last gives `r0` the vertex's own position before a
+   clip-space output reads it. That is found by the data rather than by the
+   instruction, because this client draws its clutter in two shapes and both have
+   to be bent: the reference client's own shader lands the vertex with
+   `add r0, r0, c3` (`r0` is then the *view* position), while the shapes this
+   client's fields are drawn with place it through the instance's own rows
+   (`dp4 r0.z, c33, v0`, so `r0` is already the *world* position and the clip-space
+   output is spelled `o0`, not `oPos`). The block is built for the frame it will
+   run in: the world-space variant reads `r0` directly, lands its displacement on
+   the world's own axes, and the device half packs away the camera correction and
+   the view-distance fade that only a view position has. The text is then
+   reassembled (`D3DAssemble`) and created on the device, and from that draw on the
+   client is handed the bent shader instead of its own whenever it binds it - and,
+   for a bind that goes through a cached state block and never reaches this
+   project's hook, again at the draw itself, where the draw is already known to be
+   a blade card. Both compiler entry points come from `d3dcompiler_47.dll`; if
+   that library is not there, the path switches itself off and says so.
+
+   Two assembler rules the block obeys, each learned from a refusal in a real
+   session: no instruction may read **two different constant registers**
+   (`D3DAssemble` answers `X5752`, and one such line - the distance fade reading
+   `c17.w` and `c14.z` in one `mad` - is a whole still field), and no instruction
+   carries an immediate float.
 4. The injected block moves each blade in the **world plane**: it reconstructs
    the blade's world position from the view-space one the client just computed
    and the frame's camera, displaces it by a travelling wave plus a per-blade
@@ -222,12 +238,16 @@ Those draws are bent in **the client's own vertex shader** instead:
    with a one-shot line saying so: refusing it is what leaves a field still, and
    the measurement only decides which way up a blade's texture runs.
 6. Every refusal is structural and one-shot logged: an empty disassembly, a
-   shader that is not `vs_2_0`/`vs_3_0`, scratch registers the block would need
-   already in use, no transform anchor, no position output, a declaration whose
-   texture coordinate is not the register the shader reads, a card that was read
-   and lies flat, or an assembler that refuses the text. In that last case the
-   shader's **whole disassembly** goes to `ModernWoWRenderer.log` once, so the
-   next build can be written against the exact code the client ships.
+   shader that is not `vs_2_0`/`vs_3_0`, a declaration that never gives the block a
+   texture coordinate, a shader that never lands its vertex in `r0` before a
+   clip-space output reads it, a scratch register the shader still needs **across**
+   the insertion point (a register the shader redefines *after* the block is not a
+   conflict - three of the five foliage shaders of a real session keep their
+   normals and their lighting in `r2`/`r3`), a declaration whose texture coordinate
+   is not the register the shader reads, a card that was read and lies flat, or an
+   assembler that refuses the text. In that last case the shader's **whole
+   disassembly** goes to `ModernWoWRenderer.log` once, so the next build can be
+   written against the exact code the client ships.
 7. What the shader *is* is judged the same way the model path judges it, with one
    deliberate difference. The passes this project has already identified as
    never-a-model - the native shadow casters, UI, precipitation and water - are

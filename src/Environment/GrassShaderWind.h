@@ -359,6 +359,15 @@ namespace renderer
     //
     // Everything else is shared, and every one of the block's own inputs is a
     // component of c14..c19, which this module writes itself.
+    //
+    // One rule the vs_3_0 assembler enforces and this text has to obey: no
+    // instruction may read TWO different constant registers (D3DAssemble answers
+    // X5752: "Max. different constant registers readable per instruction is 1").
+    // The distance fade originally read c17.w and c14.z in one `mad`, and that
+    // single line is what refused every blade shader of the first build that got
+    // here - the whole field stayed as the client drew it over one multiply. The
+    // fade is two instructions now, and the portable suite scans both variants of
+    // this block for the shape: one constant register per instruction, always.
     inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace)
     {
         // Where the vertex is, as the two coordinates the wave field and the
@@ -405,7 +414,8 @@ namespace renderer
             "    mul_sat r5.z, r5.z, c18.x\n"
             "    mul r5.z, r5.z, r5.z\n"
             "    mad r3.y, r3.x, c18.w, c18.z\n"
-            "    mad r5.w, r0.z, c17.w, c14.z\n"
+            "    mul r5.w, r0.z, c17.w\n"
+            "    add r5.w, r5.w, c14.z\n"
             "    mul_sat r5.z, r5.z, r5.w\n"
             "    mul r5.z, r5.z, r3.y\n"
             "    mul r3.z, r2.x, c15.x\n"

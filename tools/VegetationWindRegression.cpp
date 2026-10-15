@@ -2040,7 +2040,7 @@ static void TestGrassBlades()
         Check(worldBlock.find("    mov r2.x, r0.x\n    mov r2.y, r0.y\n") != std::string::npos &&
               worldBlock.find("    add r0.x, r0.x, r3.z\n    add r0.y, r0.y, r3.w\n") != std::string::npos &&
               worldBlock.find("c0.xyz") == std::string::npos &&
-              worldBlock.find("    mad r5.w, r0.z, c17.w, c14.z\n") != std::string::npos &&
+              worldBlock.find("    mul r5.w, r0.z, c17.w\n    add r5.w, r5.w, c14.z\n") != std::string::npos &&
               worldBlock.find("mul r3.x, r2.x, c19.z") != std::string::npos,
             "the world-space block reads the position it is given and lands its displacement on the world's own "
             "axes, with the same waves, hash and bend weight as the view-space one - and no row of the shader's own");
@@ -2056,9 +2056,56 @@ static void TestGrassBlades()
               block.find("mul_sat r5.z, r5.z, r5.w") != std::string::npos &&
               block.find("mov_sat") == std::string::npos,
             "and its two clamps are the one saturate modifier the reference module proved on this hardware");
+        // The one rule the vs_3_0 assembler enforces that a hand-written block can
+        // break without noticing: an instruction may read at most ONE constant
+        // register (D3DAssemble answers X5752, "Max. different constant registers
+        // readable per instruction is 1"). The distance fade read c17.w and c14.z
+        // in a single `mad`, and that one line refused every blade shader of the
+        // first build that reached this point - the field stayed exactly as the
+        // client drew it. Both variants are scanned here, instruction by
+        // instruction, because the rule is the assembler's, not the reference
+        // module's, and nothing else in this suite would catch it.
+        for (const std::string* variant : { &block, &worldBlock })
+        {
+            size_t at = 0;
+            bool offender = false;
+            std::string line;
+            while (at <= variant->size())
+            {
+                const size_t end = variant->find('\n', at);
+                line = variant->substr(at, end == std::string::npos ? std::string::npos : end - at);
+                if (line.compare(0, 4, "    ") == 0)
+                {
+                    int constants = 0, previous = -1;
+                    for (size_t i = 0; i < line.size(); ++i)
+                    {
+                        if (line[i] != 'c' || (i && (std::isalnum(static_cast<unsigned char>(line[i - 1])) || line[i - 1] == '.'))) continue;
+                        int value = 0;
+                        size_t j = i + 1;
+                        bool digits = false;
+                        while (j < line.size() && line[j] >= '0' && line[j] <= '9')
+                        {
+                            value = value * 10 + (line[j] - '0');
+                            ++j;
+                            digits = true;
+                        }
+                        if (!digits || (j < line.size() && line[j] != '.')) continue;
+                        if (value != previous) ++constants;
+                        previous = value;
+                    }
+                    if (constants > 1) offender = true;
+                }
+                if (end == std::string::npos) break;
+                at = end + 1;
+            }
+            Check(!offender, "no instruction of the injected block reads two different constant registers: the vs_3_0 "
+                "assembler refuses that outright (X5752), and one such line is a whole still field");
+        }
         Check(block.find("frc r3.x, r3.x") != std::string::npos && block.find("frc r3.y") == std::string::npos,
             "the per-blade random is taken with the write mask the fractional instruction requires");
-        Check(block.find("mul r3.x, r2.x, c19.z") != std::string::npos &&
+        Check(block.find("mul r5.w, r0.z, c17.w") != std::string::npos &&
+              block.find("add r5.w, r5.w, c14.z") != std::string::npos &&
+              block.find("mul r3.x, r2.x, c19.z") != std::string::npos &&
               block.find("mad r3.x, r2.y, c19.w, r3.x") != std::string::npos,
             "and its own random takes both world axes, so a field does not stripe");
         // The one piece of assembly syntax the compiler versions do not have to
