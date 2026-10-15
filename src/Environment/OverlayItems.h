@@ -47,7 +47,7 @@ inline std::vector<Item> items={
  {KIND_HEADER,nullptr,nullptr,"--- WIND ---",0,0,0,0},
  {KIND_TOGGLE,L"Wind",L"Enabled","SHARED WIND",0,1,1,1},
  {KIND_TOGGLE,L"Wind",L"Dynamic","TIME VARIATION",0,1,1,1},
- {KIND_SLIDER,L"Wind",L"Direction","BASE DIRECTION (TRAVEL TOWARD)",0,7,1,1},
+ {KIND_SLIDER,L"Wind",L"Direction","BASE WIND FROM",0,7,1,1},
  {KIND_SLIDER,L"Wind",L"StrengthPercent","BASE STRENGTH (%)",0,200,5,100},
  {KIND_SLIDER,L"Wind",L"GustPercent","GUST VARIATION (%)",0,100,5,35},
  {KIND_SLIDER,L"Wind",L"GustSeconds","GUST PERIOD (SECONDS)",2,120,1,18},

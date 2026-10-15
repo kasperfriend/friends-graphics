@@ -15,7 +15,7 @@ settings without resetting the wind, its gust phases, or the effect phases.
 | --- | --- | --- |
 | Shared wind / `Enabled` | 1 | Connect the shared wind. Off restores legacy authored water/cloud motion; it does not disable those effects. |
 | Time variation / `Dynamic` | 1 | Slowly choose new compass targets and vary strength over time. Off holds the selected direction and removes gust variation; weather can still change strength. |
-| Base direction / `Direction` | 1 (NE) | `0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW`. The slider displays names. In dynamic mode this is the starting direction; editing it requests a smooth turn. |
+| Base direction / `Direction` | 1 (NE) | Compass bearing the wind comes **from**: `0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW`. The slider displays names. In dynamic mode this is the starting bearing; editing it requests a smooth turn. |
 | Base strength / `StrengthPercent` | 100 | 0–200%. 100% is a reference breeze; 0 remains calm even in a storm. Live strength is bounded to 300% after weather/gust response. |
 | Gust variation / `GustPercent` | 35 | 0–100% bounded time variation about the weather-adjusted baseline. 0 removes gusts without stopping direction changes. |
 | Gust period / `GustSeconds` | 18 | 2–120 seconds for the principal gust cycle; slower/faster components avoid a single repeating pulse. |
@@ -26,12 +26,13 @@ settings without resetting the wind, its gust phases, or the effect phases.
 | Drive clouds / `AffectClouds` | 1 | Apply the shared direction and strength to cloud shapes, detail, weather map and height shear. Off restores the cloud section's legacy wind controls. |
 | Wind debug view / `DebugView` | 0 | Optional text HUD, including when F7 is closed. No world-space wind effect. |
 
-**Directions mean travel toward**, not the meteorological “wind from” convention.
-WoW's horizontal axes are **+X north, −Y east**; +Z is up. Targets use eight compass
-sectors, with a normalized direction smoothly interpolated between them rather
-than snapping the scene in 45-degree steps. The debug HUD reports the current
-heading, nearest sector, target sector, time to the next target, current/target
-strength, XY velocity, native weather input and link status.
+**Direction is the compass bearing the wind comes FROM** (the meteorological
+convention), not the direction it travels. WoW map axes are **+X north, +Y west**
+(+Z up), so a north wind travels south and an east wind travels west. The eight
+source bearings are smoothly interpolated rather than snapping in 45-degree
+steps. The debug HUD reports the current source bearing, nearest sector, target
+bearing, time to the next target, current/target strength, downwind XY velocity,
+native weather input and link status.
 
 For a steady test wind, set **Time variation OFF**, **Weather response 0**, select
 a direction and strength, and allow the response to settle. At 0% strength clouds
@@ -72,8 +73,8 @@ simulation time; no unverified in-game time-of-day memory is read.
 ## Integration contract
 
 - `src/Environment/WindSystem.h` is portable, device-free simulation policy.
-  `WindState` exposes a unit horizontal `direction`, normalized `strength`,
-  velocity in **world yards/second** (`12 × strength`), target, weather and
+  `WindState` exposes a unit horizontal downwind `direction`, normalized `strength`,
+  velocity in **world yards/second** (`12 × strength`), source-bearing target, weather and
   bounded frame delta. Future vegetation should read this state, not create
   its own random wind, clock or weather reader. Read only on the render thread
   or copy the snapshot before using it on another thread.
@@ -154,9 +155,11 @@ clock, shader-source and overlay-layout regressions remain required.
 
 In-client acceptance checks (require Windows and the Ascension client):
 
-1. Use fixed wind with weather response 0. Select all eight headings, allowing
-   wind and sea inertia to settle. Compare motion against the minimap compass,
-   not camera-facing left/right; turn the camera and visit distant coordinates.
+1. Use fixed wind with weather response 0. Select all eight source bearings,
+   allowing wind and sea inertia to settle. On a north-up map, cloud and wave
+   travel should point opposite the selected bearing; compare against the
+   minimap compass, not camera-facing left/right. Turn the camera and visit
+   distant coordinates.
 2. Enable time variation. Confirm target changes, smooth actual heading and
    strength rising **and falling** in the HUD. Watch cloud shadows move with
    the deck and wave geometry stay aligned with its shading.

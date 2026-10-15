@@ -11,11 +11,14 @@ namespace renderer
 inline constexpr double kWindPi = 3.14159265358979323846;
 inline constexpr float kWindReferenceSpeed = 12.f; // world yards/second at strength 1
 
-// WoW world axes: +X north, +Y west, +Z up. Names describe travel TOWARD,
-// not the meteorological "coming from" convention. Never use screen axes.
+// WoW world axes: +X north, +Y west, +Z up. Compass names use the standard
+// meteorological "from" convention; physical travel vectors point downwind.
+// Never use screen axes.
 enum class WindDirection : unsigned { North, NorthEast, East, SouthEast, South, SouthWest, West, NorthWest };
 struct WindVector { float x = 1.f, y = 0.f; };
-inline constexpr std::array<WindVector, 8> kWindDirections{{
+// Compass source bearings in WoW map XY (+X north, +Y west). The actual wind
+// travel direction is the negative of these vectors (a north wind blows south).
+inline constexpr std::array<WindVector, 8> kWindFromDirections{{
     {1.f, 0.f}, {.70710678f, -.70710678f}, {0.f, -1.f}, {-.70710678f, -.70710678f},
     {-1.f, 0.f}, {-.70710678f, .70710678f}, {0.f, 1.f}, {.70710678f, .70710678f}
 }};
@@ -27,6 +30,11 @@ inline const char* WindDirectionName(WindDirection direction) noexcept
 inline float WindFinite(float value, float fallback) noexcept { return std::isfinite(value) ? value : fallback; }
 inline float WindDelta(float dt) noexcept { return std::clamp(WindFinite(dt, 0.f), 0.f, .1f); }
 inline double WindWrap(double value, double period) noexcept { return value - period * std::floor(value / period); }
+inline WindVector WindTravelVector(float fromHeadingDegrees) noexcept
+{
+    const double radians = double(WindFinite(fromHeadingDegrees, 0.f)) * kWindPi / 180.0;
+    return {float(-std::cos(radians)), float(std::sin(radians))};
+}
 inline WindDirection NearestWindDirection(float headingDegrees) noexcept
 {
     return static_cast<WindDirection>(unsigned(WindWrap(WindFinite(headingDegrees, 0.f) + 22.5, 360.0) / 45.0));
@@ -36,7 +44,7 @@ struct WindSettings
 {
     bool enabled = true;
     bool dynamic = true;               // time variation; weather response is independent
-    WindDirection direction = WindDirection::NorthEast;
+    WindDirection direction = WindDirection::NorthEast; // compass bearing the wind comes from
     float strength = 1.f;               // 100% = reference breeze, 0 = calm even in a storm
     float gustAmount = .35f;            // bounded fractional variation about the baseline
     float gustSeconds = 18.f;
@@ -71,9 +79,9 @@ struct WindState
     float deltaSeconds = 0.f;
     bool enabled = false, dynamic = false, affectWaves = false, affectClouds = false, debugView = false;
     WindDirection targetDirection = WindDirection::NorthEast;
-    WindVector direction{.70710678f, -.70710678f}; // unit vector, including during turns/calm
-    WindVector velocity{0.f, 0.f};               // world yards/second; zero when disabled
-    float headingDegrees = 45.f;                // clockwise from north, [0,360)
+    WindVector direction{-.70710678f, .70710678f}; // unit travel vector, opposite the source bearing
+    WindVector velocity{0.f, 0.f};                // world yards/second; zero when disabled
+    float headingDegrees = 45.f;                 // source bearing clockwise from north, [0,360)
     float strength = 0.f, targetStrength = 0.f;  // [0,3], 1 = reference breeze
     float secondsToChange = 0.f;
     WindWeather weather;
@@ -163,8 +171,7 @@ public:
         m_state.targetDirection = m_target;
         m_state.headingDegrees = float(m_heading);
         if (m_state.headingDegrees >= 360.f) m_state.headingDegrees = 0.f;
-        const double radians = m_heading * kWindPi / 180.0;
-        m_state.direction = {float(std::cos(radians)), float(-std::sin(radians))};
+        m_state.direction = WindTravelVector(m_state.headingDegrees);
         m_state.strength = m_settings.enabled ? float(m_strength) : 0.f;
         m_state.targetStrength = m_settings.enabled ? float(targetStrength) : 0.f;
         m_state.velocity = {m_state.direction.x * m_state.strength * kWindReferenceSpeed,
