@@ -6,6 +6,7 @@
 #include "../D3D9/CameraContinuity.h"
 #include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../D3D9/TrackedRenderState.h"
 
 #include <d3dcompiler.h>
@@ -527,29 +528,24 @@ namespace renderer
 
         const std::string source = ss.str();
 
+        // On-disk bytecode cache: the source is a pure function of
+        // layerCount, so each layer count compiles at most once per
+        // machine. The driver stays authoritative: a cached blob it
+        // refuses is recompiled once and retried (GetShader).
         Microsoft::WRL::ComPtr<ID3DBlob> code;
-        Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        HRESULT hr = D3DCompile(
-            source.data(), source.size(), nullptr, nullptr, nullptr,
-            "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-            code.GetAddressOf(), errors.GetAddressOf());
-
-        if (FAILED(hr) || !code)
+        std::string error;
+        const bool created = renderer::shaderbytecode::GetShader(
+            renderer::shaderbytecode::Dir(m_basePath), source.c_str(), "main", "ps_3_0", code,
+            [this, device, layerCount](const ID3DBlob* b)
+            { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_materialPS[layerCount].GetAddressOf())); },
+            &error);
+        if (!created)
         {
-            if (errors)
-            {
-                LogMessage(m_logPath, "Shader compilation error: " + std::string(static_cast<const char*>(errors->GetBufferPointer())));
-            }
+            LogMessage(m_logPath, "Shader compilation error: " + error);
             return false;
         }
-
-        hr = device->CreatePixelShader(
-            static_cast<const DWORD*>(code->GetBufferPointer()),
-            m_materialPS[layerCount].GetAddressOf());
-
-        if (SUCCEEDED(hr))
-            LogMessage(m_logPath, "Compiled layered terrain material shader: layers=" + std::to_string(layerCount));
-        return SUCCEEDED(hr);
+        LogMessage(m_logPath, "Compiled layered terrain material shader: layers=" + std::to_string(layerCount));
+        return true;
     }
 
     bool MaterialCacheManager::EnsureObjectShader(IDirect3DDevice9* device)
@@ -638,17 +634,21 @@ float4 main(PS_IN input) : COLOR0
     return float4(factor,1.0);
 })HLSL";
 
+        // On-disk bytecode cache, as in EnsureMaterialShader: the static
+        // source compiles at most once per machine; a cached blob the
+        // driver refuses is recompiled once and retried (GetShader).
         Microsoft::WRL::ComPtr<ID3DBlob> code;
-        Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",
-            D3DCOMPILE_OPTIMIZATION_LEVEL3,0,code.GetAddressOf(),errors.GetAddressOf());
-        if(FAILED(hr)||!code){
-            if(errors)LogMessage(m_logPath,"Object material shader compilation error: "+
-                std::string(static_cast<const char*>(errors->GetBufferPointer())));
+        std::string error;
+        const bool created = renderer::shaderbytecode::GetShader(
+            renderer::shaderbytecode::Dir(m_basePath), source, "main", "ps_3_0", code,
+            [this, device](const ID3DBlob* b)
+            { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_objectPS.GetAddressOf())); },
+            &error);
+        if(!created){
+            LogMessage(m_logPath,"Object material shader compilation error: "+error);
             return false;}
-        hr=device->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()),m_objectPS.GetAddressOf());
-        if(SUCCEEDED(hr))LogMessage(m_logPath,"Compiled orientation-aware WMO/M2 object material shader");
-        return SUCCEEDED(hr);
+        LogMessage(m_logPath,"Compiled orientation-aware WMO/M2 object material shader");
+        return true;
     }
 
     struct ObjectProfileSettings
