@@ -90,7 +90,10 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"ReflectionPercent","SSR STRENGTH",0,150,2,80},
  {KIND_SLIDER,L"Water",L"EnvironmentPercent","SKY REFLECTION",0,150,2,45},
  {KIND_TOGGLE,L"Water",L"SunGlintEnabled","SUN MOON GLINT",0,1,1,1},
- {KIND_SLIDER,L"Water",L"SunGlintPercent","GLINT STRENGTH",0,500,5,160},
+ // The upper bound matches the renderer's own clamp in WaterEffect.h
+ // (`std::clamp(ReadTuning(L"SunGlintPercent",160),0,400)`): a slider that can be
+ // dragged past what the shader accepts silently does nothing above 400.
+ {KIND_SLIDER,L"Water",L"SunGlintPercent","GLINT STRENGTH",0,400,5,160},
  {KIND_TOGGLE,L"Water",L"RefractionEnabled","REFRACTION",0,1,1,1},
  {KIND_SLIDER,L"Water",L"RefractionPercent","REFRACT AMOUNT",0,50,1,14},
  {KIND_SLIDER,L"Water",L"DepthAbsorptionPercent","WATER DEPTH",0,100,1,38},

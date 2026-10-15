@@ -121,11 +121,16 @@ int main() {
     assert(l.HitTab(clientX*2560/1280/l.scale,clientY*1440/720/l.scale)==4);
     for(int i=0;i<int(items.size());++i)assert(items[i].value==defaults[i]);
     // Scope, title, close, footer and sidebar are disjoint from editable rows.
+    // Both scope buttons must also be distinct, on-panel targets.
     for(int scope=0;scope<2;++scope) {
         const auto b=l.Scope(scope);
         assert(l.HitItem(b.x+1,b.y+1)==-1);
         assert(!l.Title().Contains(b.x+1,b.y+1));
+        assert(l.panel.Contains(b.x+1,b.y+1));
+        assert(l.panel.Contains(b.x+b.w-1,b.y+b.h-1));
+        assert(b.Contains(b.x+1,b.y+1)&&b.Contains(b.x+b.w-1,b.y+b.h-1));
     }
+    assert(l.Scope(0).x+l.Scope(0).w<=l.Scope(1).x);
     for(bool down:{false,true}) {
         const auto b=l.ScrollButton(down);
         assert(l.HitItem(b.x+1,b.y+1)==-1);

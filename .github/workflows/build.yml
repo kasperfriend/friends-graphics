@@ -146,6 +146,21 @@ jobs:
           & cmd.exe /c tools\Test-OverlayState.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: F7 overlay device regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Overlay.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=F7 overlay device regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=F7 overlay device regression results::$flat"
+
       - name: Environment and all-zone read regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
