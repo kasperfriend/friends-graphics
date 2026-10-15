@@ -12,7 +12,10 @@ its own.
 - Settings live in the `[Vegetation]` section of `GraphicsEffects.ini` and obey
   the same per-location overrides as every other section (global, zone, subarea).
 - The optional diagnostic **F7 → WIND → `VEGETATION DEBUG VIEW`** adds two rows
-  under the wind HUD, readable with F7 closed. The first says how many models are
+  under the wind HUD, readable with F7 closed, plus a third that names the build
+  which drew them - the loaded `d3d9.dll`'s own file time, as in
+  `ModernWoWRenderer 2026-10-15 18:32` - so a screenshot says which build it is
+  about. The first row says how many models are
   leaning out of how many foliage draws arrived (and how many solid model draws
   were passed over); the second names **the gate that refused something**, and
   only the gates that refused something, so "nothing sways" is answered on the
@@ -63,6 +66,20 @@ the draw**.
    variant this build had not seen is reported once in `ModernWoWRenderer.log`
    **by hash**, accepted or refused, and counted as `new` on the HUD row so the
    captured list can be extended from a real session.
+
+   Which shader is judged, and which declaration it is judged through, are read
+   **from the device** - `GetVertexShader` plus the shader's own bytecode,
+   `GetVertexDeclaration` - and never from the renderer's state mirror. The
+   client binds its own passes in cached state blocks, which never reach the
+   `SetVertexShader`/`SetVertexDeclaration` hooks, so a mirror can describe an
+   earlier draw, or no shader at all, while a model is being drawn; every draw
+   in the frame then fails the shader gate at once, which is the one refusal a
+   player cannot argue with and is exactly what the first two in-client reports
+   of "2 leaning, nothing moves" looked like. A shader whose bytecode the
+   runtime will not hand back has no identity at all: such a draw is judged by
+   the constants it binds, on that draw, and is never cached - a verdict filed
+   under hash 0 would let the first unidentifiable draw in the session decide
+   for every later one.
 4. The material has to be transparent (alpha tested or alpha blended), and that
    is read **from the device**, not from the renderer's state mirror: the
    client's own passes can arrive through cached state blocks, which never reach
@@ -261,11 +278,17 @@ Linux and is wired into CI, and it pins:
   recognized while a terrain/WMO-style or transposed one is not, the world's own
   `c4..c7` projection is refused, and a declaration without bone indices is not
   a model draw whatever its shader is;
-- the two proofs the gates read from the device rather than from the state
-  mirror: the material (alpha test or alpha blend) and the colour-write mask -
-  with the mirror left to the free early counters, the palette read kept above
-  every device call it can be, and the declaration gate ordered before the
-  shader gate because the declaration is what proves the draw is a model;
+- the four proofs the gates read from the device rather than from the state
+  mirror: the shader a draw is judged by (`GetVertexShader`, then the shader's
+  own bytecode) and the declaration it is judged through
+  (`GetVertexDeclaration`), the material (alpha test or alpha blend) and the
+  colour-write mask - with the mirror left to the free early counters, the
+  palette read kept above every device call it can be, and the declaration gate
+  ordered before the shader gate because the declaration is what proves the draw
+  is a model;
+- the identity fallback: a shader the runtime will not hash is judged by the
+  constants it binds and never cached under hash 0, and a shader-gate refusal of
+  a model draw is counted whatever the mirror believes about its material;
 - the model's own vertices: the palette bound comes from the bone indices the
   draw's vertices reference (never from the constant file), the size gate
   measures the vertices themselves - a one-bone tuft with a 1.6 yd mesh measures
@@ -278,7 +301,9 @@ Linux and is wired into CI, and it pins:
   made every plant a new, never-stable instance and left the HUD reading zero;
 - the HUD itself: every gate the device half counts has a name on the gate row,
   the row lists only the gates that refused something and in the order they run
-  in, and both rows fit the box they are drawn in;
+  in, both rows fit the box they are drawn in, and the build stamp row is drawn
+  from the DLL's file time - published by the Windows half, absent when nothing
+  published one - so a screenshot names the build it came from;
 - every counter the HUD can report is incremented by the device half, so a gate
   that refuses silently is a test failure rather than a bug report;
 - the guard sits above the first palette read in the draw scope, and the four
@@ -290,6 +315,11 @@ Linux and is wired into CI, and it pins:
 
 In-client acceptance checks (Windows and the Ascension client):
 
+0. The third row names the build (`ModernWoWRenderer 2026-10-15 18:32`). Check
+   it against the `d3d9.dll` in the client folder - Explorer, right click,
+   Properties, Modified - **before** reading anything else: a client that never
+   restarted, or a DLL that was not replaced, shows the previous build's
+   counters, and they read exactly like the fixed build's.
 1. Stand in a forest at day and at night, with the F7 WIND tab open on
    `VEGETATION DEBUG VIEW`. Grass, bushes and tree canopies lean downwind and
    shimmer; `leaning` rises with the number of visible plants, and if it does not,

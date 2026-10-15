@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <string>
 #include <mutex>
@@ -722,12 +723,45 @@ private:
     IDirect3D9* _real;
     std::atomic<ULONG> _refs{1};
 };
+// Which build is running, as the loaded proxy DLL's own file time. It is what
+// the debug overlay stamps its rows with: a report about an effect is a
+// screenshot of those rows, and a screenshot could not previously say which
+// d3d9.dll drew it - one in-client report arrived with counters that read
+// exactly like the build before it, and nothing in the picture could tell the
+// two apart. The file time also needs no version to keep in step with the
+// source, and it is the one identity a player can check in Explorer.
+std::string g_buildStamp;
+void Initialize();
+void PublishBuildStamp()
+{
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&Initialize), &self))
+        return;
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(self, path, std::size(path)))
+        return;
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &attributes))
+        return;
+    FILETIME local{};
+    SYSTEMTIME time{};
+    if (!FileTimeToLocalFileTime(&attributes.ftLastWriteTime, &local) || !FileTimeToSystemTime(&local, &time))
+        return;
+    char text[64]{};
+    std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute);
+    g_buildStamp = text;
+    renderer::buildStamp = g_buildStamp.c_str();
+}
+
 void Initialize()
 {
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(nullptr, path, std::size(path));
     std::wstring exe(path);
     g_basePath = exe.substr(0, exe.find_last_of(L"\\/") + 1);
+    PublishBuildStamp();
     wchar_t systemDirectory[MAX_PATH]{};
     if (!GetSystemDirectoryW(systemDirectory, std::size(systemDirectory)))
         return;
@@ -762,6 +796,9 @@ void Initialize()
         watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;
     }
     Log("Modern WoW Renderer proxy loaded.");
+    if (!g_buildStamp.empty())
+        Log(("Build " + g_buildStamp + ": the debug overlay stamps this on its rows, so a screenshot names the build "
+            "it came from.").c_str());
     // Device vtable entries remain hooked for the process lifetime.
     HMODULE pinned = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,

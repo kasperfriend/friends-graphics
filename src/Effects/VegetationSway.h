@@ -36,7 +36,11 @@
 //      never-a-model (the native shadow casters above all, whose palettes are in
 //      the LIGHT's space, plus UI, precipitation and water) are refused. A
 //      variant this build had not seen is written to the renderer's log once, by
-//      hash, so the captured list can be extended from a real session;
+//      hash, so the captured list can be extended from a real session. The
+//      shader being judged is the one the DEVICE is drawing with and the
+//      declaration is the one the DEVICE is drawing through - the client binds
+//      its own passes in cached state blocks that never reach the Set hooks, and
+//      a mirror that describes an earlier draw refuses every model in the frame;
 //   5. it writes colour: a depth-only pass - the client's native shadow map, an
 //      occlusion fill, a depth prepass - cannot be the foliage the player is
 //      asking about, and the shadow map skins in the light's space;
@@ -87,6 +91,7 @@
 #include "../Core/M2DrawGeometry.h"
 #include "../Core/M2ShaderProbe.h"
 #include "../Core/MathTypes.h"
+#include "../Core/ShaderCache.h"
 #include "../D3D9/CameraContinuity.h"
 #include "../D3D9/TrackedRenderState.h"
 #include "../Environment/VegetationWind.h"
@@ -206,6 +211,7 @@ inline std::unordered_map<uint64_t, Instance> g_instances;
 inline PaletteCache g_palette;
 inline bool g_anySwaying = false;
 inline bool g_reportedUnreadableGeometry = false;
+inline bool g_reportedUnidentifiedShader = false;
 
 inline renderer::VegetationStatus& Status() noexcept { return wind.Status(); }
 
@@ -250,6 +256,7 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_palette = {};
     g_anySwaying = false;
     g_reportedUnreadableGeometry = false;
+    g_reportedUnidentifiedShader = false;
     probe.Clear();
 }
 
@@ -279,6 +286,62 @@ namespace detail
         map.erase(oldest);
     }
 
+    // Which vertex shader is the device actually drawing this call with, and
+    // what is it? Read from the DEVICE, for the reason the material and the
+    // colour-write mask are read from the device: the client binds its own
+    // passes through cached state blocks, which never reach the
+    // SetVertexShader hook, so the mirror can be holding the identity of an
+    // earlier draw - or no shader at all - while a model is being drawn. That
+    // is a refusal in the one gate a player cannot argue with: every draw the
+    // mirror does not recognize reads as "not a model".
+    //
+    //   - the mirror is used when it agrees with the device (it is free), and
+    //     as the fallback when the device cannot answer at all;
+    //   - otherwise the shader's own bytecode is hashed, exactly the way this
+    //     project's water and material paths identify a live shader;
+    //   - `bound` is false only when the device says no shader is bound at all,
+    //     which is genuinely the fixed-function path;
+    //   - `hash` is 0 when the runtime will not return the bytecode. An
+    //     unidentifiable shader is not a refusal: the draw is judged by the
+    //     constants it binds, per draw, and nothing about it is cached.
+    struct BoundShader
+    {
+        uint64_t hash = 0;   // 0 = the identity could not be read
+        bool bound = false;  // false = fixed function: no vertex shader at all
+    };
+
+    inline BoundShader BoundVertexShader(IDirect3DDevice9* device) noexcept
+    {
+        using Microsoft::WRL::ComPtr;
+        BoundShader result;
+        ComPtr<IDirect3DVertexShader9> bound;
+        if (FAILED(device->GetVertexShader(bound.GetAddressOf())))
+        {
+            result.bound = renderer::g_trackedState.currentVS != nullptr;
+            result.hash = result.bound ? renderer::g_trackedState.vsHash : 0;
+            return result;
+        }
+        result.bound = bound != nullptr;
+        if (!result.bound) return result;
+        if (renderer::g_trackedState.currentVS == bound.Get()) result.hash = renderer::g_trackedState.vsHash;
+        if (!result.hash) result.hash = renderer::ShaderCache::Instance().GetShaderHash(bound.Get());
+        return result;
+    }
+
+    // The declaration the device is using, read for the same reason. The
+    // pointer is an identity: the palette bound and the model's own vertices are
+    // both read through the layout it describes, so a stale pointer is not a
+    // missing plant, it is a wrong skeleton. The returned pointer is borrowed -
+    // the device holds the declaration as its current one for the whole call.
+    inline IDirect3DVertexDeclaration9* BoundDeclaration(IDirect3DDevice9* device) noexcept
+    {
+        using Microsoft::WRL::ComPtr;
+        ComPtr<IDirect3DVertexDeclaration9> bound;
+        if (SUCCEEDED(device->GetVertexDeclaration(bound.GetAddressOf())))
+            return bound.Get();
+        return renderer::g_trackedState.currentVDecl;
+    }
+
     // The vertex declaration of this draw, cached per declaration: one
     // GetDeclaration per declaration the client uses, and none afterwards. The
     // layout says whether the vertices carry a position this reader can address
@@ -286,9 +349,13 @@ namespace detail
     // carry bone indices (which is what makes the draw the client's skinned
     // model path rather than terrain, a WMO, a particle or the interface).
     //
-    // A declaration that cannot be read is written to the renderer's log once,
-    // in D3D's own terms, because that is the only way a "my grass does not
-    // sway" report can be answered without a debugger attached.
+    // A declaration that is not the model path is written to the renderer's log
+    // once, in D3D's own terms - not gated on what the state mirror believes
+    // about the material: the log is read exactly when the mirror is the thing
+    // that cannot be trusted, and a client uses a handful of declarations, so
+    // the whole set of them costs a handful of lines per session. That is the
+    // only way a "my grass does not sway" report can be answered without a
+    // debugger attached.
     inline const renderer::M2VertexLayout* Layout(IDirect3DVertexDeclaration9* declaration, uint64_t frame,
         bool report)
     {
@@ -319,9 +386,10 @@ namespace detail
                 char described[256]{};
                 renderer::DescribeVertexDeclaration(elements, count, described, sizeof(described));
                 std::snprintf(text, sizeof(text),
-                    "Vegetation sway: a model-shaped draw's vertex declaration has no POSITION + BLENDINDICES this "
-                    "reader can use, so nothing about the draw can be measured or bounded (%s). If a plant does not "
-                    "sway, this is what the client used.", described);
+                    "Vegetation sway: a draw is not using a vertex declaration this reader can measure - POSITION + "
+                    "BLENDINDICES in stream 0 is what makes a draw the client's skinned model path (%s). Terrain, "
+                    "WMOs, particles, ribbons, effects and the interface look like this; if a plant does not sway, "
+                    "so may it.", described);
             }
             else
             {
@@ -365,19 +433,14 @@ namespace detail
         return (value & 0x7u) != 0u; // red, green, blue
     }
 
-    // Which vertex shader is this draw using? A variant this project captured
-    // live is accepted on sight; a variant it has not seen has to bind the
-    // client's M2 model layout in c2..c5, which is the same test the material
-    // cache and the camera's sky fallback run on live draws. Anything this
-    // project has already identified as never-a-model - the native shadow
-    // casters first of all, whose palettes are in the LIGHT's space - is refused
-    // before that read.
-    //
-    // Both verdicts about a shader this build had not seen are written to the
+    // Both verdicts on a shader this build had not seen are written to the
     // renderer's log once, by hash: an accepted one is a variant to capture so
     // the acceptance is instant next time, and a refused one is the answer to
     // "my plants do not sway" that a counter alone cannot give - the HUD says
-    // how many draws `vs` refused, the log says which shader they were.
+    // how many draws `vs` refused, the log says which shader they were. Neither
+    // report is gated on what the state mirror believes about the material: by
+    // the time either is reached, the draw's own declaration has already proved
+    // it is on the client's skinned model path.
     inline void ReportShader(uint64_t hash, bool model, const char* detail) noexcept
     {
         char text[384]{};
@@ -388,7 +451,7 @@ namespace detail
                 static_cast<unsigned long long>(hash), detail);
         else
             std::snprintf(text, sizeof(text),
-                "Vegetation sway: a foliage draw was refused at the shader gate, hash=0x%016llx (%s). If a plant does "
+                "Vegetation sway: a model draw was refused at the shader gate, hash=0x%016llx (%s). If a plant does "
                 "not sway, this hash is the one to verify and add to src/Lighting/TorchSignatures.h.",
                 static_cast<unsigned long long>(hash), detail);
         Log(text);
@@ -399,6 +462,28 @@ namespace detail
     // is meant to be refused (terrain and buildings are not vegetation), while
     // an unknown refusal is a model draw this build could not prove.
     enum class Admission { Granted, World, Unknown };
+
+    // A shader the device knows but this renderer cannot name: the runtime would
+    // not return its bytecode, so there is no identity to remember and nothing
+    // to cache - a profile under hash 0 would let the first such draw decide for
+    // every other one in the session. The draw is judged by the constants it
+    // binds, on this call, like any other draw this build had not seen: only the
+    // world's own projection (c4..c7) is refused, and everything the lean rests
+    // on is still proven below it.
+    inline Admission UnidentifiedShader(IDirect3DDevice9* device) noexcept
+    {
+        if (!g_reportedUnidentifiedShader)
+        {
+            g_reportedUnidentifiedShader = true;
+            Log("Vegetation sway: the runtime would not return a vertex shader's bytecode, so one or more draws "
+                "have no shader identity. They are judged by the constants they bind and still leaned when their "
+                "palette, shape and pose prove a standing model - the HUD cannot name them, but nothing else "
+                "changes.");
+        }
+        float constants[9][4]{};
+        if (FAILED(device->GetVertexShaderConstantF(0, constants[0], 9))) return Admission::Granted;
+        return renderer::IsWmoOrTerrainConstants(constants) ? Admission::World : Admission::Granted;
+    }
 
     // Which vertex shader is this draw using, and is it a model?
     //
@@ -416,25 +501,31 @@ namespace detail
     //     the palette bounded by the draw's own vertices, the frame camera's own
     //     viewport, colour writes on, a cutout material, a plant-shaped size, and
     //     a pose AND a mesh that repeat frame to frame.
-    //   - A draw WITHOUT bone indices could be anything, so it needs the proof
-    //     this project already uses to identify an M2 model on a live draw: the
-    //     model projection in c2..c5 (or a captured variant, above).
     //   - The passes this project has already identified as never-a-model - the
     //     native shadow casters, UI, rain, snow and water - are refused first.
     //     A shadow caster's own hash is in that list, and a variant that is not
     //     is refused later anyway, by the colour-write test: a shadow map writes
     //     no colour.
-    inline Admission ShaderAccepted(IDirect3DDevice9* device, const renderer::FrameContext& frame, uint64_t hash,
-        bool foliage)
+    //   - A draw without an identity at all (the runtime will not return its
+    //     bytecode) is judged by the constants it binds, per draw, and nothing
+    //     about it is remembered: cached under hash 0 it would let the first
+    //     unidentifiable draw in the session decide for every later one.
+    //
+    // This is reached only by draws whose own declaration already carried bone
+    // indices, so the constants can decide one thing here and one thing only:
+    // whether the draw is still binding the WORLD's projection, which is
+    // scenery and is refused whatever its vertices say.
+    inline Admission ShaderAccepted(IDirect3DDevice9* device, const renderer::FrameContext& frame, uint64_t hash)
     {
-        if (hash && (renderer::IsRigidM2Shader(hash) || renderer::IsUnskinnedM2Shader(hash)))
+        if (hash == 0) return UnidentifiedShader(device);
+        if (renderer::IsRigidM2Shader(hash) || renderer::IsUnskinnedM2Shader(hash))
             return Admission::Granted;
         auto found = g_shaders.find(hash);
         if (found != g_shaders.end())
         {
             ShaderProfile& profile = found->second;
             profile.lastSeenFrame = frame.frameIndex;
-            if (!profile.model && !profile.reported && foliage)
+            if (!profile.model && !profile.reported)
             {
                 profile.reported = true;
                 ReportShader(hash, false, profile.reason);
@@ -476,9 +567,9 @@ namespace detail
         if (profile.model)
         {
             ++Status().learnedShaders;
-            if (foliage) ReportShader(hash, true, profile.reason);
+            ReportShader(hash, true, profile.reason);
         }
-        else if (foliage)
+        else
         {
             profile.reported = true;
             ReportShader(hash, false, profile.reason);
@@ -689,33 +780,42 @@ struct Scope
         // the call. It is a particle, a ribbon or an interface quad - never a
         // model - so it is not counted as one.
         if (draw.verticesUP) return;
-        // The early counters (which draws are worth counting at all) use the
-        // state mirror, which is free. The gate that decides whether a draw can
-        // reveal an instance uses the DEVICE, below, and is paid only for the
-        // model draws that got that far.
+        // Which draws are worth counting at all is judged by the state mirror,
+        // which is free. Every identity a draw is judged BY is read from the
+        // DEVICE: the shader it is drawn with and the declaration it is drawn
+        // through, because the client binds its own passes in cached state
+        // blocks that never reach the Set hooks, and both of these were the
+        // mirror's to get wrong. The material and the colour mask are device
+        // reads below, paid only for the model draws that got that far.
         const bool mirrorMaterial =
             renderer::g_trackedState.alphaTest || renderer::g_trackedState.alphaBlend;
-        if (!renderer::g_trackedState.currentVS) // fixed function is not the M2 path
+        const detail::BoundShader shader = detail::BoundVertexShader(device);
+        if (!shader.bound) // fixed function is not the M2 path
         {
             if (mirrorMaterial) ++Status().skippedShader;
             return;
         }
-        const renderer::M2VertexLayout* layout = detail::Layout(renderer::g_trackedState.currentVDecl,
-            frame.frameIndex, mirrorMaterial);
+        // The declaration is reported to the log whatever the mirror says about
+        // the material, and only counted for the HUD when it could be foliage:
+        // the log is what a report is diagnosed from, and the counter is what a
+        // player reads, so they are gated by different things on purpose.
+        const renderer::M2VertexLayout* layout = detail::Layout(detail::BoundDeclaration(device),
+            frame.frameIndex, true);
         if (!layout)
         {
             if (mirrorMaterial) ++Status().skippedLayout;
             return;
         }
-        const detail::Admission admission = detail::ShaderAccepted(device, frame,
-            renderer::g_trackedState.vsHash, mirrorMaterial);
+        const detail::Admission admission = detail::ShaderAccepted(device, frame, shader.hash);
         if (admission != detail::Admission::Granted)
         {
-            if (mirrorMaterial)
-            {
-                if (admission == detail::Admission::World) ++Status().skippedWorld;
-                else ++Status().skippedShader;
-            }
+            // Counted whatever the mirror says about the material: this draw is
+            // already on the client's skinned model path - the declaration above
+            // proved the bone indices - so a refusal here is about a model, and
+            // the mirror's verdict is exactly what cannot be trusted for the
+            // client's own cached-state-block passes.
+            if (admission == detail::Admission::World) ++Status().skippedWorld;
+            else ++Status().skippedShader;
             return;
         }
 

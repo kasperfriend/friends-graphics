@@ -207,7 +207,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
 | `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain/snow rendering speed, occlusion, lens droplets and continuity-layer mist; added precipitation tilt follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
 | `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud/vegetation links, continuity-layer drift and diagnostic HUD. |
-| `[Vegetation]` | Grass, bushes, plants and trees swaying in that shared wind: strength, gusts, flutter, size-class gains, sway range, the animated-model opt-in and the two diagnostic rows (what leans, and which gate refused the rest). The link itself is `[Wind] AffectVegetation`. |
+| `[Vegetation]` | Grass, bushes, plants and trees swaying in that shared wind: strength, gusts, flutter, size-class gains, sway range, the animated-model opt-in and the diagnostic rows (what leans, which gate refused the rest, and the build that drew them). The link itself is `[Wind] AffectVegetation`. |
 | `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |

@@ -825,10 +825,25 @@ static void TestWindDebugLine()
     Check(rows[1].find("world 400") < rows[1].find("vs 812"), "in the order the gates run in");
     Check(rows[1].find("vs 812") < rows[1].find("pal 3"), "in the order the gates run in");
     Check(rows[1].find("mat") == std::string::npos, "without offering a solid trunk as a refusal");
+    // The row that names the build. Two in-client reports of "it does not work"
+    // arrived with counters that read exactly like the fixed build's, from a
+    // client still running the previous d3d9.dll, and nothing in the picture
+    // could say so. The stamp is the loaded DLL's own file time, so it needs no
+    // version to keep in step with the source.
+    buildStamp = "2026-10-15 18:32";
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 3 && rows[2] == "ModernWoWRenderer 2026-10-15 18:32",
+        "the debug rows stamp the build that drew them");
+    buildStamp = nullptr;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 2, "and a session that published no build stamps nothing");
     // The rows have to fit the HUD's own box: 600 logical pixels at a 16 pixel
     // font, drawn 10 pixels in from the left and clipped 18 short of the right.
     // A clipped diagnostic is exactly as useful as the "0" the player reported.
-    for (const auto& row : rows) Check(row.size() <= 72, "a vegetation HUD row fits in the box it is drawn in");
+    buildStamp = "2026-10-15 18:32";
+    for (const auto& row : VegetationDebugLines(status, settings, wind))
+        Check(row.size() <= 72, "a vegetation HUD row fits in the box it is drawn in");
+    buildStamp = nullptr;
     Pass("the vegetation HUD: what leans, what arrived, and the gate that is refusing");
 }
 
@@ -961,8 +976,9 @@ static void TestConfigurationAndWiring()
     const auto firstPaletteRead = sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister", scopeStart);
     const auto linkGate = sway.find("if (!frame.wind.DrivesVegetation()) return;", scopeStart);
     const auto upGate = sway.find("if (draw.verticesUP) return;", scopeStart);
-    const auto shaderGate = sway.find("detail::ShaderAccepted(device, frame,", scopeStart);
-    const auto layoutGate = sway.find("detail::Layout(renderer::g_trackedState.currentVDecl", scopeStart);
+    const auto shaderGate = sway.find("detail::ShaderAccepted(device, frame, shader.hash)", scopeStart);
+    const auto layoutGate = sway.find("detail::Layout(detail::BoundDeclaration(device)", scopeStart);
+    const auto layoutReport = sway.find("frame.frameIndex, true);", layoutGate);
     Check(scopeStart != sway.npos && firstPaletteRead != sway.npos &&
           linkGate != sway.npos && linkGate < firstPaletteRead &&
           upGate != sway.npos && upGate < firstPaletteRead &&
@@ -980,16 +996,26 @@ static void TestConfigurationAndWiring()
     // verdicts on a variant this build had not seen go to the renderer's log by
     // hash - and the log is wired from the same place the settings are reloaded.
     Check(sway.find("ReportShader") != sway.npos &&
-          sway.find("a foliage draw was refused at the shader gate") != sway.npos &&
+          sway.find("a model draw was refused at the shader gate") != sway.npos &&
           sway.find("Add it to kRigidM2Shaders") != sway.npos,
         "an unproven shader is reported by hash, accepted or refused");
     Check(main.find("vegetation::logLine=Log;") != main.npos,
         "and those reports reach the renderer's own log");
+    // The build stamp is published by the Windows half (the overlay rows are
+    // portable, so the time itself is read where Windows is available) and it is
+    // both stamped on the rows and written to the log at startup.
+    Check(main.find("renderer::buildStamp = g_buildStamp.c_str();") != main.npos &&
+          main.find("GetFileAttributesExW") != main.npos &&
+          main.find("FileTimeToSystemTime") != main.npos,
+        "the build stamp is the loaded dll's own file time");
     const auto hud = Read("src/Environment/WindDebug.h");
     for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
                                "far", "new" })
         Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
             "every gate the device half counts has a name on the HUD row");
+    Check(hud.find("inline const char* buildStamp") != hud.npos &&
+          hud.find("\"ModernWoWRenderer %s\", buildStamp") != hud.npos,
+        "the debug rows name the build that drew them");
     // The admission rework. A shader list captured from one build of the client
     // cannot gate another build - which is what made a working feature read as
     // "0 swaying" on a machine whose client ships different binaries - so a draw
@@ -1000,10 +1026,42 @@ static void TestConfigurationAndWiring()
         "both captured variant lists admit a draw on sight");
     Check(sway.find("renderer::IsWmoOrTerrainConstants") != sway.npos,
         "and the world's own projection refuses one outright");
-    Check(sway.find("detail::Layout(renderer::g_trackedState.currentVDecl") < shaderGate,
+    Check(layoutGate < shaderGate,
         "the declaration is read first: it is the proof the draw is a model at all");
     Check(geometry_.find("out.valid = out.position && out.skinned") != std::string::npos,
         "a declaration without bone indices is not a model draw, whatever its shader is");
+    // Which shader, and which declaration. Both come from the DEVICE, and that
+    // is not a detail: the client binds its own passes in cached state blocks
+    // that never reach the SetVertexShader/SetVertexDeclaration hooks, so the
+    // mirror describes an earlier draw - or no shader at all - while a model is
+    // being drawn. Every draw in the frame then reads as "not a model", which is
+    // the one refusal a player cannot argue with: it is what the two in-client
+    // reports of "2 leaning, nothing moves" looked like from the HUD.
+    Check(sway.find("detail::BoundVertexShader(device)") != sway.npos &&
+          sway.find("device->GetVertexShader(bound.GetAddressOf())") != sway.npos &&
+          sway.find("renderer::ShaderCache::Instance().GetShaderHash(bound.Get())") != sway.npos,
+        "the shader a draw is judged by is the one the device is drawing with");
+    Check(sway.find("detail::BoundDeclaration(device)") != sway.npos &&
+          sway.find("device->GetVertexDeclaration(bound.GetAddressOf())") != sway.npos,
+        "and the declaration is the one the device is drawing through");
+    Check(layoutReport != sway.npos,
+        "a declaration that is not the model path is named in the log, mirror or not");
+    Check(sway.find("renderer::g_trackedState.vsHash, mirrorMaterial") == sway.npos &&
+          sway.find("detail::Layout(renderer::g_trackedState.currentVDecl") == sway.npos,
+        "no gate decides a draw's identity from the state mirror");
+    // A shader with no identity is not a refusal: it is judged by the constants
+    // it binds, on that draw, and never cached - a profile under hash 0 would
+    // let the first draw the runtime could not identify decide for every other.
+    const auto unidentified = sway.find("if (hash == 0) return UnidentifiedShader(device);");
+    Check(unidentified != sway.npos && sway.find("g_shaders.find(hash)") > unidentified &&
+          sway.find("IsWmoOrTerrainConstants(constants) ? Admission::World : Admission::Granted") != sway.npos,
+        "a shader whose bytecode will not come back is judged per draw, and never cached under 0");
+    // The shader gate's refusals are counted whatever the mirror says about the
+    // material: the declaration above proved the draw is a model, so a refusal
+    // here is about a model and must not be the mirror's to hide.
+    Check(sway.find("if (admission == detail::Admission::World) ++Status().skippedWorld;") != sway.npos &&
+          sway.find("else ++Status().skippedShader;") != sway.npos,
+        "a refusal of a model draw is counted, mirror or not");
     // The material verdict. A foliage draw that the state mirror believes is
     // solid is never revealed as an instance at all, and the client's own passes
     // arrive through cached state blocks that never reach the SetRenderState

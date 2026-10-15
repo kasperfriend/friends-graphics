@@ -8,6 +8,13 @@
 
 namespace renderer
 {
+// Which build is drawing this HUD, as the loaded d3d9.dll's own file time
+// ("2026-10-15 18:32"), published once by the renderer at startup and shown on
+// the vegetation rows. Empty when nothing published one - the portable suite
+// draws these rows without a DLL behind them, and a row that is not there is
+// better than a row that lies.
+inline const char* buildStamp = nullptr;
+
 // Diagnostic text only; the wind simulation itself creates no geometry,
 // particles, noise textures or render targets.
 inline std::array<std::string, 5> WindDebugLines(const WindState& wind)
@@ -118,6 +125,17 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("new", status.learnedShaders);
     std::snprintf(text, sizeof(text), "Plants gate: h %.1f yd | ", double(status.lastMeasured));
     lines.emplace_back(std::string(text) + (gates.empty() ? "none refused" : gates));
+    // And which build drew the row. A report about this feature is a screenshot
+    // of these lines, and a screenshot could not say which d3d9.dll drew them -
+    // one report arrived with counters that read exactly like the build before
+    // it, from a client that had not restarted. The stamp is the loaded DLL's
+    // own file time, so it needs no version to keep in step with the source, and
+    // a screenshot now names the build it came from.
+    if (buildStamp && *buildStamp)
+    {
+        std::snprintf(text, sizeof(text), "ModernWoWRenderer %s", buildStamp);
+        lines.emplace_back(text);
+    }
     return lines;
 }
 }
