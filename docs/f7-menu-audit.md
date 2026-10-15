@@ -90,6 +90,8 @@ Checked in the same pass, no defect found:
 * Every one of the 91 controls is reachable by mouse at every tab, every scroll offset and
   twelve resolution/DPI combinations (portable test, ASan/UBSan clean); each widget stays
   inside its own row, and the panel fits both the logical screen and the real backbuffer.
+  The same sweep now runs against the real overlay on a D3D9 device in the Windows CI job
+  and passes at 1920x1080, 2560x1440 and 3840x2160.
 * **Text does not degrade with UI scale.** The layout is in logical pixels and the font is
   `round(16*uiScale)` device pixels, while every drawn bound is also multiplied by
   `uiScale`, so the space available in em is `logical_width/16` at every scale: the value
