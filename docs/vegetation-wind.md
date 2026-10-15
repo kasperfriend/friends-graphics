@@ -165,6 +165,16 @@ single byte is written:
   neither alpha test nor alpha blend state - so the first solid model draw of a
   session is named in `ModernWoWRenderer.log` by shader hash, which is what makes
   that report answerable.
+- **A palette that is not where this reader looks for it.** `pal` counts a c31
+  that is not a bone block, a palette that fails validation, a root block whose
+  translation is not a placement point, and a pivot that does not survive the
+  view transform; a device that refuses the leaned write has its own name
+  (`write`). The first such refusal of a session writes the twelve numbers it
+  read at c31 to `ModernWoWRenderer.log`: zeros mean the client keeps its bone
+  matrices in a different register, a projection means the draw was not a model
+  at all, and a different stride shows up in the numbers. That is the difference
+  between "the plants are not being measured" and "this client keeps its
+  skeleton somewhere else", and no counter can tell them apart.
 - **Depth-only passes.** A draw that writes no colour - the client's native
   shadow map above all, but also its occlusion fills and depth fills - is
   refused: nothing visible is being drawn, and the shadow cascades skin in the
@@ -304,6 +314,9 @@ Linux and is wired into CI, and it pins:
 - the identity fallback: a shader the runtime will not hash is judged by the
   constants it binds and never cached under hash 0, and a shader-gate refusal of
   a model draw is counted whatever the mirror believes about its material;
+- the one-shot data dumps a refusal cannot carry as a number: the shader hash of
+  the first solid model draw of a session, and the twelve values read at c31 when
+  it did not hold a bone block;
 - the model's own vertices: the palette bound comes from the bone indices the
   draw's vertices reference (never from the constant file), the size gate
   measures the vertices themselves - a one-bone tuft with a 1.6 yd mesh measures

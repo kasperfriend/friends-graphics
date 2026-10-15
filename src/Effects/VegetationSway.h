@@ -220,6 +220,7 @@ inline bool g_anySwaying = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
 inline bool g_reportedSolidModel = false;
+inline bool g_reportedRootBlock = false;
 
 inline renderer::VegetationStatus& Status() noexcept { return wind.Status(); }
 
@@ -266,6 +267,7 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_reportedUnreadableGeometry = false;
     g_reportedUnidentifiedShader = false;
     g_reportedSolidModel = false;
+    g_reportedRootBlock = false;
     probe.Clear();
 }
 
@@ -896,11 +898,38 @@ struct Scope
         // `pal` also means "this client does not keep its bones at c31", which
         // is a different bug from "no plant arrived at the gate".
         float root[3][4]{};
-        if (FAILED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, root[0],
-                renderer::kM2RegistersPerBone)) ||
-            !renderer::M2BoneBlockValid(root[0], root[1], root[2]))
+        const bool rootRead = SUCCEEDED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, root[0],
+            renderer::kM2RegistersPerBone));
+        if (!rootRead || !renderer::M2BoneBlockValid(root[0], root[1], root[2]))
         {
             ++Status().skippedPalette;
+            // Once per session, the register itself. "The palette did not look
+            // like bones" is answerable only if the numbers are on the record:
+            // zeros mean this client keeps its matrix somewhere else, a
+            // projection means the draw is not a model after all, and a bone
+            // block with a different stride shows up as the numbers a stride
+            // would produce. Without this, `pal` on the HUD is a dead end from a
+            // player's machine.
+            if (!g_reportedRootBlock)
+            {
+                g_reportedRootBlock = true;
+                char text[320]{};
+                if (!rootRead)
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: the register the bone palette is read from (c%u) could not be read for a "
+                        "model draw. If the HUD shows `pal`, this is why nothing leaned.",
+                        unsigned(renderer::kM2BoneBaseRegister));
+                else
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: c%u did not hold a bone block for a model draw: %.3f %.3f %.3f %.3f | "
+                        "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f. If the HUD shows `pal`, this is what the client "
+                        "keeps in the register this reader takes its object -> view blocks from.",
+                        unsigned(renderer::kM2BoneBaseRegister),
+                        double(root[0][0]), double(root[0][1]), double(root[0][2]), double(root[0][3]),
+                        double(root[1][0]), double(root[1][1]), double(root[1][2]), double(root[1][3]),
+                        double(root[2][0]), double(root[2][1]), double(root[2][2]), double(root[2][3]));
+                Log(text);
+            }
             return;
         }
         const uint64_t rootKey = detail::RootKey(root);

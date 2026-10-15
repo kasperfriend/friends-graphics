@@ -1062,6 +1062,14 @@ static void TestConfigurationAndWiring()
           sway.find("hash=0x%016llx). The HUD counts these as `solid`") != sway.npos &&
           sway.find("inside the pixel shader") != sway.npos,
         "a solid model draw names its shader once, so `solid` can be diagnosed");
+    // And the register itself, once, when c31 is not a bone block: `pal` on the
+    // HUD is otherwise a dead end from a player's machine - zeros mean the
+    // client keeps its matrix elsewhere, a projection means the draw is not a
+    // model, and a different stride shows up in the numbers.
+    Check(sway.find("g_reportedRootBlock") != sway.npos &&
+          sway.find("did not hold a bone block for a model draw: %.3f %.3f %.3f %.3f") != sway.npos &&
+          sway.find("unsigned(renderer::kM2BoneBaseRegister)") != sway.npos,
+        "the register a failed palette read looked at is named once, with its numbers");
     // The caps under the caches. A dropped instance is measured again from
     // scratch, so they are pinned as a number rather than left to drift: a
     // client can place a lot of models.
