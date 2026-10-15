@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: Crossing into a new area no longer stalls the game for a second
+title: Crossing into a new area no longer costs the game a second
 ---
-Walking between areas used to re-read every graphics setting and the whole F7 menu whenever the client's idea of your place flipped across a border, which can happen several times a second while you walk along it. That tuning now applies once the new place has settled: one quick reload per crossing.
+Walking along a border used to re-read every graphics setting and the whole F7 menu each time the client's idea of your place flipped, several times a second there. The place now applies once it has settled, and a re-read only happens when the file holds something new for it.

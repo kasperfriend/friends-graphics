@@ -332,24 +332,71 @@ namespace renderer
     //     modelview rows before it is added to r0.
     //
     // r0 is the shader's position and r1 is the engine's own scratch; the block
-    // uses r2..r5 and NOTHING else, which is why the caller refuses to inject into
-    // any shader that touches them (see GrassBladeTempsUsed below). It carries no
-    // immediate float operands at all: every scalar it reads is a component of
-    // c14..c19, which the caller writes itself, so the text has nothing in it the
-    // two versions of the compiler could read differently.
+    // uses r2..r5 and NOTHING else, which is why the injection refuses a shader
+    // whose own value still lives in one of them across the insertion point (see
+    // GrassBladeScratchLive below). It carries no immediate float operands at all:
+    // every scalar it reads is a component of c14..c19, which the caller writes
+    // itself, so the text has nothing in it the two versions of the compiler could
+    // read differently.
     //
     // `texcoord` is the v register of the blade's texture coordinate, taken from
     // the shader's own declaration line rather than assumed: a client that
     // declares its texcoord in v2 instead of v3 must still have its grass bend.
-    inline std::string GrassBladeMotionBlock(const char* texcoord)
+    // `worldSpace` says which frame r0 is in when the block runs, and the block is
+    // built for that frame:
+    //
+    //   * false - the reference client's own blade shader: r0 is the VIEW position
+    //     (`add r0, r0, c3` landed it), and the world position comes back through
+    //     the shader's own modelview rows c0/c1 plus the camera in c14. The
+    //     displacement is rotated back out through the same two rows.
+    //   * true - the other shape a real client draws its ground clutter with: the
+    //     vertex is placed by the instance's own rows (`dp4 r0.z, c33, v0`), so r0
+    //     already IS the world position. The block reads it directly - no rows to
+    //     borrow, no camera to add, and the displacement lands on the world's own
+    //     x and y. (The shader's c0/c1 in that shape are `def` literals baked into
+    //     the bytecode, and a `def` is only a default: the engine's own upload
+    //     writes c0..c13 for every batch and would take it straight back.)
+    //
+    // Everything else is shared, and every one of the block's own inputs is a
+    // component of c14..c19, which this module writes itself.
+    inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace)
     {
-        char text[4096]{};
+        // Where the vertex is, as the two coordinates the wave field and the
+        // per-blade hash are built from.
+        char place[512]{};
+        if (worldSpace)
+            std::snprintf(place, sizeof(place),
+                "    mov r2.x, r0.x\n"
+                "    mov r2.y, r0.y\n");
+        else
+            std::snprintf(place, sizeof(place),
+                "    dp3 r2.x, c0.xyz, r0.xyz\n"
+                "    add r2.x, r2.x, c14.x\n"
+                "    dp3 r2.y, c1.xyz, r0.xyz\n"
+                "    add r2.y, r2.y, c14.y\n");
+        // And the displacement, once the two waves have been summed: out of the
+        // world plane for the view-space shader, straight into it for the other.
+        char shear[640]{};
+        if (worldSpace)
+            std::snprintf(shear, sizeof(shear),
+                "    add r0.x, r0.x, r3.z\n"
+                "    add r0.y, r0.y, r3.w\n");
+        else
+            std::snprintf(shear, sizeof(shear),
+                "    mul r2.z, r3.z, c0.x\n"
+                "    mad r2.z, r3.w, c1.x, r2.z\n"
+                "    mul r2.w, r3.z, c0.y\n"
+                "    mad r2.w, r3.w, c1.y, r2.w\n"
+                "    mul r3.x, r3.z, c0.z\n"
+                "    mad r3.x, r3.w, c1.z, r3.x\n"
+                "    add r0.x, r0.x, r2.z\n"
+                "    add r0.y, r0.y, r2.w\n"
+                "    add r0.z, r0.z, r3.x\n");
+
+        char text[4608]{};
         std::snprintf(text, sizeof(text),
             "    ; ---- injected grass wind (this renderer: see src/Environment/GrassShaderWind.h) ----\n"
-            "    dp3 r2.x, c0.xyz, r0.xyz\n"
-            "    add r2.x, r2.x, c14.x\n"
-            "    dp3 r2.y, c1.xyz, r0.xyz\n"
-            "    add r2.y, r2.y, c14.y\n"
+            "%s"
             "    mul r3.x, r2.x, c19.z\n"
             "    mad r3.x, r2.y, c19.w, r3.x\n"
             "    frc r3.x, r3.x\n"
@@ -378,16 +425,8 @@ namespace renderer
             "    mad r3.w, r5.y, c16.w, r3.w\n"
             "    mul r3.z, r3.z, r5.z\n"
             "    mul r3.w, r3.w, r5.z\n"
-            "    mul r2.z, r3.z, c0.x\n"
-            "    mad r2.z, r3.w, c1.x, r2.z\n"
-            "    mul r2.w, r3.z, c0.y\n"
-            "    mad r2.w, r3.w, c1.y, r2.w\n"
-            "    mul r3.x, r3.z, c0.z\n"
-            "    mad r3.x, r3.w, c1.z, r3.x\n"
-            "    add r0.x, r0.x, r2.z\n"
-            "    add r0.y, r0.y, r2.w\n"
-            "    add r0.z, r0.z, r3.x\n",
-            texcoord ? texcoord : "v3");
+            "%s",
+            place, texcoord ? texcoord : "v3", shear);
         return text;
     }
 
@@ -480,15 +519,41 @@ namespace renderer
         return 0;
     }
 
-    // Does the shader already use a register the injected block needs? Any use at
-    // all - read or written, before or after the anchor - refuses the injection,
-    // because a scratch value the shader still needs would be destroyed by a
-    // block that starts writing there. A shader whose temps are only r0 and r1
-    // (the reference client's own detail-doodad shaders are exactly that) can be
-    // injected into without touching anything of its own.
-    inline bool GrassBladeTempsUsed(const std::string& disassembly) noexcept
+    // A register operand as an instruction writes it: `-r0` and `r0_abs` are r0
+    // too, and a source this test missed would be a value the injected block is
+    // allowed to destroy.
+    inline bool GrassBladeWordIsRegister(const std::string& word, const char* name) noexcept
     {
-        static const char* kNeeded[] = { "r2", "r3", "r4", "r5" };
+        size_t begin = 0;
+        while (begin < word.size() && (word[begin] == '-' || word[begin] == '!')) ++begin;
+        const size_t abs = word.find('_', begin);
+        const std::string base = word.substr(begin,
+            abs == std::string::npos ? std::string::npos : abs - begin);
+        return GrassBladeRegisterIs(base, name);
+    }
+
+    // The constant register a word names, or -1: `c31`, `c31.x` and `-c31.y` are
+    // all register 31, `c3147` is not a register at all (and neither is a word
+    // that only starts with the letter c).
+    inline int GrassBladeConstantRegister(const std::string& word) noexcept
+    {
+        size_t begin = 0;
+        while (begin < word.size() && (word[begin] == '-' || word[begin] == '!')) ++begin;
+        if (begin >= word.size() || word[begin] != 'c' || begin + 1 >= word.size()) return -1;
+        if (word[begin + 1] < '0' || word[begin + 1] > '9') return -1;
+        unsigned value = 0;
+        size_t at = begin + 1;
+        while (at < word.size() && word[at] >= '0' && word[at] <= '9')
+        {
+            value = value * 10 + unsigned(word[at] - '0');
+            ++at;
+        }
+        if (at < word.size() && word[at] != '.') return -1;
+        return value < 256u ? int(value) : -1;
+    }
+
+    inline bool GrassBladeReferencesConstant(const std::string& disassembly, unsigned reg) noexcept
+    {
         size_t at = 0;
         while (at <= disassembly.size())
         {
@@ -496,18 +561,62 @@ namespace renderer
             const std::string line = GrassBladeTrimmed(disassembly.substr(at,
                 end == std::string::npos ? std::string::npos : end - at));
             for (const std::string& word : GrassBladeWords(line))
-                for (const char* needed : kNeeded)
-                    if (GrassBladeRegisterIs(word, needed)) return true;
+                if (GrassBladeConstantRegister(word) == int(reg)) return true;
             if (end == std::string::npos) break;
             at = end + 1;
         }
         return false;
     }
 
-    // The line the block is inserted after: the view transform of the vertex.
-    // Found by what it does rather than by its exact text, because two builds of
-    // the same shader write the same instruction with different masks.
+    // The line the block is inserted AFTER: the last line that gives r0 the
+    // vertex's own position before the shader projects it.
+    //
+    // The reference client's detail-doodad shader lands the vertex with
+    // `add r0, r0, c3` and this build was written against that line; a client
+    // that places the vertex through the instance's own rows instead
+    // (`dp4 r0.z, c33, v0`) has no such line at all, and refusing those - every
+    // one of them, in a real session - is what "0 looked at, 0 bent" on the HUD
+    // was. What both forms share is not the instruction but the data: r0 is the
+    // vertex's position there, and the projection is about to consume it. So the
+    // anchor is found by that: the last write to r0 before a clip-space output
+    // reads r0 for the first time.
     inline size_t GrassBladeAnchorLine(const std::string& disassembly) noexcept
+    {
+        size_t at = 0, lineNumber = 0, lastWrite = ~size_t(0);
+        while (at <= disassembly.size())
+        {
+            const size_t end = disassembly.find('\n', at);
+            const std::string line = GrassBladeTrimmed(disassembly.substr(at,
+                end == std::string::npos ? std::string::npos : end - at));
+            const std::vector<std::string> words = GrassBladeWords(line);
+            if (words.size() >= 2)
+            {
+                // A clip-space output: `oPos` in vs_1_1, `o0` from vs_2_0 on. The
+                // disassembler names it, not the shader's author, and a build that
+                // only knew the first name refused every shader of the second kind
+                // ("the shader writes no clip-space position") that had one.
+                const bool position = GrassBladeWordIsRegister(words[1], "oPos") ||
+                    (words[1].size() >= 2 && words[1][0] == 'o' && words[1][1] == '0');
+                if (position)
+                    for (size_t i = 2; i < words.size(); ++i)
+                        if (GrassBladeWordIsRegister(words[i], "r0")) return lastWrite;
+                if (GrassBladeWordIsRegister(words[1], "r0")) lastWrite = lineNumber;
+            }
+            if (end == std::string::npos) break;
+            at = end + 1;
+            ++lineNumber;
+        }
+        return ~size_t(0);
+    }
+
+    // Does the anchor line place the vertex with the engine's own instance rows?
+    // That - not "the shader mentions c31 somewhere" - is what says the vertex is
+    // already in the world when the block runs: the client's own blade shader
+    // reads c31..c33 for its fog and its second texture coordinates as well, and a
+    // test that took any mention of them for a world placement would hand the
+    // block the wrong constants (three of the five foliage shaders of one real
+    // session read them after their position was projected, in o6/o7/o8).
+    inline bool GrassBladeAnchorUsesInstanceRows(const std::string& disassembly, size_t anchorLine) noexcept
     {
         size_t at = 0, lineNumber = 0;
         while (at <= disassembly.size())
@@ -515,23 +624,72 @@ namespace renderer
             const size_t end = disassembly.find('\n', at);
             const std::string line = GrassBladeTrimmed(disassembly.substr(at,
                 end == std::string::npos ? std::string::npos : end - at));
-            const std::vector<std::string> words = GrassBladeWords(line);
-            if (words.size() >= 3 && (words[0] == "add" || words[0] == "ADD") &&
-                GrassBladeRegisterIs(words[1], "r0"))
+            if (lineNumber == anchorLine)
             {
-                bool viewPosition = false, viewTranslation = false;
+                const std::vector<std::string> words = GrassBladeWords(line);
                 for (size_t i = 2; i < words.size(); ++i)
                 {
-                    if (GrassBladeRegisterIs(words[i], "r0")) viewPosition = true;
-                    if (GrassBladeRegisterIs(words[i], "c3")) viewTranslation = true;
+                    const int reg = GrassBladeConstantRegister(words[i]);
+                    if (reg == 31 || reg == 32 || reg == 33) return true;
                 }
-                if (viewPosition && viewTranslation) return lineNumber;
+                return false;
             }
             if (end == std::string::npos) break;
             at = end + 1;
             ++lineNumber;
         }
-        return ~size_t(0);
+        return false;
+    }
+
+    // Is a register the block writes still needed by the shader once the block
+    // has run?
+    //
+    // The rule is not "the shader never mentions r2..r5". A shader that redefines
+    // one of them AFTER the insertion point cannot be harmed by the block - its
+    // own instruction lands after ours - and refusing every shader that mentions
+    // them is how a client whose blade shader keeps its normals and lighting in
+    // r2/r3 read as "nothing sways" (three of the five foliage shaders in one
+    // real session). What matters is whether a register holds a value ACROSS the
+    // block: written at or before the anchor, and read again before anything
+    // writes it after the anchor. Only that register is refused.
+    inline bool GrassBladeScratchLive(const std::string& disassembly, size_t anchorLine) noexcept
+    {
+        static const char* const kScratch[] = { "r2", "r3", "r4", "r5" };
+        for (const char* name : kScratch)
+        {
+            bool writtenBefore = false;
+            size_t at = 0, lineNumber = 0;
+            // Everything up to and including the anchor: does this register hold a
+            // value there at all?
+            while (at <= disassembly.size() && lineNumber <= anchorLine)
+            {
+                const size_t end = disassembly.find('\n', at);
+                const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
+                    end == std::string::npos ? std::string::npos : end - at)));
+                if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) writtenBefore = true;
+                if (end == std::string::npos) break;
+                at = end + 1;
+                ++lineNumber;
+            }
+            if (!writtenBefore) continue;
+            // And after it: the first line that touches the register decides. A
+            // read (as a source, or as the destination's own operand, as in
+            // `add r2.x, r2.x, c5`) means the shader still needs the value the
+            // block would destroy; a write means the shader has redefined it
+            // before any use.
+            while (at <= disassembly.size())
+            {
+                const size_t end = disassembly.find('\n', at);
+                const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
+                    end == std::string::npos ? std::string::npos : end - at)));
+                for (size_t i = 2; i < words.size(); ++i)
+                    if (GrassBladeWordIsRegister(words[i], name)) return true;
+                if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) break;
+                if (end == std::string::npos) break;
+                at = end + 1;
+            }
+        }
+        return false;
     }
 
     struct GrassBladeInjection
@@ -541,11 +699,27 @@ namespace renderer
         std::string text;                 // the shader text to assemble
         unsigned texcoordRegister = 0;    // the v register the block reads
         size_t anchorLine = 0;
+        // Which frame the block's input is in: r0 is the view position, or - when
+        // the anchor line places the vertex through the engine's own instance rows
+        // (c31..c33) - it is already the world position. The block is built for the
+        // frame it will actually run in; the device half complements that for this
+        // one by packing the camera correction and the view-distance fade away,
+        // neither of which a world position has (see BladeShader::worldSpace).
+        bool worldSpace = false;
     };
 
     // The whole injection, as a function of a disassembly and the shader model
     // token the blob itself declares. Nothing here touches a device: the caller
     // disassembles, calls this, and assembles what comes back.
+    //
+    // Every refusal below is a structure, not a guess, and each one is a shader
+    // this build cannot bend without breaking it:
+    //   * no texture coordinate: the bend weight IS that coordinate;
+    //   * no position: the projection never reads r0, so there is no line the
+    //     block can sit after with the vertex in hand;
+    //   * a scratch register the shader still needs across the insertion point;
+    //   * no free constant register to define the world axes in (the world-space
+    //     family only), which no foliage shader in a real session has hit.
     inline GrassBladeInjection BuildGrassBladeInjection(const std::string& disassembly, const char* model)
     {
         GrassBladeInjection out;
@@ -558,50 +732,41 @@ namespace renderer
             out.reason = "the shader does not declare a texture coordinate, so a blade has no height to bend";
             return out;
         }
-        if (GrassBladeTempsUsed(disassembly))
-        {
-            out.reason = "the shader already uses one of the scratch registers the motion block needs (r2..r5)";
-            return out;
-        }
         const size_t anchor = GrassBladeAnchorLine(disassembly);
         if (anchor == ~size_t(0))
         {
-            out.reason = "the shader has no view-transform line for the block to be inserted after";
+            out.reason = "the shader never lands its vertex in r0 before a clip-space output reads it, so the block "
+                "has no position to bend and nowhere to be inserted";
             return out;
         }
-        // A vertex shader has to write a clip-space position; without one this is
-        // not a vertex shader's body at all and nothing should be inserted into
-        // it.
-        bool writesPosition = false;
+        if (GrassBladeScratchLive(disassembly, anchor))
         {
-            size_t at = 0;
-            while (at <= disassembly.size() && !writesPosition)
-            {
-                const size_t end = disassembly.find('\n', at);
-                const std::string line = GrassBladeTrimmed(disassembly.substr(at,
-                    end == std::string::npos ? std::string::npos : end - at));
-                for (const std::string& word : GrassBladeWords(line))
-                    if (word.compare(0, 4, "oPos") == 0) writesPosition = true;
-                if (end == std::string::npos) break;
-                at = end + 1;
-            }
-        }
-        if (!writesPosition)
-        {
-            out.reason = "the shader writes no clip-space position";
+            out.reason = "the shader still needs one of the scratch registers the motion block writes (r2..r5) across "
+                "the insertion point";
             return out;
         }
+        // The vertex's own frame. The engine's model transform lives in c31..c33
+        // for a draw this build can only see as unskinned scenery, and a shader
+        // that reads them has placed its vertex in the world already: r0 IS the
+        // world position when the block runs, and the world's axes are the
+        // coordinates themselves. Those two rows the block reads must then come
+        // from registers nothing else touches - the shader's own c0/c1 in that
+        // shape are `def` literals the assembler bakes in, and the engine's upload
+        // cannot overwrite them - so the injection defines the two axes itself,
+        // in the first two constant registers above the matrices that no line of
+        // the shader mentions.
+        out.worldSpace = GrassBladeAnchorUsesInstanceRows(disassembly, anchor);
 
         char texcoordName[16]{};
         std::snprintf(texcoordName, sizeof(texcoordName), "v%u", texcoord);
-        const std::string block = GrassBladeMotionBlock(texcoordName);
+        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace);
 
-        // The assembled text: the shader's own lines, with the block after the
-        // view transform. The model token is prepended when the disassembler did
-        // not write one, because an assembler needs the model to assemble
-        // against.
+        // The assembled text: the shader's own lines, with the block after the line
+        // that lands the vertex's position. The model token is prepended when the
+        // disassembler did not write one, because an assembler needs the model to
+        // assemble against.
         std::string text;
-        text.reserve(disassembly.size() + block.size() + 64);
+        text.reserve(disassembly.size() + block.size() + 96);
         bool hasModel = false;
         size_t at = 0, lineNumber = 0;
         if (disassembly.find(model) != std::string::npos) hasModel = true;

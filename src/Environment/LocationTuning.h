@@ -35,6 +35,28 @@ inline std::unordered_map<std::wstring,std::unordered_set<std::wstring>>& Scoped
     return keys;
 }
 inline void InvalidateScopedKeys() { ScopedKeys().clear(); }
+// The identity of the file the memo was filled from. A memo of a scoped section
+// is a property of the FILE - which keys it has and what they hold - and not of
+// the place that happens to be active, so the one thing that has to drop it is a
+// change to the file itself: a different path, a hand edit, a save. A place
+// change is not a file change, and clearing on one is what made a crossing
+// re-read the whole scoped file, section by section, while the place flapped.
+inline ULONGLONG memoWritten=0;
+inline DWORD memoBytes=0;
+inline void RememberScopedFile() {
+    memoWritten=0;memoBytes=0;
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if(!localFile.empty()&&GetFileAttributesExW(localFile.c_str(),GetFileExInfoStandard,&info)) {
+        memoWritten=(static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
+        memoBytes=info.nFileSizeLow;
+    }
+}
+inline bool ScopedFileUnchanged() {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if(!GetFileAttributesExW(localFile.c_str(),GetFileExInfoStandard,&info))return memoWritten==0&&memoBytes==0;
+    const ULONGLONG written=(static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
+    return written==memoWritten&&info.nFileSizeLow==memoBytes;
+}
 inline std::wstring LowerKeyName(const wchar_t* key) {
     std::wstring text=key?key:L"";
     for(auto& c:text)if(c>=L'A'&&c<=L'Z')c=static_cast<wchar_t>(c+(L'a'-L'A'));
@@ -45,6 +67,9 @@ inline const std::unordered_set<std::wstring>* ScopedKeysFor(const std::wstring&
     auto& cache=ScopedKeys();
     const auto found=cache.find(scope);
     if(found!=cache.end())return &found->second;
+    // The first section of a fresh memo: from here on, the file this was read
+    // from is the memo's own identity, and Sync compares against it.
+    if(cache.empty())RememberScopedFile();
     if(cache.size()>=96)cache.clear();
     // Sized to the profile API's own ceiling for a section string (32767 wide
     // characters), so the key set of a section is never read in half: the editor
@@ -70,10 +95,17 @@ inline bool ScopedValuePresent(const std::wstring& scope,LPCWSTR key) {
 inline bool Sync(const std::wstring& base,const LocationContext& location,bool verified) {
     const bool changed=!active.SamePlace(location)||editable!=(location.valid&&verified)||baseFile!=base+L"GraphicsEffects.ini";
     const std::wstring nextBase=base+L"GraphicsEffects.ini",nextLocal=base+L"LocationGraphics.ini";
-    // A different place, a different file or a different verification state all
-    // invalidate what was read out of the scoped file; so does an editor save,
-    // and F12.
-    if(changed||nextLocal!=localFile)InvalidateScopedKeys();
+    // A different place does NOT invalidate what was read out of the scoped
+    // file: which keys a scope has is a property of the file, not of the place
+    // that is active, and this client's place flaps across a boundary while the
+    // player walks it - `Area=0` and `Area=223` alternating in a real session,
+    // each alternation dropping the memo and re-reading every section of the file
+    // for the F7 menu and the nine tuning reloads behind it, one
+    // GetPrivateProfileSectionW per scope per section. That is the second the
+    // player felt on every crossing. What does invalidate it: a different scoped
+    // file, the same file changed underneath the memo (a hand edit, another
+    // tool), an editor save and F12.
+    if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();
     baseFile=nextBase;localFile=nextLocal;
     active=location;editable=location.valid&&verified;return changed;
 }

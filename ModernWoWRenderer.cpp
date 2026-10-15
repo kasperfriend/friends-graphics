@@ -225,7 +225,18 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         (now-g_locationAppliedAt>=kLocationReloadGapMs||!g_locationConfigured);
     const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);
     if(locationTuningChanged){g_placePending=false;g_locationAppliedAt=now;g_locationConfigured=true;tuningoverlay::Configure(g_basePath);}
-    if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
+    if(tuningoverlay::Update()||locationTuningChanged){
+        // How long a crossing's own work takes, in the line the next report will
+        // carry: the numbers a player's log can be read for. A reload that reads
+        // the tuning of a place that adds nothing to the file is already skipped
+        // inside the scoped cache (see LocationTuning.h), so what is left here is
+        // only ever a reload that had something to read.
+        const uint64_t reloadBegan=GetTickCount64();
+        ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();
+        char reloadLine[128]{};
+        std::snprintf(reloadLine,sizeof(reloadLine),"Location tuning reloaded in %llu ms",static_cast<unsigned long long>(GetTickCount64()-reloadBegan));
+        Log(reloadLine);
+    }
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){

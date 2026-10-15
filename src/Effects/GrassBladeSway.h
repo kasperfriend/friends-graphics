@@ -20,8 +20,9 @@
 //     notice. The block is free for the same reason the reference module's is:
 //     the engine's own per-chunk upload fills c0..c13 and leaves the rest alone.
 //
-// Nothing here is fatal. A missing d3dcompiler, a shader with no view-transform
-// line, a declaration whose texture coordinate is not where the shader reads it,
+// Nothing here is fatal. A missing d3dcompiler, a shader that never lands its
+// vertex in r0, a declaration whose texture coordinate is not where the shader
+// reads it, a scratch register the shader still needs across the insertion point,
 // an assembler that refuses the block: each one refuses THAT shader, says so once
 // in the renderer log in its own words, and leaves the client drawing exactly
 // what it drew before.
@@ -82,6 +83,7 @@ struct BladeShader
     bool cardReported = false; // the one-shot line for a card whose vertices could not be read
     bool worldShaped = false;  // its constants bind the world's projection: recorded, not refused
     bool worldReported = false;// the one-shot line for that shape
+    bool worldSpace = false;   // the block it got reads r0 as the WORLD position (see the block's own note)
     float greenPercent = -1.f; // how much of the card's texture is green, when that was readable
     // The block this shader is drawn with: the frame's own rows, with c19 taken
     // from this shader's measured blade direction.
@@ -376,6 +378,7 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
         return;
     }
     entry.injected = injected;
+    entry.worldSpace = injection.worldSpace;
     ++g_status.injected;
     if (!g_reportedInjection)
     {
@@ -398,8 +401,8 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
 // entry: the SetVertexShader hook swaps the pointer on the way in, so every
 // later read of "what is bound" returns the BENT object, and without this a
 // bent shader would look like a new discovery on the next draw - it would be
-// examined again, refused for using its own scratch registers, and logged as a
-// refusal that means nothing.
+// examined again, refused a second time for a structure this build has already
+// answered, and logged as a refusal that means nothing.
 inline BladeShader* FindBladeShader(IDirect3DVertexShader9* shader) noexcept
 {
     if (!shader) return nullptr;
@@ -510,6 +513,18 @@ inline void Update(const renderer::FrameContext& frame, float gain) noexcept
         std::memcpy(entry.rows, g_constants.rows, sizeof(entry.rows));
         entry.rows[renderer::kGrassBladeRows - 1][0] = entry.bladeVSign > 0 ? 1.f : -1.f;
         entry.rows[renderer::kGrassBladeRows - 1][1] = entry.bladeVSign > 0 ? 0.f : 1.f;
+        if (entry.worldSpace)
+        {
+            // A shader whose vertex is already in the world when the block runs:
+            // there is no view position to correct with the camera (c14.x/y) and
+            // no view depth for the distance fade (c17.w is the fade's slope on
+            // r0.z, which for a world position is a height, not a distance). Both
+            // are packed away here - the fade collapses to the constant 1 in
+            // c14.z - and the block itself was built for that frame.
+            entry.rows[0][0] = 0.f;
+            entry.rows[0][1] = 0.f;
+            entry.rows[3][3] = 0.f;
+        }
         entry.rowsReady = true;
     }
 }
@@ -607,6 +622,7 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     // the model path above, which is where the green test earns its keep - so
     // asking about colour here would refuse the very field this exists for.
     ++entry->materialTries;
+    ++g_status.examined;
     ++g_status.foliageDraws;
     const renderer::TextureAlphaProbe texture = material();
     if (texture.verdict != renderer::TextureCutout::Cutout)

@@ -533,7 +533,8 @@ static void TestConfigurationAndWiring()
     const auto snapshot = main.find("nextFrame.wind=g_windSystem.Update", present);
     const auto sea = main.find("    watereffect::Present();", present);
     Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
-    Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();") != main.npos &&
+    Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){") != main.npos &&
+          main.find("ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();") != main.npos &&
           main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
           "F7/location/F12 all reload wind, and F12 drops the scoped read cache so a hand-edited file is picked up");
     // A crossing must not stall the frame. This client's place flaps across a
@@ -547,15 +548,19 @@ static void TestConfigurationAndWiring()
           tuning.find("if(!ScopedValuePresent(scope,key))continue;") != tuning.npos &&
           tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
           tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear(); }") != tuning.npos &&
-          tuning.find("if(changed||nextLocal!=localFile)InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
           tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
           "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
     Check(tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
           tuning.find("inline const std::unordered_set<std::wstring>* ScopedKeysFor(") != tuning.npos,
           "the memo answers both the read path and HasScopedValue, so the water colours see the same file view");
-    Check(tuning.find("if(changed||nextLocal!=localFile)InvalidateScopedKeys();") != tuning.npos &&
-          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
-          "a place change, a different base directory and an editor save all drop what was read out of the scoped file");
+    Check(tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("inline bool ScopedFileUnchanged() {") != tuning.npos &&
+          tuning.find("if(cache.empty())RememberScopedFile();") != tuning.npos,
+          "a different base directory, a file changed underneath the memo and an editor save all drop what was read "
+          "out of the scoped file - and a PLACE change does not, which is what a crossing used to spend its second "
+          "re-reading section by section");
     Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
           main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
           main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
