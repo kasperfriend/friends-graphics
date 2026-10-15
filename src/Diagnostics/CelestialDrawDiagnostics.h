@@ -8,6 +8,7 @@
 #include <atomic>
 #include <algorithm>
 #include <wrl/client.h>
+#include "src/Core/FrameContext.h"
 
 // Observation only. No resource locks, state changes, retained COM objects,
 // or GPU readbacks - same safety contract as WaterDiagnostics.h, which this
@@ -118,8 +119,7 @@ void Present(IDirect3DDevice9* d) noexcept {
             else if(presentsSinceStart>=180) Finish("timeout-no-draws");
         }
         const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
-        DWORD pid=0; GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!keyDown&&pid==GetCurrentProcessId()&&!active) Start(d);
+        if(down&&!keyDown&&renderer::FrameContext::Current().wowFocused&&!active) Start(d);
         keyDown=down;
     } catch(...) { enabled=false; active=false; }
 }

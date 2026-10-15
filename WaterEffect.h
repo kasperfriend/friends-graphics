@@ -1004,8 +1004,7 @@ void Present() {
     AdvanceSea(wind.sequence?wind.deltaSeconds:
         seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency()));
     const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
-    DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
+    if(hotkey&&down&&!keyDown&&renderer::FrameContext::Current().wowFocused) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
     keyDown=down;
     static unsigned frames=0;
     if(++frames%600==0)

@@ -238,9 +238,7 @@ namespace renderer
 
         // F8 hotkey toggle
         bool down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-        DWORD pid = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-        if (pid == GetCurrentProcessId())
+        if (renderer::FrameContext::Current().wowFocused)
         {
             if (down && !m_toggleKeyDown)
             {

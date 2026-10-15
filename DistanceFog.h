@@ -2,6 +2,7 @@
 #include "src/Environment/LocationTuning.h"
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
+#include "src/Core/FrameContext.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/Water/WaterPolicy.h"
@@ -23,9 +24,8 @@ void Configure(const std::wstring& base) {
     logPath=base+L"DistanceFog.log";
 }
 void Present() {
-    bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;
-    GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()){active=!active;renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
+    bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;
+    if(hotkey&&down&&!keyDown&&renderer::FrameContext::Current().wowFocused){active=!active;renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
     keyDown=down;matches=0;
 }
 struct Scope {

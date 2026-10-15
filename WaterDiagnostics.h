@@ -10,6 +10,7 @@
 #include <vector>
 #include <set>
 #include <wrl/client.h>
+#include "src/Core/FrameContext.h"
 
 // Observation only. No resource locks, state changes, retained COM objects or GPU readbacks.
 namespace waterdiag {
@@ -129,8 +130,7 @@ void OnPresent(IDirect3DDevice9* d,bool down,bool foreground) noexcept {
 }
 void Present(IDirect3DDevice9* d) noexcept {
     const bool down=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
-    DWORD pid=0; GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    OnPresent(d,down,pid==GetCurrentProcessId());
+    OnPresent(d,down,renderer::FrameContext::Current().wowFocused);
 }
 void Reset(IDirect3DDevice9* d) noexcept {
     try { std::lock_guard lock(mutex); if(active&&target==d) Finish("reset"); }

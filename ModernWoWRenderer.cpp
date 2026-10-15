@@ -151,6 +151,16 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     // history from before the pause must not be blended into the next frame.
     if (g_frameGap.Observe(now, kFrameGapMs)) volume::InvalidateTemporalHistory();
 
+    // One focus sample per frame, shared by every hotkey (F7-F12) below
+    // and in the module Present paths.
+    {
+        HWND foreground = GetForegroundWindow();
+        DWORD pid = 0;
+        GetWindowThreadProcessId(foreground, &pid);
+        renderer::FrameContext::Current().wowFocused = pid == GetCurrentProcessId();
+        renderer::FrameContext::Current().wowForeground = foreground;
+    }
+
     if (g_availability == renderer::DeviceAvailability::Lost) {
         // No effect pass can draw while the device is lost. Skip them instead
         // of letting each one fail (and log) every frame. Probe for recovery;
@@ -191,16 +201,16 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     if(locationTuningChanged)tuningoverlay::Configure(g_basePath);
     if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
     if(unified){
-        bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
+        bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;
+        if(down&&!graphicsKeyDown&&renderer::FrameContext::Current().wowFocused){
             graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;vegetation::active=graphicsActive;
             Log(graphicsActive?"F11 graphics ON":"F11 graphics OFF");
         }
         graphicsKeyDown=down;
     }
     {
-        bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;
+        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for

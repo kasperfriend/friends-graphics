@@ -484,6 +484,55 @@ public:
         if (!enhancementEnabled || !device || (!needSoftness && !needStrength) || currentRtTexture)
             return;
 
+        // The exact receiver hashes were verified from dumped shader bytecode,
+        // and this scope runs on EVERY back-buffer draw - so the whitelist is
+        // checked in memory first. A non-receiver pixel shader then costs a
+        // dozen comparisons and returns, instead of crossing the D3D9 driver
+        // for the GetPixelShader check, the cascade texture probe (several
+        // GetTexture/GetLevelDesc/Release calls) and a render-state query on
+        // every single draw. The whitelist is the authoritative safety gate;
+        // the cascade probe's result is diagnostic only.
+        UINT startRegister = 0, registerCount = 0;
+        bool oddRegistersOnly = false;
+        const bool isSoftnessReceiver = needSoftness &&
+            FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly);
+        const bool isStrengthReceiver = needStrength && IsStrengthConfirmedHash(psHash);
+        if (!isSoftnessReceiver && !isStrengthReceiver)
+        {
+            // New-receiver discovery survives the pre-gate: a hash the game
+            // draws with the native cascades bound is exactly the variant the
+            // whitelist wants to grow for (OnDraw's candidate log does not
+            // see back-buffer receiver draws). Each unknown pixel shader is
+            // probed ONCE per session - on its first draw - then cached;
+            // distinct pixel shaders are bounded, so discovery costs a few
+            // dozen probes when a new zone's materials first appear, never
+            // per draw. A first draw seen without cascades bound is assumed
+            // not to be a receiver (the game binds the four cascade textures
+            // on every draw of a shadow-sampling material).
+            if (needSoftness)
+            {
+                static std::unordered_set<uint64_t> probedUnknown;
+                if (probedUnknown.size() < 1024 && probedUnknown.insert(psHash).second)
+                {
+                    const int stage = HasFourNativeCascades(device, 4) ? 4 :
+                        (HasFourNativeCascades(device, 5) ? 5 : -1);
+                    if (stage >= 0)
+                    {
+                        static std::unordered_set<uint64_t> loggedVariants;
+                        if (loggedVariants.insert(psHash).second)
+                        {
+                            std::ostringstream s;
+                            s << "[SOFTNESS] cascades bound at stage " << stage
+                              << " but psHash=0x" << std::hex << psHash << std::dec
+                              << " is not in the receiver whitelist\n";
+                            Append(s.str());
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         IDirect3DPixelShader9* actualShader = nullptr;
         if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
         {
@@ -492,20 +541,18 @@ public:
         }
         if (actualShader) actualShader->Release();
 
-        // The exact receiver hashes below were verified from dumped shader
-        // bytecode. Requiring GetLevelDesc to report four D24X8 textures was
-        // not portable across D3D9 wrappers: this client exposes its native
+        // Requiring GetLevelDesc to report four D24X8 textures was not
+        // portable across D3D9 wrappers: this client exposes its native
         // cascade resources with a driver-specific depth FourCC, so valid
-        // receivers were rejected before either slider could run. The shader
-        // whitelist is the authoritative safety gate; the stage probe is now
-        // diagnostic only.
+        // receivers were rejected before either slider could run. Hence the
+        // probe stays diagnostic only.
         firstStage = HasFourNativeCascades(device, 4) ? 4 : (HasFourNativeCascades(device, 5) ? 5 : -1);
 
         DWORD colorWrite = 0;
         if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
 
-        if (needSoftness) ApplySoftness(psHash);
-        if (needStrength) ApplyStrength(psHash);
+        if (isSoftnessReceiver) ApplySoftness(psHash);
+        if (isStrengthReceiver) ApplyStrength(psHash);
     }
 
     ~SoftnessScope()

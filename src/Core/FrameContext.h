@@ -123,6 +123,18 @@ namespace renderer
         bool cameraValid = false;
         bool composed = false;
 
+        // Sampled once per frame at the top of Present: is WoW the
+        // foreground window? Every hotkey (F7-F12) reads this instead of
+        // calling GetForegroundWindow/GetWindowThreadProcessId itself -
+        // ten separate samples per frame could disagree while a focus
+        // change lands mid-frame, which would fire some toggles and
+        // swallow others in the same frame. The window handle is kept
+        // alongside the flag so the F7 overlay measures the SAME window
+        // the focus decision was made from (the original code used one
+        // GetForegroundWindow for both).
+        bool wowFocused = false;
+        HWND wowForeground = nullptr;
+
         void ResetForNewFrame(uint64_t newFrameIndex, IDirect3DDevice9* dev);
     };
 }

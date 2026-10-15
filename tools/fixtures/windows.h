@@ -12,8 +12,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <vector>
+#include <chrono>
+#include <ctime>
+#include <cstdio>
 
 typedef unsigned long DWORD;
+typedef unsigned short WORD;
 typedef unsigned int UINT;
 typedef int INT;
 typedef int BOOL;
@@ -37,6 +41,39 @@ inline int _wcsicmp(const wchar_t* a, const wchar_t* b)
     if (*a == *b) return 0;
     return *a ? 1 : -1;
 }
+
+// Time APIs the diagnostic headers touch (MenuDiagnostics timestamps,
+// weather ticks). Real wall-clock UTC for the SYSTEMTIME variant.
+struct SYSTEMTIME { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; };
+inline void GetSystemTime(SYSTEMTIME* t) {
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const std::time_t tsec = system_clock::to_time_t(now);
+    std::tm gm{};
+#if defined(_WIN32)
+    gmtime_s(&gm, &tsec);
+#else
+    gmtime_r(&tsec, &gm);
+#endif
+    t->wYear = static_cast<WORD>(gm.tm_year + 1900);
+    t->wMonth = static_cast<WORD>(gm.tm_mon + 1);
+    t->wDayOfWeek = static_cast<WORD>(gm.tm_wday);
+    t->wDay = static_cast<WORD>(gm.tm_mday);
+    t->wHour = static_cast<WORD>(gm.tm_hour);
+    t->wMinute = static_cast<WORD>(gm.tm_min);
+    t->wSecond = static_cast<WORD>(gm.tm_sec);
+    t->wMilliseconds = static_cast<WORD>(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
+}
+typedef unsigned long long DWORD64;
+inline DWORD64 GetTickCount64() {
+    return static_cast<DWORD64>(std::chrono::steady_clock::now().time_since_epoch().count() / 10000);
+}
+inline DWORD GetTickCount() { return static_cast<DWORD>(GetTickCount64()); }
+inline DWORD GetCurrentProcessId() { return 4242; }
+inline DWORD GetWindowThreadProcessId(void*, DWORD* out) { if (out) *out = 4242; return 1; }
+inline void* GetForegroundWindow() { return reinterpret_cast<void*>(0x1); }
+inline BOOL IsIconic(void*) { return FALSE; }
+inline BOOL IsWindow(void*) { return TRUE; }
 
 namespace shiminix {
 inline std::wstring lower(std::wstring s) { for (auto& c : s) if (c >= L'A' && c <= L'Z') c += L'a' - L'A'; return s; }

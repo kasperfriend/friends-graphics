@@ -2,6 +2,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
+#include "src/Core/FrameContext.h"
 #pragma comment(lib,"d3dcompiler.lib")
 
 namespace waterhighlight {
@@ -31,8 +32,7 @@ void Configure(const std::wstring& base) {
 void Present() {
     if(!enabled)return;
     bool next=(GetAsyncKeyState(VK_F6)&0x8000)!=0,toggle=(GetAsyncKeyState(VK_F7)&0x8000)!=0;
-    DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    if(pid==GetCurrentProcessId()) {
+    if(renderer::FrameContext::Current().wowFocused) {
         if(next&&!nextDown) {group=(group+1)%4;Status();}
         if(toggle&&!toggleDown) {visible=!visible;Status();}
     }
