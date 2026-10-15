@@ -79,14 +79,13 @@ namespace renderer
         // Initialize COM for WIC texture loader
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+        // ReloadTuning loads the manifests when (and only when) the feature
+        // is enabled - see there.
         ReloadTuning(basePath);
 
-        std::wstring manifestPath = m_cacheDir + L"manifest.json";
-        LoadManifest(manifestPath);
-        LoadManifest(m_cacheDir + L"object_manifest.json");
-        LoadManifest(m_cacheDir + L"foliage_manifest.json");
-
-        LogMessage(m_logPath, "MaterialCacheManager configured. Total loaded material entries: " + std::to_string(m_entries.size()));
+        LogMessage(m_logPath, m_enabled
+            ? "MaterialCacheManager configured. Total loaded material entries: " + std::to_string(m_entries.size())
+            : "MaterialCacheManager configured. AI materials disabled; manifests load on first enable");
     }
 
     void MaterialCacheManager::ReloadTuning(const std::wstring& basePath)
@@ -108,6 +107,19 @@ namespace renderer
                               " strength=" + std::to_string(m_globalNormalStrength) +
                               " parallax=" + std::to_string(m_parallaxScale) +
                               " shadow=" + std::to_string(m_shadowStrength));
+
+        // The manifests are several MB of JSON (object_manifest.json alone is
+        // over 3 MB). Parsing them at startup for a feature that is off by
+        // default would slow every load, so they load once, on first enable -
+        // startup when the player has already turned the feature on, or a
+        // live F7/F12 enable later.
+        if (m_enabled && !m_manifestsLoaded) {
+            LoadManifest(m_cacheDir + L"manifest.json");
+            LoadManifest(m_cacheDir + L"object_manifest.json");
+            LoadManifest(m_cacheDir + L"foliage_manifest.json");
+            m_manifestsLoaded = true;
+            LogMessage(m_logPath, "Manifests loaded. Total material entries: " + std::to_string(m_entries.size()));
+        }
     }
 
     bool MaterialCacheManager::LoadManifest(const std::wstring& manifestPath)

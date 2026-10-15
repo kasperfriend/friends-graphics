@@ -2,6 +2,7 @@
 #include "../Environment/LocationTuning.h"
 #include "../Environment/EnvironmentDatabase.h"
 #include <cstring>
+#include <filesystem>
 #include <limits>
 namespace renderer {
 namespace {
@@ -16,10 +17,13 @@ bool HasVerified12340CodeSignature(const WoWClientContext& client) {
            client.Read(0x1204E4,buf,sizeof(writeSig))&&std::memcmp(buf,writeSig,sizeof(writeSig))==0;
 }
 bool IsKnownVerified12340Client(const WoWClientContext& client) {
-    return client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6"||
+    // The code signature is three small reads; the hash comparisons are free
+    // only once the hash exists, and computing it is the expensive step.
+    // Answer from the signature whenever it can.
+    return HasVerified12340CodeSignature(client)||
+           client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6"||
            client.sha256=="f4b9f6fce448194638c5b1c751483090a48c597c6272237f31b3d151b50d3114"||
-           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da"||
-           HasVerified12340CodeSignature(client);
+           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da";
 }
 // Stock 3.3.5a (build 12340) parent zones for areas that Ascension promoted to
 // standalone starter roots (10138..10146) or unparented caves in data/areas.txt.
@@ -56,6 +60,18 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     auto iniValue=[&](const wchar_t* key) {std::wstring value;renderer::locationtuning::ReadCachedString(path.c_str(),L"LocationProvider",key,value);return value;};
     std::string fingerprint=TrimIniValue(iniValue(L"ExeSHA256"));
     for(char& c:fingerprint)if(c>='A'&&c<='F')c=char(c-'A'+'a');
+    // Hashing the whole executable (hundreds of MB) is the most expensive
+    // startup step, and most configurations never need the hash: a verified
+    // 12340 code signature identifies the stock client with three small
+    // reads, and a blank fingerprint has nothing to compare a hash against.
+    // When the hash IS needed (modded client or explicit fingerprint) it is
+    // cached on disk keyed by the module's PE identity, so a repeat launch of
+    // the same client reads a few dozen bytes instead of re-hashing.
+    if(!HasVerified12340CodeSignature(client)) {
+        std::filesystem::path dir{path}.parent_path();
+        if(dir.empty())dir=L".";
+        client.EnsureSha256((dir/L"ClientSha256.cache").string());
+    }
     // A blank shipped configuration trusts the verified Ascension and stock 3.3.5a
     // (build 12340) executables. Explicit custom configurations keep their rules.
     const bool knownClient=IsKnownVerified12340Client(client);

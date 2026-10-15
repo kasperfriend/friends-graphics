@@ -14,7 +14,13 @@ void EnvironmentProfileManager::Configure(const std::wstring& base) {
     menudiagnostics::Configure(base);
     if(!database.Load(base+L"data\\areas.txt",error))Log(error+"; location validation unavailable");
     else Log("Area database loaded: "+std::to_string(database.AreaCount()));
-    Reload();Log("Client SHA256="+provider.Client().sha256+" timestamp="+std::to_string(provider.Client().timestamp));
+    Reload();
+    const auto& client=provider.Client();
+    const std::string clientIdentity=
+        client.sha256State==WoWClientContext::Sha256State::Computed?"SHA256="+client.sha256:
+        client.sha256State==WoWClientContext::Sha256State::Failed?"SHA256 unavailable (hash computation failed)":
+        "SHA256 not computed (identified by code signature)";
+    Log("Client "+clientIdentity+" timestamp="+std::to_string(client.timestamp));
     WriteMenuReport("configured");
 }
 void EnvironmentProfileManager::Reload() {

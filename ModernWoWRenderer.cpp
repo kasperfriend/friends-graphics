@@ -605,7 +605,11 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    if(volume::enabled||watereffect::enabled){
+    // Water's backend is ready or still compiling (its startup shader compile
+    // runs on a worker thread): install the capture hooks either way, since a
+    // failed compile just leaves the hooks dormant (their per-frame gates all
+    // check readiness live) and a late success must not need a device reset.
+    if(volume::enabled||watereffect::enabled||watereffect::compiling){
         InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
         InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
         InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
@@ -669,7 +673,9 @@ void HookDevice(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    if(volume::enabled||watereffect::enabled){
+    // Same gate as the first hook pass: water's compile may still be in
+    // flight (worker thread), and a late success must not need a reset.
+    if(volume::enabled||watereffect::enabled||watereffect::compiling){
         volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
         volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
         renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);

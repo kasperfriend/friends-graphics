@@ -2,11 +2,14 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
 #include <vector>
 #include "src/Environment/LocationTuning.h"
 #include <unordered_set>
@@ -24,8 +27,14 @@ namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
 // when water starts off, so F7/F12 and location changes can enable it live.
-// effectEnabled is the single live switch; active is the F9/F11 master switch.
-bool enabled=false, active=true, keyDown=false, hotkey=true;
+// enabled is published by the startup compile thread (see Configure), so it
+// is atomic: the render thread reads it on every draw and must not race the
+// one-time publish. effectEnabled is the single live switch; active is the
+// F9/F11 master switch.
+std::atomic<bool> enabled{false};
+std::atomic<bool> compiling{false}; // true from Configure until the compile thread publishes
+inline std::mutex waterCompileMutex; // guards the code/vertexCode publish in Configure
+bool active=true, keyDown=false, hotkey=true;
 bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=true,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,foamEnabled=true,sunGlintEnabled=true;
 float strength=.003f;
 float normalStrength=.16f, specularStrength=.55f;
@@ -946,26 +955,47 @@ void Configure(const std::wstring& base) {
     code.clear();vertexCode.clear();
     cachedReplacementPS.Reset();cachedReplacementVS.Reset();
     cachedShaderDevice=nullptr;shaderCreationFailed=false;
-    // Compile independently of the live switch. HookDevice uses readiness to
-    // install draw/depth hooks once, before a player can turn water on in F7.
+    // The replacement shaders (a ~540-slot pixel stage) are the largest fxc
+    // cost at load. Compile them on a worker thread: the game is still
+    // loading, the first water frame is the earliest possible consumer, and
+    // D3DCompile is a standalone CPU pass that needs no device. Water draws
+    // before the publish stay native; after it, the next tile switches over.
+    // HookDevice installs the depth hooks while compiling is still true, so
+    // a device created mid-compile is never left without the capture path.
     ReloadTuning();
     // Prime the CPU field before the first draw too, not one frame later:
     // a saved size/direction or calm wind must not flash the old default sea.
     AdvanceSea(0.f);
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
-    ComPtr<ID3DBlob> blob,error;
-    HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
-    std::ofstream log(std::filesystem::path(logPath),std::ios::app);
-    log<<"compile="<<hr<<" ripple="<<strength<<'\n';
-    if(FAILED(hr)){enabled=false;if(error)log<<static_cast<const char*>(error->GetBufferPointer());return;}
-    code.resize(blob->GetBufferSize()/4);memcpy(code.data(),blob->GetBufferPointer(),blob->GetBufferSize());
-    blob.Reset();error.Reset();
-    hr=D3DCompile(vertexSource,strlen(vertexSource),nullptr,nullptr,nullptr,"main","vs_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
-    log<<"vertex_compile="<<hr<<" normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
-    if(FAILED(hr)){enabled=false;if(error)log<<static_cast<const char*>(error->GetBufferPointer());return;}
-    vertexCode.resize(blob->GetBufferSize()/4);memcpy(vertexCode.data(),blob->GetBufferPointer(),blob->GetBufferSize());
-    enabled=true;
-    log<<"water backend ready; live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
+    compiling=true;
+    std::thread([logPath,strength,normalStrength,specularStrength,effectEnabled]{
+        ComPtr<ID3DBlob> blob,error;
+        std::vector<DWORD> ps,vs;
+        bool ok=false;
+        {
+            std::ofstream log(std::filesystem::path(logPath),std::ios::app);
+            HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
+            log<<"compile="<<hr<<" ripple="<<strength<<'\n';
+            if(SUCCEEDED(hr)) {
+                ps.resize(blob->GetBufferSize()/4);memcpy(ps.data(),blob->GetBufferPointer(),blob->GetBufferSize());
+                blob.Reset();error.Reset();
+                hr=D3DCompile(vertexSource,strlen(vertexSource),nullptr,nullptr,nullptr,"main","vs_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
+                log<<"vertex_compile="<<hr<<" normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
+                ok=SUCCEEDED(hr);
+                if(ok)vs.resize(blob->GetBufferSize()/4),memcpy(vs.data(),blob->GetBufferPointer(),blob->GetBufferSize());
+            }
+            if(!ok&&error)log<<static_cast<const char*>(error->GetBufferPointer());
+            log<<(ok?"water backend ready; ":"water backend NOT ready; ")
+               <<"live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
+        }
+        // Publish both vectors and the readiness flag under the same lock the
+        // first CreatePixelShader read uses; a partial publish (pixel but no
+        // vertex bytecode) would fail every CreateVertexShader until reset.
+        std::lock_guard lk(waterCompileMutex);
+        code=std::move(ps);vertexCode=std::move(vs);
+        enabled=ok;
+        compiling=false;
+    }).detach();
 }
 // Once per frame, from the same weather observation the cloud deck reads (see the call site in
 // ModernWoWRenderer.cpp), so water and sky cannot disagree about whether it is raining. Water does
@@ -1329,8 +1359,13 @@ struct Scope {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
             }
-            if(shaderCreationFailed || code.empty() || vertexCode.empty())return;
+            if(shaderCreationFailed)return;
             if(!cachedReplacementPS || !cachedReplacementVS) {
+                // The bytecode is published by the startup compile thread;
+                // take the same lock the publish uses. Empty means still
+                // compiling (or failed) - this draw stays native.
+                std::lock_guard lk(waterCompileMutex);
+                if(code.empty()||vertexCode.empty())return;
                 cachedReplacementPS.Reset();
                 cachedReplacementVS.Reset();
                 cachedShaderDevice = d;

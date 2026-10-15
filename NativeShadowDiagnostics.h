@@ -805,8 +805,12 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     if (!enabled || !d) return;
     ++drawOrdinal;
 
+    // Only the state that gates candidacy or enters the dedupe signature is
+    // read here. The rest (cull/stencil/viewport/stage textures) feeds the
+    // first-sighting log only and is collected where that log is built, so a
+    // repeated candidate draw costs three render-state reads instead of the
+    // ~37 driver calls the full dump would take.
     DWORD colorWrite = 0xf;
-    DWORD srcBlend = 0, dstBlend = 0, cull = 0, stencil = 0;
     d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
     const bool offscreen = currentRtValid && currentRtTexture &&
         (currentRtDesc.Width < std::max(1u, backBufferWidth) || currentRtDesc.Height < std::max(1u, backBufferHeight));
@@ -816,18 +820,9 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     const bool candidate = offscreen || depthOnly || projectedBlend || samplesPriorRt;
     if (!candidate) return;
 
+    DWORD srcBlend = 0, dstBlend = 0;
     d->GetRenderState(D3DRS_SRCBLEND, &srcBlend);
     d->GetRenderState(D3DRS_DESTBLEND, &dstBlend);
-    d->GetRenderState(D3DRS_CULLMODE, &cull);
-    d->GetRenderState(D3DRS_STENCILENABLE, &stencil);
-    D3DVIEWPORT9 viewport{};
-    d->GetViewport(&viewport);
-
-    std::array<IDirect3DBaseTexture9*, 16> rawTextures{};
-    for (DWORD stage = 0; stage < rawTextures.size(); ++stage)
-    {
-        d->GetTexture(stage, &rawTextures[stage]);
-    }
 
     ++candidateDrawsThisFrame;
     uint64_t signature = 0xcbf29ce484222325ull;
@@ -864,6 +859,19 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     const bool first = loggedSignatures.size() < maxUniqueCandidates && loggedSignatures.insert(signature).second;
     if (first)
     {
+        // First sighting of this signature: the full state dump. Everything
+        // here - stage textures, sampler states, constants, shader dumps -
+        // runs once per unique candidate, never per draw.
+        DWORD cull = 0, stencil = 0;
+        d->GetRenderState(D3DRS_CULLMODE, &cull);
+        d->GetRenderState(D3DRS_STENCILENABLE, &stencil);
+        D3DVIEWPORT9 viewport{};
+        d->GetViewport(&viewport);
+
+        std::array<IDirect3DBaseTexture9*, 16> rawTextures{};
+        for (DWORD stage = 0; stage < rawTextures.size(); ++stage)
+            d->GetTexture(stage, &rawTextures[stage]);
+
         IDirect3DSurface9* depth = nullptr;
         D3DSURFACE_DESC depthDesc{};
         if (SUCCEEDED(d->GetDepthStencilSurface(&depth)) && depth)
@@ -937,9 +945,9 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
         }
         s << '\n';
         Append(s.str());
-    }
 
-    for (auto* texture : rawTextures) if (texture) texture->Release();
+        for (auto* texture : rawTextures) if (texture) texture->Release();
+    }
 }
 
 inline void OnPresent(IDirect3DDevice9* d)
