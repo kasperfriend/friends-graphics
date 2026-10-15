@@ -78,8 +78,13 @@ These runtime checks cannot be completed in the Linux development sandbox:
 5. Click a slider label: its value must not jump. Drag the slider through both
    endpoints and outside its track. Toggles change once per press. Moving,
    resizing and scrolling must not change or save any setting.
-6. Check both verified zone/subarea scopes and global fallback. An unavailable
-   subarea cannot be selected. Image & color remains global. Reload with F12
+6. Check all three scopes: zone, subarea, and Global. An unavailable subarea
+   cannot be selected; Global can always be selected. Opening Global must not
+   create overrides. Edit one Global setting and confirm it wins over both
+   location scopes, survives map changes and F12, and leaves other keys alone.
+   In Global, CLEAR OVERRIDES restores saved location values for only the
+   selected category; RESET DEFAULTS instead persists explicit global defaults.
+   Image & color remains global-only through GraphicsEffects.ini. Reload with F12
    and confirm saved values persist. Confirm save failures are still reported.
 7. Close with X and F7, including F7 during a drag, then reopen. Size and position
    should remain; no drag should resume. Opening while already holding the

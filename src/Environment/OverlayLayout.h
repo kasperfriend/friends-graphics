@@ -76,7 +76,7 @@ struct OverlayLayout {
     Box Close() const {return {panel.x+panel.w-36,panel.y+4,28,24};}
     Box ResizeGrip() const {return {panel.x+panel.w-24,panel.y+panel.h-24,24,24};}
     Box Scope(int scope) const {
-        const float width=(panel.w-166)/2;
+        const float width=(panel.w-174)/3;
         return {panel.x+150+scope*(width+8),panel.y+132,width,26};
     }
     Box TabButton(int tab) const {
@@ -87,6 +87,7 @@ struct OverlayLayout {
     }
     Box Content() const {return {panel.x+240,panel.y+240,panel.w-270,float(VisibleRows())*rowHeight};}
     Box ResetButton() const {const auto c=Content();return {c.x+c.w-142,panel.y+202,142,26};}
+    Box ClearOverridesButton() const {auto b=ResetButton();b.x-=166;b.w=158;return b;}
     int VisibleRows() const {return std::max(1,int((panel.h-276)/rowHeight));}
     int MaxScroll(int tab) const {return std::max(0,Tabs()[tab].end-Tabs()[tab].begin-VisibleRows());}
     void SelectTab(int tab) {if(tab>=0&&tab<int(Tabs().size())){activeTab=tab;Cancel();}}
