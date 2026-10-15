@@ -533,8 +533,11 @@ static void TestConfigurationAndWiring()
     const auto snapshot = main.find("nextFrame.wind=g_windSystem.Update", present);
     const auto sea = main.find("    watereffect::Present();", present);
     Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
+    // The F12 gate reads the per-frame focus sample (one GetForegroundWindow
+    // per frame shared by all hotkeys) instead of sampling the foreground
+    // window itself - see FrameContext::wowFocused.
     Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();") != main.npos &&
-          main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();") != main.npos, "F7/location/F12 all reload wind");
+          main.find("if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){ReloadWindTuning();") != main.npos, "F7/location/F12 all reload wind");
     const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");
