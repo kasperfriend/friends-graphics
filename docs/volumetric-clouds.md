@@ -130,14 +130,13 @@ legacy disc signals leave the world shadow texture unchanged with wind and evolu
 ## Settings
 
 `[VolumetricClouds]` in `GraphicsEffects.ini`, per location like the rest of the tuning (`LocationTuning`), and on
-the F7 menu in the first column.
+the F7 VOLUMETRIC CLOUDS tab.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `Enabled` | 1 | Master switch for the pass. |
-| `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128, half-res unless overridden). Presets only set defaults; the shipped explicit resolution is 25%. |
-| `SampleCount` / `LightSampleCount` / `BaseStep` | preset | March budget overrides. |
-| `ResolutionPercent` | 25 | Independent F7 slider, 20–100% of screen width and height in steps of 5. Resizes live without changing march samples. Explicit value overrides preset resolution. |
+| `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128). Owns the sample count, light samples and base step together. Old `SampleCount` / `LightSampleCount` / `BaseStep` INI keys are ignored; they made F7 quality inert on existing installs. |
+| `ResolutionPercent` | 25 | Independent F7 slider, 20–100% of screen width and height in steps of 5. Resizes live without changing march samples; Quality never changes this resolution. |
 | `SunRaysEnabled` / `SunRayPercent` | 1 / 80 | Cloud-filtered world-space shafts, toggle and 0–200% strength in F7. SUN RAYS is also a master gate. |
 | `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
 | `ZoneClouds` / `WeatherClouds` | 1 / 1 | Apply zone climate / native weather independently; also in F7. |
@@ -153,7 +152,7 @@ the F7 menu in the first column.
 | `DetailSize` | 240 | World size of one tile of the erosion volume. |
 | `WeatherSize` | 34000 | World size of one tile of the weather map. |
 | `DetailPercent` | 88 | Strength of the erosion that shreds cloud edges. |
-| `WindSpeed` / `WindAngle` / `WindShearPercent` | 26 / 25 / 22 | Drift speed at shared wind strength 100% and downwind shear gain. `WindAngle` is the legacy sampling angle, ignored while linked to `[Wind]`. See [shared wind](wind-system.md). |
+| `WindSpeed` / `WindShearPercent` | 26 / 22 | Cloud-local drift speed at shared wind strength 100% and shear gain. The optional, unshipped `WindAngle` (legacy default 25) is a sampling angle used only when unlinked from `[Wind]`. See [shared wind](wind-system.md). |
 | `AbsorptionPercent` | 38 | Self-shadowing strength along the light march. |
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
 | `AmbientPercent` | 105 | Sky ambient contribution, tinted by the zone fog colour. |
@@ -166,7 +165,7 @@ the F7 menu in the first column.
 | `HorizonFadePermille` | 18 | How quickly grazing rays fade out. |
 | `MaxDistance` | 26000 | March limit; the deck fades out before it. |
 | `AerialPerspectivePercent` | 60 | How much of the sky's haze a cloud picks up with distance. 0 makes near and far clouds equally contrasty. |
-| `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 14000 | Cloud shadows cast on the world below. |
+| `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 24000 | Cloud shadows cast on the world below. |
 | `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only, 4 = shadow map. |
 
 ### Zone character, weather and evolution
@@ -215,8 +214,10 @@ Cloud type now interpolates toward **pure stratus at -100** and **pure towers at
 
 Weather consumes the existing exact native rain/snow/sand draw signatures and
 five-second detection hold. Detection no longer depends on enabled precipitation
-replacement or successful effect-texture loading. WeatherVisuals' hint does not
-force clouds or weather. The verified signal is the **type/presence**, not server
+replacement or successful effect-texture loading. The old WeatherVisuals Mode
+hint has been removed: it could change continuity-layer snow into rain while
+clouds and native particles still saw snow. The verified signal is the
+**type/presence**, not server
 severity: no primitive count is used as an invented intensity measurement.
 `WeatherVisuals.IntensityPercent × WeatherIntensityMultiplier`, clamped to 0–1,
 scales the cloud response; the default reaches full overcast. Rain builds deeper

@@ -34,7 +34,7 @@ bool cloudsEffectEnabled=true;
 // Held native observation; the cloud controller smooths weather transitions.
 renderer::CloudWeather cloudWeather=renderer::CloudWeather::Clear;
 float cloudWeatherStrength=1.f;
-bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,cloudShadowsEffectEnabled=true,temporalShaftsEnabled=false;
+bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,temporalShaftsEnabled=false;
 bool postProcessEffectEnabled=true;
 bool sunGlareEnabled=true;
 float sunGlareStrength=0.25f;
@@ -281,7 +281,6 @@ void ReloadTuning() {
     shadowMapEnabled = ReadTuning(L"ShadowMapEnabled", 0) != 0;
     shadowMapUpdateInterval = UINT(std::clamp(ReadTuning(L"ShadowMapUpdateInterval", 2), 1, 10));
     volumetricCharacterShadows = ReadTuning(L"VolumetricCharacterShadows", 0) != 0;
-    cloudShadowsEffectEnabled = ReadTuning(L"CloudShadowsEnabled", 1) != 0;
     temporalShaftsEnabled = ReadTuning(L"TemporalShaftsEnabled", 0) != 0;
     baseHeight = float(ReadTuning(L"BaseHeight", 60));
     density = std::clamp(ReadTuning(L"DensityPermille", 4), 0, 20) * .001f;

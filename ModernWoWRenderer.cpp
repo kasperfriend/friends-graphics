@@ -71,19 +71,6 @@ renderer::FrameGapDetector g_frameGap;
 renderer::WindSystem g_windSystem;
 renderer::FrameClock g_windClock;
 
-struct Settings
-{
-    bool enabled = true;
-    BYTE fogOpacity = 42;
-    BYTE fogRed = 86, fogGreen = 118, fogBlue = 145;
-    BYTE raysOpacity = 36;
-    float fogHeight = 0.58f;
-    float sunX = 0.72f, sunY = 0.18f;
-};
-
-struct Vertex { float x, y, z, rhw; D3DCOLOR color; };
-constexpr DWORD VERTEX_FVF = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
-
 HMODULE g_systemD3D9 = nullptr;
 Direct3DCreate9Fn g_realCreate9 = nullptr;
 Direct3DCreate9ExFn g_realCreate9Ex = nullptr;
@@ -92,7 +79,6 @@ std::mutex g_hookMutex;
 void** g_hookedTable = nullptr;
 std::once_flag g_initialize;
 thread_local bool g_drawingOverlay = false;
-Settings g_settings;
 std::wstring g_basePath;
 
 void Log(char const* text)
@@ -113,31 +99,6 @@ void SetAvailability(renderer::DeviceAvailability next)
         : "Direct3D device restored: effects resumed.");
 }
 
-int ReadInt(wchar_t const* key, int fallback)
-{
-    return GetPrivateProfileIntW(L"Atmosphere", key, fallback, (g_basePath + L"ModernWoWRenderer.ini").c_str());
-}
-
-float ReadFloat(wchar_t const* key, float fallback)
-{
-    wchar_t buffer[64]{};
-    GetPrivateProfileStringW(L"Atmosphere", key, L"", buffer, std::size(buffer), (g_basePath + L"ModernWoWRenderer.ini").c_str());
-    return buffer[0] ? static_cast<float>(wcstod(buffer, nullptr)) : fallback;
-}
-
-void ReloadSettings()
-{
-    g_settings.enabled = ReadInt(L"Enabled", 1) != 0;
-    g_settings.fogOpacity = static_cast<BYTE>(std::clamp(ReadInt(L"FogOpacity", 42), 0, 255));
-    g_settings.fogRed = static_cast<BYTE>(std::clamp(ReadInt(L"FogRed", 86), 0, 255));
-    g_settings.fogGreen = static_cast<BYTE>(std::clamp(ReadInt(L"FogGreen", 118), 0, 255));
-    g_settings.fogBlue = static_cast<BYTE>(std::clamp(ReadInt(L"FogBlue", 145), 0, 255));
-    g_settings.raysOpacity = static_cast<BYTE>(std::clamp(ReadInt(L"RaysOpacity", 36), 0, 255));
-    g_settings.fogHeight = std::clamp(ReadFloat(L"FogHeight", .58f), .0f, 1.0f);
-    g_settings.sunX = std::clamp(ReadFloat(L"SunX", .72f), .0f, 1.0f);
-    g_settings.sunY = std::clamp(ReadFloat(L"SunY", .18f), .0f, 1.0f);
-}
-
 void ReloadWindTuning()
 {
     const auto ini=g_basePath+L"GraphicsEffects.ini";
@@ -146,30 +107,23 @@ void ReloadWindTuning()
     }));
 }
 
-void DrawQuad(IDirect3DDevice9* device, float left, float top, float right, float bottom, D3DCOLOR topColor, D3DCOLOR bottomColor)
-{
-    Vertex vertices[] = {{left, top, 0.f, 1.f, topColor}, {right, top, 0.f, 1.f, topColor}, {left, bottom, 0.f, 1.f, bottomColor}, {right, bottom, 0.f, 1.f, bottomColor}};
-    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(Vertex));
-}
-
-void DrawAtmosphere(IDirect3DDevice9*)
-{
-    // Obsolete 2D screen quad completely disabled: volume rendering provides true 3D atmosphere.
-}
-
 void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
 
 HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 {
     // Overlays cannot draw on a lost device; forward the call untouched.
     if (g_availability == renderer::DeviceAvailability::Lost) return g_originalEndScene(device);
-    DrawAtmosphere(device);
     g_drawingOverlay=true;
     if(unified){if(graphicsShowStatus){watereffect::DrawStatus(device,graphicsActive?"FX ON":"FX OFF",0);
         if(graphicsActive&&volume::enabled)watereffect::DrawStatus(device,volume::composed?"AIR ON":"AIR WAIT",1);}
     }
     else {watereffect::DrawStatus(device);
-    if(distancefog::enabled&&distancefog::showStatus)watereffect::DrawStatus(device,!distancefog::active?"HAZE OFF":distancefog::matches?"HAZE ON":"HAZE WAIT",1);}
+    if(distancefog::showStatus){
+        const auto& fog=renderer::DirectionalVolumetricLighting::Instance().Settings();
+        const bool volumeEdge=volume::enabled&&volume::active&&volume::composed&&fog.enabled&&fog.edgeFogEnabled;
+        watereffect::DrawStatus(device,!distancefog::active||!distancefog::effectEnabled?"HAZE OFF":
+            volumeEdge||distancefog::matches?"HAZE ON":"HAZE WAIT",1);
+    }}
     if(weathervisuals::enabled&&weathervisuals::showStatus)watereffect::DrawStatus(device,weathervisuals::GetStatusText(),3);
     nativeshadowdiag::DrawPreview(device);
     tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind);
@@ -755,7 +709,6 @@ void Initialize()
         return;
     g_realCreate9 = reinterpret_cast<Direct3DCreate9Fn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9"));
     g_realCreate9Ex = reinterpret_cast<Direct3DCreate9ExFn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9Ex"));
-    ReloadSettings();
     waterdiag::Configure(g_basePath);
     celestialdiag::Configure(g_basePath);
     waterhighlight::Configure(g_basePath);
@@ -776,7 +729,7 @@ void Initialize()
     renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
-    if(unified){watereffect::hotkey=false;distancefog::hotkey=false;g_settings.enabled=false;
+    if(unified){watereffect::hotkey=false;distancefog::hotkey=false;
         graphicsShowStatus=GetPrivateProfileIntW(L"Graphics",L"ShowStatus",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
         graphicsActive=GetPrivateProfileIntW(L"Graphics",L"Enabled",1,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
         watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;

@@ -27,8 +27,8 @@ namespace renderer
     {
         bool enabled = true;
         // 0 = LOW, 1 = MEDIUM, 2 = HIGH, 3 = ULTRA. Drives the march step
-        // count, the light march length, the base step and the resolution
-        // the deck is integrated at.
+        // count, light march length and base step. Buffer resolution is
+        // independently owned by ResolutionPercent.
         uint32_t quality = 2;
         uint32_t sampleCount = 96;
         uint32_t lightSampleCount = 6;
@@ -86,7 +86,7 @@ namespace renderer
         // world height.
         bool groundShadows = true;
         float groundShadowStrength = .55f;
-        float groundShadowExtent = 14000.f;
+        float groundShadowExtent = 24000.f;
         bool sunRays = true;
         float sunRayStrength = .8f;
 

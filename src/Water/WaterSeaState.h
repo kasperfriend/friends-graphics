@@ -34,8 +34,8 @@ namespace renderer::water
     struct SeaTuning
     {
         float zoneAgitation = 1.f;   // [Environment] WaterAgitationMultiplier for the area
-        float response = 1.f;        // [Water] WeatherResponsePercent, how hard weather lands here
-        float authoredWind = 1.f;    // [Water] WindStrengthPercent, the authored foam/wind bias
+        float response = 1.f;        // [Water] WeatherResponsePercent, wave-energy response to wind (weather when unlinked)
+        float authoredWind = 1.f;    // [Water] WindStrengthPercent, the authored foam/roughness bias
         bool sharedWind = false;    // use the one weather-driven wind instead of a second storm boost
         float windStrength = 1.f;   // shared wind [0,3], before this body's response/exposure
     };
@@ -79,15 +79,19 @@ namespace renderer::water
         // Never multiply another rain boost into it. Response=0 keeps the
         // authored sea energy (direction can still follow wind); at strength
         // zero a little residual swell survives, but wind-driven foam vanishes.
+        const float wind = std::clamp(Finite(tuning.windStrength, 0.f), 0.f, 3.f);
         const float air = tuning.sharedWind ? std::clamp(1.f +
-            (std::clamp(Finite(tuning.windStrength, 0.f), 0.f, 3.f) - 1.f) *
-            std::clamp(Finite(tuning.response, 1.f), 0.f, 4.f), 0.f, 5.f) : 1.f;
+            (wind - 1.f) * std::clamp(Finite(tuning.response, 1.f), 0.f, 4.f), 0.f, 5.f) : 1.f;
         const float forcing = tuning.sharedWind ? std::max(air - 1.f, 0.f) : push;
         const float energy = tuning.sharedWind ? .2f + .8f * air : 1.f + .95f * push;
         state.agitation = std::clamp(Finite(tuning.zoneAgitation, 1.f) * energy, .12f, 2.6f);
         state.motion = std::clamp(1.f + (state.agitation - 1.f) * .55f + .8f * forcing, .08f, 3.f);
         state.shear = std::clamp(.25f * forcing + (state.agitation - 1.f) * .12f, 0.f, 1.f);
-        state.wind = std::clamp(Finite(tuning.authoredWind, 1.f) * air * (.45f + .55f * state.agitation), 0.f, 2.5f);
+        // Sea response is an energy gain, not a switch that can create foam
+        // without air. At Response=0 an authored swell survives calm, but
+        // whitecaps/roughness still use the actual shared wind strength.
+        const float foamAir = tuning.sharedWind ? wind : 1.f;
+        state.wind = std::clamp(Finite(tuning.authoredWind, 1.f) * foamAir * (.45f + .55f * state.agitation), 0.f, 2.5f);
         return state;
     }
 

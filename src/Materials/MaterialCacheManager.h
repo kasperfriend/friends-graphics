@@ -74,7 +74,7 @@ namespace renderer
             UINT primCount,
             const std::function<HRESULT()>& drawCall);
 
-        bool m_enabled = true;
+        bool m_enabled = false; // experimental; fail closed until explicitly enabled
         bool m_active = true;
         bool m_showStatus = false;
         bool m_toggleKeyDown = false;

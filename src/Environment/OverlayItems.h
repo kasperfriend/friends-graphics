@@ -34,14 +34,15 @@ inline std::vector<Item> items={
  // above. This is what actually guarantees the world edge stays covered
  // regardless of any other setting here.
  {KIND_TOGGLE,L"DistanceFog",L"Enabled","WORLD EDGE FOG",0,1,1,1},
- {KIND_SLIDER,L"DistanceFog",L"DistancePercent","EDGE FOG DISTANCE",10,300,5,130},
- {KIND_SLIDER,L"DistanceFog",L"PowerPercent","EDGE FOG POWER",10,300,5,30},
+ {KIND_SLIDER,L"DistanceFog",L"DistancePercent","EDGE FOG DISTANCE",10,300,5,100},
+ {KIND_SLIDER,L"DistanceFog",L"PowerPercent","EDGE FOG POWER",10,300,5,100},
 
  // === WEATHER VISUALS ===
  {KIND_HEADER,nullptr,nullptr,"--- WEATHER VISUALS ---",0,0,0,0},
- {KIND_TOGGLE,L"WeatherVisuals",L"Enabled","WEATHER SYSTEM",0,1,1,1},
- {KIND_SLIDER,L"WeatherVisuals",L"Mode","WEATHER HINT (0=AUTO 1=RAIN 2=SNOW)",0,2,1,0},
- {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","WEATHER STRENGTH",25,200,5,100},
+ {KIND_TOGGLE,L"WeatherVisuals",L"Enabled","WEATHER RENDERING",0,1,1,1},
+ // Intensity is also the shared native-weather input for clouds, wind and
+ // sea; turning off WEATHER RENDERING/F10 does not turn off detection.
+ {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","STORM INTENSITY (AFFECTS WIND CLOUDS WAVES)",0,300,5,100},
 
  // === SHARED WIND (simulation only; no visible wind effect) ===
  {KIND_HEADER,nullptr,nullptr,"--- WIND ---",0,0,0,0},
@@ -70,14 +71,14 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"BaseAltitude","CLOUD HEIGHT",100,20000,50,850},
  {KIND_SLIDER,L"VolumetricClouds",L"Thickness","CLOUD THICKNESS",100,12000,50,2150},
  {KIND_SLIDER,L"VolumetricClouds",L"FeatureSize","CLOUD SIZE",600,40000,200,3000},
- {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD DRIFT AT 100% WIND",0,400,5,26},
+ {KIND_SLIDER,L"VolumetricClouds",L"WindSpeed","CLOUD DRIFT SPEED (SCALED BY WIND IF LINKED)",0,400,5,26},
  {KIND_SLIDER,L"VolumetricClouds",L"SunIntensityPercent","CLOUD SUNLIGHT",0,400,5,130},
  {KIND_SLIDER,L"VolumetricClouds",L"AerialPerspectivePercent","CLOUD HAZE",0,100,5,60},
  {KIND_SLIDER,L"VolumetricClouds",L"GroundShadowPercent","CLOUD SHADOWS",0,100,5,55},
  {KIND_TOGGLE,L"VolumetricClouds",L"SunRaysEnabled","CLOUD SUN RAYS",0,1,1,1},
  {KIND_SLIDER,L"VolumetricClouds",L"SunRayPercent","CLOUD RAY STRENGTH",0,200,5,80},
  {KIND_SLIDER,L"VolumetricClouds",L"ResolutionPercent","CLOUD RESOLUTION (%)",20,100,5,25},
- {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD QUALITY (0 LOW 3 ULTRA)",0,3,1,2},
+ {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD MARCH QUALITY (0 LOW 3 ULTRA)",0,3,1,2},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
@@ -109,7 +110,8 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WATER WIND / FOAM BIAS",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
  {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},
- {KIND_SLIDER,L"Water",L"WeatherResponsePercent","WIND / WEATHER RESPONSE",0,200,5,100},
+ // Wave-energy response only; wind-driven foam still stops in calm air.
+ {KIND_SLIDER,L"Water",L"WeatherResponsePercent","SEA ENERGY RESPONSE (WIND OR NATIVE WEATHER)",0,200,5,100},
  {KIND_TOGGLE,L"Water",L"ZoneWaves","PER-ZONE SEA STATE",0,1,1,1},
 
  // === LOCAL LIGHTING ===
@@ -133,7 +135,7 @@ inline std::vector<Item> items={
 
  // === AI MATERIALS & RELIEF ===
  {KIND_HEADER,nullptr,nullptr,"--- AI MATERIALS & RELIEF ---",0,0,0,0},
- {KIND_TOGGLE,L"AIMaterials",L"Enabled","AI MATERIALS",0,1,1,1},
+ {KIND_TOGGLE,L"AIMaterials",L"Enabled","EXPERIMENTAL MATERIALS",0,1,1,0},
  {KIND_SLIDER,L"AIMaterials",L"NormalStrengthPercent","NORMAL BUMP",0,200,5,90},
  {KIND_SLIDER,L"AIMaterials",L"ParallaxDepthPercent","PARALLAX DEPTH",0,100,2,35},
  {KIND_SLIDER,L"AIMaterials",L"SelfShadowStrength","SELF SHADOWS",0,150,5,90},

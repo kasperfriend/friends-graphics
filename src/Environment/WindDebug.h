@@ -26,8 +26,9 @@ inline std::array<std::string, 5> WindDebugLines(const WindState& wind)
         wind.weather.kind == 1 ? "rain" : wind.weather.kind == 2 ? "snow" : wind.weather.kind == 3 ? "sand" : "clear",
         double(wind.weather.strength * 100.f));
     lines[3] = text;
-    std::snprintf(text, sizeof(text), "Waves: %s | Clouds: %s | Vegetation: not connected",
-        wind.DrivesWaves() ? "linked (sea inertia)" : "legacy", wind.DrivesClouds() ? "linked" : "legacy");
+    std::snprintf(text, sizeof(text), "Waves: %s | Clouds: %s | Rain drift: %s",
+        wind.DrivesWaves() ? "linked (sea inertia)" : "legacy",
+        wind.DrivesClouds() ? "linked" : "legacy", wind.enabled ? "wind" : "off");
     lines[4] = text;
     return lines;
 }
