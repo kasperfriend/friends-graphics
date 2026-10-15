@@ -239,16 +239,51 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
 // here by their own identity - the same stat a read would make. This is the
 // difference between a crossing that re-reads nine subsystems and one that does
 // nothing, and it is what the log line of the next report is read for.
-inline LocationContext appliedPlace;
-inline bool appliedEditable=false,appliedKnown=false;
+// A place does not have to be the SAME place to need no re-read: two areas answer
+// a scoped read identically when neither of them overrides anything, which is the
+// common case for the `Area=0`/`Area=223` flap this client produces walking a
+// border. What decides it is therefore the VALUES a place resolves to, not its
+// ids: the global file's identity plus every scoped section that belongs to the
+// place's three levels, keys and values. Two places with the same fingerprint
+// answer all nine subsystems the same way, so the reload is skipped and the log
+// says 0 ms instead of a stalled second.
+inline uint64_t FingerprintMix(uint64_t hash,const std::wstring& text) {
+    for(const wchar_t character:text)hash=(hash^static_cast<uint64_t>(character))*1099511628211ull;
+    return hash*1099511628211ull;
+}
+inline uint64_t ScopedFingerprint(const LocationContext& location) {
+    uint64_t hash=1469598103934665603ull;
+    auto& cache=ProfileCache();
+    for(const std::wstring& path:{baseFile,localFile}) {
+        auto found=cache.find(path);
+        if(found==cache.end())continue;
+        hash^=found->second.written;hash*=1099511628211ull;
+        hash^=found->second.bytes;hash*=1099511628211ull;
+    }
+    const auto& sections=cache[localFile].sections;
+    for(int level=0;level<3;++level) {
+        const std::wstring prefix=LowerKeyName((Scope(level)+L".").c_str());
+        for(const auto& [name,values]:sections) {
+            if(name.compare(0,prefix.size(),prefix)!=0)continue;
+            hash=FingerprintMix(hash,name);
+            for(const auto& [key,value]:values) {hash=FingerprintMix(hash,key);hash=FingerprintMix(hash,value);}
+        }
+    }
+    return hash;
+}
+inline uint64_t appliedFingerprint=0;
+inline bool appliedEditable=false;
 inline bool AppliedTuningStillInForce(const LocationContext& location,bool verified) {
-    if(!appliedKnown||!appliedPlace.SamePlace(location)||appliedEditable!=(location.valid&&verified))return false;
+    if(!appliedFingerprint)return false;
+    if(appliedEditable!=(location.valid&&verified))return false;
     if(!ScopedFileUnchanged())return false;
     if(!baseFile.empty()&&!ProfileIdentity(ProfileCache()[baseFile],baseFile))return false;
-    return true;
+    return ScopedFingerprint(location)==appliedFingerprint;
 }
 inline void MarkTuningApplied(const LocationContext& location,bool verified) {
-    appliedPlace=location;appliedEditable=location.valid&&verified;appliedKnown=true;
+    appliedEditable=location.valid&&verified;
+    appliedFingerprint=ScopedFingerprint(location);
+    if(!appliedFingerprint)appliedFingerprint=1; // 0 is "nothing applied yet"
 }
 inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
     if(!IsGlobal(section)&&editable&&path&&baseFile==path) {

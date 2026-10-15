@@ -307,7 +307,8 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         g_placePending=false;g_locationConfigured=true;
         if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}
         else if(!f7Edited)
-            Log("Location tuning reloaded in 0 ms - the place that settled is the one already in force, and neither settings file changed");
+            Log("Location tuning reloaded in 0 us - the place that settled is the one already in force: its own scoped "
+                "settings resolve to the values the nine subsystems are already running with, and neither file changed");
     }
     if(f7Edited||(locationTuningChanged&&placeTuningStale)){
         // How long a crossing's own work takes, in the line the next report will
@@ -315,13 +316,18 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         // the tuning of a place that adds nothing to the file is already skipped
         // inside the scoped cache (see LocationTuning.h), so what is left here is
         // only ever a reload that had something to read.
-        const uint64_t reloadBegan=GetTickCount64();
+        const std::int64_t reloadBegan=renderer::PerformanceCounter();
+        const std::int64_t reloadFrequency=std::max<std::int64_t>(1,renderer::PerformanceFrequency());
         // Each stage is timed, and the line carries all nine: a crossing that
         // still costs something has to say WHICH reload cost it, in the log a
         // player sends, or the next round of this is guesswork again. The sum is
         // the number this line has always carried.
-        uint64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
-        const auto stage=[&mark](uint64_t& out){const uint64_t nowTick=GetTickCount64();out=nowTick-mark;mark=nowTick;};
+        // Microseconds, not the 15.6 ms ticks GetTickCount64 rounds to: a stage
+        // that reads a few cached numbers costs single-digit microseconds, and a
+        // timer that cannot see that is a timer that says 16 ms for every stage
+        // and 47 ms for a chain that costs two.
+        std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
+        const auto stage=[&mark,reloadFrequency](std::int64_t& out){const std::int64_t nowTick=renderer::PerformanceCounter();out=nowTick-mark;mark=nowTick;};
         ReloadWindTuning();stage(tWind);
         watereffect::ReloadTuning();stage(tWater);
         distancefog::ReloadTuning();stage(tFog);
@@ -331,16 +337,18 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);stage(tMaterial);
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
         weathervisuals::ReloadTuning();stage(tWeather);
-        char reloadLine[320]{};
+        const auto micros=[reloadFrequency](std::int64_t ticks){return ticks*1000000/reloadFrequency;};
+        char reloadLine[360]{};
         std::snprintf(reloadLine,sizeof(reloadLine),
-            "Location tuning reloaded in %llu ms (wind %llu water %llu fog %llu volume %llu celestial %llu shadow %llu "
-            "material %llu lights %llu weather %llu)",
-            static_cast<unsigned long long>(GetTickCount64()-reloadBegan),
-            static_cast<unsigned long long>(tWind),static_cast<unsigned long long>(tWater),
-            static_cast<unsigned long long>(tFog),static_cast<unsigned long long>(tVolume),
-            static_cast<unsigned long long>(tCelestial),static_cast<unsigned long long>(tShadow),
-            static_cast<unsigned long long>(tMaterial),static_cast<unsigned long long>(tLights),
-            static_cast<unsigned long long>(tWeather));
+            "Location tuning reloaded in %lld us (wind %lld water %lld fog %lld volume %lld celestial %lld shadow %lld "
+            "material %lld lights %lld weather %lld) - the place was seen %lld ms before this line",
+            static_cast<long long>(micros(renderer::PerformanceCounter()-reloadBegan)),
+            static_cast<long long>(micros(tWind)),static_cast<long long>(micros(tWater)),
+            static_cast<long long>(micros(tFog)),static_cast<long long>(micros(tVolume)),
+            static_cast<long long>(micros(tCelestial)),static_cast<long long>(micros(tShadow)),
+            static_cast<long long>(micros(tMaterial)),static_cast<long long>(micros(tLights)),
+            static_cast<long long>(micros(tWeather)),
+            static_cast<long long>(now-g_placeChangedAt));
         Log(reloadLine);
         renderer::locationtuning::MarkTuningApplied(environmentManager.Location(),environmentManager.LocationTuningVerified());
     }

@@ -122,6 +122,7 @@ inline uint64_t g_uploadedFrame = ~0ull;
 inline const void* g_uploadedShader = nullptr;
 inline float g_phasePrimary = 0.f, g_phaseCross = 0.f;
 inline bool g_reportedCompiler = false;
+inline bool g_dumpedNoCoordinate = false;
 inline bool g_reportedInjection = false;
 inline bool g_reportedRefusal = false;
 
@@ -504,6 +505,7 @@ inline void Reset() noexcept
     g_status = {};
     g_reportedInjection = false;
     g_reportedRefusal = false;
+    g_dumpedNoCoordinate = false;
 }
 
 // The frame's own constants: the wind's heading and strength, the camera, the
@@ -604,9 +606,29 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     if (!frame.wind.DrivesVegetation()) return;
     if (!layout.texcoord || !layout.texcoordIsFloat2)
     {
-        // A draw with no texture coordinate in its vertices is not a blade card:
-        // the bend weight IS that coordinate.
+        // A draw with no texture coordinate in its vertices is not a blade card by
+        // the rule this path was built on: the bend weight IS that coordinate. But a
+        // real session refused 1.2 million of these draws while 49 reached this
+        // module's material gate and 4 to 17 went out bent - a field the player can
+        // see, a whole family of foliage drawn through a declaration of POSITION and
+        // NORMAL only, textured with a cut-out atlas. So the first one is dumped
+        // here, once: a card whose weight has to come from its own vertices instead
+        // of from a coordinate that is not there needs a different ramp, and writing
+        // that ramp starts with reading the shader that draws the field.
         ++g_status.noTexcoord;
+        if (!g_dumpedNoCoordinate && shader && device)
+        {
+            uint32_t bytes = 0;
+            const std::string disassembly = DisassembleShader(shader, bytes);
+            if (!disassembly.empty())
+            {
+                g_dumpedNoCoordinate = true;
+                Log("Grass blade sway: a foliage draw whose declaration carries no texture coordinate is refused, and "
+                    "its shader follows once, so the next build can bend a card of this family from its own vertices "
+                    "instead of from a coordinate that is not there (" + std::to_string(bytes) + " bytes):");
+                Log(disassembly.c_str());
+            }
+        }
         return;
     }
 
