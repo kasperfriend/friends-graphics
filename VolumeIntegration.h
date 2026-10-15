@@ -17,6 +17,7 @@
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Effects/VolumetricClouds.h"
+#include "src/Effects/AmbientOcclusion.h"
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
@@ -336,6 +337,7 @@ void ReloadTuning() {
     if (!savedBasePath.empty()) {
         renderer::DirectionalVolumetricLighting::Instance().Configure(savedBasePath);
         renderer::VolumetricClouds::Instance().Configure(savedBasePath);
+        renderer::AmbientOcclusion::Instance().Configure(savedBasePath);
     }
     cloudsEffectEnabled = renderer::VolumetricClouds::Instance().Settings().enabled;
 }
@@ -375,6 +377,7 @@ void Reset(IDirect3DDevice9* d) {
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DirectionalVolumetricLighting::Instance().Reset(d);
     renderer::VolumetricClouds::Instance().Reset(d);
+    renderer::AmbientOcclusion::Instance().Reset(d);
     renderer::GroundSurfaceCapture::Instance().Reset();
     renderer::PerformanceProfiler::Instance().Reset(d);
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
@@ -424,7 +427,8 @@ inline bool HasActiveEffects() {
     bool hasClouds = (!shaftDebug && cloudsEffectEnabled && renderer::VolumetricClouds::Instance().Settings().enabled);
     bool hasPost = postProcessEffectEnabled &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost;
+    bool hasAO = !shaftDebug && renderer::AmbientOcclusion::Instance().IsActive();
+    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO;
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
@@ -1036,6 +1040,24 @@ bool Composite(IDirect3DDevice9* d) {
     D3DVIEWPORT9 fullVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
     check(d->SetViewport(&fullVp));
     check(d->SetPixelShaderConstantF(0, constants[0], 14));
+
+    // Screen-space ambient occlusion. First effect on the scene, so it
+    // darkens ONLY world geometry: clouds, local light, fog and glare all
+    // composite over the result afterwards and are never darkened by it.
+    // The pass multiplies into `target` in place; the scene copy every
+    // downstream pass samples is republished right after.
+    if (!shaftDebug && renderer::AmbientOcclusion::Instance().IsActive() &&
+        renderer::AmbientOcclusion::Instance().Render(d, renderer::FrameContext::Current(),
+                                                      target.Get(), depth.Get())) {
+        check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
+        // AmbientOcclusion restores the state it found (ScopedRenderState);
+        // the legacy passes below expect their own bindings to be live again.
+        check(d->SetPixelShader(legacyShaders.volume.Get()));
+        check(d->SetTexture(0, nullptr));
+        check(d->SetTexture(1, depth.Get()));
+        check(d->SetTexture(2, resources.noise.Get()));
+        check(d->SetPixelShaderConstantF(0, constants[0], 14));
+    }
 
     // Screen-space contact shadows.
     // Rendered DIRECTLY onto the bound scene target (`target`, already the

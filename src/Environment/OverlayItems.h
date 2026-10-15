@@ -149,6 +149,18 @@ inline std::vector<Item> items={
  // receiver hashes, restoring the original shader after the draw.
  {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
 
+ // === AMBIENT OCCLUSION ===
+ // Screen-space ambient occlusion from the captured scene depth: seats
+ // objects on the ground and deepens creases. Bounded by design - an occluder
+ // more than ~2.5 radii away in depth never counts at all - so raising the
+ // radius is the only way it spreads, and strength alone cannot grey a wall.
+ {KIND_HEADER,nullptr,nullptr,"--- AMBIENT OCCLUSION ---",0,0,0,0},
+ {KIND_TOGGLE,L"AmbientOcclusion",L"Enabled","AMBIENT OCCLUSION",0,1,1,1},
+ {KIND_SLIDER,L"AmbientOcclusion",L"StrengthPercent","AO STRENGTH",0,150,5,60},
+ {KIND_SLIDER,L"AmbientOcclusion",L"RadiusUnits","AO RADIUS (UNITS)",1,6,1,1},
+ {KIND_SLIDER,L"AmbientOcclusion",L"DistanceFadeUnits","AO DISTANCE FADE (UNITS)",20,600,10,250},
+ {KIND_TOGGLE,L"AmbientOcclusion",L"DebugMask","AO DEBUG VIEW",0,1,1,0},
+
  // === AI MATERIALS & RELIEF ===
  {KIND_HEADER,nullptr,nullptr,"--- AI MATERIALS & RELIEF ---",0,0,0,0},
  {KIND_TOGGLE,L"AIMaterials",L"Enabled","EXPERIMENTAL MATERIALS",0,1,1,0},
