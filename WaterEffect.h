@@ -876,7 +876,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
 unsigned ReadTuningColour(const wchar_t* key,unsigned fallback){
     wchar_t value[64]{};
     renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());
-    if(!value[0])GetPrivateProfileStringW(L"Water",key,L"",value,std::size(value),mainIni.c_str());
+    if(!value[0]){std::wstring cached; if(renderer::locationtuning::ReadCachedString(mainIni.c_str(),L"Water",key,cached)&&!cached.empty()){size_t n=std::min(cached.size(),std::size(value)-1);for(size_t i=0;i<n;++i)value[i]=cached[i];value[n]=L'\0';}}
     if(!value[0])return fallback;
     const auto parsed=wcstol(value,nullptr,value[0]==L'0'&&(value[1]==L'x'||value[1]==L'X')?16:10);
     return parsed<0?fallback:unsigned(parsed)&0xffffffu;

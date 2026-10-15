@@ -751,10 +751,11 @@ void Initialize()
     renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
     renderer::GlobalIllumination::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
-    unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
+    const std::wstring modernIni=g_basePath+L"ModernWoWRenderer.ini";
+    unified=renderer::locationtuning::ReadCachedInt(modernIni.c_str(),L"Graphics",L"UnifiedToggle",0)!=0;
     if(unified){watereffect::hotkey=false;distancefog::hotkey=false;
-        graphicsShowStatus=GetPrivateProfileIntW(L"Graphics",L"ShowStatus",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
-        graphicsActive=GetPrivateProfileIntW(L"Graphics",L"Enabled",1,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
+        graphicsShowStatus=renderer::locationtuning::ReadCachedInt(modernIni.c_str(),L"Graphics",L"ShowStatus",0)!=0;
+        graphicsActive=renderer::locationtuning::ReadCachedInt(modernIni.c_str(),L"Graphics",L"Enabled",1)!=0;
         watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;
     }
     Log("Modern WoW Renderer proxy loaded.");

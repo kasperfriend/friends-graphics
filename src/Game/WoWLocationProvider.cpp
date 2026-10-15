@@ -1,4 +1,5 @@
 #include "WoWLocationProvider.h"
+#include "../Environment/LocationTuning.h"
 #include "../Environment/EnvironmentDatabase.h"
 #include <cstring>
 #include <limits>
@@ -52,7 +53,7 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // Values are trimmed because the Win32 profile API returns them space-for-space as
     // written: a byte-exact compare against a hash carrying one trailing space fails,
     // and a failed compare means no location in any zone, forever, with no typo in sight.
-    auto iniValue=[&](const wchar_t* key) {wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"",value,128,path.c_str());return std::wstring(value);};
+    auto iniValue=[&](const wchar_t* key) {std::wstring value;renderer::locationtuning::ReadCachedString(path.c_str(),L"LocationProvider",key,value);return value;};
     std::string fingerprint=TrimIniValue(iniValue(L"ExeSHA256"));
     for(char& c:fingerprint)if(c>='A'&&c<='F')c=char(c-'A'+'a');
     // A blank shipped configuration trusts the verified Ascension and stock 3.3.5a
@@ -67,7 +68,7 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     uint32_t probe=0;
     if(!offsets.map||!offsets.zone||!offsets.area||offsets.map==offsets.zone||offsets.map==offsets.area||offsets.zone==offsets.area||!client.Read(offsets.map,&probe,4)||!client.Read(offsets.zone,&probe,4)||!client.Read(offsets.area,&probe,4)) {status="Invalid/unreadable location RVAs; Default environment";failure=configureFailure=LocationFailure::UnreadableRvas;return;}
     const bool knownVerifiedOffsets=knownClient&&offsets.map==0x7D088C&&offsets.zone==0x7D080C&&offsets.area==0x7D0810;
-    available=true;verified=bundled||knownVerifiedOffsets||GetPrivateProfileIntW(L"LocationProvider",L"VerifiedInWorld",0,path.c_str())!=0;
+    available=true;verified=bundled||knownVerifiedOffsets||renderer::locationtuning::ReadCachedInt(path.c_str(),L"LocationProvider",L"VerifiedInWorld",0)!=0;
     status=bundled?"Supported 3.3.5a build; bundled verified RVAs":verified?"Fingerprint matched; in-world verified RVAs":"Fingerprint matched; diagnostic RVAs (effects locked)";
     // Configured and readable: the only thing missing is a frame that proves the
     // world is on screen. Saying "not configured" here - the value this function

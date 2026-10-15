@@ -1,4 +1,5 @@
 #include "EnvironmentProfileManager.h"
+#include "LocationTuning.h"
 #include "MenuDiagnostics.h"
 #include <algorithm>
 #include <cmath>
@@ -115,8 +116,12 @@ std::string EnvironmentProfileManager::TuningBlockedReason() const {
     return {};
 }
 void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const {
-    menudiagnostics::Write("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
-    menudiagnostics::Write("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
+    // The whole report goes out in one file open: this runs on every zone
+    // change, and a dozen open/write/close cycles per border crossing is I/O
+    // the player pays for with frame time.
+    std::vector<std::string> lines;
+    lines.push_back("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
+    lines.push_back("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
     const auto path=basePath+L"EnvironmentProfiles.ini";
     auto utf8=[](const wchar_t* text) {
         const int size=WideCharToMultiByte(CP_UTF8,0,text,int(wcslen(text)),nullptr,0,nullptr,nullptr);
@@ -125,10 +130,11 @@ void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const 
         return result;
     };
     for(const wchar_t* key:{L"ExeSHA256",L"MapRva",L"ZoneRva",L"AreaRva",L"VerifiedInWorld"}) {
-        wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"<missing>",value,128,path.c_str());
-        menudiagnostics::Write("CONFIG "+utf8(key)+"="+utf8(value));
+        std::wstring value; if(!renderer::locationtuning::ReadCachedString(path.c_str(),L"LocationProvider",key,value)||value.empty()) value=L"<missing>";
+        lines.push_back("CONFIG "+utf8(key)+"="+utf8(value.c_str()));
     }
-    for(const auto& line:CompactDebugLines())menudiagnostics::Write(line);
+    for(const auto& line:CompactDebugLines())lines.push_back(line);
+    menudiagnostics::WriteBatch(lines);
 }
 bool EnvironmentProfileManager::CreateOverride(bool area) {
     if(!location.valid)return false;
