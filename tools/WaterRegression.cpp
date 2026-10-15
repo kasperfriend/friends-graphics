@@ -901,10 +901,9 @@ int main() try
                     "both stages assemble the displaced long trains from the same coefficients");
         Require(vertex.find("4.255")!=std::string::npos&&pixel.find("4.255")==std::string::npos&&
                 vertex.find("float longSwell=kWeightA*sinA+kWeightB*sinB;")!=std::string::npos&&
-                vertex.find("sinB,cosB")!=std::string::npos&&vertex.find("sinA,cosA")!=std::string::npos&&
-                pixel.find("float2 trigA=uv0.zw*rsqrt(max(dot(uv0.zw,uv0.zw),1e-4));")!=std::string::npos&&
-                pixel.find("float2 trigB=uv1.zw*rsqrt(max(dot(uv1.zw,uv1.zw),1e-4));")!=std::string::npos&&
-                pixel.find("float2 sin01=float2(trigA.x,trigB.x),cos01=float2(trigA.y,trigB.y);")!=std::string::npos&&
+                vertex.find("cosA,cosB")!=std::string::npos&&vertex.find("sinA,sinB")!=std::string::npos&&
+                pixel.find("float2 trigInv=rsqrt(max(uv0.zw*uv0.zw+uv1.zw*uv1.zw,1e-4));")!=std::string::npos&&
+                pixel.find("float2 sin01=uv0.zw*trigInv,cos01=uv1.zw*trigInv;")!=std::string::npos&&
                 pixel.find("float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);")!=std::string::npos&&
                 pixel.find("sincos(t01")==std::string::npos&&pixel.find("float2 t01=")==std::string::npos,
                 "spare UV lanes reconstruct the long waves without pixel-stage sin/cos work");

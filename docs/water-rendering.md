@@ -351,8 +351,9 @@ The warp value and its gradient arrive as `TEXCOORD7` (a `float4`: xyz the sampl
 grouping gain) and `TEXCOORD4` (a `float4`: xy the lattice coordinate, zw the grouping gradient).
 The pixel shader samples no low-frequency noise at all, which is what keeps a set nailed to the
 terrain for one multiply and one `dot`. The performance pass widened the two existing native UV
-values from `float2` to `float4`: `TEXCOORD0.zw` carries train A's sine/cosine and
-`TEXCOORD1.zw` carries train B's sine/cosine. It did not add an Output field, so the eleven-VS-output /
+values from `float2` to `float4`: `TEXCOORD0.zw` carries A/B sine and `TEXCOORD1.zw`
+carries A/B cosine, allowing both pairs to normalize in vector form. It did not add an Output
+field, so the eleven-VS-output /
 ten-PS-input ceiling is unchanged. The current water block remains `c200..c218` (19 registers),
 and the five vertex controls remain `c200..c204`; only the state transaction now saves the full
 `c180..c218` pixel span so local lights and controls cross the driver together.

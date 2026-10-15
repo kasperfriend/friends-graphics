@@ -316,10 +316,11 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;
     o.pos=projection[0]*p.x+projection[1]*p.y+projection[2]*p.z+projection[3]*p.w;
     o.fog=min(pow(max(p.z*fogParams.x+fogParams.y,0),fogParams.z),1);
-    // xy keep the client's native UVs byte-for-byte. zw are otherwise unused
-    // interpolator lanes, so carrying A/B's sin/cos pairs costs no output.
-    o.uv1=float4(uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy,sinB,cosB);
-    o.uv0=float4(uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy,sinA,cosA);
+    // xy keep the client's native UVs byte-for-byte. zw are otherwise unused.
+    // Pack by component so the pixel stage can normalize A/B together: uv0 has
+    // both sines, uv1 both cosines.
+    o.uv1=float4(uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy,cosA,cosB);
+    o.uv0=float4(uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy,sinA,sinB);
     float3 n=modelView[0].xyz*normal.x+modelView[1].xyz*normal.y+modelView[2].xyz*normal.z;
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
     // viewPos is the DISPLACED point, so the surface depth the atmosphere marches to and
@@ -523,12 +524,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
     // The vertex stage has already evaluated A/B while displacing the mesh.
-    // Renormalize each interpolated (sin,cos) pair back onto the unit circle;
-    // this retains the original analytic long-wave shape to sub-percent RMS on
-    // the client's ~4-yard liquid grid, without repeating either sin/cos here.
-    float2 trigA=uv0.zw*rsqrt(max(dot(uv0.zw,uv0.zw),1e-4));
-    float2 trigB=uv1.zw*rsqrt(max(dot(uv1.zw,uv1.zw),1e-4));
-    float2 sin01=float2(trigA.x,trigB.x),cos01=float2(trigA.y,trigB.y);
+    // uv0.zw contains their sines and uv1.zw their cosines. Renormalize both
+    // interpolated pairs back onto the unit circle together; this retains the
+    // original analytic long-wave shape to sub-percent RMS on the client's
+    // ~4-yard liquid grid, without repeating either sin/cos here.
+    float2 trigInv=rsqrt(max(uv0.zw*uv0.zw+uv1.zw*uv1.zw,1e-4));
+    float2 sin01=uv0.zw*trigInv,cos01=uv1.zw*trigInv;
     // Evaluate only the six shorter, shading-only trains here, in batches of
     // four and two. The sum remains the same eight-direction authored band.
     float4 t4=kRad4*(swellPlane.x*kDirX4+swellPlane.y*kDirY4+waveSwell+kStart4);
