@@ -21,6 +21,12 @@ static void ReachEverySetting(OverlayLayout& l) {
         assert(l.panel.Contains(button.x+button.w-1,button.y+button.h-1));
         assert(button.y+button.h<=l.panel.y+l.panel.h-34); // Sidebar never overlaps footer.
         l.SelectTab(t);l.Scroll(-10000);
+        const auto reset=l.ResetButton();
+        assert(l.panel.Contains(reset.x+reset.w*.5f,reset.y+reset.h*.5f));
+        assert(!l.Content().Contains(reset.x+reset.w*.5f,reset.y+reset.h*.5f));
+        assert(l.HitItem(reset.x+reset.w*.5f,reset.y+reset.h*.5f)==-1);
+        assert(!l.Title().Contains(reset.x+reset.w*.5f,reset.y+reset.h*.5f));
+        assert(!l.ResizeGrip().Contains(reset.x+reset.w*.5f,reset.y+reset.h*.5f));
         for(int offset=0;offset<=l.MaxScroll(t);++offset) {
             assert(l.offsets[t]==offset);
             const auto& tab=Tabs()[t];
@@ -107,6 +113,7 @@ int main() {
     l.Scroll(3);l.SelectTab(0);l.SelectTab(cloudTab);assert(l.offsets[cloudTab]==3);
     l.panel.h=1000;l.Clamp();assert(l.offsets[cloudTab]==0); // Growing removes stale scroll offsets.
     auto close=l.Close();assert(!l.Begin(close.x+1,close.y+1));
+    auto reset=l.ResetButton();assert(!l.Begin(reset.x+1,reset.y+1));
     auto row=l.Row(Tabs()[cloudTab].begin);assert(!l.Begin(row.x+1,row.y+1));
     // A physical client position maps to the same hit on a differently-sized backbuffer.
     l.Fit(2560,1440,1.5f);auto tab=l.TabButton(4);

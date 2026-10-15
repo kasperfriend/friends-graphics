@@ -9,6 +9,7 @@
 #include <cstring>
 #include "../Core/FrameContext.h"
 #include "../D3D9/TrackedRenderState.h"
+#include "../D3D9/CameraContinuity.h"
 #include "../Materials/TextureHashLookup.h"
 #include "TorchSignatures.h"
 
@@ -159,7 +160,7 @@ namespace renderer
         // Only verified flame material + verified rigid M2 skinning. Neither
         // arbitrary bright pixels nor character/weapon textures become lights.
         const auto& f=FrameContext::Current();
-        if(!m_enabled||!d||!f.cameraValid||!g_trackedState.zEnable||!g_trackedState.alphaBlend)return;
+        if(!m_enabled||!d||!f.cameraValid||!f.viewRawValid||!g_trackedState.zEnable||!g_trackedState.alphaBlend)return;
         bool rigid=std::find(std::begin(kRigidM2Shaders),std::end(kRigidM2Shaders),g_trackedState.vsHash)!=std::end(kRigidM2Shaders);
         bool unskinned=std::find(std::begin(kUnskinnedM2Shaders),std::end(kUnskinnedM2Shaders),g_trackedState.vsHash)!=std::end(kUnskinnedM2Shaders);
         if(!rigid&&!unskinned)return;
@@ -206,10 +207,11 @@ namespace renderer
         if(lockedVertices)vb->Unlock();
         // Particle batches can contain several torches. Never average the
         // whole batch into a phantom emitter halfway between real flames.
+        const float camera[3]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z};
         for(const Vec3& view:centers){
-        Vec3 world=f.cameraPosition+Vec3{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2]}*view.x+
-            Vec3{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2]}*view.y+
-            Vec3{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2]}*view.z;
+        const float viewPosition[3]={view.x,view.y,view.z};float worldPosition[3]{};
+        ViewPositionToWorld(&f.viewRaw.m[0][0],camera,viewPosition,worldPosition);
+        Vec3 world{worldPosition[0],worldPosition[1],worldPosition[2]};
         if(!std::isfinite(Length(world))||Length(world-f.cameraPosition)>120)continue;
         ULONGLONG now=GetTickCount64();
         auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){return now-e.seen<kAttachedLifetimeMs&&Length(e.light.position-world)<1.5f;});

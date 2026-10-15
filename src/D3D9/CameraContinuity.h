@@ -30,8 +30,32 @@ public:
     void Reset() { valid=false; candidates=0; }
     const float* Position() const { return camera; }
 
+    bool MatchesViewport(unsigned viewportWidth, unsigned viewportHeight) const {
+        return valid && viewportWidth == width && viewportHeight == height;
+    }
+
     bool MatchesBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) const {
-        return valid && viewportWidth == width && viewportHeight == height && BasisDot(viewBasis, basis) > .7f;
+        return MatchesViewport(viewportWidth, viewportHeight) && BasisDot(viewBasis, basis) > .7f;
+    }
+
+    // Sky fallback can see a legitimate camera turn of many degrees in one
+    // frame (for example, snapping the mouse-look camera straight up). Keep the
+    // same world position/viewport continuity guard as the normal capture, but
+    // do not mistake a pitch change for a different camera.
+    bool AcceptFallback(const float viewTranslation[4], const float viewBasis[3][4],
+                        unsigned viewportWidth, unsigned viewportHeight) {
+        const float position[3]={
+            -(viewTranslation[0]*viewBasis[0][0]+viewTranslation[1]*viewBasis[0][1]+viewTranslation[2]*viewBasis[0][2]),
+            -(viewTranslation[0]*viewBasis[1][0]+viewTranslation[1]*viewBasis[1][1]+viewTranslation[2]*viewBasis[1][2]),
+            -(viewTranslation[0]*viewBasis[2][0]+viewTranslation[1]*viewBasis[2][1]+viewTranslation[2]*viewBasis[2][2])};
+        if (!valid) {
+            Anchor(position, viewBasis, viewportWidth, viewportHeight);
+            return true;
+        }
+        if (!MatchesViewport(viewportWidth, viewportHeight) || Distance(position, camera) > 40.f)
+            return false;
+        Anchor(position, viewBasis, viewportWidth, viewportHeight);
+        return true;
     }
 
     void UpdateBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) {
@@ -128,6 +152,17 @@ inline void ViewDirectionToWorld(const float viewRaw[16], const float viewDirect
     worldOut[2] = viewRaw[8]*viewDirection[0] + viewRaw[9]*viewDirection[1] + viewRaw[10]*viewDirection[2];
     const float length = std::sqrt(worldOut[0]*worldOut[0] + worldOut[1]*worldOut[1] + worldOut[2]*worldOut[2]);
     if (length > 1e-6f) { worldOut[0] /= length; worldOut[1] /= length; worldOut[2] /= length; }
+}
+
+// Convert a view-space point (such as a torch vertex recovered from the
+// client's skinning constants) through the same accepted camera pose. Keeping
+// the translation explicit prevents a view-relative point from becoming a
+// light that follows the camera when its pitch/yaw changes.
+inline void ViewPositionToWorld(const float viewRaw[16], const float camera[3],
+                                const float viewPosition[3], float worldOut[3]) {
+    worldOut[0] = camera[0] + viewRaw[0]*viewPosition[0] + viewRaw[1]*viewPosition[1] + viewRaw[2]*viewPosition[2];
+    worldOut[1] = camera[1] + viewRaw[4]*viewPosition[0] + viewRaw[5]*viewPosition[1] + viewRaw[6]*viewPosition[2];
+    worldOut[2] = camera[2] + viewRaw[8]*viewPosition[0] + viewRaw[9]*viewPosition[1] + viewRaw[10]*viewPosition[2];
 }
 
 } // namespace renderer

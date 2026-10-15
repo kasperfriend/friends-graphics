@@ -397,7 +397,16 @@ static void TestConfigurationAndWiring()
     const auto water = Read("WaterEffect.h");
     Check(water.find("frame.wind.DrivesWaves(),frame.wind.strength") != water.npos &&
           water.find("waveScalePercent,frame.wind,pivotX,pivotY") != water.npos, "waves use shared direction AND strength");
-    Check(water.find("seaFilter.Forget();") == water.npos, "device reset preserves CPU sea state");
+    const auto resetBegin = water.find("inline void Reset(IDirect3DDevice9* d)");
+    Check(resetBegin != water.npos, "production water reset is present");
+    const auto reset = water.substr(resetBegin, water.find("void DrawStatus", resetBegin) - resetBegin);
+    Check(reset.find("ResetObservationCache(d)") != reset.npos &&
+          reset.find("ResetMrtCapabilities(d)") != reset.npos &&
+          reset.find("waterTargetDescValid = false") != reset.npos,
+          "device reset drops GPU observation/MRT/target caches alongside persistent wind");
+    Check(reset.find("lastWaveAnchor.valid=false") != reset.npos &&
+          water.find("seaFilter.Forget();") == water.npos,
+          "device reset invalidates only the camera anchor, not CPU wind/sea phase history");
     auto debug = Air(WindDirection::East, 1.25f);
     const auto lines = WindDebugLines(debug);
     Check(lines[1].find("E 90.0") != std::string::npos && lines[2].find("125.0%") != std::string::npos &&

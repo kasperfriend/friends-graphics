@@ -86,6 +86,7 @@ struct OverlayLayout {
         return {panel.x+12,panel.y+204+tab*pitch,212,pitch-4};
     }
     Box Content() const {return {panel.x+240,panel.y+240,panel.w-270,float(VisibleRows())*rowHeight};}
+    Box ResetButton() const {const auto c=Content();return {c.x+c.w-142,panel.y+202,142,26};}
     int VisibleRows() const {return std::max(1,int((panel.h-276)/rowHeight));}
     int MaxScroll(int tab) const {return std::max(0,Tabs()[tab].end-Tabs()[tab].begin-VisibleRows());}
     void SelectTab(int tab) {if(tab>=0&&tab<int(Tabs().size())){activeTab=tab;Cancel();}}

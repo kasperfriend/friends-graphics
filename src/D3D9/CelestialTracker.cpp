@@ -41,6 +41,7 @@ namespace renderer
                 return;
 
             body.visible = true;
+            body.viewSpacePosition = { cx, cy, cz };
             body.viewSpaceDirection = viewDir;
             body.worldSpaceDirection = worldDir;
             body.screenX = 0.5f + 0.5f * (cx / cz) * p00;

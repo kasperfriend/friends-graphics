@@ -13,27 +13,17 @@ namespace renderer
         frameIndex = newFrameIndex;
         device = dev;
 
-        width = 0;
-        height = 0;
-        viewport = {};
-
-        view.SetIdentity();
-        projection.SetIdentity();
-        viewProjection.SetIdentity();
-        inverseView.SetIdentity();
-
-        cameraPosition = { 0.0f, 0.0f, 0.0f };
-        sunDirectionView = { 0.0f, 0.0f, 1.0f };
-        sunDirectionWorld = { 0.0f, 0.0f, 1.0f };
-        directionalLightColor = { 1.0f, 1.0f, 1.0f };
-
-        daylightFactor = 0.0f;
-        moonlightFactor = 0.0f;
-        shadowLightFactor = 0.0f;
-
+        // Keep the last accepted camera pose/projection as a fallback when a
+        // frame contains only a skybox and no terrain draw can recapture it.
+        // `cameraValid` is the freshness gate: consumers must not use that pose
+        // until this frame's camera capture or sky fallback explicitly accepts it.
         sunScreenX = -1.0f;
         sunScreenY = -1.0f;
         sunStrength = 0.0f;
+        moonDiscScreenX = -1.0f;
+        moonDiscScreenY = -1.0f;
+        moonDiscViewDepth = 0.0f;
+        moonDiscValid = false;
         celestialIntensity = 0.0f;
         celestialIsMoon = false;
         directLightIntensity = 0.0f;
@@ -41,9 +31,6 @@ namespace renderer
         directLightValid = false;
         directLightDirectionView = { 0.0f, 0.0f, 1.0f };
         directLightDirectionWorld = { 0.0f, 0.0f, 1.0f };
-
-        projUnpack[0] = projUnpack[1] = projUnpack[2] = projUnpack[3] = 0.0f;
-        depthMaxZ = 1.0f;
 
         shadowMatrix.SetIdentity();
         viewToShadowMatrix.SetIdentity();

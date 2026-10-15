@@ -117,11 +117,23 @@ int main() try
                 {0.f, sp,       cp,      0.f}};
             Require(gate.MatchesBasis(skyBasis, 1920, 1080), "upward-pitching sky basis stays continuous with the scene camera");
             gate.UpdateBasis(skyBasis, 1920, 1080);
+            float skyTranslation[4]{};
+            const float anchor[3]={800.f,-400.f,30.f};
+            for(int c=0;c<3;++c)
+                skyTranslation[c]=-(anchor[0]*skyBasis[0][c]+anchor[1]*skyBasis[1][c]+anchor[2]*skyBasis[2][c]);
+            skyTranslation[3]=1.f;
+            Require(gate.AcceptFallback(skyTranslation,skyBasis,1920,1080),
+                    "sky fallback accepts a hard camera pitch at the continuous world position");
             Require(std::fabs(gate.Position()[0] - 800.f) < 1e-3f &&
                     std::fabs(gate.Position()[1] + 400.f) < 1e-3f &&
                     std::fabs(gate.Position()[2] - 30.f) < 1e-3f,
                 "updating the sky basis preserves the anchored world camera position");
         }
+        viewFor(850.f,-400.f,30.f,.47f,t,basis);
+        Require(!gate.AcceptFallback(t,basis,1920,1080),
+                "sky fallback still rejects a different world camera at the same viewport");
+        Require(!gate.AcceptFallback(t,basis,256,256),
+                "sky fallback rejects an unrelated viewport even when its camera is close");
         gate.Reset();
         viewFor(0.f, 0.f, 0.f, 0.f, t, basis);
         Require(gate.Accept(t, basis, 1920, 1080), "a reset gate anchors on the next camera it sees");

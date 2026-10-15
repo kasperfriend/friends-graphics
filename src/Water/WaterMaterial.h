@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d9.h>
 #include <wrl/client.h>
+#include <array>
 #include "WaterPolicy.h"
 #include "../Core/ShaderCache.h"
 #include "../D3D9/TrackedRenderState.h"
@@ -24,19 +25,67 @@ namespace renderer::water
         uint64_t psHash = 0;
     };
 
+    // GetTexture is still checked against the live device state (state blocks
+    // can bypass SetTexture hooks), but most scene draws reuse the same bound
+    // resources. Cache each live texture's level-zero descriptor so a frame no
+    // longer asks the driver for both descriptions twice per world draw.
+    struct TextureDimensionCache
+    {
+        Microsoft::WRL::ComPtr<IDirect3DBaseTexture9> texture;
+        D3DSURFACE_DESC desc{};
+        bool valid = false;
+    };
+    inline IDirect3DDevice9* g_observationDevice = nullptr;
+    inline std::array<TextureDimensionCache, 2> g_textureDimensions{};
+
+    inline void ResetObservationCache(IDirect3DDevice9* device = nullptr)
+    {
+        for (auto& entry : g_textureDimensions) {
+            entry.texture.Reset();
+            entry.desc = {};
+            entry.valid = false;
+        }
+        g_observationDevice = device;
+    }
+
     inline Observation Observe(IDirect3DDevice9* device)
     {
         Observation out;
         if (!device) return out;
+        if (g_observationDevice != device)
+            ResetObservationCache(device);
 
         D3DSURFACE_DESC desc[2]{};
         for (unsigned slot = 0; slot < 2; ++slot)
         {
             Microsoft::WRL::ComPtr<IDirect3DBaseTexture9> texture;
-            if (FAILED(device->GetTexture(slot, texture.GetAddressOf())) || !texture ||
-                texture->GetType() != D3DRTYPE_TEXTURE ||
-                FAILED(static_cast<IDirect3DTexture9*>(texture.Get())->GetLevelDesc(0, &desc[slot])))
+            auto& cached = g_textureDimensions[slot];
+            if (FAILED(device->GetTexture(slot, texture.GetAddressOf())))
+            {
+                cached.texture.Reset();
+                cached.valid = false;
                 return out;
+            }
+            if (!texture || texture->GetType() != D3DRTYPE_TEXTURE)
+            {
+                cached.texture.Reset();
+                cached.valid = false;
+                return out;
+            }
+            if (cached.texture.Get() != texture.Get() || !cached.valid)
+            {
+                D3DSURFACE_DESC current{};
+                if (FAILED(static_cast<IDirect3DTexture9*>(texture.Get())->GetLevelDesc(0, &current)))
+                {
+                    cached.texture = texture;
+                    cached.valid = false;
+                    return out;
+                }
+                cached.texture = texture;
+                cached.desc = current;
+                cached.valid = true;
+            }
+            desc[slot] = cached.desc;
             out.width[slot] = desc[slot].Width;
             out.height[slot] = desc[slot].Height;
         }

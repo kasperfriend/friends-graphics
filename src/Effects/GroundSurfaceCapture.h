@@ -73,11 +73,12 @@ public:
         default:return false;}
     }
     // Called before replacement material scopes, only for genuine world draws.
-    template<class Draw> void Observe(IDirect3DDevice9* d,const FrameContext& f,Draw draw) {
+    template<class Draw> void Observe(IDirect3DDevice9* d,const FrameContext& f,Draw draw,
+                                      const renderer::water::Observation* observation=nullptr) {
         if(!f.cameraValid || !g_trackedState.zEnable)return;
         const auto hash=g_trackedState.psHash;
         bool terrain=IsTerrainVertexShader(g_trackedState.vsHash)||hash==0x1259eadbfaafb43eull||hash==0x8f5f50576e4cf36aull||hash==0x36df746731dcdefdull||hash==0x250ee869fc4be850ull;
-        const bool water=!terrain && renderer::water::IsMaterial(d);
+        const bool water=!terrain && (observation?observation->liquid:renderer::water::IsMaterial(d));
         if(!terrain&&!water)return;
         Capture(d,f,water?5:0,draw);
     }

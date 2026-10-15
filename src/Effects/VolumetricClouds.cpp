@@ -60,8 +60,10 @@ float4 groundColor:register(c17);   // rgb=ground bounce ambient, w=horizon fade
 float4 lobe:register(c18);          // x=forward g, y=backward g, z=ms eccentricity, w=debug mode
 float4 octaves:register(c19);       // x=a^1, y=a^2 (extinction), z=b^1, w=b^2 (contribution)
 float4 detailMotion:register(c20);  // xy=detail uv offset, z=light step length, w=light steps
-float4 evolution:register(c23);     // x=shape Z phase, y=detail Z phase, z=weather variation, w=type scale
 float4 haze:register(c22);          // rgb=aerial perspective colour, w=1/fade distance
+float4 evolution:register(c23);     // x=shape Z phase, y=detail Z phase, z=weather variation, w=type scale
+float4 moonDisc:register(c24); // xy=tracked screen centre, z=disc view depth
+float4 moonControl:register(c25);   // x=vertical UV radius, y=depth tolerance, z=valid, w=horizontal scale
 
 // Analytic vertical profile per cloud type: this is what separates a flat
 // overcast lid from towering cumulus with flat bottoms and round tops.
@@ -113,6 +115,18 @@ float Density(float3 p,float h,float erosion) {
 // slider means what it says.
 float HG(float c,float g) { return (1-g*g)*pow(max(1+g*g-2*g*c,1e-4),-1.5); }
 
+// WoW draws the moon as a small camera-relative billboard. Its depth is much
+// nearer than the world-space cloud deck, so treating that depth as terrain
+// clipped the clouds away in a dark circular hole. Match only the tracked
+// disc's view-space cone AND depth; all other geometry remains an occluder.
+float MoonDiscPixel(float2 uv,float rawDepth,float viewDepth) {
+ float2 delta=(uv-moonDisc.xy)*float2(moonControl.w,1);
+ float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
+ float depthMatch=1-step(moonControl.y,abs(viewDepth-moonDisc.z));
+ float geometry=1-step((depthRange.z+1)*.5,rawDepth);
+ return disc*depthMatch*geometry*moonControl.z;
+}
+
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float rawDepth=tex2D(depthMap,uv).r;
  // INTZ stores viewport depth; normalise it exactly like the atmosphere's
@@ -136,7 +150,9 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // at infinity puts raw depth exactly on it, and the infinity that comes
  // back turns into a NaN the moment it meets another one.
  float hasGeometry=1-step((depthRange.z+1)*.5,rawDepth);
- float sceneLimit=hasGeometry>.5?(projection.y/min(raw-projection.x,-1e-6))*viewLength:layer.w;
+ float sceneViewDepth=projection.y/min(raw-projection.x,-1e-6);
+ float moonPixel=MoonDiscPixel(uv,rawDepth,sceneViewDepth);
+ float sceneLimit=hasGeometry>.5&&moonPixel<.5?sceneViewDepth*viewLength:layer.w;
 
  // Intersect fixed world-height planes, never a camera-centred dome.
  // Horizontal rays inside the layer march to the scene/distance limit;
@@ -375,6 +391,15 @@ float4 invView0:register(c3); float4 invView1:register(c4); float4 invView2:regi
 float4 projection:register(c6);  // x=A, y=B, z=P00, w=P11
 float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow strength
 float4 lightProjection:register(c8); // xy=light XY/Z, z=cloud base, w=thickness
+float4 moonDisc:register(c9); // xy=tracked screen centre, z=disc view depth
+float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z=valid, w=horizontal scale
+float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth) {
+ float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
+ float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
+ float depthMatch=1-step(moonControl.y,abs(viewDepth-moonDisc.z));
+ float geometry=1-step((depthRange.z+1)*.5,rawDepth);
+ return disc*depthMatch*geometry*moonControl.z;
+}
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
@@ -389,8 +414,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float2 lowTexel=texels.zw;
  float2 grid=uv/lowTexel-.5;
  float2 base=(floor(grid)+.5)*lowTexel, fr=frac(grid);
- float4 taps=float4(tex2D(depthMap,base).r,tex2D(depthMap,base+float2(lowTexel.x,0)).r,
-                    tex2D(depthMap,base+float2(0,lowTexel.y)).r,tex2D(depthMap,base+lowTexel).r);
+ float2 tapUv0=base,tapUv1=base+float2(lowTexel.x,0);
+ float2 tapUv2=base+float2(0,lowTexel.y),tapUv3=base+lowTexel;
+ float4 taps=float4(tex2D(depthMap,tapUv0).r,tex2D(depthMap,tapUv1).r,
+                    tex2D(depthMap,tapUv2).r,tex2D(depthMap,tapUv3).r);
  // Compare in linear view depth: raw depth-buffer values crowd into the
  // last fraction of their range at distance, where most of the sky is.
  // Both reciprocals are clamped away from the projection's pole, which a
@@ -399,14 +426,24 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float normalizedRaw=saturate((linearRaw-depthRange.x)/max(depthRange.y,.001));
  float4 normalizedTaps=saturate((taps-depthRange.x)/max(depthRange.y,.001));
  float centreZ=projection.y/min(normalizedRaw-projection.x,-1e-6);
+ float4 tapZ=projection.y/min(normalizedTaps-projection.x,-1e-6);
+ float clearZ=projection.y/min(1-projection.x,-1e-6);
+ float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ);
+ float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x),MoonDiscPixel(tapUv1,taps.y,tapZ.y),
+                        MoonDiscPixel(tapUv2,taps.z,tapZ.z),MoonDiscPixel(tapUv3,taps.w,tapZ.w));
+ // The moon's near billboard depth is a sprite, not a foreground surface.
+ // Treat only those matched pixels as clear sky while choosing the four
+ // depth-aware taps, so it cannot pull a dark ring through the low-res cloud.
+ float filterCentreZ=lerp(centreZ,clearZ,moonCentre);
+ float4 filterTapZ=lerp(tapZ,float4(clearZ,clearZ,clearZ,clearZ),moonTaps);
  float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
-              /(.002+abs(projection.y/min(normalizedTaps-projection.x,-1e-6)-centreZ)/max(centreZ,1));
+              /(.002+abs(filterTapZ-filterCentreZ)/max(filterCentreZ,1));
  float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
               +tex2D(cloudMap,base+float2(0,lowTexel.y))*weight.z+tex2D(cloudMap,base+lowTexel)*weight.w)
               /max(dot(weight,1),1e-5);
 
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
- float sky=step((depthRange.z+1)*.5,linearRaw);
+ float sky=max(step((depthRange.z+1)*.5,linearRaw),moonCentre);
  // Reconstruct where this pixel is in the world and read the deck's
  // transmittance toward the sun. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
@@ -878,6 +915,12 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float ambientOcclusion=1.f-coverage*.45f;
  const float c23[4]={float(motion.shapeZ),float(motion.detailZ),motion.variation,
                       1.f-std::abs(settings.cloudType)};
+ const float moonDisc[4]={f.moonDiscScreenX,f.moonDiscScreenY,f.moonDiscViewDepth,0.f};
+ const float moonAngle=5.f*0.01745329252f;
+ const float moonControl[4]={.5f*std::tan(moonAngle)*f.projUnpack[3],
+                              std::max(.75f,f.moonDiscViewDepth*.04f),
+                              f.moonDiscValid?1.f:0.f,
+                              f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f)};
  const float c14[4]={kBaseExtinction*settings.density,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
@@ -956,6 +999,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(7,layer,1);d->SetPixelShaderConstantF(8,c8,1);
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
+  d->SetPixelShaderConstantF(24,moonDisc,1);d->SetPixelShaderConstantF(25,moonControl,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);
@@ -995,6 +1039,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(6,c6c,1);d->SetPixelShaderConstantF(7,c7c,1);
   const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
   d->SetPixelShaderConstantF(8,c8c,1);
+  d->SetPixelShaderConstantF(9,moonDisc,1);d->SetPixelShaderConstantF(10,moonControl,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);
  }
