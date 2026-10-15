@@ -11,6 +11,7 @@
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
 
@@ -479,11 +480,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(composited,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
+bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir,IDirect3DPixelShader9** shader)
 {
- ComPtr<ID3DBlob> blob,errors;
- if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),errors.GetAddressOf()))||!blob)return false;
- return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(blob->GetBufferPointer()),shader));
+ // On-disk bytecode cache first (renderer::shaderbytecode): a repeat launch
+ // skips fxc, and a cached blob the driver refuses falls back to one
+ // recompile, exactly as a fresh compile would.
+ ComPtr<ID3DBlob> blob;
+ return renderer::shaderbytecode::GetShader(cacheDir,source,"main","ps_3_0",blob,
+  [d,shader](const ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
 }
 
 // Extinction of fully dense cloud material per world unit. DensityPercent
@@ -620,6 +624,7 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
 {
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Clouds.log";
+ m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
  m_cachePath=basePath+L"CloudFields.cache";
  auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));};
  m_settings.enabled=read(L"Enabled",1)!=0;
@@ -722,9 +727,9 @@ bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
  // clouds" into "this machine has no frames". The fields cache their own
  // failure for the same reason.
  if(m_shadersFailed)return false;
- if(Compile(d,kCloudMarchSource,m_marchShader.GetAddressOf())&&
-    Compile(d,kCloudCompositeSource,m_compositeShader.GetAddressOf())&&
-    Compile(d,kCloudShadowSource,m_shadowShader.GetAddressOf()))return true;
+ if(Compile(d,kCloudMarchSource,m_shaderCacheDir,m_marchShader.GetAddressOf())&&
+    Compile(d,kCloudCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&
+    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))return true;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  m_shadersFailed=true;
  if(!m_logPath.empty())

@@ -56,5 +56,6 @@ namespace renderer
         bool m_shaderErrorLogged = false;
         bool m_resourceErrorLogged = false;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
     };
 }

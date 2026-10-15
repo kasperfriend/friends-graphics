@@ -14,6 +14,7 @@
 #include "src/D3D9/CameraCapture.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ShaderBytecodeCache.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Effects/VolumetricClouds.h"
@@ -171,33 +172,33 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     owner = d;
     if (!d) return false;
 
-    ComPtr<ID3DBlob> errors;
-    if (!bytecode) D3DCompile(volumePixelSource, strlen(volumePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, bytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!blurBytecode) D3DCompile(volumeBlurPixelSource, strlen(volumeBlurPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blurBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!copyBytecode) D3DCompile(volumeCopyPixelSource, strlen(volumeCopyPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, copyBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!temporalBytecode) D3DCompile(volumeTemporalPixelSource, strlen(volumeTemporalPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, temporalBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!radialBytecode) D3DCompile(solarRadialPixelSource, strlen(solarRadialPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, radialBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!contactShadowBytecode) D3DCompile(contactShadowPixelSource, strlen(contactShadowPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, contactShadowBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!postProcessBytecode) D3DCompile(postProcessPixelSource, strlen(postProcessPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, postProcessBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!rayCompositeBytecode) D3DCompile(rayCompositePixelSource, strlen(rayCompositePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, rayCompositeBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!localLightBytecode) D3DCompile(localLightPixelSource, strlen(localLightPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, localLightBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!celestialMarkerBytecode) D3DCompile(celestialMarkerPixelSource, strlen(celestialMarkerPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, celestialMarkerBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
+    // Each shader reads the on-disk bytecode cache first (renderer::
+    // shaderbytecode::GetShader) and only compiles - and stores the result -
+    // on a miss, so a repeat launch skips all ten fxc passes. GetShader
+    // also recompiles once and retries if the driver refuses a cached blob.
+    const std::wstring cacheDir = renderer::shaderbytecode::Dir(savedBasePath);
+    auto createPS = [&](const ID3DBlob* b, ComPtr<IDirect3DPixelShader9>& out)
+    { return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out.GetAddressOf())); };
 
-    if (!bytecode || !blurBytecode || !copyBytecode || !temporalBytecode || !radialBytecode || !contactShadowBytecode)
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumePixelSource, "main", "ps_3_0", bytecode, [&](const ID3DBlob* b) { return createPS(b, volume); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeBlurPixelSource, "main", "ps_3_0", blurBytecode, [&](const ID3DBlob* b) { return createPS(b, blur); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeCopyPixelSource, "main", "ps_3_0", copyBytecode, [&](const ID3DBlob* b) { return createPS(b, copy); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeTemporalPixelSource, "main", "ps_3_0", temporalBytecode, [&](const ID3DBlob* b) { return createPS(b, temporal); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, solarRadialPixelSource, "main", "ps_3_0", radialBytecode, [&](const ID3DBlob* b) { return createPS(b, radial); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, contactShadowPixelSource, "main", "ps_3_0", contactShadowBytecode, [&](const ID3DBlob* b) { return createPS(b, contactShadow); }))
         return false;
 
-    if (FAILED(d->CreatePixelShader(static_cast<DWORD*>(bytecode->GetBufferPointer()), volume.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(blurBytecode->GetBufferPointer()), blur.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(copyBytecode->GetBufferPointer()), copy.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(temporalBytecode->GetBufferPointer()), temporal.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(radialBytecode->GetBufferPointer()), radial.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(contactShadowBytecode->GetBufferPointer()), contactShadow.GetAddressOf())))
-        return false;
-
-    if (postProcessBytecode) d->CreatePixelShader(static_cast<DWORD*>(postProcessBytecode->GetBufferPointer()), postProcess.GetAddressOf());
-    if (rayCompositeBytecode) d->CreatePixelShader(static_cast<DWORD*>(rayCompositeBytecode->GetBufferPointer()), rayComposite.GetAddressOf());
-    if (localLightBytecode) d->CreatePixelShader(static_cast<DWORD*>(localLightBytecode->GetBufferPointer()), localLight.GetAddressOf());
-    if (celestialMarkerBytecode) d->CreatePixelShader(static_cast<DWORD*>(celestialMarkerBytecode->GetBufferPointer()), celestialMarker.GetAddressOf());
+    // These four are optional: a compile/create failure only disables their
+    // feature, it must not abort the rest of the pass (as before).
+    renderer::shaderbytecode::GetShader(cacheDir, postProcessPixelSource, "main", "ps_3_0", postProcessBytecode, [&](const ID3DBlob* b) { return createPS(b, postProcess); });
+    renderer::shaderbytecode::GetShader(cacheDir, rayCompositePixelSource, "main", "ps_3_0", rayCompositeBytecode, [&](const ID3DBlob* b) { return createPS(b, rayComposite); });
+    renderer::shaderbytecode::GetShader(cacheDir, localLightPixelSource, "main", "ps_3_0", localLightBytecode, [&](const ID3DBlob* b) { return createPS(b, localLight); });
+    renderer::shaderbytecode::GetShader(cacheDir, celestialMarkerPixelSource, "main", "ps_3_0", celestialMarkerBytecode, [&](const ID3DBlob* b) { return createPS(b, celestialMarker); });
 
     return true;
 }

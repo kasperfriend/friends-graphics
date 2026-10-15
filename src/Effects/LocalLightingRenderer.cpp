@@ -7,6 +7,7 @@
 #include <fstream>
 #include "../D3D9/DepthCapture.h"
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Lighting/LocalLightManager.h"
 
 #include <windows.h>
@@ -103,22 +104,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(scene.rgb+light+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* device, const char* source, IDirect3DPixelShader9** shader, std::string& error)
+bool Compile(IDirect3DDevice9* device, const char* source, const std::wstring& cacheDir, IDirect3DPixelShader9** shader, std::string& error)
 {
-    ComPtr<ID3DBlob> blob, errors;
-    const HRESULT hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, "main", "ps_3_0",
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(hr) || !blob)
-    {
-        if (errors) error.assign(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
-        return false;
-    }
-    if (FAILED(device->CreatePixelShader(static_cast<const DWORD*>(blob->GetBufferPointer()), shader)))
-    {
-        error = "CreatePixelShader failed";
-        return false;
-    }
-    return true;
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips fxc entirely, and a cached blob the driver refuses
+    // falls back to one recompile, keeping the error text as before.
+    ComPtr<ID3DBlob> blob;
+    return renderer::shaderbytecode::GetShader(cacheDir, source, "main", "ps_3_0", blob,
+        [device, shader](const ID3DBlob* b)
+        { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), shader)); },
+        &error);
 }
 }
 
@@ -131,6 +126,7 @@ LocalLightingRenderer& LocalLightingRenderer::Instance()
 void LocalLightingRenderer::Configure(const std::wstring& basePath)
 {
     m_logPath = basePath + L"LocalLighting.log";
+    m_shaderCacheDir = renderer::shaderbytecode::Dir(basePath);
     m_retry = RetryGate{};
 }
 
@@ -155,8 +151,8 @@ bool LocalLightingRenderer::EnsureShaders(IDirect3DDevice9* device)
 {
     if (m_surfaceShader && m_compositeShader) return true;
     std::string error;
-    if (!Compile(device, kSurfaceSource, m_surfaceShader.GetAddressOf(), error) ||
-        !Compile(device, kCompositeSource, m_compositeShader.GetAddressOf(), error))
+    if (!Compile(device, kSurfaceSource, m_shaderCacheDir, m_surfaceShader.GetAddressOf(), error) ||
+        !Compile(device, kCompositeSource, m_shaderCacheDir, m_compositeShader.GetAddressOf(), error))
     {
         m_surfaceShader.Reset(); m_compositeShader.Reset();
         if (!m_shaderErrorLogged) {

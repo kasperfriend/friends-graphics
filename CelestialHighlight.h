@@ -3,6 +3,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <vector>
+#include "src/D3D9/ShaderBytecodeCache.h"
 #pragma comment(lib,"d3dcompiler.lib")
 
 // Debug-only, opt-in visual confirmation for the celestial-draw hypothesis
@@ -34,10 +35,12 @@ bool enabled=false;
 std::vector<DWORD> code;
 bool codeReady=false;
 
-void Configure(const std::wstring&) {
+void Configure(const std::wstring& base) {
     const char* source="float4 color:register(c0);float4 main():COLOR{return color;}";
-    ComPtr<ID3DBlob> blob,error;
-    if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_2_0",0,0,blob.GetAddressOf(),error.GetAddressOf())))
+    ComPtr<ID3DBlob> blob;
+    // Bytecode-only consumer: the driver creates the shader later at draw
+    // time, so "create" just accepts the (validated) cached or compiled blob.
+    if(!renderer::shaderbytecode::GetShader(renderer::shaderbytecode::Dir(base),source,"main","ps_2_0",blob,[](const ID3DBlob*){return true;}))
         return;
     code.resize(blob->GetBufferSize()/sizeof(DWORD));
     memcpy(code.data(),blob->GetBufferPointer(),blob->GetBufferSize());

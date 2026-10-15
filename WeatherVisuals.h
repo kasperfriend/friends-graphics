@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
+#include "src/D3D9/ShaderBytecodeCache.h"
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
@@ -389,36 +390,35 @@ inline void EnsureShaders(IDirect3DDevice9* device)
     if (!device) return;
     if (precipitationPS && lensDropletsPS && nativeParticlePS) return;
 
-    ComPtr<ID3DBlob> codeBlob, errBlob;
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips all three fxc passes, and a cached blob the driver
+    // refuses falls back to one recompile, keeping the error log as before.
+    const std::wstring cacheDir = renderer::shaderbytecode::Dir(basePath);
+    ComPtr<ID3DBlob> codeBlob;
     if (!precipitationPS)
     {
-        HRESULT hr = D3DCompile(precipitationHLSL, strlen(precipitationHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), precipitationPS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, precipitationHLSL, "main", "ps_3_0", codeBlob,
+                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), precipitationPS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 
     if (!lensDropletsPS)
     {
-        codeBlob.Reset(); errBlob.Reset();
-        HRESULT hr = D3DCompile(lensDropletsHLSL, strlen(lensDropletsHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), lensDropletsPS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        codeBlob.Reset();
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, lensDropletsHLSL, "main", "ps_3_0", codeBlob,
+                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), lensDropletsPS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 
     if (!nativeParticlePS)
     {
-        codeBlob.Reset(); errBlob.Reset();
-        HRESULT hr = D3DCompile(nativeParticleHLSL, strlen(nativeParticleHLSL),
-            nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0,
-            codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), nativeParticlePS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        codeBlob.Reset();
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, nativeParticleHLSL, "main", "ps_2_0", codeBlob,
+                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), nativeParticlePS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 }
 

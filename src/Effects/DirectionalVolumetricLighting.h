@@ -155,6 +155,7 @@ namespace renderer
         Matrix4 m_previousView{};
         bool m_previousViewValid = false;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
         uint64_t m_renderFrames = 0;
         FrameClock m_fogClock;
         float m_fogElapsed = 0;

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -147,15 +148,16 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     return float4(ao,ao,ao,1);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* device, const char* source, IDirect3DPixelShader9** out, std::string& error)
+bool Compile(IDirect3DDevice9* device, const char* source, const std::wstring& cacheDir, IDirect3DPixelShader9** out, std::string& error)
 {
-    Microsoft::WRL::ComPtr<ID3DBlob> shader, errors;
-    const HRESULT hr = D3DCompile(source, strlen(source), nullptr, nullptr, nullptr, "main", "ps_3_0",
-                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.GetAddressOf(), errors.GetAddressOf());
-    if (errors && errors->GetBufferPointer())
-        error.assign(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
-    if (FAILED(hr) || !shader) return false;
-    return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(shader->GetBufferPointer()), out));
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips fxc entirely, and a cached blob the driver refuses
+    // falls back to one recompile, keeping the error text as before.
+    Microsoft::WRL::ComPtr<ID3DBlob> shader;
+    return renderer::shaderbytecode::GetShader(cacheDir, source, "main", "ps_3_0", shader,
+        [device, out](const ID3DBlob* b)
+        { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out)); },
+        &error);
 }
 } // namespace
 
@@ -169,6 +171,7 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
 {
     const std::wstring ini = basePath + L"GraphicsEffects.ini";
     m_logPath = basePath + L"AmbientOcclusion.log";
+    m_shaderCacheDir = renderer::shaderbytecode::Dir(basePath);
     auto read = [&](const wchar_t* key, int fallback) -> int {
         return static_cast<int>(renderer::locationtuning::ReadInt(L"AmbientOcclusion", key, fallback, ini.c_str()));
     };
@@ -213,8 +216,8 @@ bool AmbientOcclusion::EnsureShaders(IDirect3DDevice9* device)
 {
     if (m_generateShader && m_applyShader) return true;
     std::string error;
-    if (!Compile(device, kAmbientOcclusionSource, m_generateShader.GetAddressOf(), error) ||
-        !Compile(device, kAmbientOcclusionApplySource, m_applyShader.GetAddressOf(), error))
+    if (!Compile(device, kAmbientOcclusionSource, m_shaderCacheDir, m_generateShader.GetAddressOf(), error) ||
+        !Compile(device, kAmbientOcclusionApplySource, m_shaderCacheDir, m_applyShader.GetAddressOf(), error))
     {
         m_generateShader.Reset();
         m_applyShader.Reset();

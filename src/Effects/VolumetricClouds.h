@@ -145,6 +145,7 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_shadowShader;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
         bool m_shadersFailed = false;
         bool m_fieldsReady = false;

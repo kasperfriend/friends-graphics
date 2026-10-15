@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
 #include "GroundSurfaceCapture.h"
@@ -528,11 +529,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(result,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
+bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir,IDirect3DPixelShader9** shader)
 {
- ComPtr<ID3DBlob> blob,errors;
- if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),errors.GetAddressOf()))||!blob)return false;
- return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(blob->GetBufferPointer()),shader));
+ // On-disk bytecode cache first (renderer::shaderbytecode): a repeat launch
+ // skips fxc, and a cached blob the driver refuses falls back to one
+ // recompile, exactly as a fresh compile would.
+ ComPtr<ID3DBlob> blob;
+ return renderer::shaderbytecode::GetShader(cacheDir,source,"main","ps_3_0",blob,
+  [d,shader](const ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
 }
 }
 
@@ -542,6 +546,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
 {
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Atmosphere.log";
+ m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
  auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));};
  m_settings.enabled=read(L"DirectionalVolumetricEnabled",1)!=0;
  m_settings.quality=static_cast<uint32_t>(std::clamp(read(L"AtmosphereQuality",1),0,2));
@@ -614,7 +619,7 @@ void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
 bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* d)
 {
  if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader&&m_boundaryDebugShader&&m_groundHeightShader&&m_localFogFieldShader)return true;
- return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_boundaryDebugShader.GetAddressOf())&&Compile(d,kGroundHeightSource,m_groundHeightShader.GetAddressOf())&&Compile(d,kLocalFogFieldSource,m_localFogFieldShader.GetAddressOf());
+ return Compile(d,kDepthSource,m_shaderCacheDir,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_shaderCacheDir,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_shaderCacheDir,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_shaderCacheDir,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_shaderCacheDir,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_shaderCacheDir,m_boundaryDebugShader.GetAddressOf())&&Compile(d,kGroundHeightSource,m_shaderCacheDir,m_groundHeightShader.GetAddressOf())&&Compile(d,kLocalFogFieldSource,m_shaderCacheDir,m_localFogFieldShader.GetAddressOf());
 }
 
 bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h,D3DFORMAT format)

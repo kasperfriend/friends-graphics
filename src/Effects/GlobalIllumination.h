@@ -72,6 +72,7 @@ namespace renderer
         GlobalIlluminationSettings m_settings;
         std::wstring m_iniPath;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_width = 0;
         uint32_t m_height = 0;

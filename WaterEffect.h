@@ -16,6 +16,7 @@
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
+#include "src/D3D9/ShaderBytecodeCache.h"
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
@@ -146,6 +147,11 @@ inline bool SupportsWaterMrt(IDirect3DDevice9* device) {
     return true;
 }
 std::vector<DWORD> code,vertexCode;
+std::wstring shaderCacheDir;
+// True when the published bytecode came from the on-disk cache: if the
+// driver then refuses it, the consumer recompiles once before giving up
+// (the fallback for a stale/corrupt cache entry, see the Create site).
+bool codeFromCache = false;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
@@ -951,8 +957,9 @@ void ReloadTuning(){
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
     logPath=base+L"WaterEffect.log";
+    shaderCacheDir=renderer::shaderbytecode::Dir(base);
     enabled=false;
-    code.clear();vertexCode.clear();
+    code.clear();vertexCode.clear();codeFromCache=false;
     cachedReplacementPS.Reset();cachedReplacementVS.Reset();
     cachedShaderDevice=nullptr;shaderCreationFailed=false;
     // The replacement shaders (a ~540-slot pixel stage) are the largest fxc
@@ -968,23 +975,42 @@ void Configure(const std::wstring& base) {
     AdvanceSea(0.f);
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     compiling=true;
-    std::thread([logPath,strength,normalStrength,specularStrength,effectEnabled]{
+    std::thread([cacheDir=renderer::shaderbytecode::Dir(base),logPath,strength,normalStrength,specularStrength,effectEnabled]{
         ComPtr<ID3DBlob> blob,error;
         std::vector<DWORD> ps,vs;
-        bool ok=false;
+        bool ok=false,fromCache=false;
         {
             std::ofstream log(std::filesystem::path(logPath),std::ios::app);
-            HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
-            log<<"compile="<<hr<<" ripple="<<strength<<'\n';
-            if(SUCCEEDED(hr)) {
+            // Both stages read the on-disk bytecode cache first; a miss
+            // compiles and stores, so only the first launch on a machine
+            // pays fxc for the water replacement stage.
+            if(renderer::shaderbytecode::Load(cacheDir,source,"main","ps_3_0",blob)) {
+                fromCache=true;
+                log<<"compile=cached ripple="<<strength<<'\n';
+            } else {
+                const HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
+                log<<"compile="<<hr<<" ripple="<<strength<<'\n';
+                if(SUCCEEDED(hr))renderer::shaderbytecode::Save(cacheDir,source,"main","ps_3_0",blob.Get());
+                else if(error)log<<static_cast<const char*>(error->GetBufferPointer());
+            }
+            if(blob) {
                 ps.resize(blob->GetBufferSize()/4);memcpy(ps.data(),blob->GetBufferPointer(),blob->GetBufferSize());
                 blob.Reset();error.Reset();
-                hr=D3DCompile(vertexSource,strlen(vertexSource),nullptr,nullptr,nullptr,"main","vs_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
-                log<<"vertex_compile="<<hr<<" normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
-                ok=SUCCEEDED(hr);
-                if(ok)vs.resize(blob->GetBufferSize()/4),memcpy(vs.data(),blob->GetBufferPointer(),blob->GetBufferSize());
+                if(renderer::shaderbytecode::Load(cacheDir,vertexSource,"main","vs_3_0",blob)) {
+                    fromCache=true;
+                    log<<"vertex_compile=cached normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
+                } else {
+                    const HRESULT hr=D3DCompile(vertexSource,strlen(vertexSource),nullptr,nullptr,nullptr,"main","vs_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
+                    log<<"vertex_compile="<<hr<<" normal="<<normalStrength<<" specular="<<specularStrength<<'\n';
+                    if(SUCCEEDED(hr))renderer::shaderbytecode::Save(cacheDir,vertexSource,"main","vs_3_0",blob.Get());
+                    else if(error)log<<static_cast<const char*>(error->GetBufferPointer());
+                }
+                if(blob) {
+                    vs.resize(blob->GetBufferSize()/4);memcpy(vs.data(),blob->GetBufferPointer(),blob->GetBufferSize());
+                    blob.Reset();
+                }
             }
-            if(!ok&&error)log<<static_cast<const char*>(error->GetBufferPointer());
+            ok=!ps.empty()&&!vs.empty();
             log<<(ok?"water backend ready; ":"water backend NOT ready; ")
                <<"live enabled="<<effectEnabled<<" (GraphicsEffects.ini/location settings)\n";
         }
@@ -993,6 +1019,7 @@ void Configure(const std::wstring& base) {
         // vertex bytecode) would fail every CreateVertexShader until reset.
         std::lock_guard lk(waterCompileMutex);
         code=std::move(ps);vertexCode=std::move(vs);
+        codeFromCache=fromCache;
         enabled=ok;
         compiling=false;
     }).detach();
@@ -1371,6 +1398,31 @@ struct Scope {
                 cachedShaderDevice = d;
                 HRESULT hr=d->CreatePixelShader(code.data(), cachedReplacementPS.GetAddressOf());
                 if(SUCCEEDED(hr))hr=d->CreateVertexShader(vertexCode.data(), cachedReplacementVS.GetAddressOf());
+                if(FAILED(hr)&&codeFromCache) {
+                    // A cached blob the driver refuses means the entry is
+                    // stale or corrupt for this machine. Recompile once
+                    // (deterministic fxc), replace the stale entries, and
+                    // retry before falling back to native water. We hold
+                    // waterCompileMutex, so the recompiled publish cannot
+                    // race a concurrent first draw.
+                    ComPtr<ID3DBlob> psBlob,vsBlob,rerr;
+                    const HRESULT rhr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,psBlob.GetAddressOf(),rerr.GetAddressOf());
+                    const HRESULT rhr2=SUCCEEDED(rhr)?D3DCompile(vertexSource,strlen(vertexSource),nullptr,nullptr,nullptr,"main","vs_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,vsBlob.GetAddressOf(),rerr.GetAddressOf()):E_FAIL;
+                    if(SUCCEEDED(rhr)&&SUCCEEDED(rhr2)) {
+                        renderer::shaderbytecode::Save(shaderCacheDir,source,"main","ps_3_0",psBlob.Get());
+                        renderer::shaderbytecode::Save(shaderCacheDir,vertexSource,"main","vs_3_0",vsBlob.Get());
+                        code.assign(static_cast<const DWORD*>(psBlob->GetBufferPointer()),static_cast<const DWORD*>(psBlob->GetBufferPointer())+psBlob->GetBufferSize()/4);
+                        vertexCode.assign(static_cast<const DWORD*>(vsBlob->GetBufferPointer()),static_cast<const DWORD*>(vsBlob->GetBufferPointer())+vsBlob->GetBufferSize()/4);
+                        codeFromCache=false;
+                        hr=d->CreatePixelShader(code.data(), cachedReplacementPS.GetAddressOf());
+                        if(SUCCEEDED(hr))hr=d->CreateVertexShader(vertexCode.data(), cachedReplacementVS.GetAddressOf());
+                    } else if(rerr){
+                        std::ofstream(std::filesystem::path(logPath),std::ios::app)
+                            <<static_cast<const char*>(rerr->GetBufferPointer());
+                    }
+                    std::ofstream(std::filesystem::path(logPath),std::ios::app)
+                        <<"water cache rejected; recompile hr="<<hr<<'\n';
+                }
                 if(FAILED(hr)) {
                     shaderCreationFailed=true;
                     D3DCAPS9 caps{};d->GetDeviceCaps(&caps);
