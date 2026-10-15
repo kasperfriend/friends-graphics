@@ -676,44 +676,45 @@ static void TestConfigurationAndWiring()
     // setting that quietly stops working: a skip decided from what was cached instead
     // of from what the file holds leaves a scope written by the editor, or by hand,
     // unread - and its value dead - until something else happens to change.
-    const auto here = LocationContext{0,12,87,true};
-    const auto next = LocationContext{0,12,88,true};
+    const auto saved = LocationContext{0,12,88,true};    // the area that gets a scope of its own
+    const auto fresh = LocationContext{0,12,90,true};    // two areas that override nothing
+    const auto neighbour = LocationContext{0,12,91,true};
     const auto scoped = base + L"LocationGraphics.ini";
-    locationtuning::Sync(base, here, true);
-    locationtuning::MarkTuningApplied(here, true);
-    Check(locationtuning::AppliedTuningStillInForce(here, true), "the place that was just applied is still in force");
-    locationtuning::Sync(base, next, true);
-    Check(locationtuning::AppliedTuningStillInForce(next, true),
+    locationtuning::Sync(base, fresh, true);
+    locationtuning::MarkTuningApplied(fresh, true);
+    Check(locationtuning::AppliedTuningStillInForce(fresh, true), "the place that was just applied is still in force");
+    locationtuning::Sync(base, neighbour, true);
+    Check(locationtuning::AppliedTuningStillInForce(neighbour, true),
           "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
           "into it is skipped without re-reading nine subsystems");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
-          "a scope written for the neighbouring area, as the editor or a hand edit would");
-    locationtuning::Sync(base, next, true);
-    Check(load().direction == WindDirection::South, "the neighbouring area's own scope is what a read answers now");
-    locationtuning::Sync(base, next, true);
-    Check(!locationtuning::AppliedTuningStillInForce(next, true),
-          "an area whose own scope overrides a value is never skipped: the reload has to read it");
-    locationtuning::MarkTuningApplied(next, true);
-    Check(locationtuning::AppliedTuningStillInForce(next, true), "the neighbouring place is in force once it was applied");
-    Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for the neighbouring area yet");
+          "a scope written for one area, as the editor or a hand edit would");
+    locationtuning::Sync(base, saved, true);
+    Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
+    locationtuning::Sync(base, saved, true);
+    locationtuning::MarkTuningApplied(saved, true);
+    Check(locationtuning::AppliedTuningStillInForce(saved, true), "the area is in force once its own tuning was applied");
+    Check(!locationtuning::AppliedTuningStillInForce(fresh, true),
+          "walking back is not skipped once the two areas resolve to different values");
+    Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
           "a scope written into a section no read in this session has touched");
-    locationtuning::Sync(base, next, true);
+    locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
-    locationtuning::Sync(base, next, true);
+    locationtuning::Sync(base, saved, true);
     Check(locationtuning::HasScopedValue(L"Water", L"WaterColour"),
           "what the water colours ask - does this scope hold the key at all - is answered by the hand-written scope");
-    Check(!locationtuning::AppliedTuningStillInForce(next, true),
+    Check(!locationtuning::AppliedTuningStillInForce(saved, true),
           "a scope no read in this session ever touched still changes the place's fingerprint, so a crossing is "
           "never skipped past the value it holds");
-    locationtuning::MarkTuningApplied(next, true);
-    Check(locationtuning::AppliedTuningStillInForce(next, true), "and once that was applied the place is skipped again");
+    locationtuning::MarkTuningApplied(saved, true);
+    Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
-          "the neighbouring area's wind is edited");
-    locationtuning::Sync(base, next, true);
+          "the area's wind is edited");
+    locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
-    locationtuning::Sync(base, next, true);
-    Check(!locationtuning::AppliedTuningStillInForce(next, true),
+    locationtuning::Sync(base, saved, true);
+    Check(!locationtuning::AppliedTuningStillInForce(saved, true),
           "an edited value refuses the skip with nothing else changed");
     Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence, manual reload and the "
          "crossing gate over real files");
