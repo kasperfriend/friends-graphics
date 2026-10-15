@@ -45,6 +45,24 @@
 - [ ] Extend the verified rigid M2 shader list (`src/Lighting/TorchSignatures.h`) if a foliage variant in the client does not sway: the diagnostic line's skipped counters and the renderer log say whether a draw was rejected as an unlisted shader, as a palette that failed validation, or as a shape/size refusal.
 - [ ] Decide, from an in-client shadow comparison, whether the client's own shadow pass should lean vegetation too. It is excluded today (its shader is not a verified palette variant), so a leaning tree's shadow stays with the client's pose; leaning it would need that pass's palette space rather than the frame camera's.
 
+## Ambient occlusion
+
+- [x] Add screen-space ambient occlusion from the captured scene depth: a 12-direction hemisphere kernel with a
+  static per-pixel rotation, depth-derived normals, a locality guard, a distance fade and a depth-aware blur,
+  composited first so it darkens world geometry only. See [docs/ambient-occlusion.md](docs/ambient-occlusion.md).
+- [x] Keep the math in one place: `src/Effects/AmbientOcclusionCore.h` compiles without windows.h, so
+  `tools/AmbientOcclusionPreview.cpp` (the published on/off sheet) and `tools/AmbientOcclusionRegression.cpp`
+  run the same code the two ps_3_0 passes mirror.
+- [x] Tune the radius against a scene with a known answer rather than by eye: 1 leaves every open surface at
+  exactly 1.0 and still takes a right-angled corner to 0.75; 2 already costs the open floor 5%.
+- [ ] Run the acceptance pass in the client: AO visible at object/ground contact and in interior corners,
+  no darkening of open ground/walls/rooftops, no crawling or shimmer while the camera moves, water and sky
+  untouched, and F7 strength/radius changes taking effect live.
+- [ ] Check the cost on a mid-range card at 1080p and 1440p; the blur is the expensive half (32 taps/pixel).
+  Half-resolution generation with a bilateral upsample is the obvious fallback if it matters.
+- [ ] Consider a larger normal-reconstruction offset, or a normal derived from the sample depths, to recover
+  the contact darkening that a crease currently steals (the column base reads 0.94 where ~0.7 is correct).
+
 ## Later: interactive local volumetric fog
 
 - [x] Add a separate local ground-fog density layer integrated physically with the existing atmospheric compositor (not a second fullscreen alpha overlay). Runtime visual tuning remains.
