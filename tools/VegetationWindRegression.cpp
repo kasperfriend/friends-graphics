@@ -498,11 +498,32 @@ static void TestShaderAdmission()
     Check(!IsM2ModelConstants(broken), "NaN constants prove nothing");
     Check(!IsM2ModelConstants(nullptr), "and no constants at all prove nothing");
 
+    // The world's own projection, read over the same nine registers
+    // DrawCallClassifier reads it over: c4..c7 column major, c6[3] == 1 and
+    // c7[2] < 0. A draw whose constants are the terrain's is never a plant.
+    float world[9][4] = { {}, {}, {}, {}, { 1.5f, 0.f, 0.f, 0.f }, { 0.f, 1.5f, 0.f, 0.f },
+        { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, -.2f, 0.f }, {} };
+    Check(IsWmoOrTerrainConstants(world), "the WMO/terrain projection identifies a piece of the world");
+    float modelNine[9][4] = { { 1.f, 0.f, 0.f, 0.f }, { 0.f, 1.f, 0.f, 0.f }, { 1.5f, 0.f, 0.f, 0.f },
+        { 0.f, 1.5f, 0.f, 0.f }, { 0.f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 1.f, 0.f }, {}, {}, {} };
+    Check(!IsWmoOrTerrainConstants(modelNine),
+        "and a model's projection is not mistaken for it, however the rest of the file reads");
+    float brokenWorld[9][4]{};
+    for (int i = 0; i < 9; ++i) for (int j = 0; j < 4; ++j) brokenWorld[i][j] = world[i][j];
+    brokenWorld[7][2] = std::numeric_limits<float>::quiet_NaN();
+    Check(!IsWmoOrTerrainConstants(brokenWorld), "a NaN constant proves nothing either");
+    Check(!IsWmoOrTerrainConstants(nullptr), "and neither does no constants at all");
+
     for (uint64_t hash : kRigidM2Shaders)
         Check(IsRigidM2Shader(hash), "a verified rigid M2 shader is accepted");
     for (uint64_t hash : kUnskinnedM2Shaders)
-        Check(!IsRigidM2Shader(hash), "an unskinned model variant is not");
+    {
+        Check(!IsRigidM2Shader(hash), "an unskinned model variant is not a rigid one");
+        Check(IsUnskinnedM2Shader(hash), "but it is an accepted model variant in its own right");
+    }
     Check(!IsRigidM2Shader(0) && !IsRigidM2Shader(~0ull), "an unproven shader is not");
+    Check(!IsUnskinnedM2Shader(0) && !IsUnskinnedM2Shader(~0ull),
+        "and no captured list accepts a hash it does not name");
     for (uint64_t hash : kNonModelShaders)
     {
         Check(IsNonModelShader(hash), "a pass that must never be leaned is refused");
@@ -793,6 +814,15 @@ static void TestWindDebugLine()
     rows = VegetationDebugLines(status, settings, wind);
     Check(rows[1].find("vs 812") != std::string::npos && rows[1].find("pal 3") != std::string::npos &&
           rows[1].find("new 1") != std::string::npos, "and names every gate that refused, with its count");
+    // The two refusals a "nothing sways" report turns on and that no other line
+    // can tell apart: the world drawn as scenery (correct, and thousands of
+    // draws of it) and the depth-only passes, the client's own shadow map among
+    // them, whose palette is in the light's space and must never be leaned.
+    status.skippedWorld = 400; status.skippedDepthOnly = 900;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows[1].find("world 400") != std::string::npos, "the row separates the world's own draws from the census");
+    Check(rows[1].find("depth 900") != std::string::npos, "and the depth-only passes, which are never leaned");
+    Check(rows[1].find("world 400") < rows[1].find("vs 812"), "in the order the gates run in");
     Check(rows[1].find("vs 812") < rows[1].find("pal 3"), "in the order the gates run in");
     Check(rows[1].find("mat") == std::string::npos, "without offering a solid trunk as a refusal");
     // The rows have to fit the HUD's own box: 600 logical pixels at a 16 pixel
@@ -904,6 +934,7 @@ static void TestConfigurationAndWiring()
         "the vegetation HUD rows are drawn by the wind debug text");
 
     const auto sway = Read("src/Effects/VegetationSway.h");
+    const auto geometry_ = Read("src/Core/M2DrawGeometry.h");
     Check(sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos &&
           sway.find("SetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos,
           "the lean is written over the client's own bone palette registers");
@@ -930,8 +961,7 @@ static void TestConfigurationAndWiring()
     const auto firstPaletteRead = sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister", scopeStart);
     const auto linkGate = sway.find("if (!frame.wind.DrivesVegetation()) return;", scopeStart);
     const auto upGate = sway.find("if (draw.verticesUP) return;", scopeStart);
-    const auto shaderGate = sway.find(
-        "if (!detail::ShaderAccepted(device, frame, renderer::g_trackedState.vsHash", scopeStart);
+    const auto shaderGate = sway.find("detail::ShaderAccepted(device, frame,", scopeStart);
     const auto layoutGate = sway.find("detail::Layout(renderer::g_trackedState.currentVDecl", scopeStart);
     Check(scopeStart != sway.npos && firstPaletteRead != sway.npos &&
           linkGate != sway.npos && linkGate < firstPaletteRead &&
@@ -940,27 +970,87 @@ static void TestConfigurationAndWiring()
           layoutGate != sway.npos && layoutGate < firstPaletteRead,
         "the disabled, unlinked and non-model paths return before the first palette read");
     for (const char* counter : { "candidates", "skippedMaterial", "skippedCamera", "skippedViewport",
-                                 "skippedShader", "skippedLayout", "skippedGeometry", "skippedPalette",
-                                 "skippedShape", "skippedSize", "skippedAnimated", "skippedRange",
-                                 "unbounded", "learnedShaders", "swaying", "batches", "maxAngle",
-                                 "lastHeight", "lastMeasured" })
+                                 "skippedShader", "skippedWorld", "skippedLayout", "skippedGeometry",
+                                 "skippedDepthOnly", "skippedPalette", "skippedShape", "skippedSize",
+                                 "skippedAnimated", "skippedRange", "unbounded", "learnedShaders",
+                                 "swaying", "batches", "maxAngle", "lastHeight", "lastMeasured" })
         Check(sway.find(std::string("Status().") + counter) != sway.npos,
             "every counter the HUD can report is incremented by the device half");
     // The one thing a counter cannot say is WHICH shader it counted, so both
     // verdicts on a variant this build had not seen go to the renderer's log by
     // hash - and the log is wired from the same place the settings are reloaded.
     Check(sway.find("ReportShader") != sway.npos &&
-          sway.find("a foliage vertex shader was refused") != sway.npos &&
+          sway.find("a foliage draw was refused at the shader gate") != sway.npos &&
           sway.find("Add it to kRigidM2Shaders") != sway.npos,
         "an unproven shader is reported by hash, accepted or refused");
     Check(main.find("vegetation::logLine=Log;") != main.npos,
         "and those reports reach the renderer's own log");
     const auto hud = Read("src/Environment/WindDebug.h");
-    for (const char* label : { "cam", "vs", "decl", "geo", "pal", "shape", "size", "move", "far", "new" })
+    for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
+                               "far", "new" })
         Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
             "every gate the device half counts has a name on the HUD row");
-    Check(sway.find("alphaTest || renderer::g_trackedState.alphaBlend") != sway.npos,
-        "both transparent material modes reveal foliage, not just the alpha tested one");
+    // The admission rework. A shader list captured from one build of the client
+    // cannot gate another build - which is what made a working feature read as
+    // "0 swaying" on a machine whose client ships different binaries - so a draw
+    // now has to prove itself: bone indices in its own declaration (the client's
+    // skinned model path, which terrain, WMOs, particles and the UI never use),
+    // or the M2 model projection in its constants, or a captured variant.
+    Check(sway.find("renderer::IsUnskinnedM2Shader") != sway.npos,
+        "both captured variant lists admit a draw on sight");
+    Check(sway.find("renderer::IsWmoOrTerrainConstants") != sway.npos,
+        "and the world's own projection refuses one outright");
+    Check(sway.find("detail::Layout(renderer::g_trackedState.currentVDecl") < shaderGate,
+        "the declaration is read first: it is the proof the draw is a model at all");
+    Check(geometry_.find("out.valid = out.position && out.skinned") != std::string::npos,
+        "a declaration without bone indices is not a model draw, whatever its shader is");
+    // The material verdict. A foliage draw that the state mirror believes is
+    // solid is never revealed as an instance at all, and the client's own passes
+    // arrive through cached state blocks that never reach the SetRenderState
+    // hook - so the gate asks the device, exactly like the material cache does.
+    Check(sway.find("detail::TransparentMaterial(device)") != sway.npos,
+        "the cutout test reads the device, not the mirror");
+    Check(sway.find("GetRenderState(D3DRS_ALPHABLENDENABLE") != sway.npos &&
+          sway.find("GetRenderState(D3DRS_ALPHATESTENABLE") != sway.npos,
+        "both transparent modes are read from that device call");
+    Check(sway.find("renderer::g_trackedState.alphaBlend || renderer::g_trackedState.alphaTest") != sway.npos,
+        "and the mirror only answers when the device cannot be asked at all");
+    const auto materialGate = sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);");
+    Check(materialGate != sway.npos && materialGate > shaderGate,
+        "and it is asked once, after the cheap gates, so the device call is paid for models only");
+    Check(sway.find("const bool mirrorMaterial =") != sway.npos,
+        "with the free state mirror left to the early counters");
+    // Colour writes. The client's native shadow map skins in the LIGHT's space,
+
+    // so leaning it with the frame camera's wind would rotate a shadow by the
+    // wrong air; a depth fill and a prepass write no colour either. The state
+    // mirror cannot answer this - the client's own passes arrive through cached
+    // state blocks, which never reach the SetRenderState hook - so the device is
+    // asked, once per draw that is still a candidate.
+    const auto colourGate = sway.find("if (!detail::WritesColor(device))", scopeStart);
+    const auto firstLean = sway.find("Lean(frame, *instance", scopeStart);
+    Check(sway.find("GetRenderState(D3DRS_COLORWRITEENABLE") != sway.npos,
+        "the colour-write proof is read from the device, not from the state mirror");
+    Check(sway.find("colorWrite") == sway.npos,
+        "and nothing keeps a mirror of it that could go stale");
+    Check(colourGate != sway.npos && colourGate < firstLean && colourGate > sway.find("if (!foliageMaterial)"),
+        "no draw is leaned before its colour writes are known, and the free state-mirror gate runs first");
+    Check(sway.find("kVegetationFootprintToHeight * height") != sway.npos,
+        "the shape gate is the plant one: a fence is long and low, a bush is not");
+    // The reader itself: the two facts the whole fix rests on are read from the
+    // draw's own vertices, which is the only place they exist.
+    const auto geometry = geometry_;
+    Check(geometry.find("D3DDECLTYPE_UBYTE4N") != std::string::npos,
+        "bone indices are read whether the client declares them as bytes or as normalised bytes");
+    Check(geometry.find("D3DDECLTYPE_FLOAT4") != std::string::npos &&
+          geometry.find("D3DDECLTYPE_FLOAT3") != std::string::npos,
+        "and a position is read whether it is three floats or four");
+    Check(geometry.find("DescribeVertexDeclaration") != std::string::npos &&
+          geometry.find("D3DDECL_END") != std::string::npos,
+        "a declaration that cannot be read is named in the renderer's log, in D3D's own terms");
+    Check(geometry.find("GetStreamSource") != std::string::npos &&
+          geometry.find("kM2GeometryMaxBytes") != std::string::npos,
+        "the reader takes the vertex buffer the draw itself is using, within a fixed budget");
     Check(Read("src/Core/M2ShaderProbe.h").find("kM2BoneBaseRegister") != std::string::npos,
         "the shader probe and the palette share one base register");
     Check(Read("README.md").find("[Vegetation]") != std::string::npos,

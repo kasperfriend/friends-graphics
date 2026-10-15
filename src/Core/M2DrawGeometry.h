@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <wrl/client.h>
 #include "../Environment/VegetationWind.h"
@@ -35,6 +36,13 @@ namespace renderer
 // POSITION and its bone indices in the same stream.
 struct M2VertexLayout
 {
+    // `position` means the vertex data can be addressed at all; `skinned` is the
+    // stronger and much more important statement that the vertices carry a BONE
+    // INDEX. Every M2 model the client draws - one bone or seventy - is declared
+    // with the model vertex format, blend indices included, so a draw that has
+    // them is on the client's skinned model path, and a draw that does not is
+    // terrain, a WMO, a particle, a ribbon or the interface. `valid` is the two
+    // together: a declaration the sway is willing to read at all.
     bool valid = false;
     bool position = false;
     bool skinned = false; // POSITION + BLENDINDICES: the client's palette path
@@ -51,13 +59,21 @@ inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned coun
     {
         const D3DVERTEXELEMENT9& element = elements[i];
         if (element.Stream != 0) continue;
-        if (element.Usage == D3DDECLUSAGE_POSITION && element.Type == D3DDECLTYPE_FLOAT3 && !out.position)
+        // FLOAT4 positions are accepted as well as the client's own FLOAT3: the
+        // fourth component of a valid model position is 1 and is ignored by the
+        // 3x4 bone matrices either way.
+        if (element.Usage == D3DDECLUSAGE_POSITION &&
+            (element.Type == D3DDECLTYPE_FLOAT3 || element.Type == D3DDECLTYPE_FLOAT4) && !out.position)
         {
             out.position = true;
             out.positionOffset = element.Offset;
         }
+        // UBYTE4N as well as UBYTE4: a normalised byte pair is the same four
+        // bytes to a shader that reads them as an index; only the declaration's
+        // own idea of the range differs, and the reader wants the raw value.
         if (element.Usage == D3DDECLUSAGE_BLENDINDICES &&
-            (element.Type == D3DDECLTYPE_UBYTE4 || element.Type == D3DDECLTYPE_D3DCOLOR) && !out.skinned)
+            (element.Type == D3DDECLTYPE_UBYTE4 || element.Type == D3DDECLTYPE_UBYTE4N ||
+             element.Type == D3DDECLTYPE_D3DCOLOR) && !out.skinned)
         {
             out.skinned = true;
             out.boneOffset = element.Offset;
@@ -66,6 +82,79 @@ inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned coun
     }
     out.valid = out.position && out.skinned;
     return out.valid;
+}
+
+// The declaration as one line of text, for the renderer log. A draw that a
+// player reports as "standing still" is diagnosed from this: the reader needs a
+// POSITION it can address, and the sway additionally needs to know whether the
+// vertices carry a bone index. The names are D3D's own, spelled the way the
+// debug output of a capture tool spells them.
+inline const char* VertexUsageName(BYTE usage) noexcept
+{
+    switch (usage)
+    {
+    case D3DDECLUSAGE_POSITION: return "POSITION";
+    case D3DDECLUSAGE_BLENDWEIGHT: return "BLENDWEIGHT";
+    case D3DDECLUSAGE_BLENDINDICES: return "BLENDINDICES";
+    case D3DDECLUSAGE_NORMAL: return "NORMAL";
+    case D3DDECLUSAGE_PSIZE: return "PSIZE";
+    case D3DDECLUSAGE_TEXCOORD: return "TEXCOORD";
+    case D3DDECLUSAGE_TANGENT: return "TANGENT";
+    case D3DDECLUSAGE_BINORMAL: return "BINORMAL";
+    case D3DDECLUSAGE_COLOR: return "COLOR";
+    case D3DDECLUSAGE_POSITIONT: return "POSITIONT";
+    default: return "OTHER";
+    }
+}
+
+inline const char* VertexTypeName(BYTE type) noexcept
+{
+    switch (type)
+    {
+    case D3DDECLTYPE_FLOAT1: return "FLOAT1";
+    case D3DDECLTYPE_FLOAT2: return "FLOAT2";
+    case D3DDECLTYPE_FLOAT3: return "FLOAT3";
+    case D3DDECLTYPE_FLOAT4: return "FLOAT4";
+    case D3DDECLTYPE_D3DCOLOR: return "D3DCOLOR";
+    case D3DDECLTYPE_UBYTE4: return "UBYTE4";
+    case D3DDECLTYPE_SHORT2: return "SHORT2";
+    case D3DDECLTYPE_SHORT4: return "SHORT4";
+    case D3DDECLTYPE_UBYTE4N: return "UBYTE4N";
+    case D3DDECLTYPE_SHORT2N: return "SHORT2N";
+    case D3DDECLTYPE_SHORT4N: return "SHORT4N";
+    case D3DDECLTYPE_USHORT2N: return "USHORT2N";
+    case D3DDECLTYPE_USHORT4N: return "USHORT4N";
+    case D3DDECLTYPE_UDEC3: return "UDEC3";
+    case D3DDECLTYPE_DEC3N: return "DEC3N";
+    case D3DDECLTYPE_FLOAT16_2: return "FLOAT16_2";
+    case D3DDECLTYPE_FLOAT16_4: return "FLOAT16_4";
+    default: return "OTHER";
+    }
+}
+
+inline void DescribeVertexDeclaration(const D3DVERTEXELEMENT9* elements, unsigned count, char* out,
+    size_t size) noexcept
+{
+    if (!out || !size) return;
+    out[0] = 0;
+    if (!elements) return;
+    size_t used = 0;
+    unsigned written = 0;
+    for (unsigned i = 0; i < count && written < 8; ++i)
+    {
+        const D3DVERTEXELEMENT9& element = elements[i];
+        if (element.Stream == 0xFF) break; // D3DDECL_END
+        if (element.Stream != 0) continue;
+        char piece[64]{};
+        std::snprintf(piece, sizeof(piece), "%s%s/%s@%u", written ? " " : "",
+            VertexUsageName(element.Usage), VertexTypeName(element.Type), unsigned(element.Offset));
+        const size_t length = std::strlen(piece);
+        if (used + length + 1 >= size) break;
+        std::memcpy(out + used, piece, length);
+        used += length;
+        out[used] = 0;
+        ++written;
+    }
 }
 
 // One draw call, exactly as the four device hooks receive it.
@@ -114,7 +203,7 @@ inline bool ReadM2DrawGeometry(IDirect3DDevice9* device, const M2VertexLayout& l
     const M2DrawCall& draw, IDirect3DVertexBuffer9* vertices, UINT offset, UINT stride, M2DrawGeometry& out)
 {
     out = {};
-    if (!device || !layout.valid || draw.verticesUP || !vertices) return false;
+    if (!device || !layout.valid || !layout.skinned || draw.verticesUP || !vertices) return false;
     const UINT count = draw.type == D3DPT_TRIANGLELIST ? draw.primitives * 3 :
         draw.type == D3DPT_TRIANGLESTRIP ? draw.primitives + 2 : 0;
     if (count < 3) return false;

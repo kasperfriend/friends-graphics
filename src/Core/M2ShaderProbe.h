@@ -15,6 +15,7 @@
 // blocks could be object -> view matrices, and in which frame. It is recorded
 // for the diagnostic log and for the regression suite. Nothing in this header
 // touches a device, so the pinning test compiles and runs without d3d9.
+#include <cmath>
 #include <cstdint>
 #include "../Lighting/TorchSignatures.h"
 
@@ -53,6 +54,18 @@ namespace renderer
         0x70faf83955e2b668ull // liquid vertex variants
     };
 
+    // The captured unskinned model/particle path (src/Lighting/TorchSignatures.h):
+    // the same client draws, but with ONE matrix at c31..c33 instead of a bone
+    // palette. Those variants are known M2 model draws, so an unskinned draw can
+    // be admitted on them - and its whole model is then leaned by that one
+    // matrix, which is exactly right for a single-pivot tuft.
+    inline bool IsUnskinnedM2Shader(uint64_t hash) noexcept
+    {
+        for (uint64_t candidate : kUnskinnedM2Shaders)
+            if (candidate == hash) return true;
+        return false;
+    }
+
     inline bool IsNonModelShader(uint64_t hash) noexcept
     {
         for (uint64_t candidate : kNonModelShaders)
@@ -77,6 +90,22 @@ namespace renderer
             std::fabs(constants[5][0]) < 0.01f && std::fabs(constants[5][1]) < 0.01f &&
             std::fabs(constants[5][3]) < 0.01f &&
             constants[2][0] > 0.1f && constants[3][1] > 0.1f;
+    }
+
+    // The other two layouts this client's world draws use, read exactly the way
+    // src/Scene/DrawCallClassifier.cpp reads them on live draws: WMO objects and
+    // terrain keep their projection in c4..c7, with c6[3] == 1 and c7[2] < 0.
+    // (That is also why a reader that wants to tell them apart from a model has
+    // to look at nine registers, not six.) A draw whose constants are one of
+    // these is a piece of the world, not a model, and must never be leaned.
+    inline bool IsWmoOrTerrainConstants(const float constants[9][4]) noexcept
+    {
+        if (!constants) return false;
+        for (int row = 0; row < 9; ++row)
+            for (int column = 0; column < 4; ++column)
+                if (!std::isfinite(constants[row][column])) return false;
+        return constants[4][0] > 0.1f && constants[5][1] > 0.1f &&
+            std::fabs(constants[6][3] - 1.0f) < 0.02f && constants[7][2] < -0.01f;
     }
 
     inline constexpr unsigned kM2BoneBaseRegister = 31;

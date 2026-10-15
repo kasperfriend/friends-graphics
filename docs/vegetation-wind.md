@@ -16,8 +16,16 @@ its own.
   leaning out of how many foliage draws arrived (and how many solid model draws
   were passed over); the second names **the gate that refused something**, and
   only the gates that refused something, so "nothing sways" is answered on the
-  spot instead of guessed at. They are also drawn while the wind HUD itself is
-  open, so the vegetation counts are visible from the wind tab.
+  spot instead of guessed at. The gates are named in the order they run - `decl`
+  (a declaration that is not the client's skinned model layout), `world` (the
+  WMO/terrain projection: scenery), `vs` (a shader this build could not prove is
+  a model), `geo` (the draw's vertices could not be read), `depth` (a pass that
+  writes no colour), `cam` (no frame camera, or another view's viewport), `pal`
+  (a palette that failed validation), `shape`/`size` (not a plant), `move` (the
+  client is animating it), `far` (beyond the range), `new` (shader variants
+  proven this frame, with their hashes in `ModernWoWRenderer.log`). They are also
+  drawn while the wind HUD itself is open, so the vegetation counts are visible
+  from the wind tab.
 
 ## How it works
 
@@ -32,21 +40,38 @@ the draw**.
    and cloth. A solid draw is not foliage and cannot reveal that a model is a
    plant; it is only leaned once its model is known, which is what keeps a
    tree's opaque trunk welded to the canopy above it.
-2. The draw has to use the client's skinned model layout (a vertex declaration
-   with `POSITION` float3 and `BLENDINDICES` in stream 0), come from a vertex
-   buffer, and its vertex shader has to be either one of the rigid skinned M2
-   variants this project has verified live (the captured list in
-   `src/Lighting/TorchSignatures.h` that the torch effect also requires) or a
-   variant that binds the client's **model projection in c2..c5** - the same
-   proof the material cache and the camera's sky fallback run on live draws - and
-   *not* one of the passes this project has already identified as never-a-model
-   (the native shadow casters, UI, precipitation and water). A variant proven
-   this way is leaned from that frame on and its hash is written to
-   `ModernWoWRenderer.log` once, with a note to add it to the captured list; the
-   HUD's `new` counter counts them. A fixed-function draw and an up-front
-   (particle, ribbon or interface) batch have no model identity at all and are
-   never considered.
-3. The bone palette the client uploaded at **c31** is bounded by the draw's
+2. The draw has to **prove it is a model**: its vertex declaration has to carry
+   `POSITION` and `BLENDINDICES` in stream 0, and it has to come from a vertex
+   buffer. Every M2 model the client draws is declared with that layout, one bone
+   or seventy; terrain, WMOs, particles, ribbons, effects, shadow blobs and the
+   interface declare no bone indices at all, so this is the structural proof the
+   whole feature rests on. A fixed-function draw, an up-front (particle, ribbon
+   or interface) batch and a declaration this reader cannot address are never
+   considered - and a declaration it cannot read is written to
+   `ModernWoWRenderer.log` in D3D's own terms, once, so a model that refuses to
+   sway can be identified from a player's log alone.
+3. Its vertex shader has to be a model shader, and that is judged by what the
+   draw **is**, not by a hash list: this project's captured lists
+   (`src/Lighting/TorchSignatures.h`, the same lists the torch effect uses) are
+   accepted on sight, and so is any other variant over a declaration that already
+   proved the client's skinned model path - a list captured from one build of the
+   client cannot gate another build, which is exactly how a working feature reads
+   as "0 swaying" on a machine whose client ships different shader binaries.
+   Only two families are refused: the world's own projection (WMO and terrain,
+   `c4..c7`), and the passes this project has already identified as
+   never-a-model (the native shadow casters, UI, precipitation and water). A
+   variant this build had not seen is reported once in `ModernWoWRenderer.log`
+   **by hash**, accepted or refused, and counted as `new` on the HUD row so the
+   captured list can be extended from a real session.
+4. The material has to be transparent (alpha tested or alpha blended), and that
+   is read **from the device**, not from the renderer's state mirror: the
+   client's own passes can arrive through cached state blocks, which never reach
+   the `SetRenderState` hook, and a foliage draw the mirror believes is solid is
+   never revealed as an instance at all. A pass that writes no colour is refused
+   for the same reason - the client's native shadow map is a depth-only pass
+   whose palettes live in the light's space, so leaning it would rotate shadows
+   by the frame camera's wind.
+5. The bone palette the client uploaded at **c31** is bounded by the draw's
    **own vertices**: the model's bones are the bone indices *its* vertices
    reference, and the palette is read, validated and written no further than
    that. This matters more than it sounds - the registers above a model's own
@@ -55,7 +80,7 @@ the draw**.
    skeleton (a six-bone bush read as a seventy-five-bone one). Every block inside
    the bound must then be finite, orthogonal up to scale and hold a plausible
    translation; the first one that is not ends the palette.
-4. The validated blocks are reconstructed into the model's world **placement
+6. The validated blocks are reconstructed into the model's world **placement
    point** (block 0, the root bone every batch of a model uploads first), its
    root orientation, and its size. The size is measured from the draw's **own
    vertices** through their bone blocks, with the bone span kept as a lower
@@ -66,13 +91,13 @@ the draw**.
    model rather than a draw call: the opaque trunk of a tree leans with the
    alpha-tested canopy that revealed it, even when the client draws the trunk
    first, and the batches of one model all rotate about the same point.
-5. The instance's own phase - taken from its world identity, never from a frame
+7. The instance's own phase - taken from its world identity, never from a frame
    counter - sets its flutter so two tufts a yard apart do not move in lockstep.
-6. Every validated bone gets **one** rigid rotation about that pivot, taken from
+8. Every validated bone gets **one** rigid rotation about that pivot, taken from
    the shared wind: the same transform for the whole model, so no two batches can
    be pulled apart, and no distance from the pivot changes, so a stem bends
    instead of stretching.
-7. The leaned blocks are written into the same c31 registers for the draw, and
+9. The leaned blocks are written into the same c31 registers for the draw, and
    the client's own matrices are **restored immediately after it**, in the same
    call, so the next draw and any state the game applies afterwards see exactly
    what it uploaded.
@@ -105,12 +130,23 @@ single byte is written:
   that range and fades to nothing at the range itself, so nothing pops.
 - **Solid materials.** A draw with an opaque material never reveals an instance,
   and neither does any draw outside the shared wind's snapshot, so the whole
-  discovery path is limited to the client's own transparent model materials.
-- **Every shader that is not a verified rigid skinned M2 variant.** The
-  client's unskinned M2 path keeps a single matrix in c31..c33 instead of a
-  palette, and the shadow-depth, portrait, UI and post-process shaders have
-  never been shown to hold a palette there - or to share the frame camera's
-  space, which is what makes a lean about the world ground contact correct.
+  discovery path is limited to the client's own transparent model materials. The
+  material verdict is read from the device, so a pass that arrives through a
+  cached state block is judged by what the device is actually doing.
+- **Depth-only passes.** A draw that writes no colour - the client's native
+  shadow map above all, but also its occlusion fills and depth fills - is
+  refused: nothing visible is being drawn, and the shadow cascades skin in the
+  light's space, so the frame camera's wind on them would be a visibly wrong
+  shadow.
+- **Anything that is not the client's skinned model path.** Terrain, WMOs,
+  particles, ribbons, effects, the interface and every fixed-function or
+  up-front batch declare no bone indices (or no vertex buffer at all), so they
+  are left alone before a palette is even read. So is the world's own
+  projection: a draw whose constants bind `c4..c7` the way terrain and WMOs do
+  is scenery, whatever its declaration says.
+- **The passes this project has already identified as never-a-model** - the
+  native shadow casters, UI, precipitation and water - are refused by hash
+  before any constant is read.
 - **Draws that are not the frame camera's.** A model is only leaned when the
   device is drawing into the viewport the accepted camera pose was captured in,
   which is what keeps the client's portrait, target, minimap and reflection views
@@ -194,7 +230,7 @@ at the shipped defaults with a steady west wind.
 | `TreePercent` | TREE GAIN | 100 | 0..200 | Gain for models above ~6 yd, blended in between. 0 stops trees only. |
 | `DistanceYards` | SWAY DISTANCE (YARDS) | 120 | 20..300 | Sway fades to nothing by this range. |
 | `SwayAnimatedModels` | SWAY ANIMATED MODELS (MAY MOVE CREATURES) | 0 | on/off | Also leans models the client animates. Off by default; see above. |
-| `DebugView` | VEGETATION DEBUG VIEW | 0 | on/off | Two extra diagnostic HUD rows: what leans, and which gate refused the rest. |
+| `DebugView` | VEGETATION DEBUG VIEW | 0 | on/off | Two extra diagnostic HUD rows: what leans, and which gate refused the rest, by name and count. |
 
 `[Wind] AffectVegetation` (F7 → WIND → `DRIVE PLANTS & TREES`, default on) is the
 link, exactly like `AffectWaves` and `AffectClouds`.
@@ -219,11 +255,17 @@ Linux and is wired into CI, and it pins:
   continuous in time, travelling downwind, and costless in calm air;
 - strength, size classes, gains, range fade, flutter, and all three switches
   (master wind, the link, the effect);
-- the shader whitelist: every captured rigid M2 variant is accepted, every
-  unskinned variant and every unknown hash is not, the never-a-model list (shadow
-  casters, UI, precipitation, water) is refused and does not overlap it, and the
-  client's model projection is recognized while a terrain/WMO-style or transposed
-  one is not;
+- admission: every captured model variant is accepted on sight, the
+  never-a-model list (shadow casters, UI, precipitation, water) is refused and
+  does not overlap the captured lists, the client's model projection is
+  recognized while a terrain/WMO-style or transposed one is not, the world's own
+  `c4..c7` projection is refused, and a declaration without bone indices is not
+  a model draw whatever its shader is;
+- the two proofs the gates read from the device rather than from the state
+  mirror: the material (alpha test or alpha blend) and the colour-write mask -
+  with the mirror left to the free early counters, the palette read kept above
+  every device call it can be, and the declaration gate ordered before the
+  shader gate because the declaration is what proves the draw is a model;
 - the model's own vertices: the palette bound comes from the bone indices the
   draw's vertices reference (never from the constant file), the size gate
   measures the vertices themselves - a one-bone tuft with a 1.6 yd mesh measures
@@ -251,12 +293,16 @@ In-client acceptance checks (Windows and the Ascension client):
 1. Stand in a forest at day and at night, with the F7 WIND tab open on
    `VEGETATION DEBUG VIEW`. Grass, bushes and tree canopies lean downwind and
    shimmer; `leaning` rises with the number of visible plants, and if it does not,
-   the second row names the gate that refused them (`vs` for an unproven shader,
-   `decl` for a declaration that is not the client's skinned layout, `geo` for
-   vertices that could not be read, `pal` for a palette that failed validation,
+   the second row names the gate that refused them (`decl` for a declaration that
+   is not the client's skinned model layout, `world` for the scenery projection,
+   `vs` for a shader this build could not prove, `geo` for vertices that could not
+   be read, `depth` for a pass that writes no colour, `cam` for the frame
+   camera's own viewport, `pal` for a palette that failed validation,
    `shape`/`size` for a model that did not look like a plant, `move` for a model
    the client is animating, `far` for range). `new` above zero means a shader
-   variant was proven this frame and should be added to the captured list.
+   variant was proven this frame: `/log ModernWoWRenderer.log` names its hash, and
+   adding that hash to the captured list is what makes the next session accept it
+   without reading constants.
 2. Set `SWAY STRENGTH` to 0 and back, then `VEGETATION SWAY` off and on. Nothing
    jumps; off is indistinguishable from the renderer without the feature.
 3. Set `DRIVE PLANTS & TREES` off. Plants stand still, waves and clouds keep
@@ -277,16 +323,17 @@ In-client acceptance checks (Windows and the Ascension client):
 - Only the client's skinned M2 path sways. Terrain-bound grass that the client
   does not draw as a model, and anything the client itself deforms in a vertex
   shader outside the bone palette, is untouched.
-- The client's own shadow pass is not leaned: it is not one of the verified
-  palette shaders, so a leaning tree's native shadow stays with the client's
-  pose. This is the conservative choice - a lean built in the wrong camera's
-  space would be a visibly broken shadow, not a missing one. Whether that pass
-  should lean too is a separate decision in `TODO.md`.
-- A foliage variant outside the captured list sways only once it has proven that
-  it binds the client's model projection in c2..c5 - which the renderer checks
-  for it, reports once in `ModernWoWRenderer.log` by hash and counts as `new` on
-  the HUD row so the captured list can be extended. A variant that is *not* the
-  model path stays still, by design.
+- The client's own shadow pass is not leaned: it is one of the never-a-model
+  passes, it writes no colour, and it renders into its own 2048x2048 viewport, so
+  a leaning tree's native shadow stays with the client's pose. This is the
+  conservative choice - a lean built in the wrong camera's space would be a
+  visibly broken shadow, not a missing one. Whether that pass should lean too is
+  a separate decision in `TODO.md`.
+- A foliage variant outside the captured list sways as long as its draw carries
+  the client's skinned model declaration - the renderer reports the hash once in
+  `ModernWoWRenderer.log` and counts it as `new` on the HUD row, so the captured
+  list can be extended and the next session accepts it without any proof at all.
+  A draw that is *not* the model path stays still, by design.
 - A model the client animates is skipped even if it is a plant, unless
   `SWAY ANIMATED MODELS` is enabled. A zone whose foliage is animated therefore
   needs that switch - and accepts that a motionless creature can lean.

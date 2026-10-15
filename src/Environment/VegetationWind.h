@@ -66,9 +66,11 @@ struct VegetationStatus
     unsigned skippedMaterial = 0; // solid material: not foliage, so not a candidate
     unsigned skippedCamera = 0;   // no accepted camera pose for the frame yet
     unsigned skippedViewport = 0; // drawn into a viewport that is not the frame camera's
-    unsigned skippedShader = 0;   // neither a verified rigid M2 variant nor the M2 layout
+    unsigned skippedShader = 0;   // not a captured variant, no bone indices, no M2 projection
+    unsigned skippedWorld = 0;    // the WMO/terrain projection: a piece of the world, never a plant
     unsigned skippedLayout = 0;   // vertex declaration is not POSITION + BLENDINDICES
     unsigned skippedGeometry = 0; // couldn't read the draw's own vertices (the palette bound)
+    unsigned skippedDepthOnly = 0; // writes no colour: a shadow map, a depth fill, a prepass
     unsigned skippedPalette = 0;  // c31 did not look like a bone palette
     unsigned skippedAnimated = 0; // the client's own animation is moving the model
     unsigned skippedShape = 0;    // too many bones, or too long/low to be a plant

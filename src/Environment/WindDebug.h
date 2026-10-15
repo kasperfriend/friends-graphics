@@ -76,19 +76,26 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     // problem in six characters. The order is the order the gates run in, so the
     // first name on the row is the first thing to look at.
     //
-    //   cam   the camera pose is missing, or the draw belongs to another view
-    //   vs    the vertex shader is not a proven M2 model shader
-    //   decl  the declaration is not the client's skinned model layout
+    //   decl  the vertex declaration cannot be read (no usable position)
+    //   world the constants bind the WMO/terrain projection: scenery, not plants
+    //   vs    no bone indices, no captured variant, no M2 projection: unproven
     //   geo   the draw's own vertices could not be read (the palette bound)
+    //   depth no colour writes: the client's shadow map or another depth pass
+    //   cam   the camera pose is missing, or the draw belongs to another view
     //   pal   the palette does not look like object -> view matrices / is short
     //   shape too many bones, or longer than it is tall
     //   size  outside the supported height range, measured against `h`
     //   move  the client is animating it
     //   far   beyond DistanceYards
-    //   new   M2 shader variants proven this frame (capture these hashes)
+    //   new   model vertex shaders this build had not captured (the hashes the
+    //         renderer log just named: add the foliage ones to TorchSignatures.h)
     //
     // "solid" on the row above is deliberately not a gate: a frame with
     // something leaning counts one solid draw per trunk it carries.
+    //
+    // The labels are printed in the order the gates run, so the first name on
+    // the row is the first thing to look at, and a gate that refused nothing is
+    // not printed at all.
     std::string gates;
     const auto report = [&gates](const char* label, unsigned value) {
         if (!value) return;
@@ -97,10 +104,12 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
         gates += ' ';
         gates += std::to_string(value);
     };
-    report("cam", status.skippedCamera + status.skippedViewport);
-    report("vs", status.skippedShader);
     report("decl", status.skippedLayout);
+    report("world", status.skippedWorld);
+    report("vs", status.skippedShader);
     report("geo", status.skippedGeometry);
+    report("depth", status.skippedDepthOnly);
+    report("cam", status.skippedCamera + status.skippedViewport);
     report("pal", status.skippedPalette + status.unbounded);
     report("shape", status.skippedShape);
     report("size", status.skippedSize);
