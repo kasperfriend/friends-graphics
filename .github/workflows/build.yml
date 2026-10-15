@@ -137,7 +137,15 @@ jobs:
         shell: pwsh
         run: |
           $output = & cmd.exe /c tools\Test-Wind.cmd 2>&1
-          if ($LASTEXITCODE -ne 0) { $output | Write-Output; exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            # The suite's own last lines are the diagnosis, and stderr does not
+            # survive into a runner's job log tail: say them as annotations too.
+            $failed = ($output | Select-Object -Last 6) -join ' | '
+            $failed = $failed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error title=Wind regressions failed::$failed"
+            $output | Write-Output
+            exit $LASTEXITCODE
+          }
           # The suite's own PASS lines are the evidence a report is read for: the
           # crossing gate's real-file checks run nowhere else.
           $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '

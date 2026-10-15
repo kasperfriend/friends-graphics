@@ -249,9 +249,14 @@ Those draws are bent in **the client's own vertex shader** instead:
    all. The bend weight is the blade's own texture coordinate: zero at its
    base, growing towards the tip, with the bottom third held rigid
    (`anchor`, 0.3) and faded with distance. At reference strength a blade's tip
-   sways about five inches - the same order as the lean the model path gives a
-   plant of the same size - over a field-wide wave 18 yards long travelling
-   downwind at 3 yards per second. The constants ride in the block at
+   sways about a foot over a wave five yards long travelling downwind at two and
+   a half yards per second - a crest every two seconds, which is what makes the
+   field read as moving from a walking pace. The first shipped numbers were five
+   inches over an 18 yard wave at 3 yards per second, and a real session's own
+   `blade wind: ... yd at the tip` line is what said they were wrong: the shader
+   was bent on every draw and the field still looked still, because a whole field
+   drifting a hand's width every six seconds is smaller and slower than the eye
+   reads as swaying. The constants ride in the block at
    **c14..c19**, or - for a shader that reads one of those registers as its own
    lighting, which a real session's 956 and 1048 byte shaders do - at the first
    run of six registers above them that the shader never mentions (`c34` for

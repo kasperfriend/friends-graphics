@@ -47,12 +47,24 @@ namespace renderer
     struct GrassBladeSettings
     {
         bool enabled = true;              // [Vegetation] GrassBlades
-        float tipAmplitudeYards = .15f;   // sway at the tip of a blade, yards, at strength 1
-        float wavelengthYards = 18.f;     // the wave the field travels on, yards
-        float crossWavelengthYards = 6.5f;// its cross-swell, which is what makes it read as grass
+        // The shipped motion is what a field has to READ as when a player stands
+        // in it. A real session's own log - `blade wind: ... yd at the tip` - is
+        // the measurement behind these numbers: the 372 byte blade shader was
+        // bent on every one of its draws and the tip moved 0.15 to 0.17 yards,
+        // over a wave eighteen yards long travelling at three yards a second,
+        // which is a whole field drifting a hand's width once every six seconds.
+        // That is why the HUD could report a shader bent while the field stood
+        // still: the bend was real, and too small and too slow to see. The
+        // defaults now move a blade's tip about a foot at reference strength, on
+        // a wave five yards long travelling downwind at about two and a half
+        // yards a second - a crest every two seconds, close to the reference
+        // implementation's own defaults, and readable from a walking pace.
+        float tipAmplitudeYards = .35f;   // sway at the tip of a blade, yards, at strength 1
+        float wavelengthYards = 5.f;      // the wave the field travels on, yards
+        float crossWavelengthYards = 2.4f;// its cross-swell, which is what makes it read as grass
         float crossAmplitudeRatio = .33f; // the cross-swell's share of the primary amplitude
         float crossAngleDegrees = 35.f;   // and its heading, off the wind
-        float waveSpeedYardsPerSecond = 3.f; // how fast the crests travel downwind
+        float waveSpeedYardsPerSecond = 2.4f; // how fast the crests travel downwind
         float leanFraction = .35f;        // a constant downwind lean, as a share of the amplitude
         float variance = .6f;             // per-blade amplitude spread, 0 = every blade alike
         float jitterRadians = 1.7f;       // per-blade phase spread, radians
