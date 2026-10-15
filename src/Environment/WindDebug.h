@@ -2,8 +2,10 @@
 #include "WindSystem.h"
 #include "VegetationWind.h"
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace renderer
@@ -14,6 +16,17 @@ namespace renderer
 // draws these rows without a DLL behind them, and a row that is not there is
 // better than a row that lies.
 inline const char* buildStamp = nullptr;
+
+// What fits the HUD's own box: 600 logical pixels at a 16 pixel font, drawn 10
+// pixels in from the left and clipped 18 short of the right. A row longer than
+// this is not a longer row, it is a row whose end nobody can read - so the gate
+// census continues on the next line instead. The regression suite pins both the
+// budget and the continuation.
+inline constexpr size_t kVegetationHudRowBudget = 72;
+
+// The prefix of a continued gate row. Only ever appears when a frame refuses at
+// enough gates that one row cannot hold them all.
+inline constexpr const char* kMoreGatesPrefix = "Plants gate (more): ";
 
 // Diagnostic text only; the wind simulation itself creates no geometry,
 // particles, noise textures or render targets.
@@ -74,11 +87,19 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
         lines.emplace_back("Plants: legacy (wind off or unlinked)");
         return lines;
     }
-    std::snprintf(text, sizeof(text), "Plants: %u leaning of %u drew, %u solid | max %.1f deg",
-        status.swaying, status.candidates, status.skippedMaterial, double(status.maxAngle));
+    // "waiting" is the one number that is not a refusal and is not the effect
+    // working either: a model that has been measured, is plant-shaped and is
+    // standing still, but has not repeated itself in a second frame yet. It is
+    // printed only when there is one, and it is what tells "being measured"
+    // apart from "nothing happened" in a row that would otherwise read
+    // "0 leaning of 40 drew, 0 solid".
+    char waiting[24]{};
+    if (status.pending) std::snprintf(waiting, sizeof(waiting), ", %u waiting", status.pending);
+    std::snprintf(text, sizeof(text), "Plants: %u leaning of %u drew%s, %u solid | max %.1f deg",
+        status.swaying, status.candidates, waiting, status.skippedMaterial, double(status.maxAngle));
     lines.emplace_back(text);
     // The size the gate last looked at, then the gates that actually refused
-    // something this frame - and only those: a list of twelve zeroes is a line
+    // something this frame - and only those: a list of fourteen zeroes is a line
     // nobody reads, while "pal 21" on its own says the palette bound is the
     // problem in six characters. The order is the order the gates run in, so the
     // first name on the row is the first thing to look at.
@@ -94,6 +115,8 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     //   size  outside the supported height range, measured against `h`
     //   move  the client is animating it
     //   far   beyond DistanceYards
+    //   calm  inside the range, but the wind leaves a zero angle at that spot
+    //   write the leaned registers could not be written back
     //   new   model vertex shaders this build had not captured (the hashes the
     //         renderer log just named: add the foliage ones to TorchSignatures.h)
     //
@@ -102,14 +125,13 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     //
     // The labels are printed in the order the gates run, so the first name on
     // the row is the first thing to look at, and a gate that refused nothing is
-    // not printed at all.
-    std::string gates;
-    const auto report = [&gates](const char* label, unsigned value) {
-        if (!value) return;
-        if (!gates.empty()) gates += ' ';
-        gates += label;
-        gates += ' ';
-        gates += std::to_string(value);
+    // not printed at all. A frame where everything refuses at once does not fit
+    // the box, and a clipped row is exactly as useful as the "0" the player
+    // reported - so the list continues on the next row, prefixed, rather than
+    // being cut off. Both rows together are the whole census, in gate order.
+    std::vector<std::pair<const char*, unsigned>> refused;
+    const auto report = [&refused](const char* label, unsigned value) {
+        if (value) refused.emplace_back(label, value);
     };
     report("decl", status.skippedLayout);
     report("world", status.skippedWorld);
@@ -122,9 +144,31 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("size", status.skippedSize);
     report("move", status.skippedAnimated);
     report("far", status.skippedRange);
+    report("calm", status.skippedCalm);
+    report("write", status.skippedWrite);
     report("new", status.learnedShaders);
     std::snprintf(text, sizeof(text), "Plants gate: h %.1f yd | ", double(status.lastMeasured));
-    lines.emplace_back(std::string(text) + (gates.empty() ? "none refused" : gates));
+    if (refused.empty())
+        lines.emplace_back(std::string(text) + "none refused");
+    else
+    {
+        std::string row = text;
+        bool startsRow = true; // the row already carries the head, so no separator
+        for (const auto& [label, value] : refused)
+        {
+            const std::string entry = std::string(label) + ' ' + std::to_string(value);
+            if (!startsRow && row.size() + entry.size() + 1 > kVegetationHudRowBudget)
+            {
+                lines.emplace_back(row);
+                row = kMoreGatesPrefix;
+                startsRow = true;
+            }
+            if (!startsRow) row += ' ';
+            row += entry;
+            startsRow = false;
+        }
+        lines.emplace_back(row);
+    }
     // And which build drew the row. A report about this feature is a screenshot
     // of these lines, and a screenshot could not say which d3d9.dll drew them -
     // one report arrived with counters that read exactly like the build before

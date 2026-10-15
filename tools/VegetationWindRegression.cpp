@@ -800,6 +800,19 @@ static void TestWindDebugLine()
         "an unlinked wind leaves the single row the HUD had before this feature");
     wind.affectVegetation = true;
 
+    // Every row of the block, joined: the census is allowed to continue on the
+    // next row when everything refuses at once (checked below), so what a label
+    // says and the order it is said in are checked across the whole block.
+    const auto all = [](const std::vector<std::string>& lines) {
+        std::string joined;
+        for (const auto& line : lines) { if (!joined.empty()) joined += ' '; joined += line; }
+        return joined;
+    };
+    const auto fits = [](const std::vector<std::string>& lines) {
+        for (const auto& line : lines) if (line.size() > kVegetationHudRowBudget) return false;
+        return true;
+    };
+
     status.swaying = 34; status.batches = 51; status.candidates = 51;
     status.skippedMaterial = 812; status.maxAngle = 12.3f; status.lastMeasured = 4.2f;
     rows = VegetationDebugLines(status, settings, wind);
@@ -810,39 +823,78 @@ static void TestWindDebugLine()
         "and how many solid model draws it passed over, which is what a solid-material bug looks like");
     Check(rows[1].find("none refused") != std::string::npos, "the gate row is quiet while nothing is refused");
     Check(rows[1].find("h 4.2 yd") != std::string::npos, "and always shows the size the gate looked at");
+    // "Waiting" is neither leaning nor refused: a model that is measured,
+    // plant-shaped and standing still but has not repeated itself in a second
+    // frame yet. Without it a row can read "0 leaning of 40 drew, 0 solid" and
+    // every gate at zero, which is the one report nobody can act on.
+    status.pending = 12;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows[0].find("34 leaning of 51 drew, 12 waiting, 812 solid") != std::string::npos,
+        "waiting for the second frame is said out loud, next to what leans");
+    Check(rows.size() == 2 && rows[1].find("wait") == std::string::npos,
+        "and is never offered as a refusal on the gate row");
+    status.pending = 0;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows[0].find("waiting") == std::string::npos, "a settled scene does not print it at all");
+
+    // A frame that refuses at a couple of gates: the whole census on one row.
     status.skippedShader = 812; status.skippedPalette = 3; status.learnedShaders = 1;
     rows = VegetationDebugLines(status, settings, wind);
-    Check(rows[1].find("vs 812") != std::string::npos && rows[1].find("pal 3") != std::string::npos &&
-          rows[1].find("new 1") != std::string::npos, "and names every gate that refused, with its count");
+    Check(rows.size() == 2, "a few refusals still fit one row");
+    Check(all(rows).find("vs 812") != std::string::npos && all(rows).find("pal 3") != std::string::npos &&
+          all(rows).find("new 1") != std::string::npos, "and names every gate that refused, with its count");
+    Check(all(rows).find("mat") == std::string::npos, "without offering a solid trunk as a refusal");
     // The two refusals a "nothing sways" report turns on and that no other line
     // can tell apart: the world drawn as scenery (correct, and thousands of
     // draws of it) and the depth-only passes, the client's own shadow map among
     // them, whose palette is in the light's space and must never be leaned.
     status.skippedWorld = 400; status.skippedDepthOnly = 900;
+    status.skippedCalm = 7; status.skippedWrite = 1;
     rows = VegetationDebugLines(status, settings, wind);
-    Check(rows[1].find("world 400") != std::string::npos, "the row separates the world's own draws from the census");
-    Check(rows[1].find("depth 900") != std::string::npos, "and the depth-only passes, which are never leaned");
-    Check(rows[1].find("world 400") < rows[1].find("vs 812"), "in the order the gates run in");
-    Check(rows[1].find("vs 812") < rows[1].find("pal 3"), "in the order the gates run in");
-    Check(rows[1].find("mat") == std::string::npos, "without offering a solid trunk as a refusal");
-    // The row that names the build. Two in-client reports of "it does not work"
+    Check(all(rows).find("world 400") != std::string::npos, "the row separates the world's own draws from the census");
+    Check(all(rows).find("depth 900") != std::string::npos, "and the depth-only passes, which are never leaned");
+    // The two refusals that are not about the model at all: a plant inside the
+    // range that the wind's own gust field leaves with nothing to apply, and a
+    // write the device refused. Neither may hide behind `far` or behind the
+    // palette.
+    Check(all(rows).find("calm 7") != std::string::npos,
+        "a plant the wind leaves with no angle is not reported as out of range");
+    Check(all(rows).find("write 1") != std::string::npos, "and a refused write is named as one");
+    Check(all(rows).find("world 400") < all(rows).find("vs 812"), "in the order the gates run in");
+    Check(all(rows).find("vs 812") < all(rows).find("pal 3"), "in the order the gates run in");
+    // Everything refusing at once does not fit one row, and a clipped row is
+    // exactly as useful as the "0" the player reported: the census continues on
+    // the next row, prefixed, in the same order.
+    status.skippedLayout = 3200; status.skippedGeometry = 12; status.skippedDepthOnly = 900;
+    status.skippedCamera = 3; status.skippedViewport = 1; status.skippedShape = 4; status.skippedSize = 2;
+    status.skippedAnimated = 5; status.skippedRange = 6; status.unbounded = 2;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() > 2, "a frame that refuses at every gate continues on the next row");
+    Check(rows[2].find(kMoreGatesPrefix) == 0, "and the continuation says that it is one");
+    for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
+                               "far", "calm", "write", "new" })
+        Check(all(rows).find(std::string(label) + " ") != std::string::npos,
+            "every gate that refused is on the rows, even when they do not fit one");
+    // The row that names the build. An in-client report of "it does not work"
     // arrived with counters that read exactly like the fixed build's, from a
     // client still running the previous d3d9.dll, and nothing in the picture
     // could say so. The stamp is the loaded DLL's own file time, so it needs no
     // version to keep in step with the source.
     buildStamp = "2026-10-15 18:32";
     rows = VegetationDebugLines(status, settings, wind);
-    Check(rows.size() == 3 && rows[2] == "ModernWoWRenderer 2026-10-15 18:32",
+    Check(rows.back() == "ModernWoWRenderer 2026-10-15 18:32",
         "the debug rows stamp the build that drew them");
+    Check(rows.back().size() <= kVegetationHudRowBudget, "and the stamp fits the box too");
     buildStamp = nullptr;
     rows = VegetationDebugLines(status, settings, wind);
-    Check(rows.size() == 2, "and a session that published no build stamps nothing");
+    Check(all(rows).find("ModernWoWRenderer") == std::string::npos,
+        "and a session that published no build stamps nothing");
     // The rows have to fit the HUD's own box: 600 logical pixels at a 16 pixel
     // font, drawn 10 pixels in from the left and clipped 18 short of the right.
     // A clipped diagnostic is exactly as useful as the "0" the player reported.
     buildStamp = "2026-10-15 18:32";
-    for (const auto& row : VegetationDebugLines(status, settings, wind))
-        Check(row.size() <= 72, "a vegetation HUD row fits in the box it is drawn in");
+    Check(fits(VegetationDebugLines(status, settings, wind)),
+        "every vegetation HUD row fits the box it is drawn in");
     buildStamp = nullptr;
     Pass("the vegetation HUD: what leans, what arrived, and the gate that is refusing");
 }
@@ -988,7 +1040,8 @@ static void TestConfigurationAndWiring()
     for (const char* counter : { "candidates", "skippedMaterial", "skippedCamera", "skippedViewport",
                                  "skippedShader", "skippedWorld", "skippedLayout", "skippedGeometry",
                                  "skippedDepthOnly", "skippedPalette", "skippedShape", "skippedSize",
-                                 "skippedAnimated", "skippedRange", "unbounded", "learnedShaders",
+                                 "skippedAnimated", "skippedRange", "skippedCalm", "skippedWrite",
+                                 "unbounded", "learnedShaders", "pending",
                                  "swaying", "batches", "maxAngle", "lastHeight", "lastMeasured" })
         Check(sway.find(std::string("Status().") + counter) != sway.npos,
             "every counter the HUD can report is incremented by the device half");
@@ -1001,6 +1054,19 @@ static void TestConfigurationAndWiring()
         "an unproven shader is reported by hash, accepted or refused");
     Check(main.find("vegetation::logLine=Log;") != main.npos,
         "and those reports reach the renderer's own log");
+    // The one refusal that can swallow a whole field while the HUD only says
+    // `solid`: a client whose leaves are cut out inside the pixel shader sets
+    // neither alpha test nor alpha blend state. The first such model draw names
+    // its shader in the log, because `solid` on its own cannot be acted on.
+    Check(sway.find("g_reportedSolidModel") != sway.npos &&
+          sway.find("hash=0x%016llx). The HUD counts these as `solid`") != sway.npos &&
+          sway.find("inside the pixel shader") != sway.npos,
+        "a solid model draw names its shader once, so `solid` can be diagnosed");
+    // The caps under the caches. A dropped instance is measured again from
+    // scratch, so they are pinned as a number rather than left to drift: a
+    // client can place a lot of models.
+    Check(sway.find("kMaxInstances = 2048") != sway.npos && sway.find("kMaxGeometryProfiles = 2048") != sway.npos,
+        "the instance and geometry caches hold a forest's worth of models");
     // The build stamp is published by the Windows half (the overlay rows are
     // portable, so the time itself is read where Windows is available) and it is
     // both stamped on the rows and written to the log at startup.
@@ -1010,7 +1076,7 @@ static void TestConfigurationAndWiring()
         "the build stamp is the loaded dll's own file time");
     const auto hud = Read("src/Environment/WindDebug.h");
     for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
-                               "far", "new" })
+                               "far", "calm", "write", "new" })
         Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
             "every gate the device half counts has a name on the HUD row");
     Check(hud.find("inline const char* buildStamp") != hud.npos &&

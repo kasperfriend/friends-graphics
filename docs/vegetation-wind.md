@@ -16,17 +16,27 @@ its own.
   which drew them - the loaded `d3d9.dll`'s own file time, as in
   `ModernWoWRenderer 2026-10-15 18:32` - so a screenshot says which build it is
   about. The first row says how many models are
-  leaning out of how many foliage draws arrived (and how many solid model draws
-  were passed over); the second names **the gate that refused something**, and
+  leaning out of how many foliage draws arrived, how many of them are still
+  **waiting** to repeat themselves in a second frame before anything is written
+  (a number that is not a refusal and not the effect working either - it is what
+  turns an otherwise unanswerable "0 leaning of 40 drew, 0 solid"), and how many
+  solid model draws were passed over; the next row names **the gate that refused
+  something**, and
   only the gates that refused something, so "nothing sways" is answered on the
   spot instead of guessed at. The gates are named in the order they run - `decl`
   (a declaration that is not the client's skinned model layout), `world` (the
   WMO/terrain projection: scenery), `vs` (a shader this build could not prove is
   a model), `geo` (the draw's vertices could not be read), `depth` (a pass that
   writes no colour), `cam` (no frame camera, or another view's viewport), `pal`
-  (a palette that failed validation), `shape`/`size` (not a plant), `move` (the
-  client is animating it), `far` (beyond the range), `new` (shader variants
-  proven this frame, with their hashes in `ModernWoWRenderer.log`). They are also
+  (a palette that failed validation, including a c31 that is not a bone block at
+  all), `shape`/`size` (not a plant), `move` (the client is animating it), `far`
+  (beyond the range), `calm` (inside the range, but the wind and its gust field
+  leave a zero angle at that spot), `write` (the device refused the leaned
+  registers), `new` (shader variants
+  proven this frame, with their hashes in `ModernWoWRenderer.log`). A frame that
+  refuses at enough gates to fill the box continues the same list, in the same
+  order, on the next row (`Plants gate (more): ...`) instead of being clipped.
+  These rows are also
   drawn while the wind HUD itself is open, so the vegetation counts are visible
   from the wind tab.
 
@@ -149,7 +159,12 @@ single byte is written:
   and neither does any draw outside the shared wind's snapshot, so the whole
   discovery path is limited to the client's own transparent model materials. The
   material verdict is read from the device, so a pass that arrives through a
-  cached state block is judged by what the device is actually doing.
+  cached state block is judged by what the device is actually doing. This is also
+  the one refusal that could swallow a whole field while the HUD only says
+  `solid` - a client that cuts its leaves out inside the pixel shader sets
+  neither alpha test nor alpha blend state - so the first solid model draw of a
+  session is named in `ModernWoWRenderer.log` by shader hash, which is what makes
+  that report answerable.
 - **Depth-only passes.** A draw that writes no colour - the client's native
   shadow map above all, but also its occlusion fills and depth fills - is
   refused: nothing visible is being drawn, and the shadow cascades skin in the
@@ -301,7 +316,10 @@ Linux and is wired into CI, and it pins:
   made every plant a new, never-stable instance and left the HUD reading zero;
 - the HUD itself: every gate the device half counts has a name on the gate row,
   the row lists only the gates that refused something and in the order they run
-  in, both rows fit the box they are drawn in, and the build stamp row is drawn
+  in, a frame that refuses at every gate **continues the census on the next row
+  rather than clipping it**, every row fits the box it is drawn in, the waiting
+  count is printed next to what leans and never offered as a refusal, and the
+  build stamp row is drawn
   from the DLL's file time - published by the Windows half, absent when nothing
   published one - so a screenshot names the build it came from;
 - every counter the HUD can report is incremented by the device half, so a gate
@@ -327,9 +345,15 @@ In-client acceptance checks (Windows and the Ascension client):
    is not the client's skinned model layout, `world` for the scenery projection,
    `vs` for a shader this build could not prove, `geo` for vertices that could not
    be read, `depth` for a pass that writes no colour, `cam` for the frame
-   camera's own viewport, `pal` for a palette that failed validation,
+   camera's own viewport, `pal` for a palette that failed validation - including
+   a c31 that is not a bone block at all, which is what a client that keeps its
+   bones somewhere else looks like,
    `shape`/`size` for a model that did not look like a plant, `move` for a model
-   the client is animating, `far` for range). `new` above zero means a shader
+   the client is animating, `far` for range, `calm` for a plant the wind's own
+   gust field leaves with nothing to apply, `write` for a refused device write;
+   the list continues on the next row if it does not fit, and a `waiting` count
+   on the row above means those models are being measured, not refused).
+   `new` above zero means a shader
    variant was proven this frame: `/log ModernWoWRenderer.log` names its hash, and
    adding that hash to the captured list is what makes the next session accept it
    without reading constants.
@@ -350,6 +374,12 @@ In-client acceptance checks (Windows and the Ascension client):
 
 ## Known limitations
 
+- The instance and geometry caches hold 2048 placed models and 2048 batches
+  (`kMaxInstances`, `kMaxGeometryProfiles`). A frame that places more than that
+  drops the least recently seen entries, and a dropped instance has to repeat
+  itself twice again before it leans - which shows up as a `waiting` count on the
+  state row rather than as silence. The per-frame sweep is what keeps the maps
+  small in practice; the caps are only the floor under a flood.
 - Only the client's skinned M2 path sways. Terrain-bound grass that the client
   does not draw as a model, and anything the client itself deforms in a vertex
   shader outside the bone palette, is untouched.

@@ -123,8 +123,15 @@ inline constexpr unsigned kMaxStableFrames = 8;
 inline constexpr uint64_t kStaleFrames = 30;
 inline constexpr unsigned kMaxMeshProfiles = 512;
 inline constexpr unsigned kMaxShaderProfiles = 512;
-inline constexpr unsigned kMaxGeometryProfiles = 1024;
-inline constexpr unsigned kMaxInstances = 1024;
+// A client uses a handful of declarations and shaders, but it can place a lot
+// of models: a dense forest is hundreds of instances and several batches each.
+// The caps are the point at which the least recently seen entry is dropped, and
+// a dropped instance has to be measured again from scratch before it can lean -
+// which is exactly the "0 leaning of 200 drew, nothing refused" report the
+// `waiting` count exists to make readable. The frame sweep in BeginFrame is what
+// keeps these maps small in practice; the caps are only the floor under a flood.
+inline constexpr unsigned kMaxGeometryProfiles = 2048;
+inline constexpr unsigned kMaxInstances = 2048;
 // How many of a batch's sampled vertices the mesh-move test watches. Eight is
 // enough to see a re-uploaded particle batch and costs eight matrix multiplies.
 inline constexpr unsigned kGeometryPoseSamples = 8;
@@ -212,6 +219,7 @@ inline PaletteCache g_palette;
 inline bool g_anySwaying = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
+inline bool g_reportedSolidModel = false;
 
 inline renderer::VegetationStatus& Status() noexcept { return wind.Status(); }
 
@@ -257,6 +265,7 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_anySwaying = false;
     g_reportedUnreadableGeometry = false;
     g_reportedUnidentifiedShader = false;
+    g_reportedSolidModel = false;
     probe.Clear();
 }
 
@@ -830,6 +839,25 @@ struct Scope
         if (!foliageMaterial)
         {
             ++Status().skippedMaterial;
+            // One line, once, naming the shader of the first model draw whose
+            // material is neither alpha tested nor alpha blended. This is the
+            // only gate that can refuse the whole field quietly: a client that
+            // implements its cutouts inside the pixel shader (no alpha test and
+            // no alpha blend state at all) draws its grass exactly like this, and
+            // the HUD can only count them as `solid`. If the row says `solid` and
+            // the plants do not move, this hash is the one to look at.
+            if (!g_reportedSolidModel)
+            {
+                g_reportedSolidModel = true;
+                char text[320]{};
+                std::snprintf(text, sizeof(text),
+                    "Vegetation sway: a model draw arrived with a material that is neither alpha tested nor alpha "
+                    "blended, so it cannot reveal a plant (hash=0x%016llx). The HUD counts these as `solid`. If "
+                    "foliage stays still while the row shows `solid`, this is the material to look at - the client "
+                    "may be cutting its leaves out inside the pixel shader.",
+                    static_cast<unsigned long long>(shader.hash));
+                Log(text);
+            }
             if (!g_anySwaying) return;
         }
 
@@ -861,12 +889,20 @@ struct Scope
         }
 
         // The root block is every model's first bone, and it is also the palette
-        // cache key and the placement point: read once and reused.
+        // cache key and the placement point: read once and reused. Both ways it
+        // can fail here are palette refusals - a register that will not read,
+        // and a c31 that is not a bone block - and a palette refusal that
+        // counted nothing is exactly the report this feature has been burned by:
+        // `pal` also means "this client does not keep its bones at c31", which
+        // is a different bug from "no plant arrived at the gate".
         float root[3][4]{};
         if (FAILED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, root[0],
-                renderer::kM2RegistersPerBone)))
+                renderer::kM2RegistersPerBone)) ||
+            !renderer::M2BoneBlockValid(root[0], root[1], root[2]))
+        {
+            ++Status().skippedPalette;
             return;
-        if (!renderer::M2BoneBlockValid(root[0], root[1], root[2])) return;
+        }
         const uint64_t rootKey = detail::RootKey(root);
 
         if (!foliageMaterial)
@@ -918,7 +954,13 @@ struct Scope
         const renderer::M2DrawGeometry& model = geometry->geometry;
         float origin[3]{};
         if (!renderer::VegetationModelOrigin(root, &frame.viewRaw.m[0][0], &frame.cameraPosition.x, origin))
+        {
+            // A root block that is a bone block but whose translation is not a
+            // placement point this camera can reconstruct: a palette refusal,
+            // counted, for the same reason as the two above it.
+            ++Status().skippedPalette;
             return;
+        }
         float rootBasis[3][3]{};
         for (int row = 0; row < 3; ++row)
             for (int column = 0; column < 3; ++column)
@@ -1050,7 +1092,17 @@ struct Scope
             instance->poseFrame = frame.frameIndex;
             instance->poseBound = bound;
         }
-        if (instance->stable < 1 && !settings.animatedModels) return;
+        if (instance->stable < 1 && !settings.animatedModels)
+        {
+            // Measured, plant-shaped, standing still - and not leaning yet: the
+            // static-pose proof needs the model to repeat itself in a second
+            // frame before a byte is written, and a batch that revealed a new
+            // share of the skeleton starts that proof again. Counted, because
+            // "N drew, none leaning, nothing refused" is the one row a player
+            // can do nothing with: it means "being measured", not "refused".
+            ++Status().pending;
+            return;
+        }
 
         instance->swaying = true;
         g_anySwaying = true;
@@ -1101,24 +1153,48 @@ private:
         const float drift = std::sqrt((recovered[0] - bones.pivot[0]) * (recovered[0] - bones.pivot[0]) +
             (recovered[1] - bones.pivot[1]) * (recovered[1] - bones.pivot[1]) +
             (recovered[2] - bones.pivot[2]) * (recovered[2] - bones.pivot[2]));
-        if (!std::isfinite(drift) || drift > 1.f) return;
+        if (!std::isfinite(drift) || drift > 1.f)
+        {
+            // The pivot does not survive the round trip through this frame's view
+            // transform, so the lean cannot be built in the space this palette
+            // lives in. A palette refusal, counted like the others.
+            ++Status().skippedPalette;
+            return;
+        }
 
         const float distance = renderer::Length(pivot);
         const auto sample = wind.Sample(bones.pivot[0], bones.pivot[1], instance.height,
             instance.key, distance);
         if (!sample.Leaning())
         {
-            ++Status().skippedRange;
+            // Two different reports, and only one of them is about the range: a
+            // plant past DistanceYards fades to nothing by design, while a plant
+            // inside it can still be left with no angle at all by the wind's own
+            // gust field and strength right there. Counting both as `far` would
+            // send anyone reading the row after the wrong number.
+            if (distance > settings.distance) ++Status().skippedRange;
+            else ++Status().skippedCalm;
             return;
         }
         const renderer::Vec3 up = renderer::TransformDirectionRowVector({ 0.f, 0.f, 1.f }, frame.viewRaw.m);
         const renderer::Vec3 direction = renderer::TransformDirectionRowVector(
             { sample.directionX, sample.directionY, 0.f }, frame.viewRaw.m);
         const auto lean = renderer::BuildVegetationLean(&pivot.x, &up.x, &direction.x, sample.angleDegrees);
-        if (lean.Identity()) return;
-
+        // Neither of these can happen with a sampled angle above the threshold -
+        // the lean is built from it, and a validated palette has at least one
+        // bone - but a return that counts nothing is what this feature has been
+        // diagnosed through twice, so they are counted too.
+        if (lean.Identity())
+        {
+            ++Status().skippedCalm;
+            return;
+        }
         const unsigned blocks = std::min(readBones, renderer::kM2MaxBones);
-        if (!blocks) return;
+        if (!blocks)
+        {
+            ++Status().skippedPalette;
+            return;
+        }
         m_count = blocks * renderer::kM2RegistersPerBone;
         float leaned[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
         for (unsigned bone = 0; bone < blocks; ++bone)
@@ -1133,7 +1209,15 @@ private:
             std::memcpy(leaned + bone * renderer::kM2RegistersPerBone, out,
                 renderer::kM2RegistersPerBone * sizeof(float[4]));
         }
-        if (FAILED(m_device->SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, leaned[0], m_count))) return;
+        if (FAILED(m_device->SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, leaned[0], m_count)))
+        {
+            // The one failure that leaves the draw exactly as the client made it
+            // after the leaned blocks were built: counted on its own, because
+            // every other reason on the row is a judgement about the draw while
+            // this one is the device refusing the write.
+            ++Status().skippedWrite;
+            return;
+        }
         m_wrote = true;
         Status().maxAngle = std::max(Status().maxAngle, sample.angleDegrees);
         Status().lastHeight = instance.height;

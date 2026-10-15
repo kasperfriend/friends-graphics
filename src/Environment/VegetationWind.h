@@ -63,6 +63,7 @@ struct VegetationStatus
     unsigned candidates = 0;      // skinned M2 draw candidates considered this frame
     unsigned swaying = 0;         // instances leaning in this frame's last batch
     unsigned batches = 0;         // draw calls that received a lean this frame
+    unsigned pending = 0;         // measured and plant-shaped, waiting for the second frame
     unsigned skippedMaterial = 0; // solid material: not foliage, so not a candidate
     unsigned skippedCamera = 0;   // no accepted camera pose for the frame yet
     unsigned skippedViewport = 0; // drawn into a viewport that is not the frame camera's
@@ -76,6 +77,8 @@ struct VegetationStatus
     unsigned skippedShape = 0;    // too many bones, or too long/low to be a plant
     unsigned skippedSize = 0;     // outside the supported size range
     unsigned skippedRange = 0;    // beyond DistanceYards
+    unsigned skippedCalm = 0;     // inside the range, but the wind leaves a zero angle here
+    unsigned skippedWrite = 0;    // the leaned registers could not be written back
     unsigned learnedShaders = 0;  // new M2 layout variants accepted by proof this frame
     unsigned unbounded = 0;       // candidates whose palette could not be bounded
     float maxAngle = 0.f;         // largest angle applied this frame
