@@ -35,6 +35,7 @@ $jobs = @(
     @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource', 'volumeBlurPixelSource', 'volumeCopyPixelSource', 'volumeTemporalPixelSource', 'contactShadowPixelSource', 'rayCompositePixelSource', 'solarRadialPixelSource', 'localLightPixelSource', 'celestialMarkerPixelSource', 'postProcessPixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
+    @{ File = 'src\Effects\GlobalIllumination.cpp'; Names = @('kGlobalIlluminationIntegrateSource', 'kGlobalIlluminationCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
     @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
@@ -61,6 +62,7 @@ $budgets = @{
     'kCloudMarchSource'      = 496
     'kCloudShadowSource'     = 512
     'kCloudCompositeSource'  = 512
+    'kGlobalIlluminationIntegrateSource' = 512
     'kAmbientOcclusionSource' = 512
     'kAmbientOcclusionApplySource' = 512
 }

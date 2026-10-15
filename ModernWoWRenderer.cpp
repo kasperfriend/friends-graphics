@@ -33,6 +33,7 @@
 #include "NativeShadowDiagnostics.h"
 #include "src/Materials/MaterialCacheManager.h"
 #include "src/Lighting/LocalLightManager.h"
+#include "src/Effects/GlobalIllumination.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Environment/WindTuning.h"
@@ -188,7 +189,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
     const bool locationTuningChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
     if(locationTuningChanged)tuningoverlay::Configure(g_basePath);
-    if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
+    if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
@@ -199,7 +200,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
@@ -748,6 +749,7 @@ void Initialize()
     renderer::MaterialCacheManager::Instance().Configure(g_basePath);
     renderer::LocalLightManager::Instance().Configure(g_basePath);
     renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
+    renderer::GlobalIllumination::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
     if(unified){watereffect::hotkey=false;distancefog::hotkey=false;

@@ -68,8 +68,9 @@ static void ReachEverySetting(OverlayLayout& l) {
 int main() {
     // Pinned so adding a tab is a deliberate act: the loop below then proves
     // every control in it is still reachable and hit-testable at every
-    // supported resolution and DPI. Was 10 before AMBIENT OCCLUSION.
-    assert(Tabs().size()==11);
+    // supported resolution and DPI. Was 10 before AMBIENT OCCLUSION, 11
+    // before GLOBAL ILLUMINATION.
+    assert(Tabs().size()==12);
     std::set<std::pair<std::wstring,std::wstring>> keys;
     for(const auto& item:items)if(item.kind!=KIND_HEADER) {
         assert(keys.emplace(item.section,item.key).second);

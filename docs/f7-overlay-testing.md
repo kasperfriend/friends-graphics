@@ -1,11 +1,12 @@
 # F7 overlay verification
 
-The overlay has ten left-side category tabs: Atmosphere & God Rays, Local
+The overlay has twelve left-side category tabs: Atmosphere & God Rays, Local
 Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
-Local Lighting, Dynamic Shadows, AI Materials & Relief, and Image & Color.
-`OverlayItems.h` holds all 101 controls with their keys, defaults, ranges and
-save semantics - the original 69 plus the wind, cloud-resolution and water
-controls added since. `OverlayLayout.h` is platform-independent and supplies the
+Local Lighting, Global Illumination, Dynamic Shadows, Ambient Occlusion,
+AI Materials & Relief, and Image & Color.
+`OverlayItems.h` holds all 129 controls with their keys, defaults, ranges and
+save semantics - the original 69 plus the wind, cloud-resolution, water,
+ambient-occlusion and global-illumination controls added since. `OverlayLayout.h` is platform-independent and supplies the
 rectangles used by both Direct3D drawing and Win32 hit testing, including the
 scrollbar and resize handle. Window geometry and tab scroll positions last for
 the client session; they are not written to the graphics preset.

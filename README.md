@@ -73,6 +73,7 @@ of the cloud shader, at the shipped defaults.*
 - Strong local lights contribute to volumetric scattering in fog and mist.
 - Held torches and lanterns retain their light while the player briefly occludes the source from the camera.
 - Screen-space occlusion and depth-derived normals keep the effect attached to visible geometry.
+- Cheap screen-space global illumination adds sky ambient, one-bounce colour from nearby surfaces, soft lamp bleed and cavity occlusion, following dynamic lights, native and cloud shadows, and live overcast; see [docs/global-illumination.md](docs/global-illumination.md).
 
 ### Ambient occlusion
 
