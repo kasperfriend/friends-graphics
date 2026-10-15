@@ -29,8 +29,8 @@ namespace renderer::water
     //  * The long swell is a sum of ANALYTIC, DIRECTIONAL sine trains - not noise
     //    - because rounded forms with lit backs and shaded faces is what a real
     //    sea looks like, because a sine gives exact slopes for free, and because
-    //    the vertex stage can then displace the very same waves the shading
-    //    lights, so a crest and its highlight cannot drift apart. Each train
+    //    the vertex stage can displace the same long waves the shading receives
+    //    from it, so a crest and its highlight cannot drift apart. Each train
     //    carries its own direction, so the surface is a crossing sea rather than
     //    two perpendicular stripes (which is what a single axis-aligned pair reads
     //    as: wave curves drawn on a flat plane).
@@ -56,13 +56,15 @@ namespace renderer::water
     inline constexpr float kLatticeYaw = 0.62f;   // radians, world +X to lattice row 0
 
     // ---- the swell trains ---------------------------------------------------
-    // One table, three readings of it: the vertex stage displaces the two long
-    // ones (the client's liquid grid is ~4 yards apart, so an eleven yard wave is
-    // the shortest it can carry without faceting), the pixel stage shades all eight
-    // and wraps its phases against them, and this header advances them. Directions
-    // are unit vectors in lattice space, wavelengths are in cells, weights are the
-    // share of the authored amplitude each train carries. Both shaders spell the
-    // same numbers as literals; tools/WaterRegression.cpp pins the spelling.
+    // One table, three readings of it: the vertex stage evaluates/displaces the two
+    // long ones (the client's liquid grid is ~4 yards apart, so an eleven yard wave
+    // is the shortest it can carry without faceting) and sends their sin/cos pairs
+    // to the pixel stage; that stage renormalizes them, evaluates the six short ones
+    // and shades the complete eight-train sum; this header advances all eight.
+    // Directions are unit vectors in lattice space, wavelengths are in cells, weights
+    // are the share of the authored amplitude each train carries. The vertex literals,
+    // the pixel stage's short-train literals and this table are pinned together by
+    // tools/WaterRegression.cpp.
     //
     // Why eight and not three: three sinusoids of comparable height are a rhythm, and
     // a rhythm is precisely what "line by line of waves going and going" was. Three
@@ -386,7 +388,7 @@ namespace renderer::water
         return field;
     }
 
-    // ---- the swell both stages evaluate --------------------------------------
+    // ---- the complete swell assembled across both stages ---------------------
     struct SwellSample
     {
         float height = 0.f;             // sum of weight*sin, in units of the authored amplitude
@@ -394,11 +396,11 @@ namespace renderer::water
         float pinch = 0.f;              // sum of weight*k*sin: times sigma this is 1 - the Jacobian
     };
 
-    // The angle of one train at one lattice point, in radians. Both shader stages and
-    // this header spell the same expression: k over the train's own wavelength, times
-    // the coordinate projected onto the train's own direction, plus the wrapped phase
-    // and the train's fixed start. Keeping it in one place is what makes a displaced
-    // crest and the light on it the same crest.
+    // The angle of one train at one lattice point, in radians. The shader stage that
+    // owns each train and this header spell the same expression: k over the train's own
+    // wavelength, times the coordinate projected onto its direction, plus the wrapped
+    // phase and fixed start. Keeping those copies pinned is what makes a displaced crest
+    // and the light on it the same crest.
     inline float SwellTheta(int train, float cellX, float cellY, const float phase[kTrainCount]) noexcept
     {
         return kTrainRadians[train]
@@ -424,9 +426,10 @@ namespace renderer::water
 
     // The largest |height| the table can reach is the sum of its weights, so this divisor
     // maps a swell sample into -0.5..0.5 and a crest-reading `swell01` into 0..1 with calm
-    // water exactly at 0.5. Both stages multiply by it, so a whitecap threshold means the
-    // same thing at any wave size and any sea state. The grouping envelope above can push a
-    // crest kGroupMax past that maximum - by one seventh of the authored wave - and the
+    // water exactly at 0.5. The pixel stage and CPU preview multiply by it, so a whitecap
+    // threshold means the same thing at any wave size and any sea state. The grouping
+    // envelope above can push a crest kGroupMax past that maximum - by one seventh of the
+    // authored wave - and the
     // crest masks saturate there, which is the intended reading: the tallest crest of a set
     // is over the whitecap threshold, and the water at the end of it is under it.
     inline constexpr float kSwellToUnit = 1.f

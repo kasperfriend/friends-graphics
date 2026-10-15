@@ -106,7 +106,35 @@ simulation time; no unverified in-game time-of-day memory is read.
 The existing cloud/water offline preview scenes remain **fixed, unlinked
 reference scenes**, not simulations of a live dynamic wind history. The wind
 regression exercises the actual shared wind, cloud policy and wave integrator.
-No water/cloud shader ABI or instruction count changes are needed.
+The wind link itself required no water/cloud shader ABI change; later water
+performance work may change where an already-linked wave is evaluated without
+changing its shared-wind input.
+
+## Coupling audit (2026-10-15)
+
+The Booty Bay water-performance pass re-traced both consumers rather than
+assuming the WIND HUD implied linkage:
+
+1. `ModernWoWRenderer.cpp` advances `WindSystem` once after rendering and
+   publishes the resulting immutable sequence in `FrameContext` for the next
+   frame. `ResetForNewFrame` deliberately retains that snapshot.
+2. `VolumetricClouds::Render` calls `ApplyCloudWind` only for a new sequence.
+   The shared direction/strength advances base, detail and weather-map offsets;
+   `shear` separately offsets the top layer. The shadow/light field uses those
+   same offsets, so it cannot drift away from the visible deck.
+3. `watereffect::Present` reads the same snapshot. `WaterSeaState` converts its
+   strength and weather into wave energy, future phase speed, cross-current and
+   foam wind; `WaveMotion` consumes its direction and advances all long swell,
+   short swell, warp, grouping, chop and UV phases once.
+4. `AffectClouds=0` and `AffectWaves=0` independently select each effect's legacy
+   path. They do not mutate the shared snapshot or accidentally disable the
+   other consumer.
+
+`tools/WindRegression.cpp` pins all eight world-axis travel signs for both
+consumers, cloud strength/shear, wave direction and energy, sequence-once
+advancement, reload/disable continuity, frame publication order and the actual
+production call sites. Both coupling links are therefore present and synchronized;
+a live-client all-heading check remains the visual acceptance test.
 
 ## Validation
 

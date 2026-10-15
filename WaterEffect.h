@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -51,6 +52,12 @@ float clarityPercent=100.f,windStrengthPercent=100.f,roughnessPercent=100.f;
 float sheenPercent=50.f,shoalFoamPercent=100.f,sunDiscPercent=40.f,foamBrightPercent=100.f;
 float sparklePercent=100.f;
 unsigned waterColourTint=0x808080u,deepColour=0x0e2a28u,absorptionColour=0xff8c6bu;
+// Whether the current location has an explicit player-authored colour override.
+// Resolve these once on tuning/location reload: asking the Windows profile API
+// up to nine times for EVERY harbour tile was avoidable render-thread I/O.
+// The location cannot change in the middle of a draw; Sync() always causes
+// ReloadTuning before the next frame.
+bool scopedWaterColour=false,scopedDeepColour=false,scopedAbsorptionColour=false;
 // The sea state: what this zone asked for and what the sky is doing, eased once per frame in
 // Present() and multiplied into the controls below. It is the identity when a zone is untuned and
 // the weather is clear, which is what lets `ZoneWaves` default to on.
@@ -80,6 +87,18 @@ IDirect3DSurface9* waterMaskSurface=nullptr;
 IDirect3DSurface9* waterDepthSurface=nullptr;
 D3DSURFACE_DESC waterTargetDesc{};
 bool waterTargetDescValid=false;
+// Selected local lights and the captured main view are immutable throughout a
+// frame. Transforming the same eight lights into the same view once per liquid
+// tile is wasted CPU work in cities; cache the 17-register upload payload by
+// frame and the manager's content signature. D3D state is still saved/restored
+// per draw because the client may change it between tiles.
+struct LocalLightConstantCache {
+    std::uint64_t frameIndex=0,selectionSignature=0;
+    float intensityScale=0,reflection=0;
+    bool managerEnabled=false,reflections=false,cameraValid=false,viewValid=false,valid=false;
+    float values[68]{};
+};
+LocalLightConstantCache localLightConstantCache;
 struct WaterMrtDeviceInfo {
     IDirect3DDevice9* device=nullptr;
     bool checked=false;
@@ -209,8 +228,13 @@ static const float kGroupScale=0.01347826;
 // X5622/X5300 rather than with anything a reader can guess from the source. The envelope is
 // therefore packed into the lanes that were already there - the gain rides in waveWarp.w, the
 // gradient in worldRel.zw - because both of those registers exist for other reasons and each
-// had a free component. Costs nothing; a twelfth interpolant costs the whole shader.
-struct Output {float4 pos:POSITION;float4 color:COLOR0;float2 uv0:TEXCOORD0;float2 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float4 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float4 waveWarp:TEXCOORD7;};
+// had a free component. The native UV registers also had four unused lanes. They carry the
+// sine/cosine pairs of the two long trains this stage ALREADY evaluates for displacement.
+// The pixel stage renormalizes each interpolated pair before assembling height, slope and pinch:
+// this follows the original analytic curve much more closely than interpolating those aggregates,
+// while still removing the expensive per-pixel projections and sin/cos evaluations. It adds no
+// interpolator or texture sample.
+struct Output {float4 pos:POSITION;float4 color:COLOR0;float4 uv0:TEXCOORD0;float4 uv1:TEXCOORD1;float fog:FOG;float3 viewPos:TEXCOORD2;float3 viewNormal:TEXCOORD3;float4 worldRel:TEXCOORD4;float3 waveTangent:TEXCOORD5;float3 waveBitangent:TEXCOORD6;float4 waveWarp:TEXCOORD7;};
 Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1) {
     Output o;
     float4 p=modelView[0]*pos.x+modelView[1]*pos.y+modelView[2]*pos.z+modelView[3];
@@ -274,7 +298,12 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     float sinA,cosA,sinB,cosB;
     sincos(thetaA,sinA,cosA);
     sincos(thetaB,sinB,cosB);
-    float lift=waveControl.x*(kWeightA*sinA+kWeightB*sinB)*gain;
+    // These two trig pairs used to be evaluated a second time per pixel. Pack
+    // them into spare UV lanes; the pixel stage normalizes the interpolated
+    // pairs, combines them with the six shorter trains and applies the shared
+    // chain/product rule. The aggregate remains here only for mesh lift.
+    float longSwell=kWeightA*sinA+kWeightB*sinB;
+    float lift=waveControl.x*longSwell*gain;
     float2 warpedDirA=kDirA+6.5*dot(kDirA,float2(.6,.8))*warpGradient;
     float2 warpedDirB=kDirB+6.5*dot(kDirB,float2(.6,.8))*warpGradient;
     float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB)*gain;
@@ -287,8 +316,10 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     p.xyz+=axisZ*lift+axisX*lateral.x+axisY*lateral.y;
     o.pos=projection[0]*p.x+projection[1]*p.y+projection[2]*p.z+projection[3]*p.w;
     o.fog=min(pow(max(p.z*fogParams.x+fogParams.y,0),fogParams.z),1);
-    o.uv1=uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy;
-    o.uv0=uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy;
+    // xy keep the client's native UVs byte-for-byte. zw are otherwise unused
+    // interpolator lanes, so carrying A/B's sin/cos pairs costs no output.
+    o.uv1=float4(uvAX.xy*uv0.x+uvAY.xy*uv0.y+uvAOffset.xy,sinB,cosB);
+    o.uv0=float4(uvBX.xy*uv1.x+uvBY.xy*uv1.y+uvBOffset.xy,sinA,cosA);
     float3 n=modelView[0].xyz*normal.x+modelView[1].xyz*normal.y+modelView[2].xyz*normal.z;
     o.color=float4(diffuse.rgb*saturate(dot(-lightDirection.xyz,n))+ambient.rgb,1)*color;
     // viewPos is the DISPLACED point, so the surface depth the atmosphere marches to and
@@ -344,8 +375,10 @@ float4 foreverStyle:register(c208);
 // about the world ORIGIN, which at ten thousand yards out is a translation of hundreds of
 // yards per second. Wave directions come from the trains below instead.
 float4 waveLattice:register(c209);
-// xy=chop phase in cells, wrapped into the noise lattice; zw=the phase of swell trains A
-// and B, in cells along their own directions, wrapped into their own wavelengths.
+// xy=chop phase in cells, wrapped into the noise lattice. zw still mirror the
+// vertex stage's A/B phases for ABI stability, but the pixel stage now receives
+// those two already-evaluated long trains through spare UV lanes instead of
+// spending the same sin/cos work again for every covered pixel.
 float4 wavePhase:register(c210);
 // xy=drift of the client's detail map in its uv, z=the phase of swell train C (same
 // units as c210.zw), w=the wave gate: 0 with WAVES off, so no slope, no distortion, no
@@ -412,24 +445,20 @@ float3 noiseGradient(float2 p) {
 // intact. The grouping envelope below then decides how much of that swell each patch of
 // water is carrying, which is the part a sine comb can never fake.
 //
-// Eight trains evaluated one at a time would cost the pixel stage eight copies of the same
-// five operations, so they are evaluated as three BATCHES of two, four and two. A batch is
-// spelled with one vector per COMPONENT of the directions - kDirX4 holds the x of trains
-// C, D, E and F, kDirY4 their y - which buys two things: `plane.x*kDirX+plane.y*kDirY`
-// projects one point onto every train of the batch in two instructions, and the same two
-// vectors turn the batch of slopes back into one gradient with two dot products, so a
-// direction is spelled ONCE for both halves instead of twice as a matrix and its
-// transpose. (No matrix type is used, deliberately: HLSL's rows-versus-columns
-// convention is exactly the kind of thing a reader has to look up, and a direction read
-// in the wrong order is a sea whose crests lean one way and whose light leans another.)
-// tools/WaterRegression.cpp holds these eight numbers, the vertex stage's two-train copy,
-// and the CPU table in src/Water/WaveField.h to each other, because a wavelength that
-// moves in one place and not the others slides a lit crest off a displaced one.
+// Eight trains evaluated one at a time would cost eight copies of the same five
+// operations. A/B are already evaluated for geometry in the vertex stage, so their
+// sin/cos pairs arrive in uv0.zw / uv1.zw instead of being evaluated twice. The
+// six shading-only trains stay in vector batches of four and two. One vector per
+// COMPONENT of the directions lets `plane.x*kDirX+plane.y*kDirY` project all trains
+// in a batch in two instructions, and turns their slopes back into one gradient with
+// two dot products. The complete eight-train interference and every authored weight
+// are unchanged; only the stage doing redundant long-wave work changed.
+// tools/WaterRegression.cpp holds the packed A/B expressions, these six literals and
+// the CPU table in src/Water/WaveField.h to each other.
 static const float2 kDirX01=float2(1.0,0.8290376);      // trains A and B: 0 and -34 degrees
 static const float2 kDirY01=float2(0.0,-0.5591929);
-static const float2 kRad01=float2(0.39269908,0.54636394);   // 2pi over 16 and 11.5 cells
+static const float2 kRad01=float2(0.39269908,0.54636394);
 static const float2 kWgt01=float2(1.0,0.62);
-static const float2 kStart01=float2(0.0,4.255);             // .37 of train B's own wavelength
 static const float4 kDirX4=float4(0.9335804,0.6819984,0.1218693,-0.3420201);   // 21, 47, 83, 110 degrees
 static const float4 kDirY4=float4(0.3583679,0.7313537,0.9925462,0.9396926);
 static const float4 kRad4=float4(0.78539816,1.08330781,1.42799666,1.84799568);
@@ -460,12 +489,13 @@ static const float kGroupDepth=0.62;
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
 struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
-WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float4 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float4 waveWarp:TEXCOORD7) {
+WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float4 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float4 waveWarp:TEXCOORD7) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
-    float4 base=tex2D(baseTexture,uv0);
+    // uv0.zw/uv1.zw carry long-wave values; native texture addressing remains xy.
+    float4 base=tex2D(baseTexture,uv0.xy);
     // One world-anchored lattice carries every scale. The swell is analytic - rounded
     // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
     // crest and the light on it cannot drift apart - and only the chop on top of it is
@@ -492,19 +522,23 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
     float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
-    // The three batches of the sea band. Eight directions, eight wavelengths, eight starts.
-    float2 t01=kRad01*(swellPlane.x*kDirX01+swellPlane.y*kDirY01+wavePhase.zw+kStart01);
+    // The vertex stage has already evaluated A/B while displacing the mesh.
+    // Renormalize each interpolated (sin,cos) pair back onto the unit circle;
+    // this retains the original analytic long-wave shape to sub-percent RMS on
+    // the client's ~4-yard liquid grid, without repeating either sin/cos here.
+    float2 trigA=uv0.zw*rsqrt(max(dot(uv0.zw,uv0.zw),1e-4));
+    float2 trigB=uv1.zw*rsqrt(max(dot(uv1.zw,uv1.zw),1e-4));
+    float2 sin01=float2(trigA.x,trigB.x),cos01=float2(trigA.y,trigB.y);
+    // Evaluate only the six shorter, shading-only trains here, in batches of
+    // four and two. The sum remains the same eight-direction authored band.
     float4 t4=kRad4*(swellPlane.x*kDirX4+swellPlane.y*kDirY4+waveSwell+kStart4);
     float2 t2=kRad2*(swellPlane.x*kDirX2+swellPlane.y*kDirY2+waveSwell2.xy+kStart2);
-    float2 sin01,cos01;
     float4 sin4,cos4;
     float2 sin2,cos2;
-    sincos(t01,sin01,cos01);
     sincos(t4,sin4,cos4);
     sincos(t2,sin2,cos2);
     float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);
-    // The exact gradient of that height field, in lattice axes, times the authored swell
-    // response: the same slope the geometry was lifted by, so shading and silhouette agree.
+    // Reconstructed long-wave gradient plus the exact analytic short waves.
     float2 swellSlope=float2(dot(kWgt01*kRad01*cos01,kDirX01)+dot(kWgt4*kRad4*cos4,kDirX4)+dot(kWgt2*kRad2*cos2,kDirX2),
                              dot(kWgt01*kRad01*cos01,kDirY01)+dot(kWgt4*kRad4*cos4,kDirY4)+dot(kWgt2*kRad2*cos2,kDirY2));
     // Chain rule through p' = p + direction * warp(p), using the interpolated
@@ -548,7 +582,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     // masks and the sun road stay alive at range.
     float2 detail=float2(lerp(.5,ripple.x,filter),swell*kSwellToUnit+.5);
     float2 offset=slopes*controls.y;
-    float3 surface=tex2D(surfaceTexture,uv1+offset+waveFlow.xy).rgb;
+    float3 surface=tex2D(surfaceTexture,uv1.xy+offset+waveFlow.xy).rgb;
     float3 rgb=surface+color.rgb*base.rgb;
     float3 v=safeNormalize(-viewPos);
     float3 n=safeNormalize(viewNormal);
@@ -689,6 +723,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
                                    .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
             float inside=step(.05,samplePosition.z)*saturate(min(min(sampleUV.x,sampleUV.y),
                                       min(1-sampleUV.x,1-sampleUV.y))*8);
+            [branch] if(inside<=0) continue;
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
@@ -698,8 +733,17 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             // step: the first sample inside the band wins and later steps cannot
             // overwrite it, which is the right answer for a surface this smooth.
             float confidence=inside*step(-thickness,difference)*step(difference,thickness*.5);
-            hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,confidence*(1-hit));
-            hit=max(hit,confidence);
+            // A miss must not fetch full-resolution scene colour. The previous
+            // arithmetic sampled it on all eight steps even though a zero lerp
+            // discarded seven or eight of those reads. Branching only around
+            // the colour fetch is output-identical, and a full first hit makes
+            // every later contribution exactly zero, so stop the march there.
+            [branch] if(confidence>0) {
+                hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,
+                              confidence*(1-hit));
+                hit=max(hit,confidence);
+                if(hit>=1.0) break;
+            }
         }
         reflected=lerp(environment,hitColor,saturate(hit*1.8));
     }
@@ -744,6 +788,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
                                   .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
             float inside=step(.05,lightSample.z)*saturate(min(min(lightUV.x,lightUV.y),
                                     min(1-lightUV.x,1-lightUV.y))*8);
+            [branch] if(inside<=0) continue;
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
             // Anything nearer than the sample point occludes the source: a single
@@ -751,6 +796,10 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
             // an in-range test, which cost three more slots to say the same thing.
             float blocked=inside*step(blockerZ+1.5,lightSample.z);
             lightVisibility*=1.0-blocked;
+            // Once an interior sample is blocked the product is exactly zero;
+            // the remaining depth reads cannot change it. Edge-faded samples
+            // remain fractional and continue exactly as before.
+            if(lightVisibility<=0) break;
         }
     }
     celestialPath*=lightVisibility;
@@ -784,8 +833,15 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     [loop]for(int li=0;li<8;++li){
         if(li>=(int)localControl.x)break;
         float3 delta=localPosition[li].xyz-viewPos;
-        float distance=length(delta);float3 toLight=delta/max(distance,.001);
-        float reach=saturate(1-distance/max(localPosition[li].w,.01));
+        float radius=max(localPosition[li].w,.01);
+        float distanceSquared=dot(delta,delta);
+        // Selected lights are camera-local, not water-tile-local. In a dense
+        // harbour most of them have zero reach for most water pixels. The old
+        // loop still normalized a vector and evaluated pow(,64) before
+        // multiplying by that exact zero; skip only that mathematically dead work.
+        [branch] if(distanceSquared>=radius*radius) continue;
+        float distance=sqrt(distanceSquared);float3 toLight=delta/max(distance,.001);
+        float reach=saturate(1-distance/radius);
         float specular=pow(saturate(dot(wave,safeNormalize(toLight+v))),64);
         float fresnelLocal=.04+.96*foreverFresnel*foreverFresnel;
         localReflection+=localColor[li].rgb*localColor[li].w*specular*fresnelLocal*
@@ -830,6 +886,7 @@ unsigned ReadTuningColour(const wchar_t* key,unsigned fallback){
 }
 int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"Water",key,fallback,mainIni.c_str());}
 void ReloadTuning(){
+    localLightConstantCache.valid=false;
     // Match the menu's source and default exactly. An obsolete Enabled=0 in
     // ModernWoWRenderer.ini must not veto a live (including per-location) ON.
     effectEnabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",1,tuningIni.c_str())!=0;
@@ -866,6 +923,11 @@ void ReloadTuning(){
     waterColourTint=ReadTuningColour(L"WaterColour",0x808080u);
     deepColour=ReadTuningColour(L"DeepColour",0x0e2a28u);
     absorptionColour=ReadTuningColour(L"AbsorptionColour",0xff8c6bu);
+    // Profile-file queries belong on reload, never in the draw loop. Sync()
+    // invokes this function whenever the verified location/scope changes.
+    scopedWaterColour=renderer::locationtuning::HasScopedValue(L"Water",L"WaterColour");
+    scopedDeepColour=renderer::locationtuning::HasScopedValue(L"Water",L"DeepColour");
+    scopedAbsorptionColour=renderer::locationtuning::HasScopedValue(L"Water",L"AbsorptionColour");
     waveSofteningPercent=float(std::clamp(ReadTuning(L"WaveSofteningPercent",100),0,400));
     // 0=off, 1=solid magenta (confirms this pixel is our water shader),
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
@@ -967,6 +1029,7 @@ inline void Reset(IDirect3DDevice9* d) {
     // Wind, sea state and accumulated phases survive GPU loss. They are CPU
     // state, not device resources; forgetting them would pop every crest.
     lastWaveAnchor.valid=false;
+    localLightConstantCache.valid=false;
     if(cachedShaderDevice == d) {
         cachedReplacementPS.Reset();
         cachedReplacementVS.Reset();
@@ -995,8 +1058,11 @@ struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
-    // c200..c218 for the pixel shader, c200..c204 for the vertex shader.
-    float old[76]{},oldVertexControls[20]{},oldLocalLights[68]{};bool localLightsSaved=false;
+    // Save each touched constant span as one block. Pixel c180..c218 includes
+    // local lights, the untouched c197..c199 gap, and all water controls, so
+    // setup and restoration each cross the D3D9 driver only once.
+    float oldPixelConstants[156]{},oldVertexControls[20]{};
+    bool pixelConstantsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -1083,12 +1149,21 @@ struct Scope {
             if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
             if(!original || !originalVertex)return;
-            if(FAILED(d->GetPixelShaderConstantF(200,old,19)))return;
-            if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
-            localLightsSaved=true;
+            if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,39)))return;
+            pixelConstantsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
-            float controls[76]={0.f,strength,normalStrength,specularStrength};
-            if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
+            // c5..c8 provide this draw's model-view transform; c33 and c35
+            // provide native lighting. Fetch their enclosing span once instead
+            // of crossing the D3D9 driver three times for scattered reads.
+            float nativeVertexConstants[31][4]{};
+            if(FAILED(d->GetVertexShaderConstantF(5,nativeVertexConstants[0],31)))return;
+            float pixelConstants[39][4];
+            std::memcpy(pixelConstants,oldPixelConstants,sizeof(pixelConstants));
+            float* controls=pixelConstants[20]; // c200 within the c180 block
+            std::fill(controls,controls+76,0.f);
+            controls[1]=strength;controls[2]=normalStrength;controls[3]=specularStrength;
+            std::memcpy(controls+4,nativeVertexConstants[28],sizeof(float)*4); // c33
+            std::memcpy(controls+8,nativeVertexConstants[30],sizeof(float)*4); // c35
             // Prefer CelestialTracker's confirmed sun/moon direction (from
             // the actual disc draw call, same source the sky rays/glow use)
             // over WoW's own light-direction constant for the glint path -
@@ -1153,8 +1228,8 @@ struct Scope {
             // what makes the vertex stage's camera-relative coordinate and this phase two
             // halves of one anchor instead of two approximations of one.
             float modelView[4][4]{};
-            auto anchor=SUCCEEDED(d->GetVertexShaderConstantF(5,&modelView[0][0],4))
-                ? renderer::water::AnchorFromModelView(modelView) : renderer::water::DrawAnchor{};
+            std::memcpy(modelView,nativeVertexConstants,sizeof(modelView));
+            auto anchor=renderer::water::AnchorFromModelView(modelView);
             if(!anchor.valid) {
                 // No rigid basis on this draw (an unfilled constant register, a fixture):
                 // fall back to the captured camera, which is at least the right world, and
@@ -1229,11 +1304,11 @@ struct Scope {
             // so this is a copy, not a second conversion that could drift from it.
             if(waveFrame.environment.water.authored) {
                 const auto& zoneWater=waveFrame.environment.water;
-                if(!renderer::locationtuning::HasScopedValue(L"Water",L"WaterColour"))
+                if(!scopedWaterColour)
                     {controls[56]=zoneWater.tint[0];controls[57]=zoneWater.tint[1];controls[58]=zoneWater.tint[2];}
-                if(!renderer::locationtuning::HasScopedValue(L"Water",L"DeepColour"))
+                if(!scopedDeepColour)
                     {controls[60]=zoneWater.deep[0];controls[61]=zoneWater.deep[1];controls[62]=zoneWater.deep[2];}
-                if(!renderer::locationtuning::HasScopedValue(L"Water",L"AbsorptionColour"))
+                if(!scopedAbsorptionColour)
                     {controls[64]=zoneWater.absorption[0];controls[65]=zoneWater.absorption[1];controls[66]=zoneWater.absorption[2];}
             }
             // c217: the four trains only the shading carries, in one contiguous float4.
@@ -1300,20 +1375,37 @@ struct Scope {
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
-            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,19))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,5))){Restore();return;}
+            if(FAILED(d->SetVertexShader(replacementVertex.Get()))||
+               FAILED(d->SetVertexShaderConstantF(200,vertexControls,5))){Restore();return;}
             {
-                float lights[17][4]{};
                 const auto& frame=renderer::FrameContext::Current();
                 const auto& manager=renderer::LocalLightManager::Instance();
-                if(reflectionsEnabled&&manager.Enabled()&&frame.cameraValid&&frame.viewRawValid){
-                    const auto& selected=manager.Selected();unsigned count=std::min<unsigned>(8,unsigned(selected.size()));
-                    for(unsigned i=0;i<count;++i){const auto& light=selected[i];const auto& m=frame.viewRaw.m;
-                        for(int axis=0;axis<3;++axis)lights[i][axis]=light.position.x*m[0][axis]+light.position.y*m[1][axis]+light.position.z*m[2][axis]+m[3][axis];
-                        lights[i][3]=light.radius;lights[8+i][0]=light.color.x;lights[8+i][1]=light.color.y;lights[8+i][2]=light.color.z;lights[8+i][3]=light.intensity*manager.IntensityScale();
+                const std::uint64_t signature=manager.SelectionSignature();
+                const float intensity=manager.IntensityScale();
+                auto& cache=localLightConstantCache;
+                if(!cache.valid||cache.frameIndex!=frame.frameIndex||
+                   cache.selectionSignature!=signature||cache.intensityScale!=intensity||
+                   cache.reflection!=reflectionStrength||cache.managerEnabled!=manager.Enabled()||
+                   cache.reflections!=reflectionsEnabled||cache.cameraValid!=frame.cameraValid||
+                   cache.viewValid!=frame.viewRawValid) {
+                    std::fill(cache.values,cache.values+68,0.f);
+                    if(reflectionsEnabled&&manager.Enabled()&&frame.cameraValid&&frame.viewRawValid){
+                        const auto& selected=manager.Selected();unsigned count=std::min<unsigned>(8,unsigned(selected.size()));
+                        for(unsigned i=0;i<count;++i){const auto& light=selected[i];const auto& m=frame.viewRaw.m;
+                            for(int axis=0;axis<3;++axis)cache.values[i*4+axis]=light.position.x*m[0][axis]+light.position.y*m[1][axis]+light.position.z*m[2][axis]+m[3][axis];
+                            cache.values[i*4+3]=light.radius;cache.values[(8+i)*4]=light.color.x;cache.values[(8+i)*4+1]=light.color.y;cache.values[(8+i)*4+2]=light.color.z;cache.values[(8+i)*4+3]=light.intensity*intensity;
+                        }
+                        cache.values[64]=float(count);cache.values[65]=reflectionStrength;
                     }
-                    lights[16][0]=float(count);lights[16][1]=reflectionStrength;
+                    cache.frameIndex=frame.frameIndex;cache.selectionSignature=signature;
+                    cache.intensityScale=intensity;cache.reflection=reflectionStrength;
+                    cache.managerEnabled=manager.Enabled();cache.reflections=reflectionsEnabled;
+                    cache.cameraValid=frame.cameraValid;cache.viewValid=frame.viewRawValid;cache.valid=true;
                 }
-                if(FAILED(d->SetPixelShaderConstantF(180,lights[0],17))){Restore();return;}
+                // Preserve c197..c199 from the saved block, splice in the cached
+                // lights and water controls, then upload c180..c218 in one call.
+                std::memcpy(pixelConstants,cache.values,sizeof(cache.values));
+                if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],39))){Restore();return;}
             }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
@@ -1325,10 +1417,9 @@ struct Scope {
     void Restore() noexcept {
         if(!device)return;
         RestoreTargets();
-        if(localLightsSaved)device->SetPixelShaderConstantF(180,oldLocalLights,17);
         device->SetPixelShader(original.Get());
         device->SetVertexShader(originalVertex.Get());
-        device->SetPixelShaderConstantF(200,old,19);
+        if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
         device->SetVertexShaderConstantF(200,oldVertexControls,5);
         if(extraState) {
             const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
@@ -1339,7 +1430,7 @@ struct Scope {
                     device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
             }
         }
-        device=nullptr;extraState=localLightsSaved=false;
+        device=nullptr;extraState=pixelConstantsSaved=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

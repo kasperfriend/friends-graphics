@@ -315,11 +315,12 @@ int main() try {
     // slid vertex is a clipped pixel - the OFF readbacks below have to measure colour on
     // visible native geometry, not an empty target. z and w stay distinctive sentinels so
     // the restore check still compares against something no real draw would write.
-    float savedPS[36],savedVS[4]={0,0,73,74},savedLights[68];
-    for(unsigned i=0;i<36;++i)savedPS[i]=float(i+1);
-    for(unsigned i=0;i<68;++i)savedLights[i]=float(i+80);
-    Check(d->SetPixelShaderConstantF(200,savedPS,9));Check(d->SetVertexShaderConstantF(200,savedVS,1));
-    Check(d->SetPixelShaderConstantF(180,savedLights,17));
+    float savedPixelConstants[156],savedVertexControls[20];
+    for(unsigned i=0;i<156;++i)savedPixelConstants[i]=float(i+1);
+    for(unsigned i=0;i<20;++i)savedVertexControls[i]=float(i+71);
+    savedVertexControls[0]=savedVertexControls[1]=0; // keep fixture geometry on the clip plane
+    Check(d->SetPixelShaderConstantF(180,savedPixelConstants,39));
+    Check(d->SetVertexShaderConstantF(200,savedVertexControls,5));
     float nativeConstants[36][4]{};
     for(int i=0;i<4;++i){nativeConstants[i][i]=1;nativeConstants[5+i][i]=1;}
     nativeConstants[4][1]=nativeConstants[4][2]=1;
@@ -334,10 +335,12 @@ int main() try {
         ComPtr<IDirect3DPixelShader9> ps;ComPtr<IDirect3DVertexShader9> vs;
         Check(d->GetPixelShader(ps.GetAddressOf()));Check(d->GetVertexShader(vs.GetAddressOf()));
         Require(ps.Get()==originalPS.Get()&&vs.Get()==originalVS.Get(),"actual native shaders restored");
-        float values[68];Check(d->GetPixelShaderConstantF(200,values,9));
-        Require(memcmp(values,savedPS,sizeof(savedPS))==0,"pixel controls restored");
-        Check(d->GetVertexShaderConstantF(200,values,1));Require(memcmp(values,savedVS,sizeof(savedVS))==0,"vertex controls restored");
-        Check(d->GetPixelShaderConstantF(180,values,17));Require(memcmp(values,savedLights,sizeof(savedLights))==0,"local light constants restored");
+        float values[156];Check(d->GetPixelShaderConstantF(180,values,39));
+        Require(memcmp(values,savedPixelConstants,sizeof(savedPixelConstants))==0,
+            "batched local-light, gap and water pixel constants restored");
+        Check(d->GetVertexShaderConstantF(200,values,5));
+        Require(memcmp(values,savedVertexControls,sizeof(savedVertexControls))==0,
+            "complete vertex control block restored");
         for(unsigned slot=0;slot<2;++slot) {
             ComPtr<IDirect3DBaseTexture9> t;Check(d->GetTexture(2+slot,t.GetAddressOf()));
             Require(t.Get()==sentinel.Get(),"extra textures restored even without scene capture");
@@ -353,6 +356,9 @@ int main() try {
         Require(scope.device==d.Get(),"replacement installs without scene/depth capture");
         float c[36];Check(d->GetPixelShaderConstantF(200,c,9));
         Require(c[23]==0&&c[13]<0&&c[19]>0,"missing capture has valid depth unpack constants");
+        float gap[12];Check(d->GetPixelShaderConstantF(197,gap,3));
+        Require(memcmp(gap,savedPixelConstants+68,sizeof(gap))==0,
+            "batched upload preserves untouched c197..c199 gap");
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
     }
     restored();

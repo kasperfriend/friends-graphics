@@ -1,5 +1,69 @@
 # Water rendering audit
 
+## Water-heavy-area performance pass (2026-10-15)
+
+Booty Bay exposed both halves of the water cost: a large number of liquid tiles
+made the render-thread setup overhead visible, while those tiles covered enough
+screen area for the `ps_3_0` wave, reflection and light work to dominate the GPU.
+This pass keeps the authored eight-train sea and removes work whose contribution
+was already available or exactly zero:
+
+- The vertex stage already evaluated long trains A/B to displace every liquid
+  mesh. Their two sine/cosine pairs now travel in the unused `.zw` lanes of the
+  existing UV interpolators. The pixel stage renormalizes those interpolated
+  pairs (bounded against the analytic field on the client's roughly four-yard
+  grid), reconstructs height/slope/pinch, then adds the same six shading-only
+  trains and applies the same warp, grouping derivative, normal, foam and crest
+  formulas. It no longer repeats the long pair's projections and `sincos`
+  evaluations for every covered pixel. No interpolator, texture, sampler or
+  authored coefficient was added or removed; `.xy` remains the native UV ABI.
+- SSR and celestial rays skip depth reads when a sample is outside the capture.
+  SSR no longer reads scene colour on a depth miss and stops once hit coverage is
+  complete. Celestial occlusion stops only when visibility is exactly zero.
+  Local lights reject pixels at or beyond their squared radius before vector
+  normalization and the exponent-64 specular lobe. Fractional edge visibility,
+  partial SSR hits and every in-radius light follow the previous arithmetic.
+- `watereffect::Scope` now saves native pixel constants `c180..c218`, preserves
+  the untouched `c197..c199` gap, splices in local lights/water controls, uploads
+  once and restores once. Native vertex inputs `c5..c35` are likewise read in one
+  enclosing block. This reduces constant-state driver crossings from twelve to
+  seven per matched tile while retaining complete restoration. The selected local
+  lights are also transformed to the immutable frame view once per frame/selection
+  signature rather than repeating the same eight matrix transforms for every tile.
+- The three location-colour override decisions are resolved during tuning/location
+  reload instead of asking the profile API on every tile. The resolved zone colour
+  still yields to an explicit location override, key by key.
+- Water can still request scene/depth capture for reflection, refraction and
+  absorption when the volume renderer is off, but that path no longer allocates,
+  clears or binds the volume-only full-resolution water mask and R32F surface-depth
+  targets. Disabling volume also releases an existing pair (about 64 MiB at 4K).
+
+A packed procedural-noise lookup was prototyped but deliberately not added: its
+approximation error was small, yet another per-tile texture/sampler transaction
+would work against the harbour draw-call bottleneck. The no-new-state changes
+above are the safer first optimization. `tools/WaterRegression.cpp` pins the
+packed long-wave terms, early exits, cached profile queries, constant batching
+and volume-target gate. `tools/WaterDeviceRegression.cpp` verifies all 39 pixel
+registers, all five vertex-control registers and the untouched gap restore on a
+real D3D9 device. Portable tests can validate source and policy locally; final
+shader compilation/instruction measurement and device rendering remain Windows
+CI and live-client checks.
+
+### Shared-wind re-audit
+
+The performance change does not create a second wave clock or alter wind input.
+`ModernWoWRenderer.cpp` still publishes one immutable `FrameContext::wind`
+snapshot after scene/cloud rendering for the next frame. Clouds consume a new
+sequence once in `VolumetricClouds::Render` through `ApplyCloudWind`, advancing
+base, detail, weather and shear offsets. Water consumes that same snapshot in
+`watereffect::Present`: `TargetSeaState` maps strength/weather to energy, motion,
+shear and foam wind, while `WaveMotion` maps direction and motion to all wrapped
+wave phases. `AffectClouds` and `AffectWaves` independently select linked versus
+legacy policy; with both enabled, both effects are therefore driven by the same
+revision, direction and strength. `tools/WindRegression.cpp` rechecks all eight
+travel signs, strength/shear coupling, sequence gating, wave phase continuity,
+reloads and production source wiring.
+
 ## Full rework round 1: square patterns and tiles of native water (2026-10-14)
 
 Two reported symptoms, both reproducible from the code:
@@ -217,8 +281,8 @@ a new value into the whole session's elapsed time. Turns use a local world
 pivot and compensate the swell, warp and grouping phases together, rather
 than spinning the sea around the world origin. Every draw/reflection camera
 continues to use its own rigid model/view anchor. The geometry and pixel stages
-receive the same effective basis, wave size and phases; the shader ABI and
-instruction count are unchanged.
+receive the same effective basis, wave size and phases. The shared-wind change
+itself did not require a shader ABI or instruction-count change.
 
 Wind, sea state and phase history survive device reset and tuning reload.
 A frame delta is bounded to 0.1 seconds; invalid deltas cannot poison shader
@@ -276,17 +340,23 @@ no room for one** - see the register note below.
 |---|---|
 | `c200` (VS) | amplitude, slide, sigma, one cell in yards |
 | `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
-| `c202` (VS) | xy = the phases of the two displaced trains; the PS's `c210.zw`, verbatim |
+| `c202` (VS) | xy = the phases of the two displaced trains; mirrored in PS `c210.zw` for ABI stability |
 | `c203` (VS) | xy = the domain warp's camera anchor, wrapped in the warp's own period |
 | `c204` (VS) | xy = the grouping field's camera anchor; never reaches the pixel stage |
-| `c210` (PS) | chop phase (xy), then the displaced pair's phases (zw) |
+| `c210` (PS) | chop phase (xy); displaced-pair phases remain mirrored in zw but are no longer re-evaluated by the PS |
 | `c211` (PS) | texture creep (xy), unused (z), the wave gate (w) |
-| `c217` (PS) | the phases of the four trains only the shading carries |
+| `c217` (PS) | phases of shading-only trains C–F |
+| `c218` (PS) | phases of shading-only trains G–H |
 
 The warp value and its gradient arrive as `TEXCOORD7` (a `float4`: xyz the sample, w the
 grouping gain) and `TEXCOORD4` (a `float4`: xy the lattice coordinate, zw the grouping gradient).
 The pixel shader samples no low-frequency noise at all, which is what keeps a set nailed to the
-terrain for one multiply and one `dot`.
+terrain for one multiply and one `dot`. The performance pass widened the two existing native UV
+values from `float2` to `float4`: `TEXCOORD0.zw` carries train A's sine/cosine and
+`TEXCOORD1.zw` carries train B's sine/cosine. It did not add an Output field, so the eleven-VS-output /
+ten-PS-input ceiling is unchanged. The current water block remains `c200..c218` (19 registers),
+and the five vertex controls remain `c200..c204`; only the state transaction now saves the full
+`c180..c218` pixel span so local lights and controls cross the driver together.
 
 That packing is not tidiness, it is the only option. Without a register declared as `psize0`,
 `vs_3_0` gives the vertex stage eleven `o#` registers and `ps_3_0` accepts ten `v#` ones - this
@@ -872,23 +942,26 @@ the reporting player's machine. In-game confirmation still matters.
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
   compile, if the water instruction count cannot be read, or if any *budgeted* shader - the volume
   and cloud raymarches and weather - exceeds its ceiling. The water pixel stage is measured and
-  annotated but not capped (fxc /O3: 642 slots on Windows CI on 2026-10-14; the 621 it used to be
-  held to is described under "Full rework round 4").
+  annotated but not capped. Its pre-optimization baseline was 642 slots on Windows CI on
+  2026-10-14; the first Windows run of this performance pass is the authoritative new count
+  (the former 621 cap is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
   portable job, because shader text was previously only ever compiled by fxc on the Windows
   runner - which is how `mix` reached the volume shader's sun glint and cost a CI run.
 - `tools/WaterRegression.cpp`: portable material, independent-capture toggle
-  combinations, and target-size policy tests (included in Linux CI). It also pins the in-scatter
-  and sun-glint normalizations as shader text - in the production literal and in the CPU mirror -
-  so a cut made to fit instruction slots cannot quietly take the look with it.
+  combinations, and target-size policy tests (included in Linux CI). It also pins the packed
+  long-wave dataflow, zero-contribution branches, profile-query cache, batched constant windows,
+  volume-only MRT gate, and the in-scatter/sun-glint normalizations as production shader text -
+  plus the look formulas in the CPU mirror - so an optimization cannot quietly cut the look.
 - `tools/WaterPreview.cpp`: not a test, but the thing the look was tuned against (see "Looking at
   changes without a GPU"). It needs no device and builds with the same compiler invocation.
 - `tools/Test-Water.cmd`: builds a D3D9 regression executable using the actual
   water Scope and capture code. It checks shader installation, rendered magenta
-  debug pixels, no-capture color, constant/texture/sampler restoration,
-  independent reflection controls, capture lifetime, offscreen rejection,
+  debug pixels, no-capture color, the complete batched constant span (including
+  untouched gap registers), texture/sampler restoration, independent reflection
+  controls, capture lifetime, offscreen rejection,
   optional MRTs (including fractional coverage and unattenuated surface depth),
   size mismatch, classifier cache isolation, partial-bind failure rollback,
   and reset.
