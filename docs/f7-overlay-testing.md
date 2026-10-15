@@ -1,15 +1,18 @@
 # F7 overlay verification
 
-The overlay now has nine left-side category tabs. `OverlayItems.h` holds the
-original 69 controls with unchanged keys, defaults, ranges and save semantics.
-`OverlayLayout.h` is platform-independent and supplies the rectangles used by
-both Direct3D drawing and Win32 hit testing, including the scrollbar and resize
-handle. Window geometry and tab scroll positions last for the client session;
-they are not written to the graphics preset.
+The overlay has ten left-side category tabs: Atmosphere & God Rays, Local
+Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
+Local Lighting, Dynamic Shadows, AI Materials & Relief, and Image & Color.
+`OverlayItems.h` holds all 91 controls with their keys, defaults, ranges and
+save semantics - the original 69 plus the wind, cloud-resolution and water
+controls added since. `OverlayLayout.h` is platform-independent and supplies the
+rectangles used by both Direct3D drawing and Win32 hit testing, including the
+scrollbar and resize handle. Window geometry and tab scroll positions last for
+the client session; they are not written to the graphics preset.
 
-## Automated regression
+## Automated regressions
 
-From the repository root:
+Portable geometry, from the repository root:
 
 ```sh
 mkdir -p build
@@ -19,8 +22,19 @@ g++ -std=c++20 -Wall -Wextra -Werror -pedantic \
 ./build/overlay-test
 ```
 
-Also runs in the Build workflow under **Portable regressions**, alongside the
-other fast CPU tests.
+Runs in the Build workflow under **Portable regressions**, alongside the other
+fast CPU tests.
+
+The real overlay is also rendered on a system D3D9 device (Windows) by
+`tools/Test-Overlay.cmd` (`tools/OverlayRegression.cpp`), next to
+`tools/Test-OverlayState.cmd`. It covers the same tab/scroll hit-test sweep at
+1080p, 1440p and 2160p on a real device, the panel fitting the backbuffer,
+scope-button reachability, render-state restoration, font atlas creation and
+device-reset recovery, and writes `build/overlay-preview/*.ppm` frames for
+visual inspection. It exits 77 when the runner has no D3D9 HAL, which
+`Test-Overlay.cmd` reports as a skip. Both device tests run in the Build
+workflow's Windows job; the portable test is what guards the geometry on Linux
+runners and forks.
 
 Coverage:
 
@@ -50,7 +64,7 @@ workflow for the full DLL.
 
 These runtime checks cannot be completed in the Linux development sandbox:
 
-1. Open F7 in windowed and fullscreen modes. Visit all nine tabs and scroll
+1. Open F7 in windowed and fullscreen modes. Visit all ten tabs and scroll
    Clouds to its last setting. Confirm labels, values and hints are legible and
    no hidden row receives clicks.
 2. Drag the title in all directions, including beyond the client edges. Release
@@ -75,3 +89,7 @@ These runtime checks cannot be completed in the Linux development sandbox:
    stuck, the panel must remain on screen, and text should be recreated.
 9. Close F7 and confirm normal game mouse input returns. If any runtime check
    fails, capture `MenuDiagnostics.log`, resolution/DPI and a screenshot.
+
+The ranges, defaults and file targets of every control were also compared against
+the code that reads them; that review, including the items still open, is in
+[F7 menu audit](f7-menu-audit.md).
