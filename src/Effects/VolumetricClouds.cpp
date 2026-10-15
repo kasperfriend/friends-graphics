@@ -785,10 +785,14 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
 
  // Advance before the clear-sky early-out: an empty deck must still be
  // able to develop a storm. The clock bounds loading/focus gaps.
- const float dt=m_clock.Observe(PerformanceCounter(),PerformanceFrequency());
+ // Live frames use the shared boundary delta and snapshot, not a second
+ // wind clock. Retrying a cloud pass in one frame cannot advance it twice.
+ const float dt=f.wind.sequence ? (f.wind.sequence!=m_windSequence?f.wind.deltaSeconds:0.f) :
+     m_clock.Observe(PerformanceCounter(),PerformanceFrequency());
+ m_windSequence=f.wind.sequence;
  static_cast<CloudShape&>(settings)=m_dynamics.Update(m_settings,f.environment,
      settings.zoneClouds,settings.weatherClouds?settings.weather:CloudWeather::Clear,
-     settings.weatherClouds?settings.weatherStrength:0.f,settings.transitionSeconds,dt);
+     settings.weatherClouds?settings.weatherStrength:0.f,settings.transitionSeconds,dt,f.wind);
  if(settings.coverage<=0.f||settings.density<=0.f)return false;
  const auto& motion=m_dynamics.Motion();
 

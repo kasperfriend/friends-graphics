@@ -3,6 +3,8 @@
 #include <cmath>
 #include <string>
 #include "OverlayItems.h"
+#include "WindSystem.h"
+#include <cwchar>
 
 namespace tuningoverlay {
 // Platform-independent geometry: drawing and input use these same rectangles.
@@ -30,6 +32,11 @@ inline std::string CompactLabel(const Item& item) {
         if(result.ends_with(" ---"))result.resize(result.size()-4);
     }else if(const auto hint=result.find(" (");hint!=result.npos)result.resize(hint);
     return result;
+}
+inline std::string ValueLabel(const Item& item) {
+    if(item.section&&item.key&&std::wcscmp(item.section,L"Wind")==0&&std::wcscmp(item.key,L"Direction")==0)
+        return renderer::WindDirectionName(static_cast<renderer::WindDirection>(std::clamp(item.value,0,7)));
+    return std::to_string(item.value);
 }
 inline int SliderValue(const Item& item,float px,const Box& track) {
     const float t=std::clamp((px-track.x)/track.w,0.f,1.f);
@@ -72,7 +79,12 @@ struct OverlayLayout {
         const float width=(panel.w-166)/2;
         return {panel.x+150+scope*(width+8),panel.y+132,width,26};
     }
-    Box TabButton(int tab) const {return {panel.x+12,panel.y+204+tab*34,212,30};}
+    Box TabButton(int tab) const {
+        // Ten categories must still fit at the minimum window height; the
+        // new Wind tab must not push Image & Color underneath the footer.
+        const float pitch=std::min(34.f,(panel.h-244)/std::max(1.f,float(Tabs().size())));
+        return {panel.x+12,panel.y+204+tab*pitch,212,pitch-4};
+    }
     Box Content() const {return {panel.x+240,panel.y+240,panel.w-270,float(VisibleRows())*rowHeight};}
     Box ResetButton() const {const auto c=Content();return {c.x+c.w-142,panel.y+202,142,26};}
     int VisibleRows() const {return std::max(1,int((panel.h-276)/rowHeight));}

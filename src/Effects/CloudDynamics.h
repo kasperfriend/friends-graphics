@@ -2,6 +2,7 @@
 // Portable cloud climate/animation policy. No device, camera or random-number
 // state: the march, light samples and shadow map consume one world-space field.
 #include "../Environment/EnvironmentProfile.h"
+#include "../Environment/WindSystem.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -75,12 +76,28 @@ struct CloudMotion
     }
 };
 
+// Both shader density paths sample p + offset. Their sampling velocity and
+// height shear must be NEGATIVE the wind's travel vector, or clouds/shadows
+// would head upwind while water heads downwind. WindAngle is legacy sampling
+// orientation only; the shared system owns direction whenever it is linked.
+inline CloudShape ApplyCloudWind(CloudShape shape, const WindState& wind)
+{
+    if (!wind.DrivesClouds()) return shape;
+    const float strength = std::clamp(WindFinite(wind.strength, 0.f), 0.f, 3.f);
+    shape.windSpeed *= strength;
+    shape.windShear *= strength;
+    const double length = std::hypot(double(wind.direction.x), double(wind.direction.y));
+    if (std::isfinite(length) && length > .01)
+        shape.windAngle = float(std::atan2(-double(wind.direction.y), -double(wind.direction.x)) * 180.0 / kWindPi);
+    return shape;
+}
+
 class CloudDynamics
 {
 public:
     CloudShape Update(const CloudShape& authored, const ResolvedEnvironmentState& env,
                       bool zones, CloudWeather weather, float strength,
-                      float transitionSeconds, float dt)
+                      float transitionSeconds, float dt, const WindState& wind = {})
     {
         dt = std::isfinite(dt) ? std::clamp(dt, 0.f, .1f) : 0.f;
         const CloudShape target = ResolveCloudClimate(authored, env, zones);
@@ -126,6 +143,7 @@ public:
         result.featureSize = std::clamp(result.featureSize * (1.f + .35f * wet), 600.f, 40000.f);
         // Keep a solid core even in highly eroded/small-cloud desert profiles.
         result.detailStrength *= 1.f - .35f * wet;
+        result = ApplyCloudWind(result, wind);
         m_motion.Advance(result, dt);
         return result;
     }

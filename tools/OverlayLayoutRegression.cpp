@@ -19,6 +19,7 @@ static void ReachEverySetting(OverlayLayout& l) {
         const auto button=l.TabButton(t);
         assert(l.HitTab(button.x+1,button.y+1)==t);
         assert(l.panel.Contains(button.x+button.w-1,button.y+button.h-1));
+        assert(button.y+button.h<=l.panel.y+l.panel.h-34); // Sidebar never overlaps footer.
         l.SelectTab(t);l.Scroll(-10000);
         const auto reset=l.ResetButton();
         assert(l.panel.Contains(reset.x+reset.w*.5f,reset.y+reset.h*.5f));
@@ -54,7 +55,7 @@ static void ReachEverySetting(OverlayLayout& l) {
     assert(count==int(seen.size()));
 }
 int main() {
-    assert(Tabs().size()==9);
+    assert(Tabs().size()==10);
     std::set<std::pair<std::wstring,std::wstring>> keys;
     for(const auto& item:items)if(item.kind!=KIND_HEADER) {
         assert(keys.emplace(item.section,item.key).second);
@@ -101,16 +102,19 @@ int main() {
         }
     }
     OverlayLayout l;l.Fit(1920,1080,1);l.panel.h=l.minHeight;l.Clamp();
-    l.SelectTab(3);assert(l.MaxScroll(3)>0); // Clouds: longest tab.
+    int cloudTab=-1;
+    for(int t=0;t<int(Tabs().size());++t)if(CompactLabel(items[Tabs()[t].header])=="VOLUMETRIC CLOUDS")cloudTab=t;
+    assert(cloudTab>=0);
+    l.SelectTab(cloudTab);assert(l.MaxScroll(cloudTab)>0);
     auto thumb=l.ScrollThumb();assert(l.Begin(thumb.x+1,thumb.y+1));
     assert(l.gesture==OverlayLayout::Gesture::Scroll);
-    l.Drag(thumb.x+1,10000);assert(l.offsets[3]==l.MaxScroll(3));
-    l.Drag(thumb.x+1,-10000);assert(l.offsets[3]==0);l.Cancel();
-    l.Scroll(3);l.SelectTab(0);l.SelectTab(3);assert(l.offsets[3]==3);
-    l.panel.h=1000;l.Clamp();assert(l.offsets[3]==0); // Growing removes stale scroll offsets.
+    l.Drag(thumb.x+1,10000);assert(l.offsets[cloudTab]==l.MaxScroll(cloudTab));
+    l.Drag(thumb.x+1,-10000);assert(l.offsets[cloudTab]==0);l.Cancel();
+    l.Scroll(3);l.SelectTab(0);l.SelectTab(cloudTab);assert(l.offsets[cloudTab]==3);
+    l.panel.h=1000;l.Clamp();assert(l.offsets[cloudTab]==0); // Growing removes stale scroll offsets.
     auto close=l.Close();assert(!l.Begin(close.x+1,close.y+1));
     auto reset=l.ResetButton();assert(!l.Begin(reset.x+1,reset.y+1));
-    auto row=l.Row(Tabs()[3].begin);assert(!l.Begin(row.x+1,row.y+1));
+    auto row=l.Row(Tabs()[cloudTab].begin);assert(!l.Begin(row.x+1,row.y+1));
     // A physical client position maps to the same hit on a differently-sized backbuffer.
     l.Fit(2560,1440,1.5f);auto tab=l.TabButton(4);
     float clientX=(tab.x+1)*l.scale*1280/2560,clientY=(tab.y+1)*l.scale*720/1440;

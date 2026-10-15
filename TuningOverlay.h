@@ -13,6 +13,7 @@
 #include "src/Environment/MenuDiagnostics.h"
 #include "src/Environment/OverlayLayout.h"
 #include "src/D3D9/ScopedStateBlock.h"
+#include "src/Environment/WindDebug.h"
 
 namespace tuningoverlay {
 inline std::wstring ini;
@@ -91,7 +92,7 @@ inline bool Save(Item& i){
 inline bool ResetActiveTab(){
  if(layout.activeTab<0||layout.activeTab>=int(Tabs().size()))return false;
  const auto tab=Tabs()[layout.activeTab];bool changed=false,failed=false;
- for(int index=tab.begin+1;index<tab.end;++index){
+ for(int index=tab.begin;index<tab.end;++index){
   auto& item=items[index];const int value=std::clamp(defaults[index],item.lo,item.hi);
   const bool itemChanged=item.value!=value;item.value=value;
   if(Save(item))changed=itemChanged||changed;else failed=true;
@@ -127,6 +128,7 @@ inline void Rect(std::vector<V>& out,float x,float y,float w,float h,DWORD color
 inline void BitmapText(std::vector<V>& out,float x,float y,const char* s,DWORD color,float scale=2.f){for(;*s;++s,x+=6*scale){if(*s==' '){continue;}auto& g=Glyph(*s);for(int yy=0;yy<7;++yy)for(int xx=0;xx<5;++xx)if(g[yy]&(16>>xx))Rect(out,x+xx*scale,y+yy*scale,scale,scale,color);}}
 
 inline OverlayFont font;
+inline OverlayFont windDebugFont;
 inline float uiScale=1;
 inline std::vector<std::string> environmentLines;
 inline int renderWidth=0,renderHeight=0;
@@ -208,6 +210,38 @@ inline bool Update(){
  SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(cursor)));
  mouseDown=down;return changed;
 }
+inline void SetupOverlayState(IDirect3DDevice9* d){
+ d->SetVertexShader(nullptr);d->SetPixelShader(nullptr);d->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);d->SetTexture(0,nullptr);
+ d->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
+ d->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);
+ d->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE);d->SetRenderState(D3DRS_ZENABLE,FALSE);d->SetRenderState(D3DRS_ZWRITEENABLE,FALSE);
+ d->SetRenderState(D3DRS_LIGHTING,FALSE);d->SetRenderState(D3DRS_FOGENABLE,FALSE);d->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE);
+ d->SetRenderState(D3DRS_STENCILENABLE,FALSE);d->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);
+ d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
+ d->SetRenderState(D3DRS_COLORWRITEENABLE,15);
+}
+inline void DrawWindDebug(IDirect3DDevice9* d,const renderer::WindState& wind){
+ if(!d||!wind.debugView)return;
+ renderer::ScopedStateBlock state(d);
+ if(FAILED(state.CaptureResult()))return;
+ D3DVIEWPORT9 viewport{};
+ if(FAILED(d->GetViewport(&viewport))||!viewport.Width||!viewport.Height)return;
+ // Text HUD only. No world arrows/particles, no inputs intercepted and no
+ // changes to the simulated state. It remains readable with F7 closed.
+ const float scale=std::min({1.f,float(viewport.Width)/620.f,float(viewport.Height)/142.f});
+ const float width=600*scale,height=126*scale;
+ const float x=float(viewport.X+viewport.Width)-width-8*scale,y=float(viewport.Y)+8*scale;
+ const auto lines=renderer::WindDebugLines(wind);
+ const bool hasFont=windDebugFont.Ensure(d,std::max(6,int(std::round(16*scale))));
+ std::vector<V> vertices;
+ Rect(vertices,x,y,width,height,0xed101e28);
+ if(!hasFont)for(size_t i=0;i<lines.size();++i)
+  BitmapText(vertices,x+10*scale,y+(9+22*float(i))*scale,lines[i].c_str(),0xffdce5ea,1.2f*scale);
+ SetupOverlayState(d);
+ d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(vertices.size()/3),vertices.data(),sizeof(V));
+ if(hasFont)for(size_t i=0;i<lines.size();++i)
+  windDebugFont.Draw(d,x+10*scale,y+(8+22*float(i))*scale,lines[i],i?0xffdce5ea:0xff8effbb,x+width-8*scale);
+}
 inline void Draw(IDirect3DDevice9* d){
  if(!visible||!d)return;
  static std::map<std::string,HRESULT> lastErrors;
@@ -283,7 +317,7 @@ inline void Draw(IDirect3DDevice9* d){
    const std::string full=item.label;const auto hint=full.find(" (");
    label(b.x+8,b.y+(hint==full.npos?9:1),CompactLabel(item),index==hover?0xffffffff:0xffdce5ea,track.x-62);
    if(hint!=full.npos)label(b.x+8,b.y+18,full.substr(hint+2,full.size()-hint-3),0xff819ca8,track.x-62);
-   label(track.x-56,b.y+9,std::to_string(item.value),0xffffdc82,track.x-6);
+   label(track.x-56,b.y+9,ValueLabel(item),0xffffdc82,track.x-6);
    box({track.x,track.y+7,track.w,6},0xff30424d);
    const float t=float(item.value-item.lo)/std::max(1,item.hi-item.lo);
    box({track.x,track.y+7,track.w*t,6},0xff45c985);
@@ -310,14 +344,7 @@ inline void Draw(IDirect3DDevice9* d){
   const size_t count=size_t(std::max(0.f,(l.right-l.x)/(6*scale)));
   BitmapText(v,l.x,l.y,l.text.substr(0,count).c_str(),l.color,scale);
  }
- d->SetVertexShader(nullptr);d->SetPixelShader(nullptr);d->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);d->SetTexture(0,nullptr);
- d->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
- d->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);
- d->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE);d->SetRenderState(D3DRS_ZENABLE,FALSE);d->SetRenderState(D3DRS_ZWRITEENABLE,FALSE);
- d->SetRenderState(D3DRS_LIGHTING,FALSE);d->SetRenderState(D3DRS_FOGENABLE,FALSE);d->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE);
- d->SetRenderState(D3DRS_STENCILENABLE,FALSE);d->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);
- d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
- d->SetRenderState(D3DRS_COLORWRITEENABLE,15);check(d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V)),"DrawPrimitiveUP");
+ SetupOverlayState(d);check(d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V)),"DrawPrimitiveUP");
  if(hasFont)for(const auto& l:labels)font.Draw(d,l.x,l.y,l.text,l.color,l.right);
  check(state.Restore(),"RestoreState");
 }

@@ -34,6 +34,7 @@
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Effects/GroundSurfaceCapture.h"
+#include "src/Environment/WindTuning.h"
 
 static_assert(renderer::kD3DErrDeviceLost == D3DERR_DEVICELOST, "src/Core/DeviceHealth.h must match d3d9.h");
 static_assert(renderer::kD3DErrDeviceNotReset == D3DERR_DEVICENOTRESET, "src/Core/DeviceHealth.h must match d3d9.h");
@@ -67,6 +68,8 @@ bool unified=false,graphicsActive=true,graphicsKeyDown=false,graphicsShowStatus=
 constexpr uint64_t kFrameGapMs = 1000;
 renderer::DeviceAvailability g_availability = renderer::DeviceAvailability::Operational;
 renderer::FrameGapDetector g_frameGap;
+renderer::WindSystem g_windSystem;
+renderer::FrameClock g_windClock;
 
 struct Settings
 {
@@ -135,6 +138,14 @@ void ReloadSettings()
     g_settings.sunY = std::clamp(ReadFloat(L"SunY", .18f), .0f, 1.0f);
 }
 
+void ReloadWindTuning()
+{
+    const auto ini=g_basePath+L"GraphicsEffects.ini";
+    g_windSystem.Configure(renderer::ReadWindSettings([&](const wchar_t* key,int fallback) {
+        return static_cast<int>(renderer::locationtuning::ReadInt(L"Wind",key,fallback,ini.c_str()));
+    }));
+}
+
 void DrawQuad(IDirect3DDevice9* device, float left, float top, float right, float bottom, D3DCOLOR topColor, D3DCOLOR bottomColor)
 {
     Vertex vertices[] = {{left, top, 0.f, 1.f, topColor}, {right, top, 0.f, 1.f, topColor}, {left, bottom, 0.f, 1.f, bottomColor}, {right, bottom, 0.f, 1.f, bottomColor}};
@@ -161,6 +172,7 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     if(distancefog::enabled&&distancefog::showStatus)watereffect::DrawStatus(device,!distancefog::active?"HAZE OFF":distancefog::matches?"HAZE ON":"HAZE WAIT",1);}
     if(weathervisuals::enabled&&weathervisuals::showStatus)watereffect::DrawStatus(device,weathervisuals::GetStatusText(),3);
     nativeshadowdiag::DrawPreview(device);
+    tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind);
     tuningoverlay::Draw(device);
     renderer::MaterialCacheManager::Instance().DrawDebugOverlay(device);
     g_drawingOverlay=false;
@@ -206,21 +218,13 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
-    // Consume the held native weather observation, independently of whether
-    // precipitation replacement is enabled or its textures loaded. No draw
-    // count is treated as a researched server-side storm intensity.
-    volume::cloudWeather=static_cast<renderer::CloudWeather>(std::clamp(weathervisuals::nativeWeatherMode,0,3));
-    volume::cloudWeatherStrength=weathervisuals::intensity;
-    // Water reacts to the same observation, in the same frame, so a squall closes the sky and
-    // roughens the sea together instead of only half of them agreeing that it is raining.
-    watereffect::FeedWeather(std::clamp(weathervisuals::nativeWeatherMode,0,3),weathervisuals::intensity);
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
     weathervisuals::Present(d,tuningoverlay::visible);
     const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
     const bool locationTuningChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
     if(locationTuningChanged)tuningoverlay::Configure(g_basePath);
-    if(tuningoverlay::Update()||locationTuningChanged){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
+    if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
@@ -231,9 +235,22 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
+    // All scene/cloud rendering has finished. Publish ONE wind snapshot for
+    // the NEXT frame, then prepare its sea state. Advancing before volume's
+    // fallback composite would give clouds a different wind from the water
+    // already drawn in this frame. Detection is held independently of F10,
+    // replacement textures and F7; do not infer severity from particle count.
+    auto& nextFrame=renderer::FrameContext::Current();
+    const auto weather=renderer::ResolveWindWeather(weathervisuals::nativeWeatherMode,
+        weathervisuals::intensity,nextFrame.environment[renderer::Weather]);
+    nextFrame.wind=g_windSystem.Update(weather,
+        g_windClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency()));
+    volume::cloudWeather=static_cast<renderer::CloudWeather>(weather.kind);
+    volume::cloudWeatherStrength=weather.strength;
+    watereffect::FeedWeather(weather.kind,weather.strength);
     waterhighlight::Present();
     watereffect::Present();
     distancefog::Present();
@@ -247,6 +264,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
 }
 HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     tuningoverlay::font.Reset();
+    tuningoverlay::windDebugFont.Reset();
     waterreflection::Reset(d);
     volume::Reset(d);
     watereffect::Reset(d);
@@ -591,7 +609,9 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     InterlockedExchangePointer(&table[89],reinterpret_cast<void*>(HookedSetFVF));
     InterlockedExchangePointer(&table[92],reinterpret_cast<void*>(HookedSetVertexShader));
     InterlockedExchangePointer(&table[107],reinterpret_cast<void*>(HookedSetPixelShader));
-    if(waterdiag::enabled||waterhighlight::enabled||watereffect::enabled||distancefog::enabled||volume::enabled||nativeshadowdiag::enabled||unified){
+    // Wind/weather observation and F7 need frame/draw hooks even when all
+    // visual backends are disabled or a shader failed. Re-enabling is live.
+    {
         InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
         InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
         InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
@@ -652,7 +672,10 @@ void HookDevice(IDirect3DDevice9* device)
     InterlockedExchangePointer(&table[92], reinterpret_cast<void*>(HookedSetVertexShader));
     InterlockedExchangePointer(&table[107], reinterpret_cast<void*>(HookedSetPixelShader));
 
-    if(waterdiag::enabled || waterhighlight::enabled || watereffect::enabled || distancefog::enabled || volume::enabled || nativeshadowdiag::enabled || unified) {
+    // CPU wind and its F7 controls must not depend on a working visual
+    // backend. Draw hooks retain native weather observation while effects
+    // are off; each optional effect still checks its own rendering gates.
+    {
         InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
         InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
         InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
@@ -738,6 +761,8 @@ void Initialize()
     waterhighlight::Configure(g_basePath);
     celestialhighlight::Configure(g_basePath);
     celestialhighlight::ReloadTuning(g_basePath);
+    ReloadWindTuning();
+    renderer::FrameContext::Current().wind=g_windSystem.Update({},0.f);
     watereffect::Configure(g_basePath);
     distancefog::Configure(g_basePath);
     volume::Configure(g_basePath);
