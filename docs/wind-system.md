@@ -1,10 +1,10 @@
 # Shared dynamic wind
 
 Wind is an **internal world-space value**, not a particle effect or a visible volume.
-One frame-boundary simulation drives cloud drift and water waves; the optional
-camera-relative precipitation continuity layer also follows it. Native WoW
-particles still use the game's own motion. Plants, trees, grass and local fog
-are **not connected**.
+One frame-boundary simulation drives cloud drift, water waves and the sway of the
+client's own grass, bushes, plants and trees; the optional camera-relative
+precipitation continuity layer also follows it. Native WoW particles still use
+the game's own motion. Local fog is not connected.
 
 ## F7 controls
 
@@ -26,6 +26,7 @@ settings without resetting the wind, its gust phases, or the effect phases.
 | Weather response / `WeatherResponsePercent` | 100 | 0–200%. Rain, snow and sand increase the target strength; 0 ignores weather. |
 | Drive waves / `AffectWaves` | 1 | Apply the shared direction and strength to water. Off restores its original direction/native-weather response. |
 | Drive clouds / `AffectClouds` | 1 | Apply the shared direction and strength to cloud shapes, detail, weather map and height shear. Off restores the cloud section's legacy wind controls. |
+| Drive plants & trees / `AffectVegetation` | 1 | Apply the shared direction and strength to the client's own grass, bushes, plants and trees, in the bone matrices their draws already upload. Off leaves every model exactly as the client animated it. The sway's own shape, gain and range controls live in `[Vegetation]` - see [vegetation sway](vegetation-wind.md). |
 | Wind debug view / `DebugView` | 0 | Optional text HUD, including when F7 is closed. No world-space wind effect. |
 
 **Direction is the compass bearing the wind comes FROM** (the meteorological
@@ -34,7 +35,7 @@ convention), not the direction it travels. WoW map axes are **+X north, +Y west*
 source bearings are smoothly interpolated rather than snapping in 45-degree
 steps. The debug HUD reports the current source bearing, nearest sector, target
 bearing, time to the next target, current/target strength, downwind XY velocity,
-native weather input and wave/cloud/rain drift status.
+native weather input and the wave/cloud/plants/rain link status.
 
 For a steady test wind, set **Time variation OFF**, **Weather response 0**, select
 a direction and strength, and allow the response to settle. At 0% strength clouds
@@ -91,9 +92,9 @@ simulation time; no unverified in-game time-of-day memory is read.
 - `src/Environment/WindSystem.h` is portable, device-free simulation policy.
   `WindState` exposes a unit horizontal downwind `direction`, normalized `strength`,
   velocity in **world yards/second** (`12 × strength`), source-bearing target, weather and
-  bounded frame delta. Future vegetation should read this state, not create
-  its own random wind, clock or weather reader. Read only on the render thread
-  or copy the snapshot before using it on another thread.
+  bounded frame delta. Every consumer reads this state and none creates its own
+  random wind, clock or weather reader. Read only on the render thread or copy
+  the snapshot before using it on another thread.
 - `ModernWoWRenderer.cpp` updates wind once, **after all rendering**, including
   the Present fallback compositor, and after native-weather observation. It
   publishes `FrameContext::wind` for the next frame and prepares that frame's
@@ -104,6 +105,12 @@ simulation time; no unverified in-game time-of-day memory is read.
   advance its phases twice. All three noise layers integrate offsets, and
   both the visible deck and its shadow/light field use those same offsets.
   Sampling velocity is the negative of travel velocity, including top shear.
+- `src/Effects/VegetationSway.h` is a per-draw scope with no state of its own
+  beyond the wind: it validates the client's own bone palette at c31 for the
+  draw, leans it about the model's reconstructed world ground contact and puts
+  the client's matrices back immediately after the draw. It adds no shader
+  constant, and with the wind, the link or the effect off it makes no device call
+  at all. See [vegetation sway](vegetation-wind.md).
 - `src/Water/WaveMotion.h` integrates each dispersion/shear/UV phase separately
   in double precision and wraps it in its own period. Changing speed, shear or
   wind never recalculates displacement from `session age × new speed`.
@@ -173,7 +180,7 @@ g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/WindRegression.cpp -o b
 `tools/Test-Wind.cmd` additionally checks real Windows global/zone/subarea INI
 persistence and reload. `tools/Test-OverlayState.cmd` checks the actual debug
 HUD with hooked D3D9 setters, both with F7 open and closed. Both are wired into
-Windows CI; portable wind tests are wired into Linux CI. `tools/Test-Weather.cmd`
+Windows CI; portable wind and vegetation-sway tests are wired into Linux CI. `tools/Test-Weather.cmd`
 checks the changed precipitation shader phase on a D3D9 device. Water, cloud,
 frame-clock, shader-source and overlay-layout regressions remain required.
 

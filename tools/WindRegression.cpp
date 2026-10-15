@@ -406,7 +406,10 @@ static std::map<std::wstring, int> SettingValues(const WindSettings& s)
         {L"StrengthPercent",int(std::lround(s.strength * 100))},{L"GustPercent",int(std::lround(s.gustAmount * 100))},
         {L"GustSeconds",int(s.gustSeconds)},{L"DirectionChangeSeconds",int(s.directionSeconds)},
         {L"TransitionSeconds",int(s.transitionSeconds)},{L"WeatherResponsePercent",int(std::lround(s.weatherResponse * 100))},
-        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},{L"DebugView",s.debugView}};
+        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},
+        // The vegetation link is part of this section: one switch per consumer,
+        // each one restoring that consumer's legacy behaviour on its own.
+        {L"AffectVegetation",s.affectVegetation},{L"DebugView",s.debugView}};
 }
 static void TestConfigurationAndWiring()
 {
