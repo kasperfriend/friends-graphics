@@ -1,5 +1,6 @@
 #pragma once
 #include "src/D3D9/TrackedRenderState.h"
+#include "src/Water/WaterMaterial.h"
 namespace waterreflection {
 using Microsoft::WRL::ComPtr;
 struct Resources{
@@ -27,11 +28,13 @@ inline void Expose(){
  watereffect::reflectionData[7]=volume::constants[2][3];
 }
 
-inline void Prepare(IDirect3DDevice9* d){
+inline void Prepare(IDirect3DDevice9* d,const renderer::water::Observation* observed=nullptr){
  // A previous world capture must not leak into an offscreen water draw.
  // The owned copy stays ready and is re-exposed on the next valid world tile.
  ClearInput();
- if(!watereffect::NeedsScene()||volume::internal||!renderer::water::IsMaterial(d))return;
+ if(!watereffect::NeedsScene()||volume::internal)return;
+ const auto material=observed?*observed:renderer::water::Observe(d);
+ if(!material.liquid)return;
  if(volume::owner!=d||volume::composed||!volume::target||!volume::depth)return;
  // Never capture a shadow/offscreen target or expose another device's scene.
  ComPtr<IDirect3DSurface9> current;

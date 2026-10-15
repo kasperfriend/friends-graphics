@@ -88,6 +88,18 @@ inline bool Save(Item& i){
  i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
  return false;
 }
+inline bool ResetActiveTab(){
+ if(layout.activeTab<0||layout.activeTab>=int(Tabs().size()))return false;
+ const auto tab=Tabs()[layout.activeTab];bool changed=false,failed=false;
+ for(int index=tab.begin+1;index<tab.end;++index){
+  auto& item=items[index];const int value=std::clamp(defaults[index],item.lo,item.hi);
+  const bool itemChanged=item.value!=value;item.value=value;
+  if(Save(item))changed=itemChanged||changed;else failed=true;
+ }
+ if(failed)saveError="Reset incomplete; see MenuDiagnostics.log";
+ else {saveError.clear();renderer::menudiagnostics::Write("RESET DEFAULTS tab="+std::string(items[tab.header].label));}
+ return changed;
+}
 inline const std::array<unsigned char,7>& Glyph(char c){
  if(c>='a'&&c<='z')c=char(c-'a'+'A');
  static const std::array<unsigned char,7> blank{};
@@ -176,6 +188,7 @@ inline bool Update(){
   else if(renderer::locationtuning::editable&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));}
   else if(layout.ScrollButton(false).Contains(px,py)){layout.Scroll(-1);}
   else if(layout.ScrollButton(true).Contains(px,py)){layout.Scroll(1);}
+  else if(layout.ResetButton().Contains(px,py)){dragItem=-1;changed=ResetActiveTab();}
   else if(const int index=layout.HitItem(px,py);index>=0){
    auto& item=items[index];
    if(item.kind==KIND_TOGGLE){item.value=!item.value;changed=Save(item);}
@@ -252,7 +265,9 @@ inline void Draw(IDirect3DDevice9* d){
   label(b.x+10,b.y+6,CompactLabel(items[Tabs()[tab].header]),selected?0xff9dffc0:0xffb5cbd6,b.x+b.w-6);
  }
  const auto content=layout.Content();const auto& tab=Tabs()[layout.activeTab];
- label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,content.x+content.w);
+ const auto resetButton=layout.ResetButton();
+ label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,resetButton.x-8);
+ box(resetButton,0xff263f4b);label(resetButton.x+8,resetButton.y+5,"RESET DEFAULTS",0xff9dffc0,resetButton.x+resetButton.w-6);
  const int first=tab.begin+layout.offsets[layout.activeTab];
  const int end=std::min(tab.end,first+layout.VisibleRows());
  for(int index=first;index<end;++index){

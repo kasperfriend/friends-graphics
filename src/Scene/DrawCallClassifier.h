@@ -7,6 +7,8 @@
 
 namespace renderer
 {
+    namespace water { struct Observation; }
+
     class DrawCallClassifier
     {
     public:
@@ -17,7 +19,8 @@ namespace renderer
             const DrawCallContext& ctx,
             const float capturedViewTranslation[3],
             bool capturedViewValid,
-            uint64_t cameraCaptureShaderHash);
+            uint64_t cameraCaptureShaderHash,
+            const water::Observation* waterObservation = nullptr);
 
         void ClearCache();
 

@@ -19,6 +19,7 @@ namespace renderer
     struct CelestialBody
     {
         bool visible = false;
+        Vec3 viewSpacePosition{};    // billboard origin, camera/view space
         Vec3 viewSpaceDirection{};   // normalized, view space
         Vec3 worldSpaceDirection{};  // normalized, world space
         float screenX = -1.0f;
