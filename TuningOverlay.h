@@ -77,7 +77,8 @@ inline void InstallInputHook(HWND window){
  if(previous&&previous!=reinterpret_cast<LONG_PTR>(&InputWndProc)){inputWindow=window;originalInputProc=reinterpret_cast<WNDPROC>(previous);}
  else if(!previous&&GetLastError())renderer::menudiagnostics::Write("INPUT HOOK FAILED win32="+std::to_string(GetLastError()));
 }
-inline void Configure(const std::wstring& base){CancelInteraction();ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
+inline void ReloadValues(){for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
+inline void Configure(const std::wstring& base){CancelInteraction();ini=base+L"GraphicsEffects.ini";ReloadValues();}
 inline bool Save(Item& i){
  if(i.kind==KIND_HEADER)return false;
  SetLastError(0);
@@ -99,6 +100,23 @@ inline bool ResetActiveTab(){
  }
  if(failed)saveError="Reset incomplete; see MenuDiagnostics.log";
  else {saveError.clear();renderer::menudiagnostics::Write("RESET DEFAULTS tab="+std::string(items[tab.header].label));}
+ return changed;
+}
+// Only the selected category is cleared; saved location presets stay untouched.
+inline bool CanClearGlobalTab(){
+ return renderer::locationtuning::editGlobal&&!renderer::locationtuning::IsGlobal(items[Tabs()[layout.activeTab].begin].section);
+}
+inline bool ClearGlobalActiveTab(){
+ if(!CanClearGlobalTab())return false;
+ const auto tab=Tabs()[layout.activeTab];bool changed=false,failed=false;
+ for(int index=tab.begin;index<tab.end;++index){
+  const auto& item=items[index];
+  if(!renderer::locationtuning::HasGlobalValue(item.section,item.key))continue;
+  if(renderer::locationtuning::ClearGlobalValue(item.section,item.key))changed=true;else failed=true;
+ }
+ CancelInteraction();ReloadValues();
+ saveError=failed?"Clear incomplete; see MenuDiagnostics.log":"";
+ renderer::menudiagnostics::Write(failed?"CLEAR GLOBAL OVERRIDES FAILED":"CLEARED GLOBAL OVERRIDES");
  return changed;
 }
 inline const std::array<unsigned char,7>& Glyph(char c){
@@ -141,13 +159,14 @@ inline void Layout(int width,int height,HWND window){
  uiScale=layout.scale;
 }
 inline int HitScope(float px,float py){
- for(int i=0;i<2;++i)if(layout.Scope(i).Contains(px,py))return i;
+ for(int i=0;i<3;++i)if(layout.Scope(i).Contains(px,py))return i;
  return -1;
 }
 inline bool SelectScope(int scope){
- if(!renderer::locationtuning::editable||scope<0||scope>1||(scope==1&&!renderer::locationtuning::active.areaId))return false;
+ if(scope<0||scope>2||(scope!=2&&!renderer::locationtuning::editable)||(scope==1&&!renderer::locationtuning::active.areaId))return false;
+ renderer::locationtuning::editGlobal=scope==2;
  renderer::locationtuning::editZone=scope==0;dragItem=-1;
- for(auto& i:items)if(i.kind!=KIND_HEADER)i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
+ CancelInteraction();ReloadValues();
  return true;
 }
 inline bool Update(){
@@ -187,9 +206,10 @@ inline bool Update(){
   }
   if(layout.Begin(px,py)){dragItem=-1;}
   else if(const int tab=layout.HitTab(px,py);tab>=0){layout.SelectTab(tab);dragItem=-1;}
-  else if(renderer::locationtuning::editable&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));}
+  else if(HitScope(px,py)>=0){SelectScope(HitScope(px,py));}
   else if(layout.ScrollButton(false).Contains(px,py)){layout.Scroll(-1);}
   else if(layout.ScrollButton(true).Contains(px,py)){layout.Scroll(1);}
+  else if(CanClearGlobalTab()&&layout.ClearOverridesButton().Contains(px,py)){dragItem=-1;changed=ClearGlobalActiveTab();}
   else if(layout.ResetButton().Contains(px,py)){dragItem=-1;changed=ResetActiveTab();}
   else if(const int index=layout.HitItem(px,py);index>=0){
    auto& item=items[index];
@@ -280,20 +300,18 @@ inline void Draw(IDirect3DDevice9* d){
  const auto& manager=renderer::EnvironmentProfileManager::Instance();
  const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
  label(x+12,y+137,"Settings for:",0xffdce5ea,x+142);
- if(renderer::locationtuning::editable){
-  for(int scope=0;scope<2;++scope){
-   const auto b=layout.Scope(scope);const bool enabled=scope==0||renderer::locationtuning::active.areaId;
-   box(b,enabled&&((scope==0)==zone)?0xff246b47:0xff26343b);
-   const std::string text=scope==0?"Entire zone - "+manager.ZoneName():enabled?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)";
-   label(b.x+8,b.y+4,text,enabled?0xffdce5ea:0xff81919c,b.x+b.w-8);
-  }
- }else{
-  box({x+150,y+132,w-162,26},0xff246b47);
-  label(x+158,y+137,"Entire game - GraphicsEffects.ini",0xffdce5ea,x+w-12);
+ for(int scope=0;scope<3;++scope){
+  const auto b=layout.Scope(scope);
+  const bool enabled=scope==2||(renderer::locationtuning::editable&&(scope==0||renderer::locationtuning::active.areaId));
+  const bool selected=renderer::locationtuning::editGlobal?scope==2:renderer::locationtuning::editable&&((scope==0&&zone)||(scope==1&&!zone));
+  box(b,enabled&&selected?0xff246b47:0xff26343b);
+  const std::string text=scope==2?"Global - entire game":scope==0?"Entire zone - "+manager.ZoneName():enabled?"This subarea - "+manager.AreaName():"Subarea unavailable";
+  label(b.x+8,b.y+4,text,enabled?0xffdce5ea:0xff81919c,b.x+b.w-8);
  }
- label(x+12,y+168,!saveError.empty()?saveError:renderer::locationtuning::editable?
-  "Subarea settings override zone settings. Image & color always applies globally.":
-  "Location not verified: all edits apply globally. Changes save automatically.",
+ label(x+12,y+168,!saveError.empty()?saveError:renderer::locationtuning::editGlobal?
+  "Global edits override all locations. Clear overrides restores location settings.":renderer::locationtuning::editable?
+  "Priority: Global > Subarea > Zone. Image & color always applies globally.":
+  "Location not verified: edits apply globally. Select Global for priority overrides.",
   saveError.empty()?0xffb5cbd6:0xffffaaaa,x+w-12);
  box({x+8,y+198,220,panel.h-234},0xff101e28);
  for(int tab=0;tab<int(Tabs().size());++tab){
@@ -303,7 +321,9 @@ inline void Draw(IDirect3DDevice9* d){
  }
  const auto content=layout.Content();const auto& tab=Tabs()[layout.activeTab];
  const auto resetButton=layout.ResetButton();
- label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,resetButton.x-8);
+ const auto clearButton=layout.ClearOverridesButton();
+ label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,(CanClearGlobalTab()?clearButton.x:resetButton.x)-8);
+ if(CanClearGlobalTab()){box(clearButton,0xff263f4b);label(clearButton.x+8,clearButton.y+5,"CLEAR OVERRIDES",0xff9dffc0,clearButton.x+clearButton.w-6);}
  box(resetButton,0xff263f4b);label(resetButton.x+8,resetButton.y+5,"RESET DEFAULTS",0xff9dffc0,resetButton.x+resetButton.w-6);
  const int first=tab.begin+layout.offsets[layout.activeTab];
  const int end=std::min(tab.end,first+layout.VisibleRows());

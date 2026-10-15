@@ -221,7 +221,8 @@ away again.
 
 ### Authoring
 
-Every value above is a `[Water]` key, read per area first (`LocationGraphics.ini`, the same
+Every value above is a `[Water]` key. Explicit `[Global.Water]` overrides take priority;
+otherwise values are read per area first (`LocationGraphics.ini`, the same
 scope the enable switch uses), so zones differ without a code change: `ClarityPercent`,
 `WindStrengthPercent`, `SparklePercent`, `WaveRoughnessPercent`, `SheenPercent`,
 `ShoalFoamPercent`, `FoamBrightnessPercent`, `SunDiscPercent`, and the three colours

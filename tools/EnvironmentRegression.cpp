@@ -10,6 +10,43 @@ using namespace renderer;
 void Require(bool v,const char* message) {if(!v)throw std::runtime_error(message);std::cout<<"PASS "<<message<<'\n';}
 bool Near(float a,float b){return std::abs(a-b)<.0001f;}
 static uint32_t testMap=0,testZone=12,testArea=87;
+// Called with the existing zone/subarea fixtures in place.
+void TestGlobalOverrides(const std::wstring& base) {
+ using namespace locationtuning;
+ Sync(base,{571,65,4164,true},true);
+ const auto path=baseFile;
+ const auto runtime=[&]{return ReadInt(L"Atmosphere",L"ShaftPercent",0,path.c_str());};
+ editGlobal=true;
+ Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==60,"untouched Global editor shows baseline, not current subarea");
+ Require(runtime()==170&&!HasGlobalValue(L"Atmosphere",L"ShaftPercent"),"opening Global does not create overrides");
+ Require(Save(L"Atmosphere",L"ShaftPercent",0)&&runtime()==0,"explicit zero Global edit overrides subarea");
+ Require(GetPrivateProfileIntW(L"Atmosphere",L"ShaftPercent",0,path.c_str())==60,"Global override preserves baseline file");
+ Require(ReadInt(L"Water",L"Enabled",1,path.c_str())==0&&!HasGlobalValue(L"Water",L"Enabled"),"Global edit leaves other keys untouched");
+ editGlobal=false;editZone=true;
+ Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==90,"zone editor remains independent of Global mask");
+ Require(Save(L"Atmosphere",L"ShaftPercent",95)&&runtime()==0,"zone edit cannot beat Global override");
+ editZone=false;
+ Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==170,"area editor remains independent of Global mask");
+ Require(Save(L"Atmosphere",L"ShaftPercent",175)&&runtime()==0,"area edit cannot beat Global override");
+ Sync(base,{619,4494,4623,true},true);
+ Require(runtime()==0,"Global override survives map changes");
+ Sync(base,{},false);
+ Require(runtime()==0&&ReadEditorInt(L"Atmosphere",L"ShaftPercent",60,path.c_str())==0,"Global override works without location verification");
+ Require(Save(L"Atmosphere",L"ShaftPercent",5)&&runtime()==5,"unverified fallback edits existing Global override instead of masked baseline");
+ editGlobal=true;
+ Require(Save(L"Water",L"WaterColour",0x123456)&&HasScopedValue(L"Water",L"WaterColour"),"Global water colour is a deliberate override even without location");
+ Require(ReadInt(L"Water",L"WaterColour",0,path.c_str())==0x123456,"Global water colour reads back");
+ Require(Save(L"Atmosphere",L"ShaftPercent",60)&&runtime()==60,"Global edit equal to baseline still overrides location");
+ Sync(base,{571,65,4164,true},true);
+ Require(runtime()==60,"Global override persists across settings reload");
+ Require(ClearGlobalValue(L"Atmosphere",L"ShaftPercent")&&runtime()==175,"clearing Global restores saved subarea without deleting it");
+ Sync(base,{571,65,4165,true},true);
+ Require(runtime()==95,"clearing Global preserves saved zone value");
+ Require(HasGlobalValue(L"Water",L"WaterColour"),"clearing one Global key leaves another intact");
+ Require(ClearGlobalValue(L"Water",L"WaterColour")&&!HasScopedValue(L"Water",L"WaterColour"),"clearing Global colour restores automatic zone colours");
+ Require(ClearGlobalValue(L"Water",L"WaterColour"),"clearing absent override is harmless");
+ editGlobal=false;editZone=false;
+}
 int main() try {
  const auto tuningDir=std::filesystem::absolute("build/location-tuning-test");std::filesystem::create_directories(tuningDir);
  const auto tuningBase=tuningDir.wstring()+L"\\";
@@ -44,14 +81,15 @@ int main() try {
          locationtuning::ReadInt(L"Water",L"Enabled",1,locationtuning::baseFile.c_str())==0&&
          GetPrivateProfileIntW(L"Map.571.Zone.65.Area.4164.Water",L"Enabled",-1,locationtuning::localFile.c_str())==-1,
          "unverified database falls back globally without writing a location preset");
+ TestGlobalOverrides(tuningBase);
  // Existing map/zone/subarea color overrides must never affect global grading.
  locationtuning::Sync(tuningBase,{571,65,4164,true},true);
  const wchar_t* colorKeys[]={L"Enabled",L"BrightnessPercent",L"ContrastPercent",L"GammaPercent",L"SharpnessPercent"};
  const int globalValues[]={1,-6,108,80,42};
  for(int k=0;k<5;++k){
   for(unsigned level=0;level<3;++level){const auto section=locationtuning::Scope(level)+L".PostProcess";WritePrivateProfileStringW(section.c_str(),colorKeys[k],L"35",locationtuning::localFile.c_str());}
-  locationtuning::editZone=k%2==0;
-  Require(locationtuning::Save(L"PostProcess",colorKeys[k],globalValues[k]),"save color globally in either editor scope");
+  locationtuning::editZone=k%2==0;locationtuning::editGlobal=k%3==2;
+  Require(locationtuning::Save(L"PostProcess",colorKeys[k],globalValues[k]),"save color globally in all three editor scopes");
   Require(int(locationtuning::ReadInt(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str()))==globalValues[k]&&int(locationtuning::ReadEditorInt(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str()))==globalValues[k],"runtime and editor ignore old color overrides");
   Require(GetPrivateProfileIntW(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str())==globalValues[k],"global color writes shared graphics file");
   Require(GetPrivateProfileIntW(L"Map.571.Zone.65.Area.4164.PostProcess",colorKeys[k],0,locationtuning::localFile.c_str())==35,"legacy local color values remain untouched");
@@ -60,7 +98,7 @@ int main() try {
  Require(int(locationtuning::ReadInt(L"PostProcess",L"BrightnessPercent",0,locationtuning::baseFile.c_str()))==-6,"color remains identical after location change");
  locationtuning::Sync(tuningBase,{},false);
  Require(locationtuning::Save(L"PostProcess",L"Enabled",0)&&locationtuning::ReadInt(L"PostProcess",L"Enabled",1,locationtuning::baseFile.c_str())==0,"global color remains editable without valid local preset");
- locationtuning::editZone=false;
+ locationtuning::editZone=false;locationtuning::editGlobal=false;
  locationtuning::Sync(L"",{},false);
  EnvironmentConfiguration c;std::string error;
  const std::string text="[EnvironmentSystem]\nTransitionSeconds=4\nAreaDebounceMs=300\n[Default]\nFogDensityMultiplier=0.8\nWaterAgitationMultiplier=1.0\n[Environment.Forest]\nRayIntensityMultiplier=1.2\nLocalFogMultiplier=0.7\n[Environment.City]\nProfile=Forest\nLocalFogMultiplier=0.1\n[Map.0]\nFogDensityMultiplier=0.5\nWaterAgitationMultiplier=1.2\n[Zone.12]\nProfile=City\nFogDensityMultiplier=0.6\nWaterAgitationMultiplier=0.7\n[Area.87]\nRayIntensityMultiplier=0.3\nWaterAgitationMultiplier=0.3\n";
