@@ -217,6 +217,21 @@ struct Instance
     unsigned boneBound = 0;
     unsigned poseBound = 0;   // the bound the stored pose was taken with
     unsigned stable = 0;
+    // How many plants this model's draw carries. One for a single tuft, bush or
+    // tree; every tuft of a patch for a draw the client merged a field's grass
+    // into. It is what the HUD's "leaning" counts, because that is what the
+    // player sees move - counting a whole field as one would read as "nothing
+    // sways" no matter how hard it blew.
+    unsigned plants = 1;
+    // The last frame this model was seen moving - a pose that changed, a mesh
+    // re-uploaded, or a placement point that travelled. It is refused for a
+    // while afterwards, so a walk cycle cannot flicker back into leaning between
+    // two frames that happen to match.
+    uint64_t movedFrame = ~0ull;
+    // Whether this instance has been measured at all. Until it has, there is no
+    // placement point to compare against and no size to trust: a fresh instance
+    // is "waiting", never "placed and still".
+    bool measured = false;
     bool swaying = false;
     // The material proof that does not come from the render state: this model is
     // drawn with a texture that has transparent texels in it, which is what a
@@ -254,6 +269,11 @@ inline std::unordered_map<const void*, renderer::TextureAlphaProbe> g_textureCut
 inline bool g_anySwaying = false;
 inline bool g_reportedSolidTexture = false;
 inline bool g_reportedUnreadableTexture = false;
+inline bool g_reportedShape = false;
+inline bool g_reportedSize = false;
+inline bool g_reportedMoved = false;
+inline bool g_reportedMerged = false;
+inline bool g_reportedLean = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
 inline bool g_reportedSolidModel = false;
@@ -305,6 +325,11 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_reportedUnreadableGeometry = false;
     g_reportedSolidTexture = false;
     g_reportedUnreadableTexture = false;
+    g_reportedShape = false;
+    g_reportedSize = false;
+    g_reportedMoved = false;
+    g_reportedMerged = false;
+    g_reportedLean = false;
     g_reportedUnidentifiedShader = false;
     g_reportedSolidModel = false;
     g_reportedRootBlock = false;
@@ -407,8 +432,13 @@ namespace detail
     // the whole set of them costs a handful of lines per session. That is the
     // only way a "my grass does not sway" report can be answered without a
     // debugger attached.
-    inline const renderer::M2VertexLayout* Layout(IDirect3DVertexDeclaration9* declaration, uint64_t frame,
-        bool report)
+    // Defined below, next to the material gate that uses it; the declaration log
+    // wants it too, because "is this draw's texture foliage-like" is the one
+    // question a report about a declaration always comes down to.
+    inline renderer::TextureAlphaProbe TextureIsCutout(IDirect3DDevice9* device) noexcept;
+
+    inline const renderer::M2VertexLayout* Layout(IDirect3DDevice9* device, IDirect3DVertexDeclaration9* declaration,
+        uint64_t frame, bool report)
     {
         if (!declaration) return nullptr;
         auto found = g_meshes.find(static_cast<const void*>(declaration));
@@ -436,11 +466,22 @@ namespace detail
             {
                 char described[256]{};
                 renderer::DescribeVertexDeclaration(elements, count, described, sizeof(described));
+                // A declaration like this is a draw this reader cannot measure,
+                // and the question a report always comes down to is whether the
+                // plants are in here. The draw's own texture answers it: a
+                // declaration with no bone indices AND a cut-out texture is
+                // grass the client draws as static geometry, which no bone
+                // palette can ever lean, while an opaque one is scenery and the
+                // plants are on the model path after all.
+                const renderer::TextureAlphaProbe texture = TextureIsCutout(device);
+                const char* verdict = texture.verdict == renderer::TextureCutout::Cutout ? "a cut-out (foliage-like!)"
+                    : texture.verdict == renderer::TextureCutout::Opaque ? "opaque (scenery, not foliage)"
+                    : "not readable as a cut-out";
                 std::snprintf(text, sizeof(text),
                     "Vegetation sway: a draw is not using a vertex declaration this reader can measure - POSITION + "
-                    "BLENDINDICES in stream 0 is what makes a draw the client's skinned model path (%s). Terrain, "
-                    "WMOs, particles, ribbons, effects and the interface look like this; if a plant does not sway, "
-                    "so may it.", described);
+                    "BLENDINDICES in stream 0 is what makes a draw the client's skinned model path (%s). Its stage 0 "
+                    "texture is %s [%u texels examined]. Terrain, WMOs, particles, ribbons, effects and the interface "
+                    "look like this; if a plant does not sway, so may it.", described, verdict, texture.texels);
             }
             else
             {
@@ -771,24 +812,17 @@ namespace detail
         return &g_geometry.emplace(key, profile).first->second;
     }
 
-    // The batches of one model arrive in the client's own material order, so the
-    // canopy that proved the model is swaying can be drawn after its opaque
-    // trunk. An instance that leaned within the last couple of frames therefore
-    // still owns those batches; one that stopped leaning (out of range, no
-    // longer static, no longer drawn) owns nothing, because the range fade and
-    // the drift guard are re-checked for every batch anyway.
-    inline Instance* SwayingByRoot(uint64_t rootKey, uint64_t frame) noexcept
+    // The instance a draw belongs to, if this renderer has already measured it -
+    // looked up by the FULL identity (placement, orientation, vertex buffer) and
+    // never created. A solid prop must not become an instance by being drawn, and
+    // a model must not be leaned on the strength of another model that happens to
+    // stand in the same place.
+    inline Instance* MeasuredInstance(uint64_t key, uint64_t frame) noexcept
     {
-        for (auto& entry : g_instances)
-        {
-            Instance& instance = entry.second;
-            if (!instance.swaying || instance.rootKey != rootKey) continue;
-            if (instance.rootKeyFrame == frame) return &instance;
-            if (instance.leanedFrame != ~0ull && frame >= instance.leanedFrame &&
-                frame - instance.leanedFrame <= 2)
-                return &instance;
-        }
-        return nullptr;
+        auto found = g_instances.find(key);
+        if (found == g_instances.end()) return nullptr;
+        found->second.lastSeenFrame = frame;
+        return &found->second;
     }
 
     inline Instance* InstanceFor(uint64_t key, uint64_t frame)
@@ -935,7 +969,7 @@ struct Scope
         // the material, and only counted for the HUD when it could be foliage:
         // the log is what a report is diagnosed from, and the counter is what a
         // player reads, so they are gated by different things on purpose.
-        const renderer::M2VertexLayout* layout = detail::Layout(detail::BoundDeclaration(device),
+        const renderer::M2VertexLayout* layout = detail::Layout(device, detail::BoundDeclaration(device),
             frame.frameIndex, true);
         if (!layout)
         {
@@ -1069,6 +1103,8 @@ struct Scope
         // crate, a boulder and a piece of armour look like.
         const bool foliageMaterial = detail::TransparentMaterial(device);
         bool instanceCutout = false;
+        // Only the solid-batch path below sets this: it is the model a solid batch
+        // turned out to belong to, proved by its own vertex buffer.
         Instance* known = nullptr;
         if (foliageMaterial)
         {
@@ -1076,20 +1112,12 @@ struct Scope
         }
         else
         {
-            // The instance lookup is paid for the draws that need it, not for
-            // every model in the frame: the shortcut it feeds is about solid
-            // batches of a model that is already leaning (a tree's own trunk),
-            // which is exactly this branch.
-            known = detail::SwayingByRoot(rootKey, frame.frameIndex);
-            if (known && known->cutout)
             {
-                // A batch of a model this frame has already proved is a cutout.
-                // It costs nothing and it cannot be wrong: the proof belongs to
-                // the model, not to the batch.
-                instanceCutout = true;
-            }
-            else
-            {
+                // The draw's own texture, and nothing else: a placement point that
+                // matches some leaning model nearby is not evidence about THIS
+                // draw. A rider sits at their mount's placement point, and taking
+                // that match for an answer is how a cloak in the wind leans the
+                // mount underneath it.
                 const renderer::TextureAlphaProbe texture = detail::TextureIsCutout(device);
                 instanceCutout = texture.verdict == renderer::TextureCutout::Cutout;
                 if (!instanceCutout)
@@ -1154,10 +1182,42 @@ struct Scope
         {
             // A solid batch of a model that is already leaning (a tree's own
             // trunk, drawn before or after its canopy): it is leaned from the
-            // palette alone, exactly as before - its vertices would have to be
-            // re-read to measure it and its shape was already decided by the
-            // batch that revealed the model.
-            if (!known) return;
+            // palette alone - its shape was already decided by the batch that
+            // revealed the model - but only once it has proved it is a batch of
+            // THAT model. The placement point is not enough to say so: a rider
+            // sits at their mount's placement point with the same orientation, so
+            // a cloak in the wind would hand the mount its lean. The vertex buffer
+            // is the model, and it is one cached read away.
+            GeometryProfile* solid = detail::BatchGeometry(device, *layout, draw, frame.frameIndex);
+            if (!solid)
+            {
+                ++Status().skippedGeometry;
+                return;
+            }
+            const renderer::M2DrawGeometry& solidModel = solid->geometry;
+            float solidOrigin[3]{};
+            if (!renderer::VegetationModelOrigin(root, &frame.viewRaw.m[0][0], &frame.cameraPosition.x, solidOrigin))
+            {
+                ++Status().skippedPalette;
+                return;
+            }
+            float solidBasis[3][3]{};
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                {
+                    float value = 0.f;
+                    for (int k = 0; k < 3; ++k) value += frame.viewRaw.m[row][k] * root[k][column];
+                    solidBasis[row][column] = value;
+                }
+            Instance* owner = detail::MeasuredInstance(
+                renderer::VegetationInstanceKey(solidOrigin, solidBasis, solidModel.model), frame.frameIndex);
+            if (!owner || !owner->swaying)
+            {
+                // Not a batch of any model this renderer has measured: a solid
+                // prop, which is what the material gate already counted it as.
+                return;
+            }
+            known = owner;
             float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
             const unsigned bound = std::max(known->boneBound, 1u);
             if (!detail::ReadPalette(device, rootKey, frame.frameIndex, bound, registers))
@@ -1173,7 +1233,29 @@ struct Scope
                 probe.Observe(false, 0, frame.frameIndex);
                 return;
             }
-            Lean(frame, *known, bones, registers, bones.bones);
+            const float moved = std::sqrt((bones.pivot[0] - known->pivot[0]) * (bones.pivot[0] - known->pivot[0]) +
+                (bones.pivot[1] - known->pivot[1]) * (bones.pivot[1] - known->pivot[1]) +
+                (bones.pivot[2] - known->pivot[2]) * (bones.pivot[2] - known->pivot[2]));
+            // The pose is only comparable when the same bones were revealed; the
+            // placement point always is.
+            const bool poseMoved = known->pose.valid && known->poseBound == bound &&
+                known->pose.bones == bones.bones &&
+                renderer::VegetationPoseDelta(known->pose, bones) > renderer::kVegetationPoseTolerance;
+            if (known->measured && moved > renderer::kVegetationPlacedEpsilon)
+            {
+                ++Status().skippedAnimated;
+                known->movedFrame = frame.frameIndex;
+                StopLeaning(*known);
+                return;
+            }
+            if (poseMoved && !settings.animatedModels)
+            {
+                ++Status().skippedAnimated;
+                known->movedFrame = frame.frameIndex;
+                StopLeaning(*known);
+                return;
+            }
+            Lean(frame, *known, bones, registers, bones.bones, shader.hash);
             return;
         }
 
@@ -1224,6 +1306,34 @@ struct Scope
         const unsigned bound = std::max(model.bones, std::max(instance->boneBound, 1u));
         instance->boneBound = bound;
 
+        // A placed doodad does not travel. Its placement point is part of its
+        // identity, so a model whose point moved between two frames is being
+        // carried by the client - a mount under the player, a creature walking,
+        // an object in someone's hands - and is not a plant whatever else it
+        // looks like. This is the witness that does not depend on the client's
+        // animation being visible in a single pair of frames, and it is what a
+        // ridden mount trips on every step it takes.
+        const bool placed = !instance->measured ||
+            std::sqrt((origin[0] - instance->pivot[0]) * (origin[0] - instance->pivot[0]) +
+                      (origin[1] - instance->pivot[1]) * (origin[1] - instance->pivot[1]) +
+                      (origin[2] - instance->pivot[2]) * (origin[2] - instance->pivot[2])) <=
+                renderer::kVegetationPlacedEpsilon;
+        if (!placed)
+        {
+            ++Status().skippedAnimated;
+            instance->movedFrame = frame.frameIndex;
+            StopLeaning(*instance);
+            if (!g_reportedMoved)
+            {
+                g_reportedMoved = true;
+                Log("Vegetation sway: a model that was being measured moved its placement point, so the client is "
+                    "carrying it (a mount, a creature, an object held by someone). Its placement is part of its "
+                    "identity and a moving prop is not a plant: it is refused and stops leaning. The HUD counts these "
+                    "as `move`.");
+            }
+            return;
+        }
+
         float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
         if (!detail::ReadPalette(device, rootKey, frame.frameIndex, bound, registers))
         {
@@ -1239,10 +1349,25 @@ struct Scope
             return;
         }
         probe.Observe(true, bones.bones, frame.frameIndex);
-        if (bones.bones > renderer::kVegetationMaxBones)
+        // Many bones are not a creature if they are spread over a patch: this
+        // client merges a field's grass into single draws, one bone per tuft, and
+        // a patch of grass has more "bones" than any creature while being nothing
+        // but grass. What a creature's skeleton has instead is COMPACTNESS - every
+        // bone inside one body a couple of yards across - so that is what the cap
+        // is applied to, and the merged case is bounded by size further down.
+        const bool merged = renderer::VegetationSkeletonIsSpatial(bones);
+        const bool manyPlants = renderer::VegetationCarriesManyPlants(bones);
+        if (bones.bones > renderer::kVegetationMaxBones && !merged)
         {
             // A full skeleton: character, creature, mount, weapon.
             ++Status().skippedShape;
+            if (!g_reportedShape)
+            {
+                g_reportedShape = true;
+                Log("Vegetation sway: a model draw carries " + std::to_string(bones.bones) +
+                    " bones in a spread of " + std::to_string(bones.spread) + " yd, which is a creature, a mount or a "
+                    "character rather than a plant. The HUD counts these as `shape`.");
+            }
             return;
         }
 
@@ -1260,13 +1385,36 @@ struct Scope
         {
             Status().lastMeasured = height;
             ++Status().skippedSize;
+            if (!g_reportedSize)
+            {
+                g_reportedSize = true;
+                Log("Vegetation sway: a model draw measured " + std::to_string(height) + " yd tall (a plant has to be "
+                    "between " + std::to_string(renderer::kVegetationMinModelHeight) + " and " +
+                    std::to_string(renderer::kVegetationMaxModelHeight) + "), so there is nothing to bend in it. The "
+                    "HUD counts these as `size`.");
+            }
             return;
         }
-        // A fence, a wall and a bridge are long and low; a bush is not.
-        if (footprint > std::max(renderer::kVegetationFootprintToHeight * height, renderer::kVegetationMinFootprint))
+        // A fence, a wall and a bridge are long and low; a bush is not. A merged
+        // patch of grass is long and low too - it is the whole patch in one draw,
+        // so the rule that keeps a fence out would keep the field out with it -
+        // and the difference is that a patch is made of many small plants with
+        // their own bones, which is exactly what `merged` says. Only the patch
+        // gets the generous limit, and even that is a limit.
+        const float footprintLimit = merged ? renderer::kVegetationMaxFootprint
+            : std::max(renderer::kVegetationFootprintToHeight * height, renderer::kVegetationMinFootprint);
+        if (footprint > footprintLimit)
         {
             Status().lastMeasured = height;
             ++Status().skippedShape;
+            if (!g_reportedShape)
+            {
+                g_reportedShape = true;
+                Log("Vegetation sway: a model draw measured " + std::to_string(height) + " yd tall and " +
+                    std::to_string(footprint) + " yd across with " + std::to_string(bones.bones) + " bones over a " +
+                    std::to_string(bones.spread) + " yd spread, which is not a plant (the limit is " +
+                    std::to_string(footprintLimit) + " yd). The HUD counts these as `shape`.");
+            }
             return;
         }
         Status().lastMeasured = height;
@@ -1274,6 +1422,18 @@ struct Scope
         instance->footprint = footprint;
         instance->rootKey = rootKey;
         instance->rootKeyFrame = frame.frameIndex;
+        instance->measured = true;
+        instance->plants = manyPlants ? bones.bones : 1;
+        if (merged && !g_reportedMerged)
+        {
+            g_reportedMerged = true;
+            Log("Vegetation sway: a draw carrying many plants was accepted - " + std::to_string(bones.bones) +
+                " bones over a " + std::to_string(bones.spread) + " yd spread, " + std::to_string(height) +
+                " yd tall and " + std::to_string(footprint) + " yd across, counted as " +
+                std::to_string(instance->plants) + " plants. A patch of grass the client merged into one draw is low "
+                "and wide; a tree is tall, and is one plant however many bones it has. Every bone turns about its "
+                "own position either way.");
+        }
         for (int i = 0; i < 3; ++i) instance->pivot[i] = origin[i];
 
         // The animation test, in two halves. The mesh has to be where it was - a
@@ -1323,8 +1483,11 @@ struct Scope
             if (samePose) instance->stable = std::min(instance->stable + 1, kMaxStableFrames);
             else if (comparable)
             {
-                // The client is moving it after all. It stops leaning immediately.
+                // The client is moving it after all. It stops leaning immediately,
+                // and the frame is remembered: a walk cycle has frames that match
+                // by accident, and those must not put it back in the wind.
                 ++Status().skippedAnimated;
+                instance->movedFrame = frame.frameIndex;
                 StopLeaning(*instance);
             }
             else if (!sameFrame || instance->poseBound != bound) instance->stable = 0;
@@ -1333,6 +1496,7 @@ struct Scope
         {
             // The client is re-uploading this mesh: an effect, not a plant.
             ++Status().skippedAnimated;
+            instance->movedFrame = frame.frameIndex;
             StopLeaning(*instance);
         }
         if (!sameFrame || instance->poseBound != bound)
@@ -1341,15 +1505,26 @@ struct Scope
             instance->poseFrame = frame.frameIndex;
             instance->poseBound = bound;
         }
-        if (instance->stable < 1 && !settings.animatedModels)
+        // The proof, and the two ways it can be short: a model that has not
+        // repeated itself for long enough yet ("being measured"), and a model
+        // that was seen moving recently - a mount, a creature, anything the
+        // client animates - which is refused outright rather than re-measured
+        // from scratch. A creature's idle animation is quiet for a frame or two;
+        // it is not quiet for six, and it is not quiet at all once it has been
+        // seen to move.
+        if (instance->stable < renderer::kVegetationStableFrames && !settings.animatedModels)
         {
             // Measured, plant-shaped, standing still - and not leaning yet: the
-            // static-pose proof needs the model to repeat itself in a second
-            // frame before a byte is written, and a batch that revealed a new
-            // share of the skeleton starts that proof again. Counted, because
-            // "N drew, none leaning, nothing refused" is the one row a player
-            // can do nothing with: it means "being measured", not "refused".
-            ++Status().pending;
+            // static proof needs the model to repeat itself over a run of frames
+            // before a byte is written, and a batch that revealed a new share of
+            // the skeleton starts that proof again. Counted, because "N drew,
+            // none leaning, nothing refused" is the one row a player can do
+            // nothing with: it means "being measured", not "refused".
+            if (instance->movedFrame != ~0ull && frame.frameIndex >= instance->movedFrame &&
+                frame.frameIndex - instance->movedFrame < renderer::kVegetationMoveCooldownFrames)
+                ++Status().skippedAnimated;
+            else
+                ++Status().pending;
             return;
         }
 
@@ -1360,7 +1535,7 @@ struct Scope
         // recognised as the same plant.
         instance->cutout = true;
         g_anySwaying = true;
-        Lean(frame, *instance, bones, registers, bones.bones);
+        Lean(frame, *instance, bones, registers, bones.bones, shader.hash);
     }
 
     ~Scope()
@@ -1392,13 +1567,19 @@ private:
         for (const auto& entry : g_instances) g_anySwaying = g_anySwaying || entry.second.swaying;
     }
 
-    // Lean every validated bone of the instance about its placement point. One
-    // rotation for the whole model, exactly as VegetationWind.h documents: every
-    // bone receives the same transform, so no two batches can be pulled apart,
-    // the distance from the pivot is preserved (a bend, not a stretch) and the
-    // tip travel is what the size class and the wind strength asked for.
+    // Lean every validated bone of the instance: ONE rigid rotation for the whole
+    // model, taken from the shared wind, applied about each bone's OWN position.
+    // One rotation keeps the model together - every batch receives the same
+    // transform - and one pivot per bone keeps it true: a tuft's single bone sits
+    // where it meets the ground (so a tuft is exactly what it always was), while a
+    // tree's trunk turns about its base and its branches about the points they
+    // grow from, and a batch the client merged a whole field of grass into bends
+    // tuft by tuft instead of swinging like a plank. Nothing changes its distance
+    // from its own pivot, so a stem bends rather than stretches, and the tip
+    // travel is what the size class and the wind strength asked for.
     void Lean(const renderer::FrameContext& frame, Instance& instance, const renderer::VegetationBones& bones,
-        const float (&registers)[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4], unsigned readBones)
+        const float (&registers)[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4], unsigned readBones,
+        uint64_t hash)
     {
         // The palette's translations live in view space, so the pivot has to as
         // well: the same reconstruct-and-verify ladder the torch path uses, run
@@ -1461,10 +1642,24 @@ private:
             // Bone i is the three registers starting at 3i: three ROWS of a
             // model -> view matrix, which is the shape the lean is applied to.
             const float (*block)[4] = &registers[bone * renderer::kM2RegistersPerBone];
+            // Every bone turns about ITS OWN position, not about the model's
+            // placement point. For one plant both are the same thing - a tuft's
+            // single bone sits where it meets the ground, so nothing changes -
+            // but a model carries as many bones as it has joints, branches or
+            // tufts, and this is what makes a lean mean the right thing for
+            // each of them: a tree's trunk turns about its base and its
+            // branches about the points they grow from, and a batch the client
+            // merged a whole patch of grass into bends tuft by tuft instead of
+            // swinging the whole patch as one plank. The bone's position is the
+            // translation column of its own block, which is where the geometry
+            // bound to it is placed in view space.
+            const float bonePivot[3] = { block[0][3], block[1][3], block[2][3] };
+            const auto boneLean = bone == 0 ? lean
+                : renderer::BuildVegetationLean(bonePivot, &up.x, &direction.x, sample.angleDegrees);
             std::memcpy(m_saved + bone * renderer::kM2RegistersPerBone, block,
                 renderer::kM2RegistersPerBone * sizeof(float[4]));
             float out[3][4]{};
-            renderer::ApplyVegetationLean(lean, block, out);
+            renderer::ApplyVegetationLean(boneLean, block, out);
             std::memcpy(leaned + bone * renderer::kM2RegistersPerBone, out,
                 renderer::kM2RegistersPerBone * sizeof(float[4]));
         }
@@ -1478,12 +1673,30 @@ private:
             return;
         }
         m_wrote = true;
+        if (!g_reportedLean)
+        {
+            // The first draw of a session that actually leans, with the numbers
+            // that identify it. A plant that does not move is a report about a
+            // gate; a plant that moves and should not be is a report about THIS
+            // line, and without it a player's log says only that something,
+            // somewhere, was leaned.
+            g_reportedLean = true;
+            char text[320]{};
+            std::snprintf(text, sizeof(text),
+                "Vegetation sway: the first draw leaned this session - shader=0x%016llx, %u bones, %.2f yd tall, "
+                "%u plant(s), %.1f degrees.",
+                static_cast<unsigned long long>(hash), blocks, double(instance.height), instance.plants,
+                double(sample.angleDegrees));
+            Log(text);
+        }
         Status().maxAngle = std::max(Status().maxAngle, sample.angleDegrees);
         Status().lastHeight = instance.height;
         if (instance.leanedFrame != frame.frameIndex)
         {
             instance.leanedFrame = frame.frameIndex;
-            ++Status().swaying;
+            // A merged draw carries its whole patch, and every plant in it bends:
+            // counting the draw would print a field of grass as "2 leaning".
+            Status().swaying += std::max(instance.plants, 1u);
         }
         ++Status().batches;
     }

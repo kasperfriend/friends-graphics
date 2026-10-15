@@ -1032,6 +1032,7 @@ static void TestConfigurationAndWiring()
         "the vegetation HUD rows are drawn by the wind debug text");
 
     const auto sway = Read("src/Effects/VegetationSway.h");
+    const auto wind = Read("src/Environment/VegetationWind.h");
     const auto geometry_ = Read("src/Core/M2DrawGeometry.h");
     Check(sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos &&
           sway.find("SetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos,
@@ -1060,7 +1061,7 @@ static void TestConfigurationAndWiring()
     const auto linkGate = sway.find("if (!frame.wind.DrivesVegetation()) return;", scopeStart);
     const auto upGate = sway.find("if (draw.verticesUP) return;", scopeStart);
     const auto shaderGate = sway.find("detail::ShaderAccepted(device, frame, shader.hash)", scopeStart);
-    const auto layoutGate = sway.find("detail::Layout(detail::BoundDeclaration(device)", scopeStart);
+    const auto layoutGate = sway.find("detail::Layout(device, detail::BoundDeclaration(device)", scopeStart);
     const auto layoutReport = sway.find("frame.frameIndex, true);", layoutGate);
     Check(scopeStart != sway.npos && firstPaletteRead != sway.npos &&
           linkGate != sway.npos && linkGate < firstPaletteRead &&
@@ -1095,6 +1096,53 @@ static void TestConfigurationAndWiring()
     // client can place a lot of models.
     Check(sway.find("kMaxInstances = 2048") != sway.npos && sway.find("kMaxGeometryProfiles = 2048") != sway.npos,
         "the instance and geometry caches hold a forest's worth of models");
+    // What the third in-client report cost: a mount came apart under the player.
+    // A creature is animated, and every one of these is a witness that a plant is
+    // not: its bones are compact, its placement point travels, its pose changes
+    // and its mesh is re-uploaded. The lean must be impossible for it on all four
+    // counts - and the batch that proves a model is a plant is not always the
+    // batch that gets leaned, so the solid shortcut is checked too.
+    Check(sway.find("const bool merged = renderer::VegetationSkeletonIsSpatial(bones);") != sway.npos &&
+          wind.find("return bones.spread > kVegetationMergedSpread || bones.height > kVegetationTallSkeleton;") != sway.npos &&
+          sway.find("if (bones.bones > renderer::kVegetationMaxBones && !merged)") != sway.npos,
+        "a batch of many plants is not a creature: the bone cap is applied to compact skeletons only");
+    Check(sway.find("const float footprintLimit = merged ? renderer::kVegetationMaxFootprint") != sway.npos,
+        "and a merged patch is allowed to be wide and low, which is what a field's grass draw is");
+    Check(sway.find("renderer::kVegetationPlacedEpsilon") != sway.npos &&
+          sway.find("instance->movedFrame = frame.frameIndex;") != sway.npos &&
+          sway.find("renderer::kVegetationMoveCooldownFrames") != sway.npos,
+        "a model whose placement point travels is being carried by the client, and is refused for a while after");
+    const auto wind2 = Read("src/Environment/VegetationWind.h");
+    Check(sway.find("instance->stable < renderer::kVegetationStableFrames") != sway.npos &&
+          wind2.find("kVegetationStableFrames = 6") != sway.npos,
+        "the static proof is a run of identical frames, not one: an idle creature breathes");
+    Check(sway.find("const float moved = std::sqrt((bones.pivot[0] - known->pivot[0])") != sway.npos &&
+          sway.find("const bool poseMoved = known->pose.valid && known->poseBound == bound &&") != sway.npos &&
+          sway.find("if (poseMoved && !settings.animatedModels)") != sway.npos,
+        "and the solid batch of a leaning model - the saddle, the armour, the held object - is leaned only "
+        "while that model is provably standing still");
+    Check(sway.find("const float bonePivot[3] = { block[0][3], block[1][3], block[2][3] };") != sway.npos &&
+          sway.find("const auto boneLean = bone == 0 ? lean") != sway.npos,
+        "every bone turns about its own position, so a merged patch bends plant by plant");
+    Check(sway.find("const bool manyPlants = renderer::VegetationCarriesManyPlants(bones);") != sway.npos &&
+          wind.find("return bones.bones > 1 && bones.spread > kVegetationMergedSpread &&") != sway.npos &&
+          sway.find("instance->plants = manyPlants ? bones.bones : 1;") != sway.npos &&
+          sway.find("Status().swaying += std::max(instance.plants, 1u);") != sway.npos,
+        "a merged draw counts the plants it carries, so a whole field does not read as two leaning");
+    // Three one-shot lines that make the next report answerable without a second
+    // round: what a declaration this reader cannot measure actually is, that a
+    // merged patch was accepted (and how big it was), and the first draw that
+    // actually leaned. A player's log has to say WHICH of the two problems it is.
+    Check(sway.find("g_reportedMerged") != sway.npos &&
+          sway.find("a draw carrying many plants was accepted") != sway.npos,
+        "the first merged patch accepted is named in the log, with its size and its plant count");
+    Check(sway.find("g_reportedLean") != sway.npos &&
+          sway.find("the first draw leaned this session") != sway.npos,
+        "and the first draw that leaned is named too - a plant that moves when it should not is a report about that "
+        "line");
+    Check(sway.find("texture is %s [%u texels examined]") != sway.npos &&
+          sway.find("opaque (scenery, not foliage)") != sway.npos,
+        "a declaration this reader cannot measure reports whether its texture is foliage-like");
     // The build stamp is published by the Windows half (the overlay rows are
     // portable, so the time itself is read where Windows is available) and it is
     // both stamped on the rows and written to the log at startup.
@@ -1224,10 +1272,11 @@ static void TestConfigurationAndWiring()
           sway.find("instance.cutout = false;") != sway.npos,
         "the proof belongs to the instance, so a tree's other batches need no texture read - and a model that "
         "stops leaning loses it rather than lending it to whatever is placed there next");
-    Check(sway.find("known = detail::SwayingByRoot(rootKey, frame.frameIndex);") != sway.npos &&
-          sway.find("if (known && known->cutout)") != sway.npos,
-        "and a batch of a model this frame already proved is a cutout is admitted on that alone, from the "
-        "instance that proves it - with the lookup paid only where it can matter");
+    Check(sway.find("SwayingByRoot") == sway.npos,
+        "no gate decides a draw's model from its placement point: a rider sits at their mount's point");
+    Check(sway.find("detail::MeasuredInstance(") != sway.npos &&
+          sway.find("renderer::VegetationInstanceKey(solidOrigin, solidBasis, solidModel.model)") != sway.npos,
+        "a solid batch is leaned only once its own vertex buffer proves it is a batch of that model");
     // The order the gates run in, which is what makes the row readable: a pass
     // that writes no colour is settled before a texture is locked, the root block
     // proves the draw is a model before the material read is paid for, and the
@@ -1524,6 +1573,135 @@ static void TestTextureCutoutDecode()
     Pass("texture cut-out decode: every format a client uploads, and never a hole it did not have");
 }
 
+
+// ---------------------------------------------------------------------------
+// One bone, one pivot: what a lean means inside a model
+// ---------------------------------------------------------------------------
+// The lean used to turn a whole draw about the model's placement point. That is
+// right for a tuft with one bone and wrong for everything else a batch can be: a
+// tree's branches and a batch the client merged a whole patch of grass into each
+// carry their own bones, and turning them all about one point swings a patch of
+// grass like a plank. Every bone now turns about its own position - which is
+// exactly the same transform for a one-bone tuft, and a bend per plant, per
+// branch and per joint for everything else.
+static void TestPerBoneLean()
+{
+    const float up[3] = { 0.f, 0.f, 1.f };
+    const float dir[3] = { 1.f, 0.f, 0.f };
+    const float base[3] = { 1.f, 2.f, 3.f };
+    const float branch[3] = { 4.f, 6.f, 8.f };
+    const float angle = 12.f;
+
+    float bone[2][3][4]{};
+    MakePlacementBone(base, bone[0]);
+    MakePlacementBone(branch, bone[1]);
+    float out[2][3][4]{};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        // The pivot of a bone is the translation column of its own block - which
+        // is what the device half passes for every bone of a draw.
+        const float own[3] = { bone[i][0][3], bone[i][1][3], bone[i][2][3] };
+        const auto lean = BuildVegetationLean(own, up, dir, angle);
+        ApplyVegetationLean(lean, bone[i], out[i]);
+    }
+
+    // Each bone stays exactly where it was: the geometry bound to it turns in
+    // place instead of being carried to another plant's pivot.
+    for (unsigned i = 0; i < 2; ++i)
+        Check(Near(out[i][0][3], bone[i][0][3], 1e-4) && Near(out[i][1][3], bone[i][1][3], 1e-4) &&
+              Near(out[i][2][3], bone[i][2][3], 1e-4),
+            "a bone turns about its own position, so the plant it carries keeps its ground contact");
+    Check(!Near(bone[0][0][3], bone[1][0][3], 1e-3),
+        "which is a different transform for each of them - a merged patch bends plant by plant");
+    // The rotation itself is the one rotation: same angle, same basis for both.
+    for (unsigned i = 0; i < 2; ++i)
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                Check(Near(out[i][row][column], out[0][row][column], 1e-4),
+                    "and every bone is turned by the same wind");
+
+    // What the client would see for a tuft that is one bone: byte for byte the
+    // lean this feature has always applied.
+    {
+        const auto modelLean = BuildVegetationLean(base, up, dir, angle);
+        float modelOut[3][4]{};
+        ApplyVegetationLean(modelLean, bone[0], modelOut);
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 4; ++column)
+                Check(Near(out[0][row][column], modelOut[row][column], 1e-5),
+                    "a one-bone model is leaned exactly as before: the bone IS the placement point");
+    }
+    Pass("per-bone lean: every bone turns about its own position, one plant per bone");
+}
+
+// ---------------------------------------------------------------------------
+// Many bones, one patch
+// ---------------------------------------------------------------------------
+// A client that merges a field's grass into a single draw hands us one bone per
+// tuft: thousands of vertices, more bones than any creature, and a footprint far
+// wider than it is tall. The rule that keeps a fence out of the wind would keep
+// that field out with it, and the bone cap written for creatures reads it as a
+// character. What tells them apart is where the bones are: a patch's bones are
+// spread over the patch, a creature's all sit inside one body.
+static void TestMergedPatchSkeleton()
+{
+    const float eye[3] = { -20.f, -30.f, 9.f };
+    const Camera camera(eye, 35.f, -8.f);
+    const float* view = camera.view; // world -> view, exactly as the device reads it
+    float registers[kM2MaxBones * kM2RegistersPerBone][4]{};
+
+    // Twenty tufts three yards apart, all of them half a yard tall: a patch, not
+    // a body, and not a single plant either.
+    for (unsigned tuft = 0; tuft < 20; ++tuft)
+    {
+        const float world[3] = { float(tuft % 5) * 3.f, float(tuft / 5) * 3.f, 0.f };
+        MakeBone(camera, world, kNoRotation,
+            reinterpret_cast<float(*)[4]>(registers[tuft * kM2RegistersPerBone]));
+    }
+    const auto patch = AnalyzeVegetationBones(registers, 20 * kM2RegistersPerBone, view, camera.position);
+    Check(patch.valid && patch.bones == 20, "a merged patch validates every bone it carries");
+    Check(patch.spread > 12.f, "and its bones are spread over the patch, not stacked in one body");
+    Check(patch.spread > kVegetationMergedSpread, "which is what marks it as many plants rather than a creature");
+    Check(patch.height < 1.f && patch.footprint > 12.f,
+        "it is wide and low, exactly like the fence the shape rule was written for");
+
+    // The same number of bones inside one body: a creature, and the spread says
+    // so even though the count alone cannot.
+    float compact[kM2MaxBones * kM2RegistersPerBone][4]{};
+    for (unsigned bone = 0; bone < 20; ++bone)
+    {
+        const float world[3] = { float(bone % 4) * .2f, float(bone / 4) * .2f, float(bone % 3) * .3f };
+        MakeBone(camera, world, kNoRotation,
+            reinterpret_cast<float(*)[4]>(compact[bone * kM2RegistersPerBone]));
+    }
+    const auto creature = AnalyzeVegetationBones(compact, 20 * kM2RegistersPerBone, view, camera.position);
+    Check(creature.valid && creature.bones == 20 && creature.spread < kVegetationMergedSpread,
+        "twenty bones inside one body are a creature: compact, and refused by the bone cap");
+    Check(creature.height < 1.f, "and no size rule would have caught it: only the count and the spread do");
+    // The two things that carry more bones than a body are told apart by shape,
+    // not by a bone count: a patch of grass is low and wide, a tree is tall. The
+    // HUD counts the first as the plants it carries and the second as one plant.
+    const auto skeleton = [](unsigned bones, float spread, float height) {
+        renderer::VegetationBones skeleton{};
+        skeleton.valid = true;
+        skeleton.bones = bones;
+        skeleton.spread = spread;
+        skeleton.height = height;
+        return skeleton;
+    };
+    Check(!renderer::VegetationSkeletonIsSpatial(skeleton(7, 1.f, 2.f)),
+        "a bush is one body's worth of bones in one body's worth of space: compact and short");
+    Check(renderer::VegetationSkeletonIsSpatial(skeleton(60, 40.f, 1.f)) &&
+          renderer::VegetationCarriesManyPlants(skeleton(60, 40.f, 1.f)),
+        "a field of grass merged into one draw is low and wide, so it is a patch of many plants");
+    Check(renderer::VegetationSkeletonIsSpatial(skeleton(40, 3.f, 12.f)) &&
+          !renderer::VegetationCarriesManyPlants(skeleton(40, 3.f, 12.f)),
+        "a tree is tall: admitted with all its branches, and still one plant");
+    Check(!renderer::VegetationCarriesManyPlants(skeleton(1, 40.f, 1.f)),
+        "and one bone is one plant, however wide the patch it belongs to measures");
+    Pass("merged patch skeleton: a field of grass in one draw is not a creature, and a creature is not a patch");
+}
+
 int main() try
 {
     TestLeanGeometry();
@@ -1536,6 +1714,8 @@ int main() try
     TestGeometryMeasurement();
     TestShaderAdmission();
     TestTextureCutoutDecode();
+    TestPerBoneLean();
+    TestMergedPatchSkeleton();
     TestConfigurationAndWiring();
     std::puts("Vegetation wind regressions passed");
     return 0;

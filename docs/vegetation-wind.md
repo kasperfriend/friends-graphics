@@ -48,11 +48,14 @@ client already keeps a model's animation: **in the bone matrices it uploads for
 the draw**.
 
 1. A draw is examined only while it is inside the shared wind's snapshot and the
-   frame has an accepted camera pose, and only if its material is transparent -
-   alpha tested or alpha blended, which is how the client draws leaves, grass
-   and cloth. A solid draw is not foliage and cannot reveal that a model is a
-   plant; it is only leaned once its model is known, which is what keeps a
-   tree's opaque trunk welded to the canopy above it.
+   frame has an accepted camera pose, and only if it is a **cut-out**: either the
+   device has alpha testing or alpha blending on for it, or its own stage 0
+   texture has transparent texels in it (see *What it refuses to touch* - the
+   second witness is what makes this work on a client whose shader system
+   compiles its alpha test into the pixel shader). A solid draw is not foliage
+   and cannot reveal that a model is a plant; it is only leaned once its own
+   vertex buffer proves it is a batch of a model that has already been accepted,
+   which is what keeps a tree's opaque trunk welded to the canopy above it.
 2. The draw has to **prove it is a model**: its vertex declaration has to carry
    `POSITION` and `BLENDINDICES` in stream 0, and it has to come from a vertex
    buffer. Every M2 model the client draws is declared with that layout, one bone
@@ -90,14 +93,16 @@ the draw**.
    the constants it binds, on that draw, and is never cached - a verdict filed
    under hash 0 would let the first unidentifiable draw in the session decide
    for every later one.
-4. The material has to be transparent (alpha tested or alpha blended), and that
-   is read **from the device**, not from the renderer's state mirror: the
-   client's own passes can arrive through cached state blocks, which never reach
-   the `SetRenderState` hook, and a foliage draw the mirror believes is solid is
+4. The material has to be a cut-out, and both witnesses for that are read
+   **from the device**, not from the renderer's state mirror: the client's own
+   passes can arrive through cached state blocks, which never reach the
+   `SetRenderState` hook, and a foliage draw the mirror believes is solid is
    never revealed as an instance at all. A pass that writes no colour is refused
-   for the same reason - the client's native shadow map is a depth-only pass
-   whose palettes live in the light's space, so leaning it would rotate shadows
-   by the frame camera's wind.
+   for the same reason, and that test runs *before* the shader is judged - the
+   client's native shadow map is the biggest source of model-path draws in a
+   frame, it is a depth-only pass whose palettes live in the light's space, and
+   naming it `depth` is truer than offering it as a model this build could not
+   prove.
 5. The bone palette the client uploaded at **c31** is bounded by the draw's
    **own vertices**: the model's bones are the bone indices *its* vertices
    reference, and the palette is read, validated and written no further than
@@ -109,7 +114,9 @@ the draw**.
    translation; the first one that is not ends the palette.
 6. The validated blocks are reconstructed into the model's world **placement
    point** (block 0, the root bone every batch of a model uploads first), its
-   root orientation, and its size. The size is measured from the draw's **own
+   root orientation, its size, and the **spread** of its bones - how far apart
+   the bone positions are, which is what distinguishes one body from a batch that
+   carries a whole patch of plants (see *What it refuses to touch*). The size is measured from the draw's **own
    vertices** through their bone blocks, with the bone span kept as a lower
    bound: bone pivots sit inside a model, so a single-bone grass tuft spans no
    height at all and would be refused forever by a size gate that trusted them.
@@ -120,10 +127,16 @@ the draw**.
    first, and the batches of one model all rotate about the same point.
 7. The instance's own phase - taken from its world identity, never from a frame
    counter - sets its flutter so two tufts a yard apart do not move in lockstep.
-8. Every validated bone gets **one** rigid rotation about that pivot, taken from
-   the shared wind: the same transform for the whole model, so no two batches can
-   be pulled apart, and no distance from the pivot changes, so a stem bends
-   instead of stretching.
+8. Every validated bone receives **one** rigid rotation about **its own
+   position**, taken from the shared wind. For a single-plant model that is
+   exactly the rotation about the model's placement point it has always been - a
+   tuft's one bone sits where it meets the ground - and for everything else it is
+   what makes the transform mean the right thing: a tree's trunk turns about its
+   base while its branches turn about the points they grow from, and a batch the
+   client merged a whole field's grass into bends tuft by tuft instead of
+   swinging the patch like a plank. No distance from a bone's own position
+   changes, so a stem bends instead of stretching, and two batches of one model
+   receive the same rotation, so they cannot be pulled apart.
 9. The leaned blocks are written into the same c31 registers for the draw, and
    the client's own matrices are **restored immediately after it**, in the same
    call, so the next draw and any state the game applies afterwards see exactly
@@ -141,18 +154,43 @@ single byte is written:
   graphics off.** No palette is read at all. Disabling a link restores exactly
   the behaviour that existed before this feature for that consumer, and never
   resets the shared wind for the others.
-- **Models the client is already animating.** Two readings have to agree: the
-  skeleton's world pose, *and* the world positions of the model's own vertices
-  (which is what a particle or effect batch, re-uploaded every frame with new
-  data, fails even when every matrix it binds is still). A static doodad repeats
-  both exactly from any camera; a character, creature, mount or animated prop
-  never does. A model whose motion is ambiguous **never** sways: it is dropped
-  the moment the two readings disagree.
-- **Full skeletons.** More than 24 bones in the validated palette is a
-  character, creature, mount or weapon, not a plant.
+- **Models the client is already animating.** Four readings have to agree, and
+  any one of them refusing is enough to keep a model out of the wind for good:
+  1. *The skeleton's world pose* has to be identical between frames;
+  2. *the world positions of the model's own vertices* have to be where they
+     were (which is what a particle or effect batch, re-uploaded every frame with
+     new data, fails even when every matrix it binds is still);
+  3. *the placement point* has to be where it was - a placed doodad does not
+     travel, while a mount under a player, a walking creature and an object held
+     in someone's hands move constantly;
+  4. *the pose has to repeat for a run of consecutive frames*
+     (`kVegetationStableFrames`), not for one: a creature breathing, a tail
+     swishing or a walk cycle only looks still for a frame or two.
+  A model that fails any of them is refused, stops leaning immediately, and is
+  refused for a while afterwards (`kVegetationMoveCooldownFrames`), so a walk
+  cycle cannot flicker back into the wind between two frames that happen to
+  match. This is what keeps mounts, characters and creatures out with
+  `SWAY ANIMATED MODELS` off, and the placement-point and pose tests are
+  re-run for **every** batch of a model - including the solid batches a
+  creature's saddle, armour or held object arrives as.
+- **Full skeletons - unless they are a patch.** More than 24 bones in a
+  validated palette is a character, creature, mount or weapon rather than one
+  plant. But a client may merge a whole field's grass into a single draw with one
+  bone per tuft, and such a draw carries more bones than any creature: what tells
+  them apart is that a creature's bones all sit inside one body (a couple of
+  yards across), while a patch's are spread over the patch (or a tree's span its
+  own height). A skeleton that is *spread out* (`kVegetationMergedSpread`) or
+  *tall* (`kVegetationTallSkeleton`) is not one body and is admitted, and every
+  one of its bones turns about its own position (see below). The two are not the
+  same thing to the player, though: a **merged patch** is low and wide (bones
+  spread over the field, none of them above the grass) and is counted on the HUD
+  as the number of plants it carries, while a **tree** is tall - one plant,
+  however many branches its skeleton has, and counted as one.
 - **Anything too small or too large** (below 0.15 yd or above 90 yd tall), and
   anything clearly longer than it is tall (more than 2.5x, with 3 yd of slack) -
-  a fence and a wall are not plants.
+  a fence and a wall are not plants. A *merged patch* gets the generous limit
+  instead, because it is not one plant but a whole one-distance-across field of
+  them; even that limit is a limit.
 - **Anything beyond `SWAY DISTANCE`.** The sway reaches full strength at 75% of
   that range and fades to nothing at the range itself, so nothing pops.
 - **Solid materials - with two witnesses, because one of them is not always

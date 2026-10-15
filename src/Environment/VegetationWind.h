@@ -427,6 +427,35 @@ inline bool VegetationModelOrigin(const float registers[][4], const float viewRa
 // taller than a tuft, it is not longer than it is tall, and the client is not
 // animating it.
 inline constexpr unsigned kVegetationMaxBones = 24;     // characters, creatures and mounts carry far more
+// A batch that carries MANY separate plants. This client merges a whole patch of
+// grass into one draw with one bone per tuft, so a grass draw can carry far more
+// bones than any plant - and refusing those for carrying a "full skeleton" is
+// how a field of grass reads as "nothing sways". What separates such a batch
+// from a creature is not the number of bones but where they ARE: a creature's
+// skeleton sits inside one body a couple of yards across, while a patch's bones
+// are spread over the patch. `spread` is the horizontal diagonal of the bone
+// translations, `kVegetationMergedSpread` the distance beyond which the bones
+// cannot belong to one body.
+inline constexpr float kVegetationMergedSpread = 6.f;
+// A skeleton this tall is not a body either: mounts and characters are a couple
+// of yards from hoof to head, while a tree IS its skeleton, head to root. It is
+// the second half of the same idea - what makes a creature a creature is being
+// one body, and a thing whose bones span six yards is not one.
+inline constexpr float kVegetationTallSkeleton = 6.f;
+
+inline constexpr float kVegetationMaxFootprint = 80.f;   // yards: a larger single draw is not one plant patch
+// The animation proof, in frames. A static doodad repeats its pose and its
+// vertices exactly; a creature breathing, a tail swishing or a walk cycle only
+// looks still for a frame or two. Six consecutive identical frames is what keeps
+// mounts and characters out of the wind with the animated-models switch off.
+inline constexpr unsigned kVegetationStableFrames = 6;
+// And once a model HAS been seen moving, it is refused for this many frames
+// afterwards, so a walk cycle cannot flicker back into leaning between steps.
+inline constexpr uint64_t kVegetationMoveCooldownFrames = 90;
+// How far a model may be moved between two frames and still be a plant: a
+// placed doodad does not travel, and a mount, a creature or an object carried by
+// the player does.
+inline constexpr float kVegetationPlacedEpsilon = .05f;
 inline constexpr float kVegetationMinModelHeight = .15f; // yards: below this there is nothing to bend
 inline constexpr float kVegetationMaxModelHeight = 90.f; // yards: the sway of a hill-sized tree is invisible
 inline constexpr float kVegetationMinFootprint = 3.f;   // yards of absolute horizontal slack
@@ -451,11 +480,40 @@ struct VegetationBones
     float top[3]{0.f, 0.f, 0.f};
     float height = 0.f;
     float footprint = 0.f;
+    // Horizontal diagonal of the bone translations: near zero for one plant, the
+    // size of the patch for a batch the client merged a field's grass into.
+    float spread = 0.f;
     float root[3]{0.f, 0.f, 0.f};      // bone 0, world
     float rootBasis[3][3]{};           // bone 0 rotation, world (rows)
     float relative[kM2PoseSamples][3]{}; // sampled bones relative to the root, world
     unsigned samples = 0;
 };
+
+// Two different things wear more bones than a body, and they must not be told
+// apart by the same test, because they are told apart by the player:
+//
+//   * a MERGED PATCH - one draw the client filled with a whole field's grass,
+//     one bone per tuft. Its bones are spread over the patch, but none of them
+//     is above the grass, so its skeleton is LOW AND WIDE: wider than it is
+//     tall, and only as tall as the grass.
+//   * a TREE - a single plant whose skeleton is the whole thing, root to
+//     crown. It is as tall as it is wide, and it is one plant however many
+//     branches it carries.
+//
+// Both are refused by the bone cap that keeps creatures out (a creature has one
+// body's worth of bones in one body's worth of space), and only the patch is
+// counted on the HUD as the plants it carries - a tree counted as forty plants
+// would be as wrong as a field counted as one.
+inline bool VegetationSkeletonIsSpatial(const VegetationBones& bones) noexcept
+{
+    return bones.spread > kVegetationMergedSpread || bones.height > kVegetationTallSkeleton;
+}
+
+inline bool VegetationCarriesManyPlants(const VegetationBones& bones) noexcept
+{
+    return bones.bones > 1 && bones.spread > kVegetationMergedSpread &&
+        bones.height <= kVegetationTallSkeleton;
+}
 
 // The palette is passed as the raw float4 registers the client uploaded, in the
 // same order: bone i occupies registers 3i, 3i+1, 3i+2.
@@ -526,6 +584,7 @@ inline VegetationBones AnalyzeVegetationBones(const float registers[][4], unsign
     // what a one-bone tuft needs - its bones span nothing at all.
     out.height = std::max(highestZ - lowestZ, 0.f);
     out.footprint = std::max(maxX - minX, maxY - minY);
+    out.spread = std::sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY));
 
     // Pose signature: evenly spaced bones, relative to the root. Relative
     // offsets cancel the camera, so a static model stays bit-stable while the
