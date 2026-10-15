@@ -70,6 +70,9 @@ namespace renderer
         unsigned materialRefused = 0;// of those, the ones whose texture was not a green cut-out
         unsigned noTexcoord = 0;     // draws with no texture coordinate to bend a blade by
         unsigned registerMismatch = 0;// draws whose coordinate is not where the shader reads it
+        unsigned neverModel = 0;     // refused: a pass this project knows is not a model (the interface!)
+        unsigned worldRefused = 0;   // refused: the WMO/terrain projection - a piece of the world
+        unsigned cardRefused = 0;    // refused: the draw's own vertices carry no blade (no height, no pair)
         unsigned examined = 0;       // shaders this build has looked at, this session
         unsigned injected = 0;       // shaders it is bending, this session
         unsigned refused = 0;        // shaders it left alone, this session
@@ -221,6 +224,26 @@ namespace renderer
         return wrapped < 0.f ? wrapped + 6.2831853f : wrapped;
     }
 
+    // What a draw's own vertices say about the card they carry: which way up its
+    // texture runs, how tall the sampled vertices are, and how many pairs of them
+    // looked like one blade's base and its tip. The sign is what the block is
+    // told; the other two are what keeps a shader from being rewritten for a
+    // card that is not a blade at all - a ground decal, a shadow blob, a quad
+    // lying flat - where the block's bend weight (the texture's own v, measured
+    // along the blade) would translate the whole card instead of bending it.
+    struct GrassBladeCard
+    {
+        int sign = 0;              // -1: v = 1 at the base (the reference client); +1: the other way up
+        float extentYards = 0.f;   // how tall the sampled vertices are, in yards
+        unsigned pairs = 0;        // sampled pairs that looked like a base and its tip
+    };
+
+    // The smallest card this path will bend, and the fewest pairs it needs to
+    // have voted with. A blade a few inches tall is a blade; a decal lying on the
+    // ground has no height to bend and never shows v rising towards its tip.
+    inline constexpr float kGrassBladeMinExtentYards = .05f;
+    inline constexpr unsigned kGrassBladeMinPairs = 1;
+
     // What the draw's own vertices say about which way a blade's texture runs,
     // as a sign: +1 when v rises with height (v = 0 at the blade's base), -1 when
     // it falls (v = 1 at the base, the reference client's convention), 0 when the
@@ -234,9 +257,18 @@ namespace renderer
     // vertices of the same edge, or the last card's tip next to the next card's
     // base, where the same sign still holds on level ground and nothing at all
     // holds on a slope.
-    inline int GrassBladeVerticalSign(const float (*samples)[3], unsigned count) noexcept
+    inline GrassBladeCard MeasureGrassBladeCard(const float (*samples)[3], unsigned count) noexcept
     {
-        if (!samples || count < 2) return 0;
+        GrassBladeCard card;
+        if (!samples || count < 2) return card;
+        float lowest = samples[0][2], highest = samples[0][2];
+        for (unsigned i = 1; i < count; ++i)
+        {
+            if (!std::isfinite(samples[i][2])) continue;
+            lowest = (std::min)(lowest, samples[i][2]);
+            highest = (std::max)(highest, samples[i][2]);
+        }
+        card.extentYards = std::isfinite(lowest) && std::isfinite(highest) ? highest - lowest : 0.f;
         unsigned rising = 0, falling = 0;
         for (unsigned i = 1; i < count; ++i)
         {
@@ -247,11 +279,19 @@ namespace renderer
             // more than a tree's height, is not one blade's base and tip.
             if (std::fabs(deltaV) < .2f || std::fabs(deltaHeight) < .02f || std::fabs(deltaHeight) > 4.f)
                 continue;
+            ++card.pairs;
             if (deltaV * deltaHeight < 0.f) ++falling;
             else ++rising;
         }
-        if (falling == rising) return 0;
-        return falling > rising ? -1 : 1;
+        if (falling == rising) return card;
+        card.sign = falling > rising ? -1 : 1;
+        return card;
+    }
+
+    // Just the sign, for the callers and the suite that only need that.
+    inline int GrassBladeVerticalSign(const float (*samples)[3], unsigned count) noexcept
+    {
+        return MeasureGrassBladeCard(samples, count).sign;
     }
 
     // -----------------------------------------------------------------------

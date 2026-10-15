@@ -1012,8 +1012,21 @@ struct Scope
             // for lazily, because it is a level 0 lock and most of these draws
             // are not grass.
             if (declared && frame.wind.DrivesVegetation() && detail::WritesColor(device))
-                grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,
-                    [device] { return detail::TextureIsCutout(device); });
+            {
+                // The same shader verdict the model path uses, and it is not
+                // optional here: an unskinned cut-out card with a texture
+                // coordinate is the interface as much as it is grass, the
+                // interface's shader is one this project has already identified as
+                // never a model, and a waving interface would be a far worse bug
+                // than a still field. The world's own projection is refused for
+                // the mirror image of the same reason.
+                const detail::Admission blades = detail::ShaderAccepted(device, frame, shader.hash);
+                if (blades == detail::Admission::Never || blades == detail::Admission::World)
+                    grassblade::RefuseShader(blades == detail::Admission::Never);
+                else
+                    grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,
+                        [device] { return detail::TextureIsCutout(device); });
+            }
             if (mirrorMaterial) ++Status().skippedLayout;
             return;
         }

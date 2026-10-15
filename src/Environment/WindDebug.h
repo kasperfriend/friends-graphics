@@ -231,7 +231,10 @@ inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& sta
         if (value) refused.emplace_back(label, value);
     };
     report("mat", status.materialRefused);
+    report("never", status.neverModel);
+    report("world", status.worldRefused);
     report("decl", status.noTexcoord);
+    report("card", status.cardRefused);
     report("vs", status.registerMismatch);
     report("asm", status.refused);
     std::snprintf(text, sizeof(text), "Blades gate: %u looked at, %u bent | ", status.examined,

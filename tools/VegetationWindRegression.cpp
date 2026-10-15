@@ -2074,6 +2074,24 @@ static void TestGrassBlades()
             "vertices that carry no v that follows their height measure as nothing, and nothing means the default");
         Check(GrassBladeVerticalSign(nullptr, 4) == 0 && GrassBladeVerticalSign(falling, 1) == 0,
             "and so does a draw with too few vertices to vote");
+        // The same vertices, measured for what they say about the CARD: how tall
+        // it is and how many pairs of it looked like a base and its tip. This is
+        // what refuses a decal or a shadow blob on the ground, where a bend
+        // weight running along the blade would translate the whole card.
+        const GrassBladeCard tall = MeasureGrassBladeCard(falling, 6);
+        Check(tall.sign == -1 && Near(tall.extentYards, .6f) && tall.pairs >= 2,
+            "a blade card carries its own height and the pairs that voted, next to the sign");
+        const float flat[6][3] = { { 0.f, 0.f, 0.f }, { 0.f, 1.f, .001f }, { 0.f, 0.f, 0.f }, { 0.f, 1.f, .002f },
+                                   { 0.f, 0.f, .001f }, { 0.f, 1.f, .003f } };
+        const GrassBladeCard decal = MeasureGrassBladeCard(flat, 6);
+        Check(decal.pairs == 0 && decal.extentYards < kGrassBladeMinExtentYards,
+            "a card lying on the ground has no height to bend along and no pair that looks like a base and a tip");
+        const float uniform[4][3] = { { 0.f, .5f, 0.f }, { 0.f, .5f, .5f }, { 0.f, .5f, 0.f }, { 0.f, .5f, .5f } };
+        const GrassBladeCard noV = MeasureGrassBladeCard(uniform, 4);
+        Check(noV.pairs == 0 && noV.extentYards >= .4f,
+            "a tall card whose vertices carry no v along their height has nothing for the bend weight to follow either");
+        Check(MeasureGrassBladeCard(nullptr, 4).pairs == 0 && MeasureGrassBladeCard(nullptr, 4).extentYards == 0.f,
+            "and a draw with no vertices at all is neither");
     }
 
     // The HUD rows the blade path adds, in the wind debug box.
@@ -2092,6 +2110,16 @@ static void TestGrassBlades()
         Check(lines[1].find("4 looked at, 1 bent") != std::string::npos &&
               lines[1].find("none refused") != std::string::npos,
             "and the gate row says how many of the client's shaders this build has looked at and bent");
+        status.neverModel = 3;
+        status.worldRefused = 1;
+        status.cardRefused = 2;
+        const std::vector<std::string> gates = GrassBladeDebugLines(status, blades);
+        Check(gates.size() > 1 && gates[1].find("never 3") != std::string::npos &&
+              gates[1].find("world 1") != std::string::npos && gates[1].find("card 2") != std::string::npos,
+            "the row names the interface and the world when they are refused, and a card that carries no blade");
+        status.neverModel = 0;
+        status.worldRefused = 0;
+        status.cardRefused = 0;
         status.materialRefused = 6;
         status.noTexcoord = 2;
         status.refused = 1;
@@ -2119,6 +2147,22 @@ static void TestGrassBlades()
             "an unskinned foliage draw is handed to the blade path from the branch that refuses the model path");
         Check(sway.find("detail::TextureIsCutout(device); });") != sway.npos,
             "and the texture probe it needs is asked for lazily, because most draws on that branch are not grass");
+        // The interface is an unskinned cut-out card with a texture coordinate -
+        // the exact shape this path looks for - so the shader verdict the model
+        // path uses has to run here too, before anything is offered to the
+        // injection, or a whole interface would wave.
+        const auto bladeCall = sway.find("grassblade::ConsiderDraw(device, frame, shader.hash, shader.object,");
+        Check(sway.find("const detail::Admission blades = detail::ShaderAccepted(device, frame, shader.hash);") !=
+              sway.npos &&
+              sway.find("const detail::Admission blades = detail::ShaderAccepted(device, frame, shader.hash);") <
+              bladeCall &&
+              sway.find("grassblade::RefuseShader(blades == detail::Admission::Never);") != sway.npos &&
+              bladeCall != sway.npos,
+            "the interface, the precipitation, the liquid variants and the world are refused before the blade path "
+            "sees a draw");
+        Check(blades.find("grassblade::ConsiderDraw") == blades.npos &&
+              blades.find("entry->structureRefused = true;") < blades.find("MeasureBladeCard(device, layout, draw)"),
+            "the blade half keeps its refusals on the shader entry, and measures the card before it bends it");
         Check(main.find("grassblade::Substitute(&vs);") != main.npos &&
               main.find("grassblade::Substitute(&vs);") < main.find("renderer::g_trackedState.currentVS != vs"),
             "the bent shader is swapped in at the SetVertexShader hook, before this renderer tracks what is bound");

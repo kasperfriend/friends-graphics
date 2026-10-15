@@ -77,6 +77,8 @@ struct BladeShader
     unsigned materialTries = 0; // draws whose material looked like foliage
     bool structureRefused = false; // no anchor, temps in the way, no texture coordinate
     int bladeVSign = 0;        // measured from the vertices; 0 = the reference convention
+    float bladeExtentYards = 0.f; // how tall the draw's own vertices were
+    unsigned bladePairs = 0;   // and how many of them looked like a base and its tip
     float greenPercent = -1.f; // how much of the card's texture is green, when that was readable
     // The block this shader is drawn with: the frame's own rows, with c19 taken
     // from this shader's measured blade direction.
@@ -158,25 +160,30 @@ inline std::string DisassembleShader(IDirect3DVertexShader9* shader, uint32_t& b
     return text;
 }
 
-// What the draw's own vertices say about which way a blade's texture runs. A
-// blade card's vertices are read through the draw's own index buffer (or
-// straight out of the stream for a non-indexed draw), their texture coordinate
-// and their height recorded, and the sign taken by majority vote over
-// consecutive pairs (see GrassBladeVerticalSign in GrassShaderWind.h).
-inline int MeasureBladeVSign(IDirect3DDevice9* device, const renderer::M2VertexLayout& layout,
+// What the draw's own vertices say about the card it carries. They are read
+// through the draw's own index buffer (or straight out of the stream for a
+// non-indexed draw), their texture coordinate and their height recorded, and
+// then measured the way the portable half does it (see MeasureGrassBladeCard in
+// GrassShaderWind.h): which way up the texture runs, how tall the card is, and
+// how many pairs of vertices looked like one blade's base and its tip. The sign
+// is what the injected block is told; the other two are what refuses a shader
+// being rewritten for a card that is not a blade - a decal or a shadow blob on
+// the ground has no height for a bend weight to run along, and a block whose
+// weight is the same everywhere translates the card instead of bending it.
+inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const renderer::M2VertexLayout& layout,
     const renderer::M2DrawCall& draw) noexcept
 {
     using Microsoft::WRL::ComPtr;
-    if (!device || !layout.position || !layout.texcoord || !layout.texcoordIsFloat2) return 0;
+    if (!device || !layout.position || !layout.texcoord || !layout.texcoordIsFloat2) return {};
     const UINT count = draw.type == D3DPT_TRIANGLELIST ? draw.primitives * 3 :
         draw.type == D3DPT_TRIANGLESTRIP ? draw.primitives + 2 : 0;
-    if (count < 4) return 0;
+    if (count < 4) return {};
     ComPtr<IDirect3DVertexBuffer9> stream;
     UINT offset = 0, stride = 0;
-    if (FAILED(device->GetStreamSource(0, stream.GetAddressOf(), &offset, &stride)) || !stream) return 0;
-    if (stride <= layout.texcoordOffset + 8u || stride <= layout.positionOffset + 12u) return 0;
+    if (FAILED(device->GetStreamSource(0, stream.GetAddressOf(), &offset, &stride)) || !stream) return {};
+    if (stride <= layout.texcoordOffset + 8u || stride <= layout.positionOffset + 12u) return {};
     D3DVERTEXBUFFER_DESC streamDesc{};
-    if (FAILED(stream->GetDesc(&streamDesc))) return 0;
+    if (FAILED(stream->GetDesc(&streamDesc))) return {};
 
     // The vertices the draw consumes, and the whole range they span: a lock has
     // to be one span, so a draw that reads the far ends of a streaming buffer is
@@ -187,16 +194,16 @@ inline int MeasureBladeVSign(IDirect3DDevice9* device, const renderer::M2VertexL
     UINT low = ~0u, high = 0;
     if (draw.indexed && !draw.indicesUP)
     {
-        if (FAILED(device->GetIndices(indicesBuffer.GetAddressOf())) || !indicesBuffer) return 0;
+        if (FAILED(device->GetIndices(indicesBuffer.GetAddressOf())) || !indicesBuffer) return {};
         D3DINDEXBUFFER_DESC indexDesc{};
-        if (FAILED(indicesBuffer->GetDesc(&indexDesc))) return 0;
+        if (FAILED(indicesBuffer->GetDesc(&indexDesc))) return {};
         indexFormat = indexDesc.Format;
         const unsigned indexSize = indexFormat == D3DFMT_INDEX16 ? 2u : 4u;
         const uint64_t range = uint64_t(count) * indexSize;
-        if (uint64_t(draw.start) * indexSize + range > indexDesc.Size || range > kMaxVertexReadBytes) return 0;
+        if (uint64_t(draw.start) * indexSize + range > indexDesc.Size || range > kMaxVertexReadBytes) return {};
         if (FAILED(indicesBuffer->Lock(uint64_t(draw.start) * indexSize, range, &lockedIndices, D3DLOCK_READONLY)) ||
             !lockedIndices)
-            return 0;
+            return {};
         const void* elements = lockedIndices;
         for (UINT i = 0; i < count; ++i)
         {
@@ -215,13 +222,13 @@ inline int MeasureBladeVSign(IDirect3DDevice9* device, const renderer::M2VertexL
     }
     else
     {
-        return 0; // indices from a UP pointer: nothing here needs that case
+        return {}; // indices from a UP pointer: nothing here needs that case
     }
     if (low == ~0u || high < low || (uint64_t(high - low + 1) * stride) > kMaxVertexReadBytes ||
         uint64_t(offset) + uint64_t(high + 1) * stride > streamDesc.Size)
     {
         if (lockedIndices) indicesBuffer->Unlock();
-        return 0;
+        return {};
     }
 
     void* locked = nullptr;
@@ -229,7 +236,7 @@ inline int MeasureBladeVSign(IDirect3DDevice9* device, const renderer::M2VertexL
             D3DLOCK_READONLY)) || !locked)
     {
         if (lockedIndices) indicesBuffer->Unlock();
-        return 0;
+        return {};
     }
     const unsigned char* bytes = static_cast<const unsigned char*>(locked);
 
@@ -269,14 +276,14 @@ inline int MeasureBladeVSign(IDirect3DDevice9* device, const renderer::M2VertexL
     }
     stream->Unlock();
     if (lockedIndices) indicesBuffer->Unlock();
-    if (taken < 4) return 0;
+    if (taken < 4) return {};
 
     // Heights relative to the lowest sampled vertex, so the vote is about the
     // blades rather than about the slope the whole patch sits on.
     float lowest = samples[0][2];
     for (unsigned i = 1; i < taken; ++i) lowest = (std::min)(lowest, samples[i][2]);
     for (unsigned i = 0; i < taken; ++i) samples[i][2] -= lowest;
-    return renderer::GrassBladeVerticalSign(samples, taken);
+    return renderer::MeasureGrassBladeCard(samples, taken);
 }
 
 // Build the bent shader for `shader` and put it in the entry. Every refusal is
@@ -367,10 +374,11 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
         char text[520]{};
         std::snprintf(text, sizeof(text),
             "Grass blade sway: the client draws its grass with a vertex shader this build has now bent - %s, %u "
-            "bytes, texture coordinate v%u, blade upright %s (measured from the draw's own vertices), card "
-            "%.0f%% green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
+            "bytes, texture coordinate v%u, blade upright %s (%.2f yd of it, %u pair(s) voted), card %.0f%% "
+            "green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
             model, bytes, injection.texcoordRegister,
             entry.bladeVSign > 0 ? "the other way up" : "as the reference client has it",
+            double(entry.bladeExtentYards), entry.bladePairs,
             double(entry.greenPercent < 0.f ? 0.f : entry.greenPercent * 100.f));
         Log(text);
     }
@@ -437,6 +445,9 @@ inline void BeginFrame() noexcept
     g_status.uploads = 0;
     g_status.foliageDraws = 0;
     g_status.materialRefused = 0;
+    g_status.neverModel = 0;
+    g_status.worldRefused = 0;
+    g_status.cardRefused = 0;
 }
 inline void Reset() noexcept
 {
@@ -506,6 +517,18 @@ inline std::vector<std::string> DebugLines()
 // shader this build has not decided about yet, because the read behind it (a
 // level 0 lock) is the most expensive thing on this path and a shader is decided
 // once.
+// A draw whose shader this project has already identified as a pass that is
+// never a model, or as the world's own projection. Counted on the blade row and
+// never offered to the injection below: an interface icon is a cut-out card with
+// a texture coordinate - exactly the shape a blade has - and a bending interface
+// would be a far worse bug than a still field, while bending a terrain or WMO
+// shader would move a piece of the world.
+inline void RefuseShader(bool neverModel) noexcept
+{
+    if (neverModel) ++g_status.neverModel;
+    else ++g_status.worldRefused;
+}
+
 template<class MaterialProbe>
 inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext& frame, uint64_t hash,
     IDirect3DVertexShader9* shader, const renderer::M2VertexLayout& layout, const renderer::M2DrawCall& draw,
@@ -599,7 +622,27 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     // Which way up a blade's texture runs, from the draw's own vertices: the
     // reference client has v = 1 at the base, and a shader whose blades are the
     // other way up is bent by the same block with one constant's sign flipped.
-    entry->bladeVSign = MeasureBladeVSign(device, layout, draw);
+    const renderer::GrassBladeCard card = MeasureBladeCard(device, layout, draw);
+    if (card.extentYards < renderer::kGrassBladeMinExtentYards || card.pairs < renderer::kGrassBladeMinPairs)
+    {
+        // Not a blade: no height to bend along, or not one pair of vertices that
+        // looks like a base and its tip. A decal, a shadow blob, a flat card that
+        // happens to be a cut-out - refused on its own geometry, which is a fact
+        // about the draw, unlike its material.
+        entry->structureRefused = true;
+        ++g_status.refused;
+        ++g_status.cardRefused;
+        char text[360]{};
+        std::snprintf(text, sizeof(text),
+            "Grass blade sway: a foliage draw's own vertices are %.4f yd tall with %u blade-shaped pair(s) in "
+            "them, so it is a card lying flat (a decal, a shadow blob) rather than a blade, and no shader is bent "
+            "for it.", double(card.extentYards), card.pairs);
+        Log(text);
+        return;
+    }
+    entry->bladeVSign = card.sign;
+    entry->bladeExtentYards = card.extentYards;
+    entry->bladePairs = card.pairs;
     BuildInjectedShader(device, *entry);
     // The draw that revealed the shader is not bent (there was nothing to bind
     // when it arrived); every draw of it after this one is.
