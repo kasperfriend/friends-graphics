@@ -242,12 +242,14 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         const uint64_t frameIndex = renderer::FrameContext::Current().frameIndex;
         if (frameIndex && frameIndex % 600 == 0) {
             const renderer::GrassBladeStatus& blades = grassblade::Status();
-            if (blades.bladeDraws || blades.injected || blades.refused || blades.noTexcoord) {
+            if (blades.bladeDraws || blades.injected || blades.refused || blades.noTexcoord ||
+                blades.heightDraws || blades.foliageDraws) {
                 char bladeLine[360]{};
                 std::snprintf(bladeLine, sizeof(bladeLine),
-                    "blade wind: %u draw(s) bent this frame, %u block upload(s) | %u shader(s) bent, %u looked at | "
+                    "blade wind: %u draw(s) bent this frame, %u of them by height, %u block upload(s) | "
+                    "%u shader(s) bent, %u looked at | "
                     "mat %u never %u decl %u card %u read %u vs %u asm %u | %.2f yd at the tip",
-                    blades.bladeDraws, blades.uploads, blades.injected, blades.examined,
+                    blades.bladeDraws, blades.heightDraws, blades.uploads, blades.injected, blades.examined,
                     blades.materialRefused, blades.neverModel, blades.noTexcoord, blades.cardRefused,
                     blades.cardUnreadable, blades.registerMismatch, blades.refused,
                     double(blades.amplitudeYards));

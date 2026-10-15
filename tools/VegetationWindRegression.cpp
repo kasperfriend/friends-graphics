@@ -2315,10 +2315,15 @@ static void TestGrassBlades()
         status.amplitudeYards = .15f;
         status.examined = 4;
         status.injected = 1;
+        status.heightDraws = 12;
         const std::vector<std::string> lines = GrassBladeDebugLines(status, blades);
         Check(lines.size() == 2 && lines[0].find("37") != std::string::npos &&
               lines[0].find("0.15") != std::string::npos,
             "the blade row says how many draws went out with the wind and how far a tip moves");
+        // The uv-less family is the field a player usually stands in, so how much of
+        // the frame is that family belongs on the row that counts movement.
+        Check(lines[0].find("12 by height") != std::string::npos,
+            "and it separates the cards bent by their own height from the rest of the wind's draws");
         Check(lines[1].find("4 looked at, 1 bent") != std::string::npos &&
               lines[1].find("none refused") != std::string::npos,
             "and the gate row says how many of the client's shaders this build has looked at and bent");
@@ -2536,6 +2541,18 @@ static void TestGrassBlades()
               "entry.rows[renderer::kGrassBladeRows - 1][0] = entry.rampScale;") != std::string::npos,
         "a height-ramped card is measured once, the block is built for that ramp, and the frame's rows carry the same "
         "floor and height - the three cannot disagree about which lane the weight comes from");
+    // And the uv-less family is not refused for the coordinate it does not have:
+    // what stays refused is a declaration with no position at all, which is the
+    // one card with nothing to read a weight from - and the count of the cards
+    // that DID go out by height is what the HUD's `by height` field reports.
+    Check(Read("src/Effects/GrassBladeSway.h").find(
+              "const bool rampByHeight = !(layout.texcoord && layout.texcoordIsFloat2);") != std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("if (!layout.position)") != std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("++g_status.noTexcoord;") != std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("if (entry->rampByHeight) ++g_status.heightDraws;") !=
+              std::string::npos,
+        "a card with no texture coordinate is bent by its own height rather than refused, and only a declaration "
+        "with no position at all is what the refusal row counts");
     Check(Read("src/Effects/GrassBladeSway.h").find(
               "device->SetVertexShaderConstantF(entry.firstRegister, entry.rows[0], renderer::kGrassBladeRows);") !=
               std::string::npos &&

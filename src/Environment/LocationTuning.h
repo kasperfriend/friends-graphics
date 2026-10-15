@@ -351,16 +351,6 @@ inline std::wstring SectionSuffixOf(const std::wstring& name) {
 // through nothing else: every one of them goes through ReadInt/ReadString/
 // HasScopedValue, which resolve against these levels and these files alone.
 //
-// The sections are read from the FILE, never from what a previous read happened
-// to cache. That distinction is what keeps this from trading a stall for a setting
-// that quietly stops working: a place whose own scope was written by hand, or by
-// the editor, in a section no read in this session ever touched has no cached
-// section at all, so a fingerprint built from the cache would equal the last
-// place's, the crossing would be skipped, and the override would never be read.
-// The file's own section list answers that question honestly, one listing per file
-// identity, and a listing that cannot be proven (truncated at the profile API's
-// own buffer ceiling) refuses the skip instead of guessing.
-//
 // What is compared per place is the ANSWER, not the file: for every suffix that
 // either file names a section with, the value a scoped read of that section would
 // resolve - the deepest level holding the key wins, exactly as ReadAtLevel walks

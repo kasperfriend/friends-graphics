@@ -79,9 +79,11 @@ namespace renderer
     {
         unsigned bladeDraws = 0;     // draws this frame that went out with the wind (blades)
         unsigned uploads = 0;        // blocks written this frame (one per frame in practice)
+        unsigned heightDraws = 0;    // of those, the cards bent by the vertex's own height
         unsigned foliageDraws = 0;   // unskinned foliage draws offered to this path
         unsigned materialRefused = 0;// of those, the ones whose texture was not a green cut-out
-        unsigned noTexcoord = 0;     // draws with no texture coordinate: bent by the vertex's own height
+        unsigned noTexcoord = 0;     // refused: neither a texture coordinate nor a position to
+                                     // read a height from, so the card has nothing to bend by
         unsigned registerMismatch = 0;// draws whose coordinate is not where the shader reads it
         unsigned neverModel = 0;     // refused: a pass this project knows is not a model (the interface!)
         // The blade path never refuses a shader for binding the world's own

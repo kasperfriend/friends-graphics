@@ -191,8 +191,9 @@ A field of ground grass in this client is often not a model at all: the blades
 arrive as **one rigid mesh**, drawn with a vertex declaration that carries no
 bone indices (`POSITION + NORMAL + COLOUR + TEXCOORD`), textured with a leaf
 card. There is no palette to bend and no animation to follow, which is why such
-a field stays perfectly still however many plants the sway leans - on a field
-with a hundred blade draws in it, `decl` on the gate row is the whole answer.
+a field stays perfectly still however many plants the sway leans - and why the
+`Blades:` row counts it: those draws are its `by height` number, the cards the
+client hands over with no texture coordinate to bend by.
 
 Those draws are bent in **the client's own vertex shader** instead:
 
@@ -325,13 +326,16 @@ rewritten.
 
 Its rows in the debug view (F7 → WIND, with `GRASS BLADE WIND` on) are:
 
-- `Blades: N swaying, M blocks/s | X.XX yd at the tip` - how many draws in this
-  frame were handed the bent shader, how often the constant block had to be
-  rewritten, and how far a blade's tip moves at the current wind strength.
+- `Blades: N swaying, M blocks/s, K by height | X.XX yd at the tip` - how many
+  draws in this frame were handed the bent shader, how often the constant block
+  had to be rewritten, how many of those draws are from the uv-less family (see
+  below: the cards bent by their own vertex height), and how far a blade's tip
+  moves at the current wind strength.
 - `Blades gate: N looked at, M bent | ...` - the blade path's own census, in the
   same style as the model row above: `mat` (a material that is not a cut-out:
   opaque scenery), `never` (the interface, precipitation, the liquid variants and
-  the shadow casters), `decl` (a draw with no `FLOAT2` coordinate), `card` (a card
+  the shadow casters), `decl` (a declaration with neither a texture coordinate
+  nor a position, so there is no height to read a weight from), `card` (a card
   that was measured and lies flat), `read` (a card whose vertices could not be
   read at all), `vs` (a coordinate that is not the register the shader reads) and
   `asm` (a shader that could not be disassembled, reassembled or created).

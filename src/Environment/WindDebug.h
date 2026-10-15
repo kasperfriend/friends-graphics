@@ -217,6 +217,8 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
 //
 //   blades  draws that went out carrying the wind - the field the player is
 //           standing in, counted per draw because that is what is being bent
+//   by height  of the draws that went out with the wind, the ones bent by the
+//           vertex's own height because the card carries no texture coordinate
 //   shaders how many of the client's shaders this build has rewritten, how many
 //           it looked at and left alone, and how far a blade's tip moves
 //
@@ -224,11 +226,12 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
 // reason in the same six-character style as the gate row above, because "the
 // grass still does not move" has exactly three answers on this path: the client
 // does not draw it as blades at all (nothing on the row), the material was not
-// foliage (`mat`), or the shader could not be rewritten (`decl` for a draw with
-// no texture coordinate, `vs` for one whose coordinate is not where the shader
-// reads it, `asm` for a shader that could not be disassembled, reassembled or
-// created, `read` for a card whose own vertices could not be read at all, `card`
-// for one that was read and lies flat).
+// foliage (`mat`), or the shader could not be rewritten (`decl` for a card whose
+// declaration carries neither a texture coordinate nor a position, so there is no
+// height to read a bend weight from, `vs` for one whose coordinate is not where
+// the shader reads it, `asm` for a shader that could not be disassembled,
+// reassembled or created, `read` for a card whose own vertices could not be read
+// at all, `card` for one that was read and lies flat).
 //
 // One more row, and it is not a refusal: `world` counts shaders that were bent
 // and bind the world's own projection. It is the shape the client draws an
@@ -240,8 +243,12 @@ inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& sta
     std::vector<std::string> lines;
     if (!settings.enabled) return lines;
     char text[256]{};
-    std::snprintf(text, sizeof(text), "Blades: %u swaying, %u blocks/s | %.2f yd at the tip",
-        status.bladeDraws, status.uploads, double(status.amplitudeYards));
+    // `by height` is the uv-less family: the cards the client draws with no
+    // texture coordinate at all, bent by their own vertex height. It is the field
+    // a player's grass usually IS, so it belongs on the row that says how much of
+    // the frame is moving rather than among the refusals.
+    std::snprintf(text, sizeof(text), "Blades: %u swaying, %u blocks/s, %u by height | %.2f yd at the tip",
+        status.bladeDraws, status.uploads, status.heightDraws, double(status.amplitudeYards));
     lines.emplace_back(text);
     std::vector<std::pair<const char*, unsigned>> refused;
     const auto report = [&refused](const char* label, unsigned value) {

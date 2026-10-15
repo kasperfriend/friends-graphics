@@ -554,12 +554,16 @@ static void TestConfigurationAndWiring()
     // applied once the place has settled, the scoped key sets are read once per
     // scope, and the chain itself is untouched.
     const auto tuning = Read("src/Environment/LocationTuning.h");
-    Check(tuning.find("GetPrivateProfileSectionW(scope.c_str()") != tuning.npos &&
-          tuning.find("if(!ScopedValuePresent(scope,key))continue;") != tuning.npos &&
+    Check(tuning.find("GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str())") != tuning.npos &&
+          tuning.find("const std::wstring wanted=LowerKeyName(key);") != tuning.npos &&
+          tuning.find("if(values->find(wanted)==values->end())continue;") != tuning.npos &&
           tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
-          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }") != tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { InvalidateProfileValues(); }") != tuning.npos &&
           tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
-          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos &&
+          // There is no second, key-only memo left to fall out of step with the
+          // value cache or to overflow in the middle of an apply.
+          tuning.find("RememberScopedFile") == tuning.npos && tuning.find("memoWritten") == tuning.npos,
           "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
     Check(tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
           tuning.find("inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
@@ -597,7 +601,7 @@ static void TestConfigurationAndWiring()
     Check(tuning.find("inline const std::unordered_map<std::wstring,std::wstring>* ScopedValuesFor(") != tuning.npos &&
           tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
           tuning.find("return values&&values->find(LowerKeyName(key))!=values->end();") != tuning.npos &&
-          tuning.find("ScopedKeys") == tuning.npos &&
+          tuning.find("ScopedKeysFor") == tuning.npos &&
           tuning.find("RememberScopedFile") == tuning.npos &&
           tuning.find(">=4096") != tuning.npos,
           "one identity-checked cache answers both presence and value for a scope, so the read path, HasScopedValue "

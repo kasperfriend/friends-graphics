@@ -668,7 +668,16 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     const bool rampByHeight = !(layout.texcoord && layout.texcoordIsFloat2);
     if (rampByHeight)
     {
-        ++g_status.noTexcoord;
+        if (!layout.position)
+        {
+            // Neither a texture coordinate nor a position: there is no height on
+            // this draw to read a bend weight from, and no register to read it
+            // out of. This is the one uv-less card that stays refused - and a
+            // declaration with no position at all is not a card, so the row
+            // naming it is where a report should end up if it appears.
+            ++g_status.noTexcoord;
+            return;
+        }
         if (g_noCoordinateReports < kNoCoordinateReports && shader && device &&
             g_noCoordinateReported.find(shader) == g_noCoordinateReported.end())
         {
@@ -713,6 +722,7 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
             // this build has bent, the bent one goes in here, where this draw has
             // already been proven to be a blade card.
             ++g_status.bladeDraws;
+            if (entry->rampByHeight) ++g_status.heightDraws;
             Upload(device, frame.frameIndex, *entry);
             if (shader == entry->original.Get()) device->SetVertexShader(entry->injected.Get());
             return;
