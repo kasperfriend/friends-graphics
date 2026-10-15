@@ -715,7 +715,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float hit=0;
     if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
         float3 hitColor=environment;
-        [loop] for(int stepIndex=0;stepIndex<8;++stepIndex) {
+        [loop] for(int stepIndex=0;stepIndex<8 && hit<1.0;++stepIndex) {
             float q=(stepIndex+1)/8.0;
             float traceDistance=.45+q*q*reflectionStyle.y;
             float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
@@ -741,7 +741,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                 hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,
                               confidence*(1-hit));
                 hit=max(hit,confidence);
-                if(hit>=1.0) break;
             }
         }
         reflected=lerp(environment,hitColor,saturate(hit*1.8));
@@ -779,7 +778,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // while ambient sky reflection remains visible under cover.
     float lightVisibility=1.0;
     if(reflectionStyle.w>.5 && celestialPath>.00005) {
-        [loop] for(int lightStep=0;lightStep<8;++lightStep) {
+        [loop] for(int lightStep=0;lightStep<8 && lightVisibility>0;++lightStep) {
             float q=(lightStep+1)/8.0;
             float traceDistance=1.5+q*q*110.0;
             float3 lightSample=viewPos+wave*.18+l*traceDistance;
@@ -795,9 +794,8 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
             float blocked=inside*step(blockerZ+1.5,lightSample.z);
             lightVisibility*=1.0-blocked;
             // Once an interior sample is blocked the product is exactly zero;
-            // the remaining depth reads cannot change it. Edge-faded samples
+            // the loop condition skips remaining depth reads. Edge-faded samples
             // remain fractional and continue exactly as before.
-            if(lightVisibility<=0) break;
         }
     }
     celestialPath*=lightVisibility;

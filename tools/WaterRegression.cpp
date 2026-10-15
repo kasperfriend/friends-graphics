@@ -875,8 +875,8 @@ int main() try
                 occurrences(code,"localLightConstantCache.valid=false")==2,
                 "selected local lights are transformed once per immutable frame instead of once per tile");
         Require(pixel.find("[branch] if(confidence>0)")!=std::string::npos&&
-                pixel.find("if(hit>=1.0) break;")!=std::string::npos&&
-                pixel.find("if(lightVisibility<=0) break;")!=std::string::npos&&
+                pixel.find("stepIndex<8 && hit<1.0")!=std::string::npos&&
+                pixel.find("lightStep<8 && lightVisibility>0")!=std::string::npos&&
                 pixel.find("[branch] if(distanceSquared>=radius*radius) continue;")!=std::string::npos,
                 "zero-contribution SSR, celestial and local-light work exits before expensive samples");
         const std::string volumeCode=stripComments(ReadAlongside("../VolumeIntegration.h"));
