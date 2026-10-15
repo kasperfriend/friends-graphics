@@ -14,6 +14,17 @@ static void Inside(const OverlayLayout& l) {
     assert(l.panel.y+l.panel.h<=l.screenHeight+.01f);
 }
 static void ReachEverySetting(OverlayLayout& l) {
+    for(int scope=0;scope<3;++scope){
+        const auto b=l.Scope(scope);
+        assert(l.panel.Contains(b.x,b.y)&&l.panel.Contains(b.x+b.w-1,b.y+b.h-1));
+        assert(l.HitItem(b.x+1,b.y+1)==-1);
+        if(scope<2)assert(b.x+b.w<=l.Scope(scope+1).x);
+    }
+    const auto clear=l.ClearOverridesButton(),reset=l.ResetButton();
+    assert(l.panel.Contains(clear.x,clear.y));
+    assert(clear.x>=l.Content().x&&clear.x+clear.w<reset.x);
+    assert(l.HitItem(clear.x+1,clear.y+1)==-1);
+    assert(!l.Begin(clear.x+1,clear.y+1));
     std::set<int> seen;
     for(int t=0;t<int(Tabs().size());++t) {
         const auto button=l.TabButton(t);
@@ -121,8 +132,8 @@ int main() {
     assert(l.HitTab(clientX*2560/1280/l.scale,clientY*1440/720/l.scale)==4);
     for(int i=0;i<int(items.size());++i)assert(items[i].value==defaults[i]);
     // Scope, title, close, footer and sidebar are disjoint from editable rows.
-    // Both scope buttons must also be distinct, on-panel targets.
-    for(int scope=0;scope<2;++scope) {
+    // All three scope buttons must also be distinct, on-panel targets.
+    for(int scope=0;scope<3;++scope) {
         const auto b=l.Scope(scope);
         assert(l.HitItem(b.x+1,b.y+1)==-1);
         assert(!l.Title().Contains(b.x+1,b.y+1));

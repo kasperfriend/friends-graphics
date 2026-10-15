@@ -126,8 +126,50 @@ void TestResetDefaults() {
     layout.SelectTab(0);
     std::printf("PASS F7 Reset Defaults restores and persists all settings in all ten tabs, without changing other tabs\n");
 }
+void TestGlobalScope() {
+    using namespace tuningoverlay;
+    using namespace renderer::locationtuning;
+    const auto directory=std::filesystem::absolute("build/overlay-global-scope");
+    std::filesystem::create_directories(directory);
+    std::filesystem::remove(directory/L"LocationGraphics.ini");
+    std::filesystem::remove(directory/L"GraphicsEffects.ini");
+    const auto base=directory.wstring()+L"\\";
+    Sync(base,{571,65,4164,true},true);
+    Configure(base);
+    Require(SelectScope(2)&&editGlobal,"Global scope selectable with verified location");
+    Require(HitScope(layout.Scope(2).x+1,layout.Scope(2).y+1)==2,"Global scope hit test");
+    layout.SelectTab(0);
+    auto& item=items[Tabs()[0].begin];
+    item.value=item.value==item.lo?item.hi:item.lo;
+    Require(Save(item)&&HasGlobalValue(item.section,item.key),"Global tab writes explicit override");
+    Require(SelectScope(0)&&!editGlobal&&editZone,"zone scope selectable after Global");
+    Require(!CanClearGlobalTab()&&!ClearGlobalActiveTab(),"zone scope cannot clear Global overrides");
+    Require(SelectScope(1)&&!editGlobal&&!editZone,"area scope selectable after Global");
+    Require(SelectScope(2),"return to Global");
+    // A different category must not be cleared with the active category.
+    const auto& other=items[Tabs()[1].begin];
+    Require(renderer::locationtuning::Save(other.section,other.key,other.lo),"save another Global category");
+    Require(ClearGlobalActiveTab()&&!HasGlobalValue(item.section,item.key),"Clear Overrides removes active category overrides");
+    Require(HasGlobalValue(other.section,other.key),"Clear Overrides preserves other Global categories");
+    Require(!ClearGlobalActiveTab(),"Clear Overrides is idempotent");
+    // Reset means explicit defaults in Global, not removal/inheritance.
+    item.value=item.value==item.lo?item.hi:item.lo;
+    Require(Save(item)&&ResetActiveTab(),"Global Reset Defaults reports changes");
+    for(int index=Tabs()[0].begin;index<Tabs()[0].end;++index)
+        Require(HasGlobalValue(items[index].section,items[index].key),"Global Reset Defaults persists every key");
+    Require(ClearGlobalActiveTab(),"Global defaults can be cleared");
+    layout.SelectTab(int(Tabs().size())-1);
+    Require(!CanClearGlobalTab(),"Image & Color retains existing global-only behavior");
+    Sync(base,{530,10127,0,true},true);
+    Require(!SelectScope(1)&&SelectScope(0)&&SelectScope(2),"Area 0 disables only subarea, not Global");
+    Sync(base,{},false);
+    Require(!SelectScope(0)&&!SelectScope(1)&&SelectScope(2),"unverified location still permits Global");
+    editGlobal=false;editZone=false;layout.SelectTab(0);
+    std::printf("PASS Global scope selection, persistence, clearing and reset behavior\n");
+}
 int main() try {
     TestResetDefaults();
+    TestGlobalScope();
     wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path, L"\\d3d9.dll");
     auto runtime = LoadLibraryW(path); Require(runtime != nullptr, "system D3D9 loaded");
     auto create = reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(runtime, "Direct3DCreate9"));

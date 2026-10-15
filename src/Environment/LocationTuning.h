@@ -10,6 +10,7 @@ inline std::wstring baseFile, localFile;
 inline LocationContext active;
 inline bool editable=false;
 inline bool editZone=false;
+inline bool editGlobal=false;
 inline bool IsGlobal(LPCWSTR section) { return section && _wcsicmp(section,L"PostProcess")==0; }
 inline std::wstring Scope(unsigned level) {
     std::wstring result=L"Map."+std::to_wstring(active.mapId);
@@ -195,6 +196,24 @@ inline bool ScopedValuePresent(const std::wstring& scope,LPCWSTR key) {
     const auto* keys=ScopedKeysFor(scope);
     return keys&&keys->find(LowerKeyName(key))!=keys->end();
 }
+// The overlay's third scope: an explicit override that outranks every location.
+// It lives in the same scoped file as the location scopes, so it is answered from
+// the same key memo and dropped by the same writes - a global override can only
+// exist in a file this module already reads once per identity.
+inline std::wstring GlobalScope(LPCWSTR section) { return std::wstring(L"Global.")+section; }
+inline bool HasGlobalValue(LPCWSTR section,LPCWSTR key) {
+    if(localFile.empty())return false;
+    return ScopedValuePresent(GlobalScope(section),key);
+}
+inline bool ClearGlobalValue(LPCWSTR section,LPCWSTR key) {
+    if(localFile.empty())return false;
+    // Deleting a key (a null value) is a write like any other, and it is the one
+    // write WriteProfile cannot express: drop what both caches hold of the file so
+    // the next read sees the override gone.
+    const bool cleared=WritePrivateProfileStringW(GlobalScope(section).c_str(),key,nullptr,localFile.c_str())!=0;
+    if(cleared)InvalidateScopedKeys();
+    return cleared;
+}
 inline bool Sync(const std::wstring& base,const LocationContext& location,bool verified) {
     const bool changed=!active.SamePlace(location)||editable!=(location.valid&&verified)||baseFile!=base+L"GraphicsEffects.ini";
     const std::wstring nextBase=base+L"GraphicsEffects.ini",nextLocal=base+L"LocationGraphics.ini";
@@ -224,21 +243,30 @@ inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR out
     return ReadProfileString(section,key,fallback,output,size,path);
 }
 inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
+    // Explicit global edits outrank every location, even without a verified location.
+    if(!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
+        return ReadProfileString(GlobalScope(section).c_str(),key,fallback,output,size,localFile.c_str());
     return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1);
 }
 inline UINT ReadEditorInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
-    wchar_t value[128]{};ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2);
+    // Location editors deliberately show their own layer, not the global mask.
+    wchar_t value[128]{};
+    if((editGlobal||!editable)&&!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
+        ReadProfileString(GlobalScope(section).c_str(),key,L"",value,128,localFile.c_str());
+    else if(editGlobal)ReadProfileString(section,key,L"",value,128,path);
+    else ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
 inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
     wchar_t value[128]{};ReadString(section,key,L"",value,128,path);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
-// True only for a value actually written into LocationGraphics.ini at some scope
-// for the current place. ReadString cannot answer this - it falls back to the
+// True for an explicit global or location override in LocationGraphics.ini.
+// ReadString cannot answer this - it falls back to the
 // global file - and the water colours need the distinction: a shipped per-zone
 // colour replaces the global default, but never a player's own scoped override.
 inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
+    if(HasGlobalValue(section,key))return true;
     if(!editable||localFile.empty())return false;
     for(int level=active.areaId?2:1;level>=0;--level) {
         const auto scope=Scope(level)+L"."+section;
@@ -249,6 +277,14 @@ inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);
+    // An explicit Global override (the overlay's third scope) outranks every
+    // location, and it belongs to the scoped file - so it is the same write path
+    // and the same invalidation as a location scope, not a third one.
+    if(editGlobal||(!editable&&HasGlobalValue(section,key))) {
+        const bool written=WriteProfile(localFile.c_str(),GlobalScope(section).c_str(),key,value);
+        if(written)InvalidateScopedKeys();
+        return written;
+    }
     // Per-location overrides are only meaningful once this client's location
     // has been verified against the database. On every other 3.3.5 build
     // (including a stock client) there is no verified location to scope the
