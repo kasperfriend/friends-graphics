@@ -13,6 +13,7 @@
 #include "src/Diagnostics/CelestialDrawDiagnostics.h"
 #include "WaterHighlight.h"
 #include "CelestialHighlight.h"
+#include "src/Effects/VegetationSway.h"
 #include "WaterEffect.h"
 #include "DistanceFog.h"
 #include "src/Effects/EnvironmentFogCapture.h"
@@ -99,12 +100,21 @@ void SetAvailability(renderer::DeviceAvailability next)
         : "Direct3D device restored: effects resumed.");
 }
 
+void ReloadVegetationTuning()
+{
+    const auto ini=g_basePath+L"GraphicsEffects.ini";
+    vegetation::Configure(renderer::ReadVegetationSettings([&](const wchar_t* key,int fallback) {
+        return static_cast<int>(renderer::locationtuning::ReadInt(L"Vegetation",key,fallback,ini.c_str()));
+    }));
+}
+
 void ReloadWindTuning()
 {
     const auto ini=g_basePath+L"GraphicsEffects.ini";
     g_windSystem.Configure(renderer::ReadWindSettings([&](const wchar_t* key,int fallback) {
         return static_cast<int>(renderer::locationtuning::ReadInt(L"Wind",key,fallback,ini.c_str()));
     }));
+    ReloadVegetationTuning();
 }
 
 void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
@@ -126,7 +136,7 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     }}
     if(weathervisuals::enabled&&weathervisuals::showStatus)watereffect::DrawStatus(device,weathervisuals::GetStatusText(),3);
     nativeshadowdiag::DrawPreview(device);
-    tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind);
+    tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind,vegetation::DebugLine());
     tuningoverlay::Draw(device);
     renderer::MaterialCacheManager::Instance().DrawDebugOverlay(device);
     g_drawingOverlay=false;
@@ -182,7 +192,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
-            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;
+            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;vegetation::active=graphicsActive;
             Log(graphicsActive?"F11 graphics ON":"F11 graphics OFF");
         }
         graphicsKeyDown=down;
@@ -202,6 +212,12 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         weathervisuals::intensity,nextFrame.environment[renderer::Weather]);
     nextFrame.wind=g_windSystem.Update(weather,
         g_windClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency()));
+    // The sway is a consumer of that one snapshot, advanced by the snapshot's
+    // own bounded delta: no second clock, no second wind. BeginFrame starts the
+    // new frame's counters and forgets nothing else, so an F7 edit, a reload,
+    // a device reset or an Alt+Tab cannot move a plant.
+    vegetation::Update(nextFrame.wind);
+    vegetation::BeginFrame();
     volume::cloudWeather=static_cast<renderer::CloudWeather>(weather.kind);
     volume::cloudWeatherStrength=weather.strength;
     watereffect::FeedWeather(weather.kind,weather.strength);
@@ -225,6 +241,7 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     waterdiag::Reset(d);
     celestialdiag::Reset(d);
     nativeshadowdiag::Reset();
+    vegetation::Reset(d);
     renderer::MaterialCacheManager::Instance().Reset(d);
     renderer::LocalLightingRenderer::Instance().Reset(d);
     renderer::LocalLightManager::Instance().Reset();
@@ -411,6 +428,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,start,n,false);
     if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDraw(d,t,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
@@ -448,6 +466,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,base,start,n);
     if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
@@ -494,6 +513,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,false,v,stride);
     if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawUP(d,t,n,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
@@ -532,6 +552,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,true,v,stride,indices,f,min+vertices);
     if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);

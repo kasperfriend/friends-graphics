@@ -1,7 +1,7 @@
 # F7 menu audit
 
 A full review of the F7 tuning menu: `TuningOverlay.h` (input, drawing),
-`src/Environment/OverlayItems.h` (the 91 controls), `OverlayLayout.h` (geometry and
+`src/Environment/OverlayItems.h` (the 101 controls), `OverlayLayout.h` (geometry and
 gestures), `OverlayFont.h`, `MenuDiagnostics.h`, `LocationTuning.h` (where a value is
 written) and the call sites in `ModernWoWRenderer.cpp`. Every finding below was checked
 against the code that consumes the same setting, so a control's range, default and target
@@ -13,7 +13,7 @@ file are read from both sides of the INI.
 | --- | --- | --- |
 | `GLINT STRENGTH` could be dragged to 500 | `WaterEffect.h` clamps `SunGlintPercent` to `0..400`, so the last fifth of the slider did nothing: the value was displayed, saved, and had no effect | `src/Environment/OverlayItems.h` bound is now 400, with the reason in a comment |
 | `tools/Test-Overlay.cmd` could not build or run | `tools/OverlayRegression.cpp` still used the deleted three-column API (`PanelX`, `PanelY`, `panelHeight`, `columnWidth`, `ItemColumn`, `ColumnStarts`, `controlRow`, `ControlsY`, and `HitItem` as a free function). The device-level overlay test has been dead since the tab rewrite, while `docs/ENVIRONMENT-SYSTEM-RU.md` still lists it as part of verification | The hit-test sweep now walks tabs and scroll offsets like the portable test, adds a HAL skip (exit 77), and is wired into the Windows job of the Build workflow; the `.cmd` uses `vswhere` instead of one machine's Insiders path |
-| `docs/f7-overlay-testing.md` said "nine tabs / 69 controls" | The menu has ten tabs and 91 controls (`OverlayStateRegression` prints "all ten tabs") | Text updated, and the device test documented |
+| `docs/f7-overlay-testing.md` said "nine tabs / 69 controls" | The menu has ten tabs and 101 controls (`OverlayStateRegression` prints "all ten tabs") | Text updated, and the device test documented |
 
 ## Open findings
 
@@ -87,7 +87,7 @@ extended to the scrollbar strip if the comment is the intent.
 
 Checked in the same pass, no defect found:
 
-* Every one of the 91 controls is reachable by mouse at every tab, every scroll offset and
+* Every one of the 101 controls is reachable by mouse at every tab, every scroll offset and
   twelve resolution/DPI combinations (portable test, ASan/UBSan clean); each widget stays
   inside its own row, and the panel fits both the logical screen and the real backbuffer.
   The same sweep now runs against the real overlay on a D3D9 device in the Windows CI job

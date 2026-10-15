@@ -220,27 +220,30 @@ inline void SetupOverlayState(IDirect3DDevice9* d){
  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
  d->SetRenderState(D3DRS_COLORWRITEENABLE,15);
 }
-inline void DrawWindDebug(IDirect3DDevice9* d,const renderer::WindState& wind){
- if(!d||!wind.debugView)return;
+inline void DrawWindDebug(IDirect3DDevice9* d,const renderer::WindState& wind,const std::string& extra={}){
+ if(!d||(!wind.debugView&&extra.empty()))return;
  renderer::ScopedStateBlock state(d);
  if(FAILED(state.CaptureResult()))return;
  D3DVIEWPORT9 viewport{};
  if(FAILED(d->GetViewport(&viewport))||!viewport.Width||!viewport.Height)return;
  // Text HUD only. No world arrows/particles, no inputs intercepted and no
  // changes to the simulated state. It remains readable with F7 closed.
- const float scale=std::min({1.f,float(viewport.Width)/620.f,float(viewport.Height)/142.f});
- const float width=600*scale,height=126*scale;
+ const bool hasExtra=!extra.empty();
+ const float scale=std::min({1.f,float(viewport.Width)/620.f,float(viewport.Height)/(hasExtra?164.f:142.f)});
+ const float width=600*scale,height=(hasExtra?148.f:126.f)*scale;
  const float x=float(viewport.X+viewport.Width)-width-8*scale,y=float(viewport.Y)+8*scale;
- const auto lines=renderer::WindDebugLines(wind);
+ auto lines=renderer::WindDebugLines(wind);
+ std::vector<std::string> rows(lines.begin(),lines.end());
+ if(hasExtra)rows.push_back(extra);
  const bool hasFont=windDebugFont.Ensure(d,std::max(6,int(std::round(16*scale))));
  std::vector<V> vertices;
  Rect(vertices,x,y,width,height,0xed101e28);
- if(!hasFont)for(size_t i=0;i<lines.size();++i)
-  BitmapText(vertices,x+10*scale,y+(9+22*float(i))*scale,lines[i].c_str(),0xffdce5ea,1.2f*scale);
+ if(!hasFont)for(size_t i=0;i<rows.size();++i)
+  BitmapText(vertices,x+10*scale,y+(9+22*float(i))*scale,rows[i].c_str(),0xffdce5ea,1.2f*scale);
  SetupOverlayState(d);
  d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(vertices.size()/3),vertices.data(),sizeof(V));
- if(hasFont)for(size_t i=0;i<lines.size();++i)
-  windDebugFont.Draw(d,x+10*scale,y+(8+22*float(i))*scale,lines[i],i?0xffdce5ea:0xff8effbb,x+width-8*scale);
+ if(hasFont)for(size_t i=0;i<rows.size();++i)
+  windDebugFont.Draw(d,x+10*scale,y+(8+22*float(i))*scale,rows[i],i?0xffdce5ea:0xff8effbb,x+width-8*scale);
 }
 inline void Draw(IDirect3DDevice9* d){
  if(!visible||!d)return;

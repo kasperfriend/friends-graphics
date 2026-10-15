@@ -40,6 +40,10 @@
 - [x] Replace the broad white water blanket with a narrow, broken reflected-sun path derived from `references/water-sun-path.png`.
 - [x] Protect already-dark source mortar from double cavity darkening and give stone terrain layers extra normal/parallax response for paved-road depth. Runtime visual tuning remains.
 - [x] When both celestial discs are drawn, select the tracked Moon during moon-lit conditions and the Sun during daylight. This prevents a still-visible sun candidate from owning a full solar halo at night while the actual moon has no shafts.
+- [x] Sway the client's own grass, bushes, plants and trees in the shared wind, in the bone palette the client already uploads for each model draw, validating every block before it is touched and restoring the client's matrices right after the draw. Portable regressions cover the transform, the palette guard, static-vs-animated detection, the gust field, the three switches and the production wiring.
+- [ ] Run the vegetation acceptance pass in the client ([docs/vegetation-wind.md](docs/vegetation-wind.md)): swaying counts against visible plants, characters/creatures/mounts/weapons/animated props never leaning, a leaning tree's trunk and canopy staying welded, and the disabled and link-off paths indistinguishable from the renderer without the feature.
+- [ ] Extend the verified rigid M2 shader list (`src/Lighting/TorchSignatures.h`) if a foliage variant in the client does not sway: the diagnostic line's skipped counters and the renderer log say whether a draw was rejected as an unlisted shader, as a palette that failed validation, or as a shape/size refusal.
+- [ ] Decide, from an in-client shadow comparison, whether the client's own shadow pass should lean vegetation too. It is excluded today (its shader is not a verified palette variant), so a leaning tree's shadow stays with the client's pose; leaning it would need that pass's palette space rather than the frame camera's.
 
 ## Later: interactive local volumetric fog
 

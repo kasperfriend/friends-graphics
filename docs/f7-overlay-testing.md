@@ -3,7 +3,7 @@
 The overlay has ten left-side category tabs: Atmosphere & God Rays, Local
 Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
 Local Lighting, Dynamic Shadows, AI Materials & Relief, and Image & Color.
-`OverlayItems.h` holds all 91 controls with their keys, defaults, ranges and
+`OverlayItems.h` holds all 101 controls with their keys, defaults, ranges and
 save semantics - the original 69 plus the wind, cloud-resolution and water
 controls added since. `OverlayLayout.h` is platform-independent and supplies the
 rectangles used by both Direct3D drawing and Win32 hit testing, including the

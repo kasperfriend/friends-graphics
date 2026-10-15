@@ -1,6 +1,7 @@
 #pragma once
 // Device-free, render-thread wind simulation. One update at the frame boundary,
-// many read-only consumers (clouds/water now; vegetation can use the same state).
+// many read-only consumers: clouds, water, precipitation and vegetation
+// (src/Environment/VegetationWind.h) all read this one state.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -53,6 +54,7 @@ struct WindSettings
     float weatherResponse = 1.f;
     bool affectWaves = true;
     bool affectClouds = true;
+    bool affectVegetation = true;
     bool debugView = false;
 };
 
@@ -78,6 +80,10 @@ struct WindState
     uint64_t sequence = 0;
     float deltaSeconds = 0.f;
     bool enabled = false, dynamic = false, affectWaves = false, affectClouds = false, debugView = false;
+    // Vegetation sway is applied to the CLIENT's own skinned M2 draws, so it has
+    // its own link switch: turning it off leaves every other consumer running
+    // and restores untouched model matrices (see VegetationWind.h).
+    bool affectVegetation = false;
     WindDirection targetDirection = WindDirection::NorthEast;
     WindVector direction{-.70710678f, .70710678f}; // unit travel vector, opposite the source bearing
     WindVector velocity{0.f, 0.f};                // world yards/second; zero when disabled
@@ -87,6 +93,7 @@ struct WindState
     WindWeather weather;
     bool DrivesWaves() const noexcept { return enabled && affectWaves; }
     bool DrivesClouds() const noexcept { return enabled && affectClouds; }
+    bool DrivesVegetation() const noexcept { return enabled && affectVegetation; }
 };
 
 class WindSystem
@@ -167,6 +174,7 @@ public:
         m_state.dynamic = m_settings.dynamic;
         m_state.affectClouds = m_settings.affectClouds;
         m_state.affectWaves = m_settings.affectWaves;
+        m_state.affectVegetation = m_settings.affectVegetation;
         m_state.debugView = m_settings.debugView;
         m_state.targetDirection = m_target;
         m_state.headingDegrees = float(m_heading);
