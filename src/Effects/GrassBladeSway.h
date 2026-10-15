@@ -15,10 +15,15 @@
 //     given the bent one instead. Nothing else about the draw changes.
 //   * The constants are written from the draw hook, directly before the client's
 //     own draw call, so they are the last word for that draw. In practice that is
-//     once per frame, and again whenever the client writes over registers
-//     c14..c19 - which is what the SetVertexShaderConstantF hook is there to
-//     notice. The block is free for the same reason the reference module's is:
-//     the engine's own per-chunk upload fills c0..c13 and leaves the rest alone.
+//     once per frame, and again whenever the client writes over the six registers
+//     that shader's block lives in - which is what the SetVertexShaderConstantF
+//     hook is there to notice.
+//   * Those six registers are chosen for the shader, not for the module: c14..c19
+//     where the shader never touches them (the engine's own per-chunk upload fills
+//     c0..c13 and leaves the rest alone), and the first free run above them where
+//     it does. A real session's foliage shaders read c17 and c18 as their own
+//     lighting, and writing the wind over those would have had the grass read the
+//     wind as its light.
 //
 // Nothing here is fatal. A missing d3dcompiler, a shader that never lands its
 // vertex in r0, a declaration whose texture coordinate is not where the shader
@@ -85,8 +90,14 @@ struct BladeShader
     bool worldReported = false;// the one-shot line for that shape
     bool worldSpace = false;   // the block it got reads r0 as the WORLD position (see the block's own note)
     float greenPercent = -1.f; // how much of the card's texture is green, when that was readable
-    // The block this shader is drawn with: the frame's own rows, with c19 taken
-    // from this shader's measured blade direction.
+    // Where this shader's block lives. c14..c19 is the reference module's free
+    // block and what most shaders take, but a shader that reads those registers
+    // itself gets the first run of six above them that it never mentions - the
+    // blocks of a real session landed at c14 and at c34, because the lighting
+    // rows c17/c18 read by that session's foliage cannot be written over.
+    unsigned firstRegister = renderer::kGrassBladeFirstRegister;
+    // The block this shader is drawn with: the frame's own rows, with the last row
+    // taken from this shader's measured blade direction.
     float rows[renderer::kGrassBladeRows][4]{};
     bool rowsReady = false;
 };
@@ -379,16 +390,18 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
     }
     entry.injected = injected;
     entry.worldSpace = injection.worldSpace;
+    entry.firstRegister = injection.firstRegister;
     ++g_status.injected;
     if (!g_reportedInjection)
     {
         g_reportedInjection = true;
-        char text[520]{};
+        char text[560]{};
         std::snprintf(text, sizeof(text),
             "Grass blade sway: the client draws its grass with a vertex shader this build has now bent - %s, %u "
-            "bytes, texture coordinate v%u, blade upright %s (%.2f yd of it, %u pair(s) voted), card %.0f%% "
-            "green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
-            model, bytes, injection.texcoordRegister,
+            "bytes, texture coordinate v%u, motion constants c%u..c%u, blade upright %s (%.2f yd of it, %u pair(s) "
+            "voted), card %.0f%% green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
+            model, bytes, injection.texcoordRegister, injection.firstRegister,
+            injection.firstRegister + renderer::kGrassBladeRows - 1,
             entry.bladeVSign > 0 ? "the other way up" : "as the reference client has it",
             double(entry.bladeExtentYards), entry.bladePairs,
             double(entry.greenPercent < 0.f ? 0.f : entry.greenPercent * 100.f));
@@ -430,9 +443,20 @@ inline void Substitute(IDirect3DVertexShader9** shader) noexcept
 inline void NoteConstantWrite(UINT start, UINT count) noexcept
 {
     if (g_uploading) return;
-    const UINT first = renderer::kGrassBladeFirstRegister;
-    const UINT last = first + renderer::kGrassBladeRows;
-    if (start < last && start + count > first) g_dirty = true;
+    // Every injected shader's own range, not one fixed block: a client write over
+    // ANY of them re-arms the upload, which is what keeps a shader from running
+    // with rows the client has since overwritten.
+    const UINT end = start + count;
+    for (const auto& shader : g_blades)
+    {
+        const BladeShader& entry = shader.second;
+        if (!entry.injected) continue;
+        if (start < entry.firstRegister + renderer::kGrassBladeRows && end > entry.firstRegister)
+        {
+            g_dirty = true;
+            return;
+        }
+    }
 }
 
 // One block per frame per shader: a frame's constants do not change between two
@@ -442,7 +466,7 @@ inline void Upload(IDirect3DDevice9* device, uint64_t frameIndex, const BladeSha
     if (!entry.rowsReady || !entry.injected) return;
     if (!g_dirty && g_uploadedFrame == frameIndex && g_uploadedShader == entry.injected.Get()) return;
     g_uploading = true;
-    device->SetVertexShaderConstantF(renderer::kGrassBladeFirstRegister, entry.rows[0], renderer::kGrassBladeRows);
+    device->SetVertexShaderConstantF(entry.firstRegister, entry.rows[0], renderer::kGrassBladeRows);
     g_uploading = false;
     g_dirty = false;
     g_uploadedFrame = frameIndex;

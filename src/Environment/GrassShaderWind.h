@@ -29,6 +29,7 @@
 // that already uses the scratch registers, one whose blade runs the other way up
 // - and prove what the injection does to each, without a device.
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
@@ -86,9 +87,14 @@ namespace renderer
         float amplitudeYards = 0.f;  // sway at a blade's tip this frame, yards
     };
 
-    // The block lives in c14..c19: six rows, one register per row, and every
-    // component of them is accounted for below. They are written once per frame
-    // and re-uploaded whenever the client writes over them again.
+    // The block lives in six constant registers: one row each, every component of
+    // them accounted for below, written once per frame and re-uploaded whenever
+    // the client writes over them again. c14..c19 is where it goes by default, and
+    // where it goes for every shader that never reads those registers; a shader
+    // that does read them (a real session's 956 and 1048 byte shaders read c17 and
+    // c18 as their lighting) gets the first free run above them instead - see
+    // GrassBladeFreeConstantRun. `GrassBladeMotionBlock` renumbers its rows to
+    // whatever base it is given, so nothing else here has to know.
     inline constexpr unsigned kGrassBladeFirstRegister = 14;
     inline constexpr unsigned kGrassBladeRows = 6;
 
@@ -120,7 +126,7 @@ namespace renderer
         float rows[kGrassBladeRows][4]{};
     };
 
-    // c14 = { cameraX, cameraY, 1.0, lean }
+    // row 0 (c14 at the default base) = { cameraX, cameraY, 1.0, lean }
     // c15 = { primary  dir * k, primary  dir * amplitude }
     // c16 = { crosst    dir * k, cross    dir * amplitude }
     // c17 = { phasePrimary, phaseCross, jitter, -1/distance }
@@ -368,7 +374,8 @@ namespace renderer
     // here - the whole field stayed as the client drew it over one multiply. The
     // fade is two instructions now, and the portable suite scans both variants of
     // this block for the shape: one constant register per instruction, always.
-    inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace)
+    inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace,
+        unsigned firstRegister = kGrassBladeFirstRegister)
     {
         // Where the vertex is, as the two coordinates the wave field and the
         // per-blade hash are built from.
@@ -437,7 +444,40 @@ namespace renderer
             "    mul r3.w, r3.w, r5.z\n"
             "%s",
             place, texcoord ? texcoord : "v3", shear);
-        return text;
+        std::string block = text;
+        // And the rows move to wherever this shader's own constants are not: the
+        // text is written against c14..c19 (the reference module's own free block)
+        // and renumbered here, one register at a time, so the block a shader is
+        // given never lands on a register that shader reads.
+        if (firstRegister != kGrassBladeFirstRegister)
+        {
+            // Downwards, so a row that has already been moved is never moved
+            // again: c19 leaves c19 (to c24) before c14 is written INTO c19.
+            for (unsigned i = kGrassBladeRows; i-- > 0; )
+            {
+                const std::string from = "c" + std::to_string(kGrassBladeFirstRegister + i);
+                const std::string to = "c" + std::to_string(firstRegister + i);
+                size_t at = 0;
+                while ((at = block.find(from, at)) != std::string::npos)
+                {
+                    const size_t next = at + from.size();
+                    const bool boundary = next >= block.size() || block[next] == '.' || block[next] == '\n' ||
+                        block[next] == ' ';
+                    const bool start = at == 0 || (!std::isalnum(static_cast<unsigned char>(block[at - 1])) &&
+                        block[at - 1] != '.');
+                    if (boundary && start)
+                    {
+                        block.replace(at, from.size(), to);
+                        at += to.size();
+                    }
+                    else
+                    {
+                        at = next;
+                    }
+                }
+            }
+        }
+        return block;
     }
 
     // A shader text with the comments and the whitespace taken off one line, so
@@ -619,6 +659,77 @@ namespace renderer
         return ~size_t(0);
     }
 
+    // The constant registers a shader reads, as a set, for choosing where the block
+    // may live. The engine's own upload fills c0..c13 (the matrices) and, for the
+    // batches that carry lights, rows like c17/c18 (their colour and parameters)
+    // and c21/c22 (their positions): a real session's foliage shaders read c17 and
+    // c18, so the block cannot live at c14..c19 for every shader - writing there
+    // would have the shader read the block's own wind rows as its lighting. The
+    // block's base is therefore chosen per shader, from the registers THAT shader
+    // never mentions.
+    inline std::vector<bool> GrassBladeConstantUse(const std::string& disassembly)
+    {
+        std::vector<bool> used(256, false);
+        size_t at = 0;
+        while (at <= disassembly.size())
+        {
+            const size_t end = disassembly.find('\n', at);
+            const std::string line = GrassBladeTrimmed(disassembly.substr(at,
+                end == std::string::npos ? std::string::npos : end - at));
+            for (const std::string& word : GrassBladeWords(line))
+            {
+                const int reg = GrassBladeConstantRegister(word);
+                if (reg >= 0) used[static_cast<size_t>(reg)] = true;
+            }
+            if (end == std::string::npos) break;
+            at = end + 1;
+        }
+        return used;
+    }
+    // The first run of kGrassBladeRows registers at or above the reference block's
+    // own base that the shader never reads. ~0u when the shader has none, which is
+    // a refusal: a shader that reads every register the block could use cannot be
+    // bent without changing what it sees.
+    inline unsigned GrassBladeFreeConstantRun(const std::string& disassembly) noexcept
+    {
+        const std::vector<bool> used = GrassBladeConstantUse(disassembly);
+        // A constant read through an index register (`c12[a0.x]`) can reach any
+        // register at or above its base, and the use scan above sees such a word as
+        // one register. The search therefore also stops below the lowest base read
+        // that way: a shader with an indexed array never has the block land inside
+        // it. (The foliage shaders of a real session have none.)
+        unsigned ceiling = unsigned(used.size());
+        {
+            const std::string lowered = disassembly;
+            size_t at = 0;
+            while ((at = lowered.find('c', at)) != std::string::npos)
+            {
+                const bool start = at == 0 || (!std::isalnum(static_cast<unsigned char>(lowered[at - 1])) &&
+                    lowered[at - 1] != '.');
+                size_t digit = at + 1;
+                unsigned value = 0;
+                bool digits = false;
+                while (start && digit < lowered.size() && std::isdigit(static_cast<unsigned char>(lowered[digit])))
+                {
+                    value = value * 10 + unsigned(lowered[digit] - '0');
+                    digits = true;
+                    ++digit;
+                }
+                if (start && digits && digit < lowered.size() && lowered[digit] == '[')
+                    ceiling = std::min(ceiling, value);
+                at = digit > at + 1 ? digit : at + 1;
+            }
+        }
+        for (unsigned base = kGrassBladeFirstRegister; base + kGrassBladeRows <= ceiling; ++base)
+        {
+            bool free = true;
+            for (unsigned i = 0; i < kGrassBladeRows && free; ++i)
+                if (used[base + i]) free = false;
+            if (free) return base;
+        }
+        return ~0u;
+    }
+
     // Does the anchor line place the vertex with the engine's own instance rows?
     // That - not "the shader mentions c31 somewhere" - is what says the vertex is
     // already in the world when the block runs: the client's own blade shader
@@ -716,6 +827,10 @@ namespace renderer
         // one by packing the camera correction and the view-distance fade away,
         // neither of which a world position has (see BladeShader::worldSpace).
         bool worldSpace = false;
+        // Where the block's own rows live: c14..c19, or - for a shader that reads
+        // them itself - the first run of six registers above them that it never
+        // mentions (see GrassBladeFreeConstantRun).
+        unsigned firstRegister = kGrassBladeFirstRegister;
     };
 
     // The whole injection, as a function of a disassembly and the shader model
@@ -766,10 +881,17 @@ namespace renderer
         // in the first two constant registers above the matrices that no line of
         // the shader mentions.
         out.worldSpace = GrassBladeAnchorUsesInstanceRows(disassembly, anchor);
+        const unsigned base = GrassBladeFreeConstantRun(disassembly);
+        if (base == ~0u)
+        {
+            out.reason = "the shader reads every constant register the motion block's rows could live in";
+            return out;
+        }
+        out.firstRegister = base;
 
         char texcoordName[16]{};
         std::snprintf(texcoordName, sizeof(texcoordName), "v%u", texcoord);
-        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace);
+        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace, out.firstRegister);
 
         // The assembled text: the shader's own lines, with the block after the line
         // that lands the vertex's position. The model token is prepended when the
