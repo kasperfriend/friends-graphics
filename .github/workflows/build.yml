@@ -275,6 +275,15 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/DeviceHealthRegression.cpp -o build/device-health-test
           ./build/device-health-test
 
+      # Ambient occlusion sees only a depth buffer and a camera, so the whole
+      # shipped look - open surfaces untouched, contacts and corners darkened,
+      # fade with distance, blur not crossing edges - is checkable on the CPU.
+      - name: Ambient occlusion regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/AmbientOcclusionRegression.cpp -o build/ambient-occlusion-test
+          ./build/ambient-occlusion-test
+
       # The shader text is only compiled on the Windows runner, so the GLSL
       # spellings fxc rejects are checked here, where a shader change can be
       # tested before it is pushed.

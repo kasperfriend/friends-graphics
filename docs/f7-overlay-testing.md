@@ -1,11 +1,12 @@
 # F7 overlay verification
 
-The overlay has ten left-side category tabs: Atmosphere & God Rays, Local
+The overlay has twelve left-side category tabs: Atmosphere & God Rays, Local
 Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
-Local Lighting, Dynamic Shadows, AI Materials & Relief, and Image & Color.
-`OverlayItems.h` holds all 101 controls with their keys, defaults, ranges and
-save semantics - the original 69 plus the wind, cloud-resolution and water
-controls added since. `OverlayLayout.h` is platform-independent and supplies the
+Local Lighting, Global Illumination, Dynamic Shadows, Ambient Occlusion,
+AI Materials & Relief, and Image & Color.
+`OverlayItems.h` holds all 129 controls with their keys, defaults, ranges and
+save semantics - the original 69 plus the wind, cloud-resolution, water,
+ambient-occlusion and global-illumination controls added since. `OverlayLayout.h` is platform-independent and supplies the
 rectangles used by both Direct3D drawing and Win32 hit testing, including the
 scrollbar and resize handle. Window geometry and tab scroll positions last for
 the client session; they are not written to the graphics preset.
@@ -78,8 +79,13 @@ These runtime checks cannot be completed in the Linux development sandbox:
 5. Click a slider label: its value must not jump. Drag the slider through both
    endpoints and outside its track. Toggles change once per press. Moving,
    resizing and scrolling must not change or save any setting.
-6. Check both verified zone/subarea scopes and global fallback. An unavailable
-   subarea cannot be selected. Image & color remains global. Reload with F12
+6. Check all three scopes: zone, subarea, and Global. An unavailable subarea
+   cannot be selected; Global can always be selected. Opening Global must not
+   create overrides. Edit one Global setting and confirm it wins over both
+   location scopes, survives map changes and F12, and leaves other keys alone.
+   In Global, CLEAR OVERRIDES restores saved location values for only the
+   selected category; RESET DEFAULTS instead persists explicit global defaults.
+   Image & color remains global-only through GraphicsEffects.ini. Reload with F12
    and confirm saved values persist. Confirm save failures are still reported.
 7. Close with X and F7, including F7 during a drag, then reopen. Size and position
    should remain; no drag should resume. Opening while already holding the

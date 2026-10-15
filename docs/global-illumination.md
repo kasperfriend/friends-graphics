@@ -37,7 +37,7 @@ The pass runs inside `volume::Composite`, after the cloud composite and the
 direct dynamic lights, and before the atmosphere:
 
 ```
-clouds -> dynamic lights -> GLOBAL ILLUMINATION -> atmosphere -> rays -> post
+ambient occlusion -> clouds -> dynamic lights -> GLOBAL ILLUMINATION -> atmosphere -> rays -> post
 ```
 
 It publishes back into `FrameContext::sceneColor/sceneSurface`, so the
@@ -55,6 +55,7 @@ blitted to the target by the same fallback that serves the lamp pass.
 | Atmosphere / fog | Runs before it; fog scatters the result. No setting on either side needs to know about the other. |
 | Water / sky / UI | Water pixels (water mask) and sky pixels (viewport-MaxZ-aware depth test) are excluded from both the integrate and the composite; the composite runs before UI draws, so the interface is never touched. |
 | Location profiles | The master multiplier rides on the location `LightingMultiplier`, and every `[GlobalIllumination]` key is location-tunable (`LocationGraphics.ini` zone/subarea scopes) like the other lighting settings. |
+| Ambient occlusion | Independent toggle, runs first on the scene, so the bounce source already carries it: occluded corners correctly contribute less bounced light. GI's own cavity term is coarser and only gates the bounce/ambient it adds; with both on, creases get AO's darkening plus reduced bounce, which is the physical combination. See `docs/ambient-occlusion.md`. |
 
 Deliberately not temporal: single-frame bilateral filtering has no history to
 invalidate on camera cuts, Alt+Tab, or light-selection changes, so the pass

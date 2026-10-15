@@ -75,6 +75,19 @@ of the cloud shader, at the shipped defaults.*
 - Screen-space occlusion and depth-derived normals keep the effect attached to visible geometry.
 - Cheap screen-space global illumination adds sky ambient, one-bounce colour from nearby surfaces, soft lamp bleed and cavity occlusion, following dynamic lights, native and cloud shadows, and live overcast; see [docs/global-illumination.md](docs/global-illumination.md).
 
+### Ambient occlusion
+
+- Screen-space ambient occlusion from the captured scene depth seats objects on the ground and deepens creases, corners and cavities.
+- It is the first effect applied to the scene, so it darkens world geometry only: clouds, local light, fog, glare and the interface all composite over the result untouched, and sky and water are excluded outright.
+- Tuned to be felt rather than seen: at the shipped radius every open surface - floor, wall face, rooftop - keeps its brightness exactly, while a right-angled corner still darkens by a quarter. Raising `AO RADIUS` reaches further into architecture and starts darkening whole surfaces; `AO STRENGTH` alone never does.
+- A depth-aware blur keeps occlusion from smearing across an object edge onto the background behind it, and the effect retires with distance instead of sparkling.
+- **F7 → AMBIENT OCCLUSION** holds the switch, strength, radius, distance fade and a debug view. See [how it works and why the defaults are what they are](docs/ambient-occlusion.md).
+
+![Ambient occlusion off and on](Screenshots/ambient-occlusion.png)
+
+*Off, on at the shipped defaults, on at twice the shipped strength, and the raw occlusion term - rendered by
+`tools/AmbientOcclusionPreview.cpp`, which runs the same math the GPU runs over the same depth buffer.*
+
 ### Weather
 
 - Native rain and snow receive replacement textures, intensity, speed and depth-occlusion controls; native particle direction stays with the game.
@@ -139,6 +152,7 @@ sky, the rows are what the zone asks for, and every panel shares a clock and a c
 
 - AI Materials, generated normal maps, parallax relief, and material self-shadowing are still experimental and are not implemented as a supported release feature.
 - Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
+- Ambient occlusion only sees what is on screen: off-screen geometry cannot occlude, contact shading is weaker than it should be where a normal is reconstructed across a crease, and occluders thinner than about a yard can be stepped over. Run it inside the atmosphere composite, so it needs `[Volume] Enabled=1`.
 - Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
 - D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive. Device-loss handling pauses the effects while the device cannot draw and resumes when it is restored, but the exclusive-fullscreen and window-switch paths have not yet been verified in the Ascension client.
 - This mod is in active development. Bugs are expected; include `ModernWoWRenderer.log`, the zone, and reproduction steps when reporting one.
@@ -160,7 +174,9 @@ frame after reload without F8. Capture status and file errors appear in
 
 F7 now uses a left-hand category list: select a tab to open its related settings. Drag the title bar to move the window, or drag the bottom-right corner to resize it. Longer tabs scroll with the mouse wheel over the settings pane, the scrollbar, or the up/down buttons. The window stays on screen; its size, position, selected tab and per-tab scroll positions are retained while the client is running. Changes save automatically.
 
-F7 saves atmospheric, lighting, water and weather settings separately for each location. Select `Entire zone` to edit settings inherited by its subareas, or `This subarea` for a more specific override. Subarea values take priority over zone values. The `IMAGE & COLOR (GLOBAL)` tab always uses the shared `GraphicsEffects.ini`, including the post-process toggle. Existing local color overrides are ignored.
+F7 saves atmospheric, lighting, water and weather settings separately for each location. The `Settings for` row has three scopes: `Entire zone`, `This subarea`, and `Global - entire game`. **Explicit Global edits take priority over subarea and zone settings everywhere**, including after changing maps or restarting. Simply opening Global does not change anything: only settings you edit become overrides. Global shows the shared baseline for untouched settings; zone/subarea editors continue to show their own values even when Global masks them.
+
+Global overrides are saved as `[Global.<effect section>]` in `LocationGraphics.ini`, separately from the baseline in `GraphicsEffects.ini`. In Global, `CLEAR OVERRIDES` removes overrides for the selected category so saved location settings apply again; other categories and location presets are preserved. `RESET DEFAULTS` instead saves explicit defaults for every setting in the selected category. Global remains available without a verified location; zone and subarea selection require verification. The `IMAGE & COLOR (GLOBAL)` category remains shared through `GraphicsEffects.ini` in every scope, including the post-process toggle; old local color overrides are ignored.
 
 Location presets automatically recognize the verified Ascension executable SHA-256 `e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6` when `[LocationProvider] ExeSHA256` is blank. Releases include `data/areas.txt`, exported from the verified client's loaded tables. Keep the `data` folder next to the DLL. Other executable versions need [environment setup and validation](docs/ENVIRONMENT-SYSTEM-RU.md) The fingerprints of a stock 3.3.5a build 12340 `wow.exe` are recorded as a comment on
 `[LocationProvider]` in `EnvironmentProfiles.ini`: copying that SHA-256 into `ExeSHA256` and naming researched
@@ -269,7 +285,7 @@ tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 
-The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
+The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, the ambient-occlusion look (open surfaces untouched, contacts and corners darkened, fade with distance, blur not crossing edges), and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
 
 ## Project structure
 
@@ -282,7 +298,7 @@ NativeShadowDiagnostics.h   Native cascade discovery and enhancement
 TuningOverlay.h             F7 in-game settings interface
 src/Core/                   Shared frame state, math, and shader caches
 src/D3D9/                   Camera/depth capture and render-state guards
-src/Effects/                Volumetric and local-light render passes
+src/Effects/                Volumetric, ambient-occlusion and local-light render passes
 src/Environment/            Location profiles, shared wind and F7 controls
 src/Water/                  Sea state, wave fields and integrated wind-driven motion
 src/Lighting/               Trusted local-light collection and lifetime rules
