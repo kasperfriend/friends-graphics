@@ -18,6 +18,7 @@
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Effects/VolumetricClouds.h"
 #include "src/Effects/GroundSurfaceCapture.h"
+#include "src/Effects/GlobalIllumination.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
@@ -375,6 +376,7 @@ void Reset(IDirect3DDevice9* d) {
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DirectionalVolumetricLighting::Instance().Reset(d);
     renderer::VolumetricClouds::Instance().Reset(d);
+    renderer::GlobalIllumination::Instance().Reset(d);
     renderer::GroundSurfaceCapture::Instance().Reset();
     renderer::PerformanceProfiler::Instance().Reset(d);
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
@@ -422,9 +424,10 @@ inline bool HasActiveEffects() {
     bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
     bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
     bool hasClouds = (!shaftDebug && cloudsEffectEnabled && renderer::VolumetricClouds::Instance().Settings().enabled);
+    bool hasGI = (!shaftDebug && renderer::GlobalIllumination::Instance().Settings().enabled);
     bool hasPost = postProcessEffectEnabled &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost;
+    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasGI || hasPost;
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
@@ -1134,6 +1137,14 @@ bool Composite(IDirect3DDevice9* d) {
     // on UI. Water is explicitly masked by LocalLightingRenderer.
     const bool localLightingRendered =
         renderer::LocalLightingRenderer::Instance().Render(d, frameCtx);
+    // Screen-space bounce light, after direct lamps and before the medium:
+    // its radiance source already carries cloud shadows, native shadows and
+    // lamp pools, and the atmosphere then scatters the bounced light like
+    // any other surface contribution. Publishes into frameCtx.sceneColor.
+    // Skipped for the shaft-debug mask like clouds and atmosphere, so the
+    // diagnostic stays a pure mask (GI has its own debug views).
+    const bool giRendered = !shaftDebug &&
+        renderer::GlobalIllumination::Instance().Render(d, frameCtx);
     // Dedicated low-resolution atmosphere. This replaces the old full-res
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
     bool atmosphereRendered = false;
@@ -1141,8 +1152,8 @@ bool Composite(IDirect3DDevice9* d) {
         (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)))
         atmosphereRendered = renderer::DirectionalVolumetricLighting::Instance().Render(
             d, renderer::FrameContext::Current(), target.Get(), fogEffectEnabled);
-    if (localLightingRendered && !atmosphereRendered)
-        check(d->StretchRect(renderer::LocalLightingRenderer::Instance().GetLitSurface(), nullptr,
+    if ((localLightingRendered || giRendered) && !atmosphereRendered)
+        check(d->StretchRect(frameCtx.sceneSurface, nullptr,
                              target.Get(), nullptr, D3DTEXF_NONE));
 
     // Secondary Sun Radial Glare pass

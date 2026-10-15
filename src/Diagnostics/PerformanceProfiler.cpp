@@ -214,6 +214,7 @@ namespace renderer
             ss << "  VolumetricUpsample            = " << getAvg(static_cast<size_t>(PerfStage::VolumetricUpsample)) << " ms\n";
             ss << "  SunRadialGlare                = " << getAvg(static_cast<size_t>(PerfStage::SunRadialGlare)) << " ms\n";
             ss << "  PostProcess                   = " << getAvg(static_cast<size_t>(PerfStage::PostProcess)) << " ms\n";
+            ss << "  GlobalIllumination            = " << getAvg(static_cast<size_t>(PerfStage::GlobalIllumination)) << " ms\n";
             ss << "  TotalInjectedFrame CPU        = " << getAvg(static_cast<size_t>(PerfStage::TotalInjectedFrame)) << " ms\n";
         }
 
@@ -230,6 +231,7 @@ namespace renderer
             ss << "  VolumetricClouds GPU          = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::VolumetricClouds)) << " ms\n";
             ss << "  LegacyComposite GPU           = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::LegacyComposite)) << " ms\n";
             ss << "  Water GPU                     = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::Water)) << " ms\n";
+            ss << "  GlobalIllumination GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::GlobalIllumination)) << " ms\n";
             ss << "  TotalGpu                      = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::TotalGpu)) << " ms\n";
         }
 
