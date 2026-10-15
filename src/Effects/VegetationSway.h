@@ -1013,18 +1013,34 @@ struct Scope
             // are not grass.
             if (declared && frame.wind.DrivesVegetation() && detail::WritesColor(device))
             {
-                // The same shader verdict the model path uses, and it is not
-                // optional here: an unskinned cut-out card with a texture
-                // coordinate is the interface as much as it is grass, the
-                // interface's shader is one this project has already identified as
-                // never a model, and a waving interface would be a far worse bug
-                // than a still field. The world's own projection is refused for
-                // the mirror image of the same reason.
+                // The same shader verdict the model path uses, with one
+                // difference that is the whole point of this branch:
+                //
+                //   - `Never` is still refused. An unskinned cut-out card with a
+                //     texture coordinate is the interface as much as it is grass,
+                //     the interface's shader is one this project has already
+                //     identified as never a model, and a waving interface would be
+                //     a far worse bug than a still field. So would a waving rain
+                //     sheet or a client shadow caster, and they are in the same
+                //     list.
+                //   - `World` is NOT refused here. That verdict says a shader
+                //     binds the WMO/terrain projection in c4..c7 and may therefore
+                //     be a piece of the world - which is a real suspicion on the
+                //     MODEL path, where a model is supposed to carry its bones at
+                //     c31 and the palette settles the question. An unskinned card
+                //     has no bones at all: the client draws its grass through
+                //     exactly that world path, so refusing it there turned away
+                //     376 foliage draws in a real session (the HUD read `world
+                //     376`) and left the field still. What proves a blade on this
+                //     path is not a constant layout but the draw's own geometry -
+                //     a measured upright card - and its material, and both are
+                //     proved below before any shader is rewritten.
                 const detail::Admission blades = detail::ShaderAccepted(device, frame, shader.hash);
-                if (blades == detail::Admission::Never || blades == detail::Admission::World)
-                    grassblade::RefuseShader(blades == detail::Admission::Never);
+                if (blades == detail::Admission::Never)
+                    grassblade::RefuseShader();
                 else
                     grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,
+                        blades == detail::Admission::World,
                         [device] { return detail::TextureIsCutout(device); });
             }
             if (mirrorMaterial) ++Status().skippedLayout;

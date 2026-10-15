@@ -2079,8 +2079,10 @@ static void TestGrassBlades()
         // what refuses a decal or a shadow blob on the ground, where a bend
         // weight running along the blade would translate the whole card.
         const GrassBladeCard tall = MeasureGrassBladeCard(falling, 6);
-        Check(tall.sign == -1 && Near(tall.extentYards, .6f) && tall.pairs >= 2,
+        Check(tall.sign == -1 && Near(tall.extentYards, .6f) && tall.pairs >= 2 && tall.measured,
             "a blade card carries its own height and the pairs that voted, next to the sign");
+        Check(!MeasureGrassBladeCard(nullptr, 0).measured,
+            "and a card that could not be read at all says so, so a failed read is never refused as a flat card");
         const float flat[6][3] = { { 0.f, 0.f, 0.f }, { 0.f, 1.f, .001f }, { 0.f, 0.f, 0.f }, { 0.f, 1.f, .002f },
                                    { 0.f, 0.f, .001f }, { 0.f, 1.f, .003f } };
         const GrassBladeCard decal = MeasureGrassBladeCard(flat, 6);
@@ -2111,15 +2113,26 @@ static void TestGrassBlades()
               lines[1].find("none refused") != std::string::npos,
             "and the gate row says how many of the client's shaders this build has looked at and bent");
         status.neverModel = 3;
-        status.worldRefused = 1;
         status.cardRefused = 2;
+        status.cardUnreadable = 1;
+        status.worldShaped = 5;
         const std::vector<std::string> gates = GrassBladeDebugLines(status, blades);
         Check(gates.size() > 1 && gates[1].find("never 3") != std::string::npos &&
-              gates[1].find("world 1") != std::string::npos && gates[1].find("card 2") != std::string::npos,
-            "the row names the interface and the world when they are refused, and a card that carries no blade");
+              gates[1].find("card 2") != std::string::npos &&
+              gates[1].find("read 1") != std::string::npos,
+            "the row names the interface when it is refused, a card that carries no blade, and one that could not be "
+            "read at all");
+        // The world verdict is a shape, not a refusal, on this path, and the row
+        // has to say so: it is what a real session's `world 376` among the
+        // refusals was hiding, and reading it as a refusal is what left a field
+        // still.
+        Check(gates[1].find("world") == std::string::npos &&
+              gates.back().find("Blades world-path: 5 bent") != std::string::npos,
+            "the world's projection is recorded as the shape an unskinned card is drawn with, not as a refusal");
         status.neverModel = 0;
-        status.worldRefused = 0;
+        status.worldShaped = 0;
         status.cardRefused = 0;
+        status.cardUnreadable = 0;
         status.materialRefused = 6;
         status.noTexcoord = 2;
         status.refused = 1;
@@ -2156,13 +2169,31 @@ static void TestGrassBlades()
               sway.npos &&
               sway.find("const detail::Admission blades = detail::ShaderAccepted(device, frame, shader.hash);") <
               bladeCall &&
-              sway.find("grassblade::RefuseShader(blades == detail::Admission::Never);") != sway.npos &&
+              sway.find("grassblade::RefuseShader();") != sway.npos &&
               bladeCall != sway.npos,
-            "the interface, the precipitation, the liquid variants and the world are refused before the blade path "
-            "sees a draw");
+            "the interface, the precipitation and the liquid variants are refused before the blade path sees a draw");
+        // ...and the world is NOT, which is the one thing that differs from the
+        // model path's use of the same verdict.
+        Check(sway.find("grassblade::RefuseShader(blades == detail::Admission::Never);") == sway.npos &&
+              sway.find("blades == detail::Admission::World,") != sway.npos &&
+              sway.find("if (blades == detail::Admission::Never)") != sway.npos,
+            "a world-shaped binding is recorded and bent on the blade path, because an unskinned card has no palette "
+            "to settle it with");
         Check(blades.find("grassblade::ConsiderDraw") == blades.npos &&
               blades.find("entry->structureRefused = true;") < blades.find("MeasureBladeCard(device, layout, draw)"),
             "the blade half keeps its refusals on the shader entry, and measures the card before it bends it");
+        // The three measurements that a real field was lost to: a card whose
+        // texture coordinate ends exactly on the stride's last byte fits (a `<=`
+        // refused every one of them), a card that could not be read is not a flat
+        // card, and a measured card that IS flat is still refused.
+        Check(blades.find("if (stride < layout.texcoordOffset + 8u || stride < layout.positionOffset + 12u)") !=
+              blades.npos &&
+              blades.find("if (card.measured && (card.extentYards < renderer::kGrassBladeMinExtentYards ||") !=
+              blades.npos &&
+              blades.find("if (!card.measured && !entry->cardReported)") != blades.npos &&
+              blades.find("card.measured = true;") == blades.npos,
+            "a measured card decides, an unread card is bent on the reference convention, and the fit test is a "
+            "strict inequality");
         Check(main.find("grassblade::Substitute(&vs);") != main.npos &&
               main.find("grassblade::Substitute(&vs);") < main.find("renderer::g_trackedState.currentVS != vs"),
             "the bent shader is swapped in at the SetVertexShader hook, before this renderer tracks what is bound");

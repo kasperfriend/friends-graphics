@@ -534,7 +534,33 @@ static void TestConfigurationAndWiring()
     const auto sea = main.find("    watereffect::Present();", present);
     Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
     Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();") != main.npos &&
-          main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();") != main.npos, "F7/location/F12 all reload wind");
+          main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
+          "F7/location/F12 all reload wind, and F12 drops the scoped read cache so a hand-edited file is picked up");
+    // A crossing must not stall the frame. This client's place flaps across a
+    // boundary while the player walks it, and a change used to re-read every
+    // scoped key of GraphicsEffects.ini (per-key probes) AND every row of the
+    // F7 menu on the spot. All three pieces are pinned here: the change is
+    // applied once the place has settled, the scoped key sets are read once per
+    // scope, and the chain itself is untouched.
+    const auto tuning = Read("src/Environment/LocationTuning.h");
+    Check(tuning.find("GetPrivateProfileSectionW(scope.c_str()") != tuning.npos &&
+          tuning.find("if(!ScopedValuePresent(scope,key))continue;") != tuning.npos &&
+          tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear(); }") != tuning.npos &&
+          tuning.find("if(changed||nextLocal!=localFile)InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
+          "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
+    Check(tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
+          tuning.find("inline const std::unordered_set<std::wstring>* ScopedKeysFor(") != tuning.npos,
+          "the memo answers both the read path and HasScopedValue, so the water colours see the same file view");
+    Check(tuning.find("if(changed||nextLocal!=localFile)InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
+          "a place change, a different base directory and an editor save all drop what was read out of the scoped file");
+    Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
+          main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
+          main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
+          main.find("if(locationTuningChanged){g_placePending=false;g_locationAppliedAt=now;g_locationConfigured=true;tuningoverlay::Configure(g_basePath);}") != main.npos,
+          "a location change is applied once the place has held still, one reload per gap, and the first one at once so startup configures itself");
     const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");

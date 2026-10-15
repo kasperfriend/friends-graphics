@@ -216,7 +216,13 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
 // foliage (`mat`), or the shader could not be rewritten (`decl` for a draw with
 // no texture coordinate, `vs` for one whose coordinate is not where the shader
 // reads it, `asm` for a shader that could not be disassembled, reassembled or
-// created, `spread` for one whose declaration and shader disagree).
+// created, `read` for a card whose own vertices could not be read at all, `card`
+// for one that was read and lies flat).
+//
+// One more row, and it is not a refusal: `world` counts shaders that were bent
+// and bind the world's own projection. It is the shape the client draws an
+// unskinned card with, so it is recorded rather than turned away - a row that
+// said `world 376` among the refusals is what a still field looked like.
 inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& status,
     const GrassBladeSettings& settings)
 {
@@ -232,9 +238,9 @@ inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& sta
     };
     report("mat", status.materialRefused);
     report("never", status.neverModel);
-    report("world", status.worldRefused);
     report("decl", status.noTexcoord);
     report("card", status.cardRefused);
+    report("read", status.cardUnreadable);
     report("vs", status.registerMismatch);
     report("asm", status.refused);
     std::snprintf(text, sizeof(text), "Blades gate: %u looked at, %u bent | ", status.examined,
@@ -259,6 +265,12 @@ inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& sta
             startsRow = false;
         }
         lines.emplace_back(row);
+    }
+    if (status.worldShaped)
+    {
+        std::snprintf(text, sizeof(text), "Blades world-path: %u bent (unskinned cards are drawn that way)",
+            status.worldShaped);
+        lines.emplace_back(text);
     }
     return lines;
 }

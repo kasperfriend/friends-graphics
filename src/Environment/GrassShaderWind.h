@@ -71,8 +71,15 @@ namespace renderer
         unsigned noTexcoord = 0;     // draws with no texture coordinate to bend a blade by
         unsigned registerMismatch = 0;// draws whose coordinate is not where the shader reads it
         unsigned neverModel = 0;     // refused: a pass this project knows is not a model (the interface!)
-        unsigned worldRefused = 0;   // refused: the WMO/terrain projection - a piece of the world
+        // The blade path never refuses a shader for binding the world's own
+        // projection: an unskinned card is drawn through the world path by
+        // construction (its placement IS an object -> world matrix, which is why
+        // the client's grass shader reads c4..c7), so a WMO/terrain-shaped
+        // constant binding says nothing about a draw that has no bones to begin
+        // with. The counter is what says how many bent shaders were that shape.
+        unsigned worldShaped = 0;    // bent anyway: its constants bind the world projection
         unsigned cardRefused = 0;    // refused: the draw's own vertices carry no blade (no height, no pair)
+        unsigned cardUnreadable = 0; // of those offered, the ones whose vertices could not be read at all
         unsigned examined = 0;       // shaders this build has looked at, this session
         unsigned injected = 0;       // shaders it is bending, this session
         unsigned refused = 0;        // shaders it left alone, this session
@@ -236,6 +243,10 @@ namespace renderer
         int sign = 0;              // -1: v = 1 at the base (the reference client); +1: the other way up
         float extentYards = 0.f;   // how tall the sampled vertices are, in yards
         unsigned pairs = 0;        // sampled pairs that looked like a base and its tip
+        // False when the draw's vertices could not be read at all: a zero extent
+        // and no pair then mean "no measurement", not "a flat card", and the two
+        // must not be refused for the same reason.
+        bool measured = false;
     };
 
     // The smallest card this path will bend, and the fewest pairs it needs to
@@ -261,6 +272,7 @@ namespace renderer
     {
         GrassBladeCard card;
         if (!samples || count < 2) return card;
+        card.measured = true;
         float lowest = samples[0][2], highest = samples[0][2];
         for (unsigned i = 1; i < count; ++i)
         {

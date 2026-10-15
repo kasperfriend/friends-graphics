@@ -59,6 +59,20 @@ visible in game, but it is the most likely source of the menu feeling heavy whil
 is dragged. Suggested fix: coalesce saves and reloads (for example save on release or at a
 ~100 ms interval), or let `Save` report "unchanged" so only real edits reload.
 
+**Follow-up (2026-10-15, the location half).** The same chain has a second trigger, and this
+one was proven in the field: `locationTuningChanged` fired on every alternation of the place
+across a boundary. A real session's log holds `Location changed: Map=1 Zone=215 Area=0` and
+`Area=223` alternating for as long as the player walked the edge, each alternation running all
+nine `Reload*Tuning()` calls plus `tuningoverlay::Configure` (one `ReadEditorInt` per menu row)
+on the spot - several full re-reads inside one second, which is the "big lag for a second" a
+crossing was reported as. Two changes: the change is applied once the place has held still for
+300 ms and at most once per second (`kLocationSettleMs`/`kLocationReloadGapMs` in
+`HookedPresent`), and a scoped read answers from the scope's own key set
+(`GetPrivateProfileSectionW` once per scope, `ScopedKeysFor` in `LocationTuning.h`) instead of
+probing each level with its own `GetPrivateProfileStringW` per key. A hand edit to
+`LocationGraphics.ini` is picked up by F12, which drops the memo; the global
+`GraphicsEffects.ini` read is unchanged, so ordinary edits are still visible immediately.
+
 ### 4. Wheel scrolling also reacts outside the settings pane (very low)
 
 The comment says a wheel is consumed "only over the settings pane", but the condition is

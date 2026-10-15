@@ -156,6 +156,15 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     return g_originalEndScene(device);
 }
 
+// When the place last changed, when its tuning was last applied, and whether the
+// renderer has configured itself for a place at all yet. See HookedPresent.
+uint64_t g_placeChangedAt = 0;
+uint64_t g_locationAppliedAt = 0;
+bool g_placePending = false;
+bool g_locationConfigured = false;
+constexpr uint64_t kLocationSettleMs = 300;   // the environment manager's own area debounce
+constexpr uint64_t kLocationReloadGapMs = 1000;
+
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
     const uint64_t now = GetTickCount64();
     // Every Present is a frame boundary. A long pause means the frame stream
@@ -199,8 +208,23 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     renderer::MaterialCacheManager::Instance().Present(d);
     weathervisuals::Present(d,tuningoverlay::visible);
     const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
-    const bool locationTuningChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
-    if(locationTuningChanged)tuningoverlay::Configure(g_basePath);
+    const bool placeChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
+    // A crossing is not a reason to re-read nine subsystems and every row of the
+    // F7 menu per frame. This client's place flaps across a boundary while the
+    // player walks it (`Area=0` and `Area=223` alternating in a real session,
+    // each alternation a full reload of both) and that reading is what the
+    // player sees as a stalled second, not the crossing itself. A change is
+    // applied once the place has HELD STILL for kLocationSettleMs, and never
+    // sooner than kLocationReloadGapMs after the last apply, so what is in force
+    // is always the tuning of the place the player settled in - and walking back
+    // and forth over a boundary reloads once, not once per sample. The very
+    // first change is applied at once: that one is startup, and nothing should
+    // wait three frames for the renderer to configure itself.
+    if(placeChanged){g_placeChangedAt=now;g_placePending=true;}
+    const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&
+        (now-g_locationAppliedAt>=kLocationReloadGapMs||!g_locationConfigured);
+    const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);
+    if(locationTuningChanged){g_placePending=false;g_locationAppliedAt=now;g_locationConfigured=true;tuningoverlay::Configure(g_basePath);}
     if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
@@ -212,7 +236,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
