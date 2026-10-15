@@ -233,15 +233,6 @@ struct Instance
     // is "waiting", never "placed and still".
     bool measured = false;
     bool swaying = false;
-    // The material proof that does not come from the render state: this model is
-    // drawn with a texture that has transparent texels in it, which is what a
-    // leaf, a blade of grass and a canopy are drawn with and what a crate, a
-    // boulder or a piece of armour is not. The state that used to decide this is
-    // absent on a client whose shader system compiles its alpha test into the
-    // pixel shader, and there the state test alone reads a whole field of grass
-    // as 238 solid props. Learned per model, beside the pose, and cleared when a
-    // model stops leaning.
-    bool cutout = false;
 };
 
 // The last palette read, reused by every further batch of the same instance in
@@ -1528,12 +1519,11 @@ struct Scope
             return;
         }
 
+        // Leaning is the proof a model's other batches look for: this instance is
+        // a plant, and the solid batches of the same model follow it - each of
+        // them found by its own vertex buffer and re-checked for motion first, so
+        // no state is read and no texture is locked twice.
         instance->swaying = true;
-        // The model is a cutout, and the proof is recorded on the INSTANCE: the
-        // texture was examined once, for this model, and its other batches (the
-        // trunk, the lower leaves) then need no state and no texture read to be
-        // recognised as the same plant.
-        instance->cutout = true;
         g_anySwaying = true;
         Lean(frame, *instance, bones, registers, bones.bones, shader.hash);
     }
@@ -1556,11 +1546,6 @@ private:
     void StopLeaning(Instance& instance) noexcept
     {
         instance.stable = 0;
-        // The material proof goes with it. A model that has stopped leaning is no
-        // longer the same model: another object can be placed on the same spot
-        // with the same root block and the same vertex buffer, and a stale
-        // "this is a cutout" would then put a solid prop in the wind.
-        instance.cutout = false;
         if (!instance.swaying) return;
         instance.swaying = false;
         g_anySwaying = false;

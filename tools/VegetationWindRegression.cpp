@@ -1268,10 +1268,9 @@ static void TestConfigurationAndWiring()
           sway.find("detail::TextureIsCutout(device)") &&
           sway.find("if (foliageMaterial)") != sway.npos,
         "the state is asked first: a cutout material is the common case and costs no lock");
-    Check(sway.find("bool cutout = false;") != sway.npos && sway.find("instance->cutout = true;") != sway.npos &&
-          sway.find("instance.cutout = false;") != sway.npos,
-        "the proof belongs to the instance, so a tree's other batches need no texture read - and a model that "
-        "stops leaning loses it rather than lending it to whatever is placed there next");
+    Check(sway.find("instance->swaying = true;") != sway.npos &&
+          sway.find("if (!owner || !owner->swaying)") != sway.npos,
+        "leaning is the proof a model's other batches look for, and it stops the moment the model moves");
     Check(sway.find("SwayingByRoot") == sway.npos,
         "no gate decides a draw's model from its placement point: a rider sits at their mount's point");
     Check(sway.find("detail::MeasuredInstance(") != sway.npos &&
