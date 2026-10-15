@@ -159,7 +159,9 @@ single byte is written:
   and neither does any draw outside the shared wind's snapshot, so the whole
   discovery path is limited to the client's own transparent model materials. The
   material verdict is read from the device, so a pass that arrives through a
-  cached state block is judged by what the device is actually doing. This is also
+  cached state block is judged by what the device is actually doing. It is read
+  right behind the declaration and before every other gate, so the solid trunk
+  and the depth pass are settled before a shader hash is looked at. This is also
   the one refusal that could swallow a whole field while the HUD only says
   `solid` - a client that cuts its leaves out inside the pixel shader sets
   neither alpha test nor alpha blend state - so the first solid model draw of a
@@ -179,16 +181,29 @@ single byte is written:
   shadow map above all, but also its occlusion fills and depth fills - is
   refused: nothing visible is being drawn, and the shadow cascades skin in the
   light's space, so the frame camera's wind on them would be a visibly wrong
-  shadow.
+  shadow. The colour-write test runs *before* the shader is judged, precisely
+  because the shadow map is the biggest source of model-path draws in a frame:
+  counting it `depth` is true and readable, where counting it as an unproven
+  shader put a number on the gate row that no player could act on.
 - **Anything that is not the client's skinned model path.** Terrain, WMOs,
   particles, ribbons, effects, the interface and every fixed-function or
   up-front batch declare no bone indices (or no vertex buffer at all), so they
-  are left alone before a palette is even read. So is the world's own
-  projection: a draw whose constants bind `c4..c7` the way terrain and WMOs do
-  is scenery, whatever its declaration says.
+  are left alone before a palette is even read. A fixed-function pass is counted
+  `flat` and a draw with no readable declaration `decl`.
 - **The passes this project has already identified as never-a-model** - the
   native shadow casters, UI, precipitation and water - are refused by hash
-  before any constant is read.
+  before any constant is read, and counted `never`. This is *not* the same
+  counter as `vs`, which is a model draw this build could not prove at all:
+  the row keeps them apart because a player can act on one of them and not on
+  the other.
+- **The world's own projection is a suspicion, not a verdict.** A draw whose
+  constants bind `c4..c7` the way terrain and WMOs do may be scenery - but the
+  constants are a guess about which shader variant a client happened to compile,
+  and a client that draws its grass through that path would stop swaying for
+  good. So such a draw is carried to the palette gate and refused there only if
+  `c31` does *not* hold an object -> view bone block: a world-shaped binding with
+  a real bone palette is a model, and a model leans. It is counted `world`, which
+  therefore means "scenery, confirmed by the absence of a palette".
 - **Draws that are not the frame camera's.** A model is only leaned when the
   device is drawing into the viewport the accepted camera pose was captured in,
   which is what keeps the client's portrait, target, minimap and reflection views
@@ -304,13 +319,14 @@ Linux and is wired into CI, and it pins:
   `c4..c7` projection is refused, and a declaration without bone indices is not
   a model draw whatever its shader is;
 - the four proofs the gates read from the device rather than from the state
-  mirror: the shader a draw is judged by (`GetVertexShader`, then the shader's
-  own bytecode) and the declaration it is judged through
-  (`GetVertexDeclaration`), the material (alpha test or alpha blend) and the
-  colour-write mask - with the mirror left to the free early counters, the
-  palette read kept above every device call it can be, and the declaration gate
-  ordered before the shader gate because the declaration is what proves the draw
-  is a model;
+  mirror: the declaration a draw is judged through (`GetVertexDeclaration`), the
+  material (alpha test or alpha blend), the colour-write mask, and the shader it
+  is judged by (`GetVertexShader`, then the shader's own bytecode) - with the
+  mirror left to the free early counters, the palette read kept above every
+  device call it can be, and the gate order pinned as declaration -> material ->
+  colour writes -> shader -> camera, so the declaration is what proves the draw
+  is a model before anything else is asked and the depth passes are named before
+  a hash is read;
 - the identity fallback: a shader the runtime will not hash is judged by the
   constants it binds and never cached under hash 0, and a shader-gate refusal of
   a model draw is counted whatever the mirror believes about its material;
@@ -331,8 +347,12 @@ Linux and is wired into CI, and it pins:
   the row lists only the gates that refused something and in the order they run
   in, a frame that refuses at every gate **continues the census on the next row
   rather than clipping it**, every row fits the box it is drawn in, the waiting
-  count is printed next to what leans and never offered as a refusal, and the
-  build stamp row is drawn
+  count is printed next to what leans and never offered as a refusal, the head of
+  the gate row carries the number of draws that arrived as the client's skinned
+  model path at all (the one number that tells "nothing was refused" apart from
+  "this client does not draw this field as models"), a fixed-function pass and a
+  pass this project has already refused are named as `flat` and `never` rather
+  than offered as unproven plants, and the build stamp row is drawn
   from the DLL's file time - published by the Windows half, absent when nothing
   published one - so a screenshot names the build it came from;
 - every counter the HUD can report is incremented by the device half, so a gate
@@ -354,18 +374,25 @@ In-client acceptance checks (Windows and the Ascension client):
 1. Stand in a forest at day and at night, with the F7 WIND tab open on
    `VEGETATION DEBUG VIEW`. Grass, bushes and tree canopies lean downwind and
    shimmer; `leaning` rises with the number of visible plants, and if it does not,
-   the second row names the gate that refused them (`decl` for a declaration that
-   is not the client's skinned model layout, `world` for the scenery projection,
-   `vs` for a shader this build could not prove, `geo` for vertices that could not
-   be read, `depth` for a pass that writes no colour, `cam` for the frame
-   camera's own viewport, `pal` for a palette that failed validation - including
-   a c31 that is not a bone block at all, which is what a client that keeps its
-   bones somewhere else looks like,
+   the second row names the gate that refused them, in the order they run:
+   `flat` for fixed-function T&L (no vertex shader at all), `decl` for a
+   declaration that is not the client's skinned model layout, `depth` for a pass
+   that writes no colour (the client's own shadow map above all), `never` for a
+   pass this project identified as never a model (UI, rain, water), `vs` for a
+   model draw this build could not prove at all, `cam` for the frame camera's own
+   viewport, `world` for world-shaped constants with no bone block at `c31`,
+   `pal` for a palette that failed validation - including a c31 that is not a
+   bone block at all, which is what a client that keeps its bones somewhere else
+   looks like - `geo` for vertices that could not be read,
    `shape`/`size` for a model that did not look like a plant, `move` for a model
    the client is animating, `far` for range, `calm` for a plant the wind's own
    gust field leaves with nothing to apply, `write` for a refused device write;
    the list continues on the next row if it does not fit, and a `waiting` count
-   on the row above means those models are being measured, not refused).
+   on the row above means those models are being measured, not refused). The
+   head of that row reads `h 4.2 yd, 214 models`: the size the gate last
+   measured, and how many draws arrived as the client's skinned model path at
+   all - a small number there, with the field full of grass, means the client is
+   not drawing that grass as models, and no gate tuning can change that.
    `new` above zero means a shader
    variant was proven this frame: `/log ModernWoWRenderer.log` names its hash, and
    adding that hash to the captured list is what makes the next session accept it

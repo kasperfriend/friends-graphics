@@ -823,6 +823,29 @@ static void TestWindDebugLine()
         "and how many solid model draws it passed over, which is what a solid-material bug looks like");
     Check(rows[1].find("none refused") != std::string::npos, "the gate row is quiet while nothing is refused");
     Check(rows[1].find("h 4.2 yd") != std::string::npos, "and always shows the size the gate looked at");
+    // The one number on the row that is not a refusal: how many draws arrived
+    // as the client's skinned model path at all. "No gate refused anything" and
+    // "this client does not draw this field as models" look identical on a row
+    // of refusals, and the answer for a player is completely different.
+    status.modelDraws = 214;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows[1].find("h 4.2 yd, 214 models") != std::string::npos,
+        "the gate row says how many model draws the frame carried, refused or not");
+    Check(fits(rows), "and the head with it still fits the box");
+    status.modelDraws = 0;
+    // The two counters that used to be one. `flat` is fixed-function T&L - a
+    // pass with no vertex shader, which is never the client's model path - and
+    // `never` is a pass this project has identified as never a model. Neither is
+    // a plant, and neither may be printed as one: a row that says "vs 180" for
+    // the UI, the rain and the shadow casters is the row that made an in-client
+    // report unreadable.
+    status.skippedFixedFunction = 3; status.skippedNeverModel = 41; status.skippedShader = 0;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(all(rows).find("flat 3") != std::string::npos,
+        "a fixed-function pass is named as one, not as an unproven shader");
+    Check(all(rows).find("never 41") != std::string::npos,
+        "and a pass this project already refused as never-a-model is named as that");
+    status.skippedFixedFunction = 0; status.skippedNeverModel = 0;
     // "Waiting" is neither leaning nor refused: a model that is measured,
     // plant-shaped and standing still but has not repeated itself in a second
     // frame yet. Without it a row can read "0 leaning of 40 drew, 0 solid" and
@@ -860,19 +883,24 @@ static void TestWindDebugLine()
     Check(all(rows).find("calm 7") != std::string::npos,
         "a plant the wind leaves with no angle is not reported as out of range");
     Check(all(rows).find("write 1") != std::string::npos, "and a refused write is named as one");
-    Check(all(rows).find("world 400") < all(rows).find("vs 812"), "in the order the gates run in");
-    Check(all(rows).find("vs 812") < all(rows).find("pal 3"), "in the order the gates run in");
+    Check(all(rows).find("depth 900") < all(rows).find("vs 812"),
+        "in the order the gates run in: a pass that writes no colour is settled before a shader is judged");
+    Check(all(rows).find("vs 812") < all(rows).find("world 400"),
+        "a shader is judged before the palette that settles a world-shaped binding");
+    Check(all(rows).find("world 400") < all(rows).find("pal 3"),
+        "and the world is named before the plain palette refusals it is settled with");
     // Everything refusing at once does not fit one row, and a clipped row is
     // exactly as useful as the "0" the player reported: the census continues on
     // the next row, prefixed, in the same order.
     status.skippedLayout = 3200; status.skippedGeometry = 12; status.skippedDepthOnly = 900;
     status.skippedCamera = 3; status.skippedViewport = 1; status.skippedShape = 4; status.skippedSize = 2;
     status.skippedAnimated = 5; status.skippedRange = 6; status.unbounded = 2;
+    status.skippedFixedFunction = 2; status.skippedNeverModel = 44;
     rows = VegetationDebugLines(status, settings, wind);
     Check(rows.size() > 2, "a frame that refuses at every gate continues on the next row");
     Check(rows[2].find(kMoreGatesPrefix) == 0, "and the continuation says that it is one");
-    for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
-                               "far", "calm", "write", "new" })
+    for (const char* label : { "flat", "decl", "world", "vs", "geo", "depth", "never", "cam", "pal", "shape",
+                               "size", "move", "far", "calm", "write", "new" })
         Check(all(rows).find(std::string(label) + " ") != std::string::npos,
             "every gate that refused is on the rows, even when they do not fit one");
     // The row that names the build. An in-client report of "it does not work"
@@ -1037,7 +1065,8 @@ static void TestConfigurationAndWiring()
           shaderGate != sway.npos && shaderGate < firstPaletteRead &&
           layoutGate != sway.npos && layoutGate < firstPaletteRead,
         "the disabled, unlinked and non-model paths return before the first palette read");
-    for (const char* counter : { "candidates", "skippedMaterial", "skippedCamera", "skippedViewport",
+    for (const char* counter : { "candidates", "modelDraws", "skippedMaterial", "skippedCamera",
+                                 "skippedViewport", "skippedFixedFunction", "skippedNeverModel",
                                  "skippedShader", "skippedWorld", "skippedLayout", "skippedGeometry",
                                  "skippedDepthOnly", "skippedPalette", "skippedShape", "skippedSize",
                                  "skippedAnimated", "skippedRange", "skippedCalm", "skippedWrite",
@@ -1083,8 +1112,8 @@ static void TestConfigurationAndWiring()
           main.find("FileTimeToSystemTime") != main.npos,
         "the build stamp is the loaded dll's own file time");
     const auto hud = Read("src/Environment/WindDebug.h");
-    for (const char* label : { "decl", "world", "vs", "geo", "depth", "cam", "pal", "shape", "size", "move",
-                               "far", "calm", "write", "new" })
+    for (const char* label : { "flat", "decl", "world", "vs", "geo", "depth", "never", "cam", "pal", "shape",
+                               "size", "move", "far", "calm", "write", "new" })
         Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
             "every gate the device half counts has a name on the HUD row");
     Check(hud.find("inline const char* buildStamp") != hud.npos &&
@@ -1099,7 +1128,7 @@ static void TestConfigurationAndWiring()
     Check(sway.find("renderer::IsUnskinnedM2Shader") != sway.npos,
         "both captured variant lists admit a draw on sight");
     Check(sway.find("renderer::IsWmoOrTerrainConstants") != sway.npos,
-        "and the world's own projection refuses one outright");
+        "and the world's own projection makes a draw a suspect rather than scenery");
     Check(layoutGate < shaderGate,
         "the declaration is read first: it is the proof the draw is a model at all");
     Check(geometry_.find("out.valid = out.position && out.skinned") != std::string::npos,
@@ -1132,10 +1161,21 @@ static void TestConfigurationAndWiring()
         "a shader whose bytecode will not come back is judged per draw, and never cached under 0");
     // The shader gate's refusals are counted whatever the mirror says about the
     // material: the declaration above proved the draw is a model, so a refusal
-    // here is about a model and must not be the mirror's to hide.
-    Check(sway.find("if (admission == detail::Admission::World) ++Status().skippedWorld;") != sway.npos &&
-          sway.find("else ++Status().skippedShader;") != sway.npos,
-        "a refusal of a model draw is counted, mirror or not");
+    // here is about a model and must not be the mirror's to hide. The verdicts
+    // are counted apart, because they are three different bugs: a pass this
+    // project has always refused as never-a-model, a model draw this build could
+    // not prove at all, and the world's own projection - which is carried to the
+    // palette gate rather than acted on here.
+    Check(sway.find("++Status().skippedNeverModel;") != sway.npos &&
+          sway.find("if (admission == detail::Admission::Unknown)") != sway.npos &&
+          sway.find("++Status().skippedShader;") != sway.npos,
+        "a refusal of a model draw is counted, mirror or not, and counted apart");
+    const auto worldSuspect = sway.find("const bool worldSuspect = admission == detail::Admission::World;");
+    Check(worldSuspect != sway.npos && sway.find("if (worldSuspect) ++Status().skippedWorld;") > worldSuspect &&
+          sway.find("else ++Status().skippedPalette;") > worldSuspect,
+        "and the world's own projection is settled by the palette, by name, at the palette gate");
+    Check(sway.find("of the world; it is left alone unless its own bone palette says otherwise") != sway.npos,
+        "a world-shaped binding with a bone block is a model drawn through the world path, not scenery");
     // The material verdict. A foliage draw that the state mirror believes is
     // solid is never revealed as an instance at all, and the client's own passes
     // arrive through cached state blocks that never reach the SetRenderState
@@ -1148,8 +1188,9 @@ static void TestConfigurationAndWiring()
     Check(sway.find("renderer::g_trackedState.alphaBlend || renderer::g_trackedState.alphaTest") != sway.npos,
         "and the mirror only answers when the device cannot be asked at all");
     const auto materialGate = sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);");
-    Check(materialGate != sway.npos && materialGate > shaderGate,
-        "and it is asked once, after the cheap gates, so the device call is paid for models only");
+    Check(materialGate != sway.npos && materialGate > layoutGate && materialGate < shaderGate,
+        "and it is asked once, right behind the declaration, so the device call is paid for models only - and "
+        "the solid trunk and the depth pass are settled before a shader hash is read");
     Check(sway.find("const bool mirrorMaterial =") != sway.npos,
         "with the free state mirror left to the early counters");
     // Colour writes. The client's native shadow map skins in the LIGHT's space,

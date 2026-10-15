@@ -64,10 +64,19 @@ struct VegetationStatus
     unsigned swaying = 0;         // instances leaning in this frame's last batch
     unsigned batches = 0;         // draw calls that received a lean this frame
     unsigned pending = 0;         // measured and plant-shaped, waiting for the second frame
+    // Every draw that carried the client's skinned model declaration, whatever
+    // happened to it afterwards. The gates below say why a draw did not lean, but
+    // none of them says whether the field the player is standing in arrived as
+    // model draws at all: a client that draws its grass as terrain detail, or
+    // batches it into one static mesh, shows a small number here and no number of
+    // gate refusals can explain it. This is that number.
+    unsigned modelDraws = 0;
     unsigned skippedMaterial = 0; // solid material: not foliage, so not a candidate
     unsigned skippedCamera = 0;   // no accepted camera pose for the frame yet
     unsigned skippedViewport = 0; // drawn into a viewport that is not the frame camera's
-    unsigned skippedShader = 0;   // not a captured variant, no bone indices, no M2 projection
+    unsigned skippedFixedFunction = 0; // fixed-function T&L: no vertex shader, never the model path
+    unsigned skippedNeverModel = 0;   // a pass this project identified as never a model (UI, rain, water)
+    unsigned skippedShader = 0;   // a model draw this build could not prove (expected to stay zero)
     unsigned skippedWorld = 0;    // the WMO/terrain projection: a piece of the world, never a plant
     unsigned skippedLayout = 0;   // vertex declaration is not POSITION + BLENDINDICES
     unsigned skippedGeometry = 0; // couldn't read the draw's own vertices (the palette bound)

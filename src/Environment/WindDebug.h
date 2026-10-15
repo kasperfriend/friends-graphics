@@ -104,13 +104,17 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     // problem in six characters. The order is the order the gates run in, so the
     // first name on the row is the first thing to look at.
     //
-    //   decl  the vertex declaration cannot be read (no usable position)
-    //   world the constants bind the WMO/terrain projection: scenery, not plants
-    //   vs    no bone indices, no captured variant, no M2 projection: unproven
-    //   geo   the draw's own vertices could not be read (the palette bound)
+    //   flat  fixed-function T&L: no vertex shader at all, never the model path
+    //   decl  the vertex declaration cannot be read (no usable position / bone
+    //         indices: not the client's skinned model path)
     //   depth no colour writes: the client's shadow map or another depth pass
+    //   never a pass this project identified as never a model (UI, rain, water)
+    //   vs    a model draw this build could not prove (expected to stay zero)
     //   cam   the camera pose is missing, or the draw belongs to another view
+    //   world world-shaped constants AND no bone block at c31: the world's own
+    //         projection, refused once the palette failed to prove otherwise
     //   pal   the palette does not look like object -> view matrices / is short
+    //   geo   the draw's own vertices could not be read (the palette bound)
     //   shape too many bones, or longer than it is tall
     //   size  outside the supported height range, measured against `h`
     //   move  the client is animating it
@@ -133,13 +137,15 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     const auto report = [&refused](const char* label, unsigned value) {
         if (value) refused.emplace_back(label, value);
     };
+    report("flat", status.skippedFixedFunction);
     report("decl", status.skippedLayout);
-    report("world", status.skippedWorld);
-    report("vs", status.skippedShader);
-    report("geo", status.skippedGeometry);
     report("depth", status.skippedDepthOnly);
+    report("never", status.skippedNeverModel);
+    report("vs", status.skippedShader);
     report("cam", status.skippedCamera + status.skippedViewport);
+    report("world", status.skippedWorld);
     report("pal", status.skippedPalette + status.unbounded);
+    report("geo", status.skippedGeometry);
     report("shape", status.skippedShape);
     report("size", status.skippedSize);
     report("move", status.skippedAnimated);
@@ -147,7 +153,12 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("calm", status.skippedCalm);
     report("write", status.skippedWrite);
     report("new", status.learnedShaders);
-    std::snprintf(text, sizeof(text), "Plants gate: h %.1f yd | ", double(status.lastMeasured));
+    // The head carries the size the gate last measured and the number of draws
+    // that arrived as the client's skinned model path at all: "no gate refused
+    // anything" and "this client does not draw this field as models" look
+    // identical on a row of refusals, and only this number tells them apart.
+    std::snprintf(text, sizeof(text), "Plants gate: h %.1f yd, %u models | ", double(status.lastMeasured),
+        status.modelDraws);
     if (refused.empty())
         lines.emplace_back(std::string(text) + "none refused");
     else

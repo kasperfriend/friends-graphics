@@ -10,40 +10,45 @@
 // where the model meets the ground); this file owns the device half: decide
 // which draws are vegetation, read the palette, lean it, restore it.
 //
-// A draw is touched only when EVERY one of these holds. A failure at any step
-// leaves the draw exactly as the client intended it, and is COUNTED, because a
-// gate that refuses silently is a gate nobody can diagnose:
+// A draw is touched only when EVERY one of these holds, in this order. A failure
+// at any step leaves the draw exactly as the client intended it, and is COUNTED,
+// because a gate that refuses silently is a gate nobody can diagnose:
 //   1. the shared wind is on, the vegetation link is on and the effect is on;
-//   2. it is transparent (alpha tested or blended). A solid draw cannot be
-//      foliage and never reveals an instance, though it is leaned once its own
-//      model is known - that is what keeps a tree's opaque trunk welded to the
-//      canopy above it;
-//   3. it uses the client's skinned model vertex layout (POSITION and
+//   2. it uses the client's skinned model vertex layout (POSITION and
 //      BLENDINDICES in stream 0) and is drawn from a vertex buffer, not from an
 //      up-front array. Every M2 model the client draws is declared with that
 //      layout, one bone or seventy; terrain, WMOs, particles, ribbons, effects
-//      and the interface declare no bone indices at all. This is the proof the
-//      sway rests on, and a declaration it cannot read is written to the
-//      renderer's log in D3D's own terms once;
-//   4. its vertex shader is a model shader, which is judged by what the DRAW is,
+//      and the interface declare no bone indices at all. This is the structural
+//      proof the sway rests on, and a declaration it cannot read is written to
+//      the renderer's log in D3D's own terms once;
+//   3. it is transparent (alpha tested or blended). A solid draw cannot be
+//      foliage and never reveals an instance, though it is leaned once its own
+//      model is known - that is what keeps a tree's opaque trunk welded to the
+//      canopy above it;
+//   4. it writes colour: a depth-only pass - the client's native shadow map, an
+//      occlusion fill, a depth prepass - cannot be the foliage the player is
+//      asking about, and the shadow map skins in the light's space. This test
+//      runs before the shader is judged, so the shadow map is counted `depth`
+//      rather than being mistaken for a model this build could not name;
+//   5. its vertex shader is a model shader, which is judged by what the DRAW is,
 //      not by a hash list: a list captured from one build of the client cannot
 //      gate another build, and that is exactly how a working feature reads as
 //      "0 swaying" on a machine whose client ships different shader binaries. A
 //      variant captured live (either list) is accepted at once, and so is any
 //      other variant over a declaration that already proved this is the client's
-//      skinned model path. Only the world's own projection (c4..c7, WMO and
-//      terrain) and the passes this project has already identified as
-//      never-a-model (the native shadow casters above all, whose palettes are in
-//      the LIGHT's space, plus UI, precipitation and water) are refused. A
-//      variant this build had not seen is written to the renderer's log once, by
-//      hash, so the captured list can be extended from a real session. The
-//      shader being judged is the one the DEVICE is drawing with and the
-//      declaration is the one the DEVICE is drawing through - the client binds
-//      its own passes in cached state blocks that never reach the Set hooks, and
-//      a mirror that describes an earlier draw refuses every model in the frame;
-//   5. it writes colour: a depth-only pass - the client's native shadow map, an
-//      occlusion fill, a depth prepass - cannot be the foliage the player is
-//      asking about, and the shadow map skins in the light's space;
+//      skinned model path. The passes this project has already identified as
+//      never-a-model - the native shadow casters, UI, precipitation and water -
+//      are refused here, and the world's own projection (c4..c7) makes a draw a
+//      SUSPECT rather than a refusal: the constants are a guess about a shader
+//      variant, and the palette in step 8 is the proof, so a world-shaped
+//      binding with a bone block at c31 leans and one without is counted
+//      `world`. A variant this build had not seen is written to the renderer's
+//      log once, by hash, so the captured list can be extended from a real
+//      session. The shader being judged is the one the DEVICE is drawing with
+//      and the declaration is the one the DEVICE is drawing through - the client
+//      binds its own passes in cached state blocks that never reach the Set
+//      hooks, and a mirror that describes an earlier draw refuses every model in
+//      the frame;
 //   6. the frame has an accepted camera pose (cameraValid + viewRawValid) and
 //      the draw renders into that camera's viewport, which is what makes the
 //      lean geometry be in the frame camera's own space - the client's portrait,
@@ -54,7 +59,8 @@
 //      bound is the highest bone index this draw's vertices reference, and
 //      nothing past it is ever read, analysed or written;
 //   8. the palette at c31 looks like object -> view matrices (finite,
-//      orthogonal up to scale, plausible translation) up to that bound;
+//      orthogonal up to scale, plausible translation) up to that bound. This is
+//      also what clears a world-shaped constant binding from step 5;
 //   9. the model is plant-shaped: at most kVegetationMaxBones bones, and a size
 //      measured from its own vertices - not from its bone pivots, which span no
 //      height at all for a one-bone tuft;
@@ -153,7 +159,8 @@ struct MeshProfile
 struct ShaderProfile
 {
     bool model = false;
-    bool world = false;      // terrain/WMO: refused however the draw is declared
+    bool world = false;      // binds the world's own projection: a suspect, not a verdict
+    bool never = false;      // a pass this project has already identified as never a model
     bool reported = false;      // the log already carries this shader's verdict
     const char* reason = "";    // why it was refused, for that one log line
     uint64_t lastSeenFrame = 0;
@@ -470,17 +477,22 @@ namespace detail
 
     // What the shader gate decided. "World" is kept apart from "Unknown"
     // because they mean opposite things to whoever reads the HUD: a world draw
-    // is meant to be refused (terrain and buildings are not vegetation), while
-    // an unknown refusal is a model draw this build could not prove.
-    enum class Admission { Granted, World, Unknown };
+    // binds the world's own projection, which is scenery rather than a plant -
+    // but it is a SUSPECT, not a verdict, and the palette below it decides
+    // whether it was scenery after all (see ShaderAccepted). "Never" is the
+    // answer for the passes this project has already identified - the shadow
+    // casters' own variants, UI, rain, snow and water - and "Unknown" is what is
+    // left: a model draw this build could not prove. It is expected to stay at
+    // zero, and it is counted rather than assumed away.
+    enum class Admission { Granted, World, Never, Unknown };
 
     // A shader the device knows but this renderer cannot name: the runtime would
     // not return its bytecode, so there is no identity to remember and nothing
     // to cache - a profile under hash 0 would let the first such draw decide for
     // every other one in the session. The draw is judged by the constants it
-    // binds, on this call, like any other draw this build had not seen: only the
-    // world's own projection (c4..c7) is refused, and everything the lean rests
-    // on is still proven below it.
+    // binds, on this call, like any other draw this build had not seen: a
+    // world-shaped binding makes it a suspect that only a bone palette can
+    // clear, and everything the lean rests on is still proven below it.
     inline Admission UnidentifiedShader(IDirect3DDevice9* device) noexcept
     {
         if (!g_reportedUnidentifiedShader)
@@ -523,9 +535,15 @@ namespace detail
     //     unidentifiable draw in the session decide for every later one.
     //
     // This is reached only by draws whose own declaration already carried bone
-    // indices, so the constants can decide one thing here and one thing only:
-    // whether the draw is still binding the WORLD's projection, which is
-    // scenery and is refused whatever its vertices say.
+    // indices, so the constants are the only thing the world check can use - and
+    // what they can say is one thing only: that the draw is still binding the
+    // WORLD's projection, which usually means scenery. That is a suspicion, not
+    // a proof: the palette is the proof. A draw whose c4..c7 looks like the
+    // world's projection AND whose c31 holds object -> view bone matrices is a
+    // model drawn through the world path, and refusing it on the constants alone
+    // is how a client that draws its grass that way reads as "nothing sways".
+    // So a world-shaped draw is admitted here as a suspect and the palette gate
+    // refuses it, by name, if its bones are not there.
     inline Admission ShaderAccepted(IDirect3DDevice9* device, const renderer::FrameContext& frame, uint64_t hash)
     {
         if (hash == 0) return UnidentifiedShader(device);
@@ -542,13 +560,15 @@ namespace detail
                 ReportShader(hash, false, profile.reason);
             }
             if (profile.model) return Admission::Granted;
-            return profile.world ? Admission::World : Admission::Unknown;
+            if (profile.world) return Admission::World;
+            return profile.never ? Admission::Never : Admission::Unknown;
         }
         if (g_shaders.size() >= kMaxShaderProfiles) Evict(g_shaders, kMaxShaderProfiles);
         ShaderProfile profile;
         profile.lastSeenFrame = frame.frameIndex;
         if (renderer::IsNonModelShader(hash))
         {
+            profile.never = true;
             profile.reason = "a pass this project has already identified as never a model";
         }
         else
@@ -557,18 +577,20 @@ namespace detail
             const bool read = SUCCEEDED(device->GetVertexShaderConstantF(0, constants[0], 9));
             const bool modelLayout = read && renderer::IsM2ModelConstants(constants);
             const bool worldLayout = read && renderer::IsWmoOrTerrainConstants(constants);
-            // The world's own projection, refused outright whatever the vertices
-            // carry: terrain and buildings are not vegetation, and their palette
-            // (if c31 holds anything at all) is in a space this project has never
-            // verified. Everything else that reaches this point is already on the
-            // client's skinned model path - the declaration said so, and terrain,
-            // WMOs, particles, ribbons and the interface declare no bone indices -
-            // so it is admitted, and the lean still has to survive the palette,
-            // the draw's own vertices, its shape, its pose and its distance.
+            // The world's own projection is a suspicion, not a verdict - see the
+            // header above: the palette gate decides, and a draw that reaches it
+            // with world-shaped constants and no bone block at c31 is counted
+            // `world` rather than `pal`. Everything else that reaches this point
+            // is already on the client's skinned model path (the declaration said
+            // so, and terrain, WMOs, particles, ribbons and the interface declare
+            // no bone indices), so it is admitted, and the lean still has to
+            // survive the palette, the draw's own vertices, its shape, its pose
+            // and its distance.
             profile.model = !worldLayout;
             profile.world = worldLayout;
             if (profile.world)
-                profile.reason = "its constants bind the WMO/terrain projection in c4..c7, so it is a piece of the world";
+                profile.reason = "its constants bind the WMO/terrain projection in c4..c7, so it may be a piece "
+                    "of the world; it is left alone unless its own bone palette says otherwise";
             else if (modelLayout)
                 profile.reason = "it binds the client's M2 model projection in c2..c5";
             else
@@ -587,7 +609,8 @@ namespace detail
         }
         g_shaders.emplace(hash, profile);
         if (profile.model) return Admission::Granted;
-        return profile.world ? Admission::World : Admission::Unknown;
+        if (profile.world) return Admission::World;
+        return profile.never ? Admission::Never : Admission::Unknown;
     }
 
     // The draw has to render into the accepted camera's own viewport: that is
@@ -792,18 +815,21 @@ struct Scope
         // model - so it is not counted as one.
         if (draw.verticesUP) return;
         // Which draws are worth counting at all is judged by the state mirror,
-        // which is free. Every identity a draw is judged BY is read from the
-        // DEVICE: the shader it is drawn with and the declaration it is drawn
-        // through, because the client binds its own passes in cached state
-        // blocks that never reach the Set hooks, and both of these were the
-        // mirror's to get wrong. The material and the colour mask are device
-        // reads below, paid only for the model draws that got that far.
+        // which is free: a count polluted by the terrain, the UI and the WMOs
+        // would be as unreadable as no count at all, and a fixed-function pass is
+        // never the model path. Everything a draw is judged BY is read from the
+        // DEVICE - the shader it is drawn with, the declaration it is drawn
+        // through, its material, its colour mask and the constants it binds -
+        // because the client binds its own passes in cached state blocks that
+        // never reach the Set hooks, and a mirror that is stale on exactly the
+        // passes that matter is how a working feature reads as "0 swaying" on one
+        // machine and works on another.
         const bool mirrorMaterial =
             renderer::g_trackedState.alphaTest || renderer::g_trackedState.alphaBlend;
         const detail::BoundShader shader = detail::BoundVertexShader(device);
         if (!shader.bound) // fixed function is not the M2 path
         {
-            if (mirrorMaterial) ++Status().skippedShader;
+            if (mirrorMaterial) ++Status().skippedFixedFunction;
             return;
         }
         // The declaration is reported to the log whatever the mirror says about
@@ -817,18 +843,17 @@ struct Scope
             if (mirrorMaterial) ++Status().skippedLayout;
             return;
         }
-        const detail::Admission admission = detail::ShaderAccepted(device, frame, shader.hash);
-        if (admission != detail::Admission::Granted)
-        {
-            // Counted whatever the mirror says about the material: this draw is
-            // already on the client's skinned model path - the declaration above
-            // proved the bone indices - so a refusal here is about a model, and
-            // the mirror's verdict is exactly what cannot be trusted for the
-            // client's own cached-state-block passes.
-            if (admission == detail::Admission::World) ++Status().skippedWorld;
-            else ++Status().skippedShader;
-            return;
-        }
+        // Past the declaration the client's skinned model path is PROVEN -
+        // POSITION + BLENDINDICES in stream 0, which terrain, WMOs, particles,
+        // ribbons, effects and the interface never declare - so every counter
+        // from here on is about a model draw. None of them is gated on the state
+        // mirror any more: the mirror cannot be trusted for the client's own
+        // cached-state-block passes, and a counter that stays silent because the
+        // mirror was stale is exactly the "0" this feature has been reported as.
+        // `modelDraws` is the total, kept whether or not anything refuses: it is
+        // the one number that says whether the field the player is standing in
+        // arrived as model draws at all.
+        ++Status().modelDraws;
 
         // A model drawn with a transparent material is a cutout: the leaves, the
         // grass, the cloth. WoW draws its foliage either alpha tested or alpha
@@ -875,6 +900,32 @@ struct Scope
             ++Status().skippedDepthOnly;
             return;
         }
+
+        // What the shader says the draw is, last of the cheap device proofs and
+        // before anything is measured. The colour-write test runs first on
+        // purpose: the client's native shadow map is the biggest single source of
+        // model-path draws in a frame, it writes no colour, and counting it as
+        // `depth` is both true and readable - where counting it `never` or `vs`
+        // would put a number on the gate row that no player can act on.
+        const detail::Admission admission = detail::ShaderAccepted(device, frame, shader.hash);
+        if (admission == detail::Admission::Never)
+        {
+            ++Status().skippedNeverModel;
+            return;
+        }
+        if (admission == detail::Admission::Unknown)
+        {
+            // A model draw this build could not prove. Expected to stay at zero:
+            // a skinned declaration admits an unknown variant, so this is what is
+            // left if a cache ever holds a verdict no gate can justify.
+            ++Status().skippedShader;
+            return;
+        }
+        // A world-shaped constant binding is a suspicion that only the palette
+        // can clear, and the palette is read further down - so it is carried, not
+        // acted on here.
+        const bool worldSuspect = admission == detail::Admission::World;
+
         if (!frame.cameraValid || !frame.viewRawValid)
         {
             if (foliageMaterial) ++Status().skippedCamera;
@@ -897,12 +948,23 @@ struct Scope
         // counted nothing is exactly the report this feature has been burned by:
         // `pal` also means "this client does not keep its bones at c31", which
         // is a different bug from "no plant arrived at the gate".
+        //
+        // This is also where a world-shaped constant binding is settled. The
+        // constants are a guess about a shader variant; a c31 that holds an
+        // object -> view bone block is proof that the draw is a model, and a
+        // model drawn through the world path is a plant that must lean, not a
+        // building. Only a world-shaped draw with NO bone block is scenery, and
+        // that is what the `world` counter means: it is counted here rather than
+        // silently merged into `pal`, because the two are different bugs - one is
+        // "this is a piece of the world", the other is "this client keeps its
+        // bones somewhere else".
         float root[3][4]{};
         const bool rootRead = SUCCEEDED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, root[0],
             renderer::kM2RegistersPerBone));
         if (!rootRead || !renderer::M2BoneBlockValid(root[0], root[1], root[2]))
         {
-            ++Status().skippedPalette;
+            if (worldSuspect) ++Status().skippedWorld;
+            else ++Status().skippedPalette;
             // Once per session, the register itself. "The palette did not look
             // like bones" is answerable only if the numbers are on the record:
             // zeros mean this client keeps its matrix somewhere else, a
@@ -917,13 +979,13 @@ struct Scope
                 if (!rootRead)
                     std::snprintf(text, sizeof(text),
                         "Vegetation sway: the register the bone palette is read from (c%u) could not be read for a "
-                        "model draw. If the HUD shows `pal`, this is why nothing leaned.",
+                        "model draw. If the HUD shows `pal` or `world`, this is why nothing leaned.",
                         unsigned(renderer::kM2BoneBaseRegister));
                 else
                     std::snprintf(text, sizeof(text),
                         "Vegetation sway: c%u did not hold a bone block for a model draw: %.3f %.3f %.3f %.3f | "
-                        "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f. If the HUD shows `pal`, this is what the client "
-                        "keeps in the register this reader takes its object -> view blocks from.",
+                        "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f. If the HUD shows `pal` or `world`, this is what "
+                        "the client keeps in the register this reader takes its object -> view blocks from.",
                         unsigned(renderer::kM2BoneBaseRegister),
                         double(root[0][0]), double(root[0][1]), double(root[0][2]), double(root[0][3]),
                         double(root[1][0]), double(root[1][1]), double(root[1][2]), double(root[1][3]),
