@@ -79,6 +79,23 @@ int main() try
                 "a missing counter frequency falls back to a nominal frame");
     }
 
+    {
+        // And the rule the present hook reports a stall by, which is what decides
+        // whether a player's log says who a hitch belonged to. The threshold is
+        // relative to the session's own frame on purpose: the same code has to
+        // report a stall on a 30 Hz machine and on a 240 Hz one, and a frame that
+        // is merely slower than its neighbours is not a stall.
+        Require(FrameGapIsAStall(2000.0, 16.7), "a two-second gap is a stall whatever the frame rate");
+        Require(FrameGapIsAStall(300.0, 8.3) && FrameGapIsAStall(kFrameStallFloorMs, 4.0),
+                "a quarter of a second is a stall on its own, on a fast machine as much as a slow one");
+        Require(FrameGapIsAStall(200.0, 16.7) && FrameGapIsAStall(180.0, 12.0),
+                "and so is a frame an order of magnitude off this session's own average");
+        Require(!FrameGapIsAStall(16.7, 16.7) && !FrameGapIsAStall(33.0, 16.7),
+                "while a frame at or twice the session's average is not one: a slow frame is not a stall");
+        Require(!FrameGapIsAStall(60.0, 0.0) && !FrameGapIsAStall(0.0, 16.7) && !FrameGapIsAStall(-5.0, 16.7),
+                "and an unprimed average, a zero gap or a backwards counter never report one");
+    }
+
     std::printf("ALL FRAME CLOCK TESTS PASSED\n");
     return 0;
 }

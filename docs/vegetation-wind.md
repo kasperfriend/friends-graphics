@@ -292,8 +292,24 @@ Those draws are bent in **the client's own vertex shader** instead:
    either; refusing it costs the shader its chance only when every draw of it is
    unreadable, and a real field measures in the first draw or two. Because one
    shader is bent for all of its draws, a verdict waits for a few draws
-   (`kBladeCardTries`) before it is taken as final: the first draw of a chunk is
-   not always a blade.
+   (`kBladeCardTries`, sixteen of them) before it is taken as final: the first
+   draw of a chunk is not always a blade, and a family whose wide flat quads share
+   the shader - or a piece of the world drawn through it - must not take the
+   shader's only chance away from the blades.
+
+   The card's **size** is part of that measurement, and it is what the material
+   test can never replace: a terrain tile samples the same cut-out atlas as the
+   grass on it (a real session's probe called one `a cut-out (foliage-like!)
+   [65536 texels examined]`), and it has a height and vertices that step up it, so
+   sign, extent and pairs all pass. What it does not have is a blade card's shape -
+   a hundred vertices at the very most standing on a patch a couple of yards across
+   (`kGrassBladeMaxCardVertices`, `kGrassBladeMaxCardFootprintYards`) - and both are
+   measured off the same vertices the bend weight comes from. And because one bent
+   shader replaces **every** draw made with it, the batch's own vertex count is
+   checked again on every draw of a shader that has been bent, from the draw call
+   itself: a batch the size of a terrain tile or a WMO group is left exactly as the
+   client drew it and counted as `big` on the blade row, so the world the client
+   happens to draw with a grass shader cannot move with the grass.
 6. Every refusal is structural and one-shot logged: an empty disassembly, a
    shader that is not `vs_2_0`/`vs_3_0`, a declaration that gives the block
    neither a texture coordinate nor a position to read a height from, a shader that never lands its vertex in `r0` before a
@@ -335,7 +351,8 @@ Its rows in the debug view (F7 → WIND, with `GRASS BLADE WIND` on) are:
   same style as the model row above: `mat` (a material that is not a cut-out:
   opaque scenery), `never` (the interface, precipitation, the liquid variants and
   the shadow casters), `decl` (a declaration with neither a texture coordinate
-  nor a position, so there is no height to read a weight from), `card` (a card
+  nor a position, so there is no height to read a weight from), `big` (a batch the
+  size of a piece of the world, drawn through a shader bent for the grass), `card` (a card
   that was measured and lies flat), `read` (a card whose vertices could not be
   read at all), `vs` (a coordinate that is not the register the shader reads) and
   `asm` (a shader that could not be disassembled, reassembled or created).

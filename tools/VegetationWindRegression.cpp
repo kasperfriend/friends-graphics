@@ -2350,10 +2350,12 @@ static void TestGrassBlades()
         status.cardUnreadable = 0;
         status.materialRefused = 6;
         status.noTexcoord = 2;
+        status.bigDraws = 9;
         status.refused = 1;
         const std::vector<std::string> refused = GrassBladeDebugLines(status, blades);
         Check(!refused.empty() && refused.back().find("mat 6") != std::string::npos &&
               refused.back().find("decl 2") != std::string::npos &&
+              refused.back().find("big 9") != std::string::npos &&
               refused.back().find("asm 1") != std::string::npos,
             "a refusal is named on the row, so a field of static grass is answerable on screen");
         blades.enabled = false;
@@ -2401,16 +2403,26 @@ static void TestGrassBlades()
         // texture coordinate ends exactly on the stride's last byte fits (a `<=`
         // refused every one of them), a card that could not be read is not a flat
         // card, and a measured card that IS flat is still refused.
+        const std::string shaderText = Read("src/Environment/GrassShaderWind.h");
         Check(blades.find("if (stride < layout.positionOffset + 12u) return card;") != blades.npos &&
               blades.find("if (!rampByHeight && stride < layout.texcoordOffset + 8u) return card;") != blades.npos &&
-              blades.find("const bool bladeShaped = card.measured && card.pairs >= renderer::kGrassBladeMinPairs &&") !=
-              blades.npos &&
-              blades.find("card.extentYards >= renderer::kGrassBladeMinExtentYards &&") != blades.npos &&
-              blades.find("card.extentYards <= renderer::kGrassBladeMaxExtentYards") != blades.npos &&
+              blades.find("const bool bladeShaped = renderer::GrassBladeCardIsGrass(card);") != blades.npos &&
               blades.find("if (!bladeShaped)") != blades.npos &&
               blades.find("card.measured = true;") == blades.npos,
-            "a draw's own vertices are the whole admission - a readable card of a blade's size with a base and a tip "
-            "in it, and the fit test is a strict inequality");
+            "a draw's own vertices are the whole admission - one predicate, asked of the card that was measured, and "
+            "the fit test is a strict inequality");
+        // ...and that predicate is the geometric test itself, in the header the
+        // suite can compile: the readable card, the size, and the two bounds that
+        // keep a piece of the WORLD out of a path the material test cannot
+        // separate from grass (a terrain tile samples a cut-out atlas too).
+        Check(shaderText.find("inline bool GrassBladeCardIsGrass(const GrassBladeCard& card) noexcept") !=
+                  std::string::npos &&
+              shaderText.find("card.extentYards < kGrassBladeMinExtentYards") != std::string::npos &&
+              shaderText.find("card.extentYards > kGrassBladeMaxExtentYards") != std::string::npos &&
+              shaderText.find("kGrassBladeMaxCardVertices = 512") != std::string::npos &&
+              shaderText.find("kGrassBladeMaxCardFootprintYards = 20.f") != std::string::npos,
+            "the admission is one function in the portable header - a blade's size, a blade's vertex count and a "
+            "blade's patch, so the wall test below is the same code the device runs");
         Check(main.find("grassblade::Substitute(&vs);") != main.npos &&
               main.find("grassblade::Substitute(&vs);") < main.find("renderer::g_trackedState.currentVS != vs"),
             "the bent shader is swapped in at the SetVertexShader hook, before this renderer tracks what is bound");
@@ -2531,6 +2543,89 @@ static void TestGrassBlades()
               !MeasureGrassBladeCardByHeight(blade, 3).measured,
             "a quad whose vertices all sit at one height has no blade in it, and three vertices are not a card");
     }
+    // The wall: what a piece of the WORLD looks like to this path, and why the
+    // material test alone can never keep it out. A terrain tile drawn unskinned
+    // through the same shader samples the same cut-out atlas as the grass on it -
+    // the probe in the last log called one `a cut-out (foliage-like!) [65536
+    // texels examined]` - and it has a height and consecutive vertices that step
+    // up it, so sign, extent and pairs all pass. What it does not have is a
+    // blade card's SHAPE: hundreds of vertices standing on a patch two feet
+    // across. These are the cards the device half fills in and hands to the same
+    // predicate the injection is admitted by.
+    {
+        // The blade, for contrast: twenty-four vertices, a yard and a half of
+        // ground, thigh-high.
+        GrassBladeCard blade;
+        blade.measured = true;
+        blade.pairs = 4;
+        blade.extentYards = .55f;
+        blade.vertices = 24;
+        blade.footprintYards = 1.5f;
+        Check(GrassBladeCardIsGrass(blade), "a blade card is admitted: measurable, stepped, thigh-high, small");
+
+        // The terrain tile: a thousand vertices spanning a hillside. Its extent is
+        // even inside a blade's range - the far corner of a gentle tile can be two
+        // yards below the near one - so it is the SHAPE that answers here.
+        GrassBladeCard tile = blade;
+        tile.vertices = 1024;
+        tile.footprintYards = 9.f;
+        tile.extentYards = 2.4f;
+        Check(!GrassBladeCardIsGrass(tile),
+            "a terrain tile is refused: a thousand vertices spanning a hillside is not a blade card, however much of "
+            "a cut-out its texture is");
+
+        // The wall or the WMO group: few enough vertices to slip past the count,
+        // but a surface tens of yards across. This is the "parts of the buildings
+        // sway" shape, and the footprint is the measurement that catches it.
+        GrassBladeCard wall = blade;
+        wall.vertices = 96;
+        wall.footprintYards = 64.f;
+        wall.extentYards = 2.9f;
+        Check(!GrassBladeCardIsGrass(wall),
+            "and a wall carrying a foliage texture is refused on the patch it spans, which is the one thing a blade "
+            "card and a piece of scenery cannot share");
+
+        // Both bounds are strict: a card exactly at a bound is still a card, since a
+        // `<=` is what refused every tightly packed blade once already.
+        GrassBladeCard atCount = blade, atPatch = blade;
+        atCount.vertices = kGrassBladeMaxCardVertices;
+        atPatch.footprintYards = kGrassBladeMaxCardFootprintYards;
+        Check(GrassBladeCardIsGrass(atCount) && GrassBladeCardIsGrass(atPatch),
+            "and both bounds are strict: a card exactly at the vertex count or the patch width is still a blade");
+
+        // A card nobody filled the shape of - the portable measurement on its own -
+        // is judged by what it does carry. An unmeasured field must never become a
+        // refusal, and the two fields the device half fills default to "unknown".
+        GrassBladeCard portable = blade;
+        portable.vertices = 0;
+        portable.footprintYards = 0.f;
+        Check(GrassBladeCardIsGrass(portable),
+            "a card whose batch was not counted is not refused for the count it never had");
+        GrassBladeCard unreadable;
+        Check(!GrassBladeCardIsGrass(unreadable) && !GrassBladeCardIsGrass(MeasureGrassBladeCardByHeight(nullptr, 0)),
+            "while an unreadable card is still not evidence of a blade");
+        GrassBladeCard decal = blade;
+        decal.pairs = 0;
+        Check(!GrassBladeCardIsGrass(decal), "and a card with no base-and-tip pair in it is still refused");
+        GrassBladeCard sapling = blade;
+        sapling.extentYards = 4.f; // a young tree, not a blade
+        Check(!GrassBladeCardIsGrass(sapling),
+            "as is a card taller than any blade: the height bound still keeps a young tree out");
+
+        // And the check that costs nothing at all, because it is already in the draw
+        // call: one injected shader replaces EVERY draw made with it, so the batch's
+        // own size is what keeps a shader bent for the grass from bending the world
+        // the client draws through the same shader.
+        Check(GrassBladeDrawVertices(8, kGrassBladeTriangleListPrimitive) == 24 &&
+              GrassBladeDrawVertices(6, kGrassBladeTriangleStripPrimitive) == 8,
+            "a batch's own vertex count is read from the draw call: three per triangle, two plus the strip");
+        Check(GrassBladeDrawVertices(20000, kGrassBladeTriangleListPrimitive) > kGrassBladeMaxCardVertices &&
+              GrassBladeDrawVertices(24, kGrassBladeTriangleListPrimitive) <= kGrassBladeMaxCardVertices,
+            "a terrain tile's batch is thousands of vertices and a blade card's is dozens, which is what separates "
+            "them without touching a vertex buffer");
+        Check(GrassBladeDrawVertices(9999, 1u) == 0 && GrassBladeDrawVertices(9999, 0u) == 0,
+            "and a batch that is not a triangle list or strip is never a blade card at all");
+    }
     // Every part of the block a device would upload lives where the report says it
     // does: the base is the shader's own, and the rows are one per register.
     Check(Read("src/Effects/GrassBladeSway.h").find("entry->rampOffset = -card.baseYards * entry->rampScale;") !=
@@ -2553,6 +2648,21 @@ static void TestGrassBlades()
               std::string::npos,
         "a card with no texture coordinate is bent by its own height rather than refused, and only a declaration "
         "with no position at all is what the refusal row counts");
+    // The per-draw size guard, on the bent path: a shader this build bent is not
+    // bound for a batch the size of a world surface, and the draw is counted on the
+    // HUD's own `big` row instead of being bent.
+    Check(Read("src/Effects/GrassBladeSway.h").find(
+              "const unsigned batch = renderer::GrassBladeDrawVertices(draw.primitives, draw.type);") !=
+              std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find(
+              "if (batch > renderer::kGrassBladeMaxCardVertices)") != std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("++g_status.bigDraws;") != std::string::npos &&
+          Read("src/Environment/WindDebug.h").find("report(\"big\", status.bigDraws);") != std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find("a batch of %u vertices was left as the client drew it") !=
+              std::string::npos,
+        "a batch far too large to be a blade card is refused by the shader that was bent for the grass, says so on "
+        "the gate row, and names its own size in the log once per shader - because that bound is a guess about how "
+        "the client batches its grass, and a guess that is too tight must be visible in one report");
     Check(Read("src/Effects/GrassBladeSway.h").find(
               "device->SetVertexShaderConstantF(entry.firstRegister, entry.rows[0], renderer::kGrassBladeRows);") !=
               std::string::npos &&

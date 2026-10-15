@@ -219,6 +219,8 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
 //           standing in, counted per draw because that is what is being bent
 //   by height  of the draws that went out with the wind, the ones bent by the
 //           vertex's own height because the card carries no texture coordinate
+//   big   a batch far too large to be a blade card: the world drawn through a
+//         shader this build bent for the grass, left exactly as the client drew it
 //   shaders how many of the client's shaders this build has rewritten, how many
 //           it looked at and left alone, and how far a blade's tip moves
 //
@@ -257,6 +259,7 @@ inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& sta
     report("mat", status.materialRefused);
     report("never", status.neverModel);
     report("decl", status.noTexcoord);
+    report("big", status.bigDraws);
     report("card", status.cardRefused);
     report("read", status.cardUnreadable);
     report("vs", status.registerMismatch);

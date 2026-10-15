@@ -78,7 +78,14 @@ inline constexpr unsigned kMaterialRetries = 3;
 // happened to arrive first - and a chunk of grass is drawn as several cards, some
 // of them flat decals that carry the same material. Until a card measures as a
 // blade nothing is bent, which is the safe side of the same question.
-inline constexpr unsigned kBladeCardTries = 6;
+//
+// The count is generous on purpose. A shader's draws are a family, not one thing:
+// a client that draws its blades with the same shader that draws a wide flat quad
+// of the same material (it does) reaches this branch with a big batch first, and a
+// verdict taken from six of those is a field that never sways. What bounds the
+// cost is that a measurement happens only while a shader is undecided, and a
+// shader is decided once.
+inline constexpr unsigned kBladeCardTries = 16;
 
 // One shader the client draws its world with, and what this build decided about
 // it. `original` is a live reference held on purpose: the entry is keyed by its
@@ -102,6 +109,7 @@ struct BladeShader
     float rampScale = 1.f;
     float rampOffset = 0.f;
     bool cardReported = false; // the one-shot line for a card whose vertices could not be read
+    bool bigReported = false;  // the one-shot line for a batch too big to be a blade card
     unsigned cardTries = 0;    // cards of this shader measured and found not to be a blade
     bool worldShaped = false;  // its constants bind the world's projection: recorded, not refused
     bool worldReported = false;// the one-shot line for that shape
@@ -221,8 +229,13 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     // block that reads a lane the draw never fed bends nothing.
     if (!device || !layout.position) return card;
     if (!rampByHeight && (!layout.texcoord || !layout.texcoordIsFloat2)) return card;
-    const UINT count = draw.type == D3DPT_TRIANGLELIST ? draw.primitives * 3 :
-        draw.type == D3DPT_TRIANGLESTRIP ? draw.primitives + 2 : 0;
+    // The one place the portable numbers meet D3D9's own: a mismatch is a compile
+    // error rather than a silent mis-sized batch. (Cast, because a /W4 build reads
+    // a bare enum/int comparison as a signed/unsigned mismatch.)
+    static_assert(renderer::kGrassBladeTriangleListPrimitive == static_cast<unsigned>(D3DPT_TRIANGLELIST) &&
+        renderer::kGrassBladeTriangleStripPrimitive == static_cast<unsigned>(D3DPT_TRIANGLESTRIP),
+        "the portable primitive numbers are D3D9's own");
+    const UINT count = renderer::GrassBladeDrawVertices(draw.primitives, draw.type);
     if (count < 4) return card;
     ComPtr<IDirect3DVertexBuffer9> stream;
     UINT offset = 0, stride = 0;
@@ -295,6 +308,8 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     float samples[kBladeVertexSamples][3]{};
     float heights[kBladeVertexSamples]{};
     unsigned taken = 0;
+    float lowestX = 0.f, highestX = 0.f, lowestY = 0.f, highestY = 0.f;
+    bool haveGround = false;
     const UINT span = high - low + 1;
     const UINT wanted = (std::min)(kBladeVertexSamples, span);
     for (UINT s = 0; s < wanted; ++s)
@@ -319,6 +334,21 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
         std::memcpy(position, at + layout.positionOffset, sizeof(position));
         if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))
             continue;
+        // The patch the batch stands on. This is the one measurement that tells a
+        // blade card apart from a piece of the world drawn through the same path -
+        // a terrain tile's material is every bit as much of a cut-out atlas as a
+        // blade's - and it is read off the same vertices the blade is, so it costs
+        // nothing. x and y are the ground plane here: WoW's world is Z-up.
+        if (!haveGround)
+        {
+            haveGround = true;
+            lowestX = highestX = position[0];
+            lowestY = highestY = position[1];
+        }
+        lowestX = (std::min)(lowestX, position[0]);
+        highestX = (std::max)(highestX, position[0]);
+        lowestY = (std::min)(lowestY, position[1]);
+        highestY = (std::max)(highestY, position[1]);
         if (rampByHeight)
         {
             // The card's own stored height, which is what its shader reads into the
@@ -339,16 +369,39 @@ inline renderer::GrassBladeCard MeasureBladeCard(IDirect3DDevice9* device, const
     stream->Unlock();
     if (lockedIndices) indicesBuffer->Unlock();
     if (taken < 4) return card;
+    // The batch's own shape, which is what the admission test judges first: how
+    // many vertices this draw carries and how far they span in the ground plane.
+    // A blade card is a handful of vertices on a patch a couple of feet across; a
+    // terrain tile is thousands of vertices spanning the world.
+    card.vertices = span;
+    if (haveGround)
+        card.footprintYards = (std::max)(highestX - lowestX, highestY - lowestY);
     // A card with no texture coordinate is measured by its height - the same
     // vertices, the other ramp - and the card carries the floor the block needs.
-    if (rampByHeight) return renderer::MeasureGrassBladeCardByHeight(heights, taken);
+    if (rampByHeight)
+    {
+        const renderer::GrassBladeCard shaped = renderer::MeasureGrassBladeCardByHeight(heights, taken);
+        card.measured = shaped.measured;
+        card.baseYards = shaped.baseYards;
+        card.extentYards = shaped.extentYards;
+        card.sign = shaped.sign;
+        card.pairs = shaped.pairs;
+        card.vertices = span;
+        return card;
+    }
 
     // Heights relative to the lowest sampled vertex, so the vote is about the
     // blades rather than about the slope the whole patch sits on.
     float lowest = samples[0][2];
     for (unsigned i = 1; i < taken; ++i) lowest = (std::min)(lowest, samples[i][2]);
     for (unsigned i = 0; i < taken; ++i) samples[i][2] -= lowest;
-    return renderer::MeasureGrassBladeCard(samples, taken);
+    const renderer::GrassBladeCard shaped = renderer::MeasureGrassBladeCard(samples, taken);
+    card.measured = shaped.measured;
+    card.sign = shaped.sign;
+    card.extentYards = shaped.extentYards;
+    card.pairs = shaped.pairs;
+    card.vertices = span;
+    return card;
 }
 
 // Build the bent shader for `shader` and put it in the entry. Every refusal is
@@ -714,6 +767,38 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     {
         if (entry->injected)
         {
+            // And a batch too big to be a blade is not bent by that shader, however
+            // good the card this shader was admitted on. One injected shader
+            // replaces EVERY draw made with it, so a shader that draws both the
+            // field and a piece of the world (a merged tile, a WMO group, a wide
+            // decal under the same material) would otherwise bend the world with
+            // the grass. The batch's own vertex count is free - it is in the draw
+            // call - and it is the one measurement that separates the two without
+            // touching a vertex buffer: a blade card is a couple of dozen vertices,
+            // a terrain tile is thousands.
+            const unsigned batch = renderer::GrassBladeDrawVertices(draw.primitives, draw.type);
+            if (batch > renderer::kGrassBladeMaxCardVertices)
+            {
+                ++g_status.bigDraws;
+                // Once per shader, with the number in it: this bound is the one
+                // thing on the path that is a guess about how the client batches
+                // its grass, and a guess that is too tight costs the player the
+                // field. If the field really is drawn in batches this size, the
+                // line says exactly what to raise the bound to, instead of the
+                // next report being another "nothing sways, the log says big N".
+                if (!entry->bigReported)
+                {
+                    entry->bigReported = true;
+                    char text[320]{};
+                    std::snprintf(text, sizeof(text),
+                        "Grass blade sway: a batch of %u vertices was left as the client drew it, because no blade "
+                        "card is more than %u vertices. If the grass itself is drawn in batches this size, this "
+                        "bound is the one to raise: the number above is the size the field arrives in.",
+                        batch, renderer::kGrassBladeMaxCardVertices);
+                    Log(text);
+                }
+                return;
+            }
             // The common case by far: a shader this build has already bent. The
             // only work left is the frame's constants, written before the draw -
             // and, for a client that binds its shaders through state blocks
@@ -796,27 +881,37 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     // The verdict takes a few draws, because one shader is bent for all of its
     // draws and the first one to arrive is not always a blade (a chunk of grass is
     // drawn as several cards, some of them flat: they share this material).
-    const bool bladeShaped = card.measured && card.pairs >= renderer::kGrassBladeMinPairs &&
-        card.extentYards >= renderer::kGrassBladeMinExtentYards &&
-        card.extentYards <= renderer::kGrassBladeMaxExtentYards;
+    // One predicate, in the portable header, so the admission test is a thing the
+    // suite can exercise rather than five clauses repeated in a device function.
+    const bool bladeShaped = renderer::GrassBladeCardIsGrass(card);
     if (!bladeShaped)
     {
         ++entry->cardTries;
         if (card.measured) ++g_status.cardRefused;
         else ++g_status.cardUnreadable;
-        if (entry->cardTries < kBladeCardTries) return; // another draw gets to answer
+        // A draw that is not a blade card is NOT a verdict about its shader. One
+        // shader draws a whole family - some of its batches are blade cards, some
+        // are the wide flat ones that share the material, and a wall or a terrain
+        // tile drawn through the same shader looks like one of these too - so the
+        // answer is looked for in more draws rather than taken from the first few.
+        // A `structureRefused` here would end the shader for the session on the
+        // sixth unlucky batch, which is exactly how a field that should sway goes
+        // still while the log says a shader was bent.
+        if (entry->cardTries < kBladeCardTries) return;
         entry->structureRefused = true;
         ++g_status.refused;
-        char text[420]{};
+        char text[560]{};
         if (card.measured)
             std::snprintf(text, sizeof(text),
                 "Grass blade sway: none of the %u draws offered for a foliage shader measured as a blade card (the "
-                "last was %.4f yd tall with %u blade-shaped pair(s); a blade is %.2f to %.1f yd with at least %u), so "
+                "last was %.4f yd tall with %u blade-shaped pair(s), %u vertices standing on %.2f yd of ground; a "
+                "blade is %.2f to %.1f yd with at least %u pair, at most %u vertices and at most %.0f yd across), so "
                 "no shader was bent for it. A canopy, a wall carrying a foliage texture and a decal all look like "
                 "this, and bending one of them moves a piece of the scenery instead of a blade.",
-                entry->cardTries, double(card.extentYards), card.pairs,
+                entry->cardTries, double(card.extentYards), card.pairs, card.vertices, double(card.footprintYards),
                 double(renderer::kGrassBladeMinExtentYards), double(renderer::kGrassBladeMaxExtentYards),
-                renderer::kGrassBladeMinPairs);
+                renderer::kGrassBladeMinPairs, renderer::kGrassBladeMaxCardVertices,
+                double(renderer::kGrassBladeMaxCardFootprintYards));
         else
             std::snprintf(text, sizeof(text),
                 "Grass blade sway: none of the %u draws offered for a foliage shader could be measured at all (the "

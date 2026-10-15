@@ -80,6 +80,7 @@ namespace renderer
         unsigned bladeDraws = 0;     // draws this frame that went out with the wind (blades)
         unsigned uploads = 0;        // blocks written this frame (one per frame in practice)
         unsigned heightDraws = 0;    // of those, the cards bent by the vertex's own height
+        unsigned bigDraws = 0;       // refused: a batch far too large to be a blade card
         unsigned foliageDraws = 0;   // unskinned foliage draws offered to this path
         unsigned materialRefused = 0;// of those, the ones whose texture was not a green cut-out
         unsigned noTexcoord = 0;     // refused: neither a texture coordinate nor a position to
@@ -269,6 +270,18 @@ namespace renderer
         // draw's own floor. A card that carries none is bent by its height, which
         // is the stored value itself, so the block is told where the floor is.
         float baseYards = 0.f;
+        // How many vertices the draw's own batch holds, and how wide they span in
+        // the ground plane (x and y, in the units the vertices are stored in) -
+        // both filled by the device half, which is the only place that has the
+        // batch and the raw positions. A blade card is a hundred vertices at the
+        // very most standing on a patch a couple of feet across; the smallest
+        // thing the client draws as a world surface is a whole terrain tile, and
+        // the material test cannot tell the two apart - a tile in the middle of a
+        // field samples a cut-out atlas with a big green fraction exactly like a
+        // blade does. The geometry can, and it is read here so that the answer is
+        // one function the suite can exercise (GrassBladeCardIsGrass).
+        unsigned vertices = 0;
+        float footprintYards = 0.f;
         // False when the draw's vertices could not be read at all: a zero extent
         // and no pair then mean "no measurement", not "a flat card", and the two
         // must not be refused for the same reason.
@@ -288,6 +301,32 @@ namespace renderer
     inline constexpr float kGrassBladeMinExtentYards = .05f;
     inline constexpr float kGrassBladeMaxExtentYards = 3.f;
     inline constexpr unsigned kGrassBladeMinPairs = 1;
+    // And the two bounds that catch a piece of the WORLD offered to this path as
+    // if it were grass. The material test cannot tell them apart - a terrain tile
+    // in the middle of a field samples a cut-out atlas with a big green fraction
+    // exactly like a blade card does - but the geometry can, and by a mile: a
+    // blade card is a couple of dozen vertices at the very most, standing on a
+    // patch a couple of feet across, while the smallest thing the client draws as
+    // a world surface is a whole terrain tile.
+    inline constexpr unsigned kGrassBladeMaxCardVertices = 512;
+    inline constexpr float kGrassBladeMaxCardFootprintYards = 20.f;
+    // D3D9's two triangle primitive types, spelled as their ABI numbers because
+    // this header is portable and the device half static_asserts them against
+    // D3DPT_TRIANGLELIST / D3DPT_TRIANGLESTRIP (they have not moved in twenty
+    // years, and a mismatch would be a compile error, not a silent one).
+    inline constexpr unsigned kGrassBladeTriangleListPrimitive = 4;
+    inline constexpr unsigned kGrassBladeTriangleStripPrimitive = 5;
+    // How many vertices a batch of this kind consumes, or 0 for a kind this path
+    // never bends. The count is in the draw call itself: a batch's SIZE is the one
+    // measurement of a blade card that costs nothing at all, which is why it is the
+    // one that guards every draw of a shader that has been bent (see
+    // GrassBladeMaxCardVertices and the per-draw guard in GrassBladeSway.h).
+    inline unsigned GrassBladeDrawVertices(unsigned primitives, unsigned primitiveType) noexcept
+    {
+        if (primitiveType == kGrassBladeTriangleListPrimitive) return primitives * 3u;
+        if (primitiveType == kGrassBladeTriangleStripPrimitive) return primitives + 2u;
+        return 0u;
+    }
 
     // What the draw's own vertices say about which way a blade's texture runs,
     // as a sign: +1 when v rises with height (v = 0 at the blade's base), -1 when
@@ -376,6 +415,37 @@ namespace renderer
             ++card.pairs;
         }
         return card;
+    }
+
+    // Is this card a blade - or is it a piece of the world the client happened to
+    // draw unskinned, with a foliage-looking texture on it?
+    //
+    // That question is the whole admission test for the grass path, and every
+    // clause of it is a measurement of the draw's OWN vertices, never a guess
+    // about a shader, a hash or a texture name:
+    //
+    //   * measured - the vertices were read at all (a failed read is not a card);
+    //   * pairs - at least one consecutive pair that steps up like a blade's base
+    //     and its tip, which a decal lying flat has none of;
+    //   * extent - a blade's height, five centimetres to three yards, which keeps
+    //     a canopy out (a real session bent a 22.91 yd card before this bound);
+    //   * vertices - a card's own batch, which is dozens of vertices, never the
+    //     thousands of a terrain tile or a WMO group;
+    //   * footprint - and the same for the patch it stands on: a blade card is a
+    //     couple of yards across, a world surface is tens of yards or more.
+    //
+    // The last two exist because the first three do not separate the two: a
+    // terrain tile has a height, has pairs that step up along its vertices, and
+    // its material can measure as a cut-out - and bending one moves the ground
+    // under the player, which is a worse bug than a still field.
+    inline bool GrassBladeCardIsGrass(const GrassBladeCard& card) noexcept
+    {
+        if (!card.measured || card.pairs < kGrassBladeMinPairs) return false;
+        if (card.extentYards < kGrassBladeMinExtentYards) return false;
+        if (card.extentYards > kGrassBladeMaxExtentYards) return false;
+        if (card.vertices && card.vertices > kGrassBladeMaxCardVertices) return false;
+        if (card.footprintYards > kGrassBladeMaxCardFootprintYards) return false;
+        return true;
     }
 
     // Just the sign, for the callers and the suite that only need that.

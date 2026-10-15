@@ -65,13 +65,29 @@ across a boundary. A real session's log holds `Location changed: Map=1 Zone=215 
 `Area=223` alternating for as long as the player walked the edge, each alternation running all
 nine `Reload*Tuning()` calls plus `tuningoverlay::Configure` (one `ReadEditorInt` per menu row)
 on the spot - several full re-reads inside one second, which is the "big lag for a second" a
-crossing was reported as. Two changes: the change is applied once the place has held still for
+crossing was reported as. Three changes: the change is applied once the place has held still for
 300 ms and at most once per second (`kLocationSettleMs`/`kLocationReloadGapMs` in
-`HookedPresent`), and a scoped read answers from the scope's own key set
-(`GetPrivateProfileSectionW` once per scope, `ScopedKeysFor` in `LocationTuning.h`) instead of
-probing each level with its own `GetPrivateProfileStringW` per key. A hand edit to
-`LocationGraphics.ini` is picked up by F12, which drops the memo; the global
+`HookedPresent`); a scoped read answers out of the identity-checked section cache
+(`ProfileSection`, `ScopedValuesFor` in `LocationTuning.h`) instead of probing each level with
+its own `GetPrivateProfileStringW` per key; and a place that resolves to the values already in
+force is skipped outright (`AppliedTuningStillInForce`), so a border walked back and forth
+costs a hash rather than nine reloads. The key-set memo the first version of this used had a
+ceiling of 96 scopes, and one apply - nine tuning reloads plus the F7 menu's hundred-odd rows,
+at every level of every section - walks more than that: the ceiling was hit in the middle of
+the apply, the whole memo was dropped, and every read after it paid a whole-file parse, one per
+scope per level. That is the 46-78 ms the reload line showed for a crossing. A hand edit to
+`LocationGraphics.ini` is picked up by F12, which drops the cache; the global
 `GraphicsEffects.ini` read is unchanged, so ordinary edits are still visible immediately.
+
+**Follow-up (2026-10-15, the stall half).** The reload line now carries what the reads behind
+it actually did - `answered <R> read(s) from memory with <P> whole-file parse(s)`, with
+`<P>` the number that decides whether a crossing costs anything - and a frame that stalls is
+written to the log by itself: `frame stall: <N> ms between presents (session average ...) -
+<place>, the place changed <N> ms ago, and the last tuning reload cost <N> ms`. The gap is
+measured on the performance counter before any of this project's work runs for the frame, so
+the line separates the two possible owners of a hitch: the client loading the place it just
+walked into, and this module's own work on the frame that noticed. A 2 s gap next to a 63 us
+reload is the client's loader, and the line says so instead of leaving it to an argument.
 
 ### 4. Wheel scrolling also reacts outside the settings pane (very low)
 

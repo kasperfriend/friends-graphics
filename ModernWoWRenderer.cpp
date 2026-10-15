@@ -208,12 +208,87 @@ bool g_locationConfigured = false;
 constexpr uint64_t kLocationSettleMs = 300;   // the environment manager's own area debounce
 constexpr uint64_t kLocationReloadGapMs = 1000;
 
+// And the stall itself, counted rather than described. A report of "still very
+// hard lag on area change" has exactly two possible owners: the client loading
+// the place it just walked into, or this project's own work on the frame that
+// noticed. This module cannot see inside the client's loader, but it can see the
+// FRAME GAP - the microseconds between presents, on the same performance counter
+// the reload line uses - and it knows exactly what its own work cost and when the
+// place last changed. So the next report does not have to argue about it: a stall
+// is written to the log once, with the gap, the minute the gap ended, how long the
+// place had been settled, and what the last tuning reload cost. If the gaps are
+// the client's loader, the line says so by showing a 2 s gap around a reload that
+// cost 63 us.
+//
+// The threshold is relative to the session's own average frame, so the same code
+// reports a stall on a 30 fps machine and on a 240 fps one, and a frame that is
+// merely slower is not a stall - only one an order of magnitude off, or a quarter
+// of a second outright, is worth a line.
+std::int64_t g_lastPresentTick = 0;
+double g_presentGapMs = 0.0;          // a running average of the frame gap, in ms
+double g_worstGapMs = 0.0;            // and the worst one this session
+uint64_t g_worstGapAt = 0;            // when it happened, in GetTickCount64 ms
+uint64_t g_stallLoggedAt = 0;
+unsigned g_stallsLogged = 0;
+unsigned g_stalls = 0;
+std::int64_t g_lastReloadMicros = 0;  // what the last tuning reload cost, for the line
+constexpr unsigned kStallLogCap = 60; // a session's worth; a log is not a stall itself
+
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
     const uint64_t now = GetTickCount64();
     // Every Present is a frame boundary. A long pause means the frame stream
     // was interrupted (Alt+Tab, minimised window, loading screen), so temporal
     // history from before the pause must not be blended into the next frame.
     if (g_frameGap.Observe(now, kFrameGapMs)) volume::InvalidateTemporalHistory();
+
+    // The frame gap, on the performance counter, measured BEFORE any of this
+    // project's work runs for the frame: what the gap holds is the client's own
+    // frame - its renderer, its loader, and this module's work on the previous
+    // one. A stall is written to the log when it is an order of magnitude off the
+    // session's own average frame, or a quarter of a second outright, at most
+    // once a second and at most a session's worth of lines.
+    {
+        const std::int64_t tick = renderer::PerformanceCounter();
+        const std::int64_t frequency = (std::max<std::int64_t>)(1, renderer::PerformanceFrequency());
+        if (g_lastPresentTick)
+        {
+            const double gapMs = double(tick - g_lastPresentTick) * 1000.0 / double(frequency);
+            // A running average that a stall cannot swamp: one 2 s frame in sixty
+            // must not turn the average into a third of a second, or the second
+            // stall would look normal.
+            g_presentGapMs = g_presentGapMs ? (g_presentGapMs * .95 + gapMs * .05) : gapMs;
+            if (gapMs > g_worstGapMs) { g_worstGapMs = gapMs; g_worstGapAt = now; }
+            const bool stall = renderer::FrameGapIsAStall(gapMs, g_presentGapMs);
+            if (stall)
+            {
+                ++g_stalls;
+                if (g_stallsLogged < kStallLogCap && now - g_stallLoggedAt >= 1000)
+                {
+                    g_stallLoggedAt = now;
+                    ++g_stallsLogged;
+                    const auto location = renderer::EnvironmentProfileManager::Instance().Location();
+                    std::string place = location.valid
+                        ? ("place Map=" + std::to_string(location.mapId) + " Zone=" + std::to_string(location.zoneId) +
+                            " Area=" + std::to_string(location.areaId))
+                        : std::string("no place verified yet");
+                    if (g_placeChangedAt)
+                        place += ", the place changed " + std::to_string(
+                            static_cast<unsigned long long>(now - g_placeChangedAt)) + " ms before this frame";
+                    else
+                        place += ", and no place change had been seen yet";
+                    char line[420]{};
+                    std::snprintf(line, sizeof(line),
+                        "frame stall: %.0f ms between presents (session average %.1f ms, worst %.0f ms, %u so far) - %s; "
+                        "the last tuning reload cost %.2f ms, and this project's own work for the stalled frame is "
+                        "what the line above the gap was",
+                        gapMs, g_presentGapMs, g_worstGapMs, g_stalls, place.c_str(),
+                        double(g_lastReloadMicros) / 1000.0);
+                    Log(line);
+                }
+            }
+        }
+        g_lastPresentTick = tick;
+    }
 
     if (g_availability == renderer::DeviceAvailability::Lost) {
         // No effect pass can draw while the device is lost. Skip them instead
@@ -243,15 +318,15 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         if (frameIndex && frameIndex % 600 == 0) {
             const renderer::GrassBladeStatus& blades = grassblade::Status();
             if (blades.bladeDraws || blades.injected || blades.refused || blades.noTexcoord ||
-                blades.heightDraws || blades.foliageDraws) {
+                blades.heightDraws || blades.foliageDraws || blades.bigDraws) {
                 char bladeLine[360]{};
                 std::snprintf(bladeLine, sizeof(bladeLine),
                     "blade wind: %u draw(s) bent this frame, %u of them by height, %u block upload(s) | "
                     "%u shader(s) bent, %u looked at | "
-                    "mat %u never %u decl %u card %u read %u vs %u asm %u | %.2f yd at the tip",
+                    "mat %u never %u decl %u big %u card %u read %u vs %u asm %u | %.2f yd at the tip",
                     blades.bladeDraws, blades.heightDraws, blades.uploads, blades.injected, blades.examined,
-                    blades.materialRefused, blades.neverModel, blades.noTexcoord, blades.cardRefused,
-                    blades.cardUnreadable, blades.registerMismatch, blades.refused,
+                    blades.materialRefused, blades.neverModel, blades.noTexcoord, blades.bigDraws,
+                    blades.cardRefused, blades.cardUnreadable, blades.registerMismatch, blades.refused,
                     double(blades.amplitudeYards));
                 Log(bladeLine);
             }
@@ -374,6 +449,10 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             static_cast<unsigned long long>(renderer::locationtuning::profileParses-parsesBefore),
             g_placeSkipped);
         Log(reloadLine);
+        // What this reload cost, kept for the stall line: a 2 s frame gap reported
+        // next to a reload that cost sixty microseconds is the client's own area
+        // load, and the line says so instead of leaving it to an argument.
+        g_lastReloadMicros=micros(renderer::PerformanceCounter()-reloadBegan);
         renderer::locationtuning::MarkTuningApplied(environmentManager.Location(),environmentManager.LocationTuningVerified());
     }
     if(unified){

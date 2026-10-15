@@ -628,6 +628,21 @@ static void TestConfigurationAndWiring()
               std::string::npos &&
           Read("src/Materials/MaterialCacheManager.cpp").find("if (lastTuningLine != line)") != std::string::npos,
         "the per-crossing log lines are written when their numbers change, not once per settled place");
+    // And the stall itself, measured rather than described. "Still very hard lag
+    // on area change" has two possible owners - the client loading the place, or
+    // this project's own work on the frame that noticed - and this module cannot
+    // see inside the client's loader. It CAN see the gap between presents, on the
+    // same performance counter the reload line uses, next to what its own work
+    // cost: a 2 s gap around a reload of sixty microseconds is the client's loader,
+    // and the line says so in the report instead of leaving it to an argument.
+    Check(main.find("frame stall: %.0f ms between presents") != main.npos &&
+          main.find("the last tuning reload cost %.2f ms, and this project's own work for the stalled frame is ") !=
+              main.npos &&
+          main.find("the place changed \" + std::to_string(") != main.npos &&
+          main.find("g_lastReloadMicros=micros(renderer::PerformanceCounter()-reloadBegan);") != main.npos &&
+          main.find("const bool stall = renderer::FrameGapIsAStall(gapMs, g_presentGapMs);") != main.npos,
+          "a frame that stalls is written to the log with its own gap, the place it happened in, how long ago the "
+          "place changed and what this project's own reload cost - so the next report says who the stall belongs to");
     Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
           main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
           main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
