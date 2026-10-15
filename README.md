@@ -73,6 +73,20 @@ of the cloud shader, at the shipped defaults.*
 - Strong local lights contribute to volumetric scattering in fog and mist.
 - Held torches and lanterns retain their light while the player briefly occludes the source from the camera.
 - Screen-space occlusion and depth-derived normals keep the effect attached to visible geometry.
+- Cheap screen-space global illumination adds sky ambient, one-bounce colour from nearby surfaces, soft lamp bleed and cavity occlusion, following dynamic lights, native and cloud shadows, and live overcast; see [docs/global-illumination.md](docs/global-illumination.md).
+
+### Ambient occlusion
+
+- Screen-space ambient occlusion from the captured scene depth seats objects on the ground and deepens creases, corners and cavities.
+- It is the first effect applied to the scene, so it darkens world geometry only: clouds, local light, fog, glare and the interface all composite over the result untouched, and sky and water are excluded outright.
+- Tuned to be felt rather than seen: at the shipped radius every open surface - floor, wall face, rooftop - keeps its brightness exactly, while a right-angled corner still darkens by a quarter. Raising `AO RADIUS` reaches further into architecture and starts darkening whole surfaces; `AO STRENGTH` alone never does.
+- A depth-aware blur keeps occlusion from smearing across an object edge onto the background behind it, and the effect retires with distance instead of sparkling.
+- **F7 → AMBIENT OCCLUSION** holds the switch, strength, radius, distance fade and a debug view. See [how it works and why the defaults are what they are](docs/ambient-occlusion.md).
+
+![Ambient occlusion off and on](Screenshots/ambient-occlusion.png)
+
+*Off, on at the shipped defaults, on at twice the shipped strength, and the raw occlusion term - rendered by
+`tools/AmbientOcclusionPreview.cpp`, which runs the same math the GPU runs over the same depth buffer.*
 
 ### Weather
 
@@ -133,6 +147,7 @@ sky, the rows are what the zone asks for, and every panel shares a clock and a c
 
 - AI Materials, generated normal maps, parallax relief, and material self-shadowing are still experimental and are not implemented as a supported release feature.
 - Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
+- Ambient occlusion only sees what is on screen: off-screen geometry cannot occlude, contact shading is weaker than it should be where a normal is reconstructed across a crease, and occluders thinner than about a yard can be stepped over. Run it inside the atmosphere composite, so it needs `[Volume] Enabled=1`.
 - Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
 - D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive. Device-loss handling pauses the effects while the device cannot draw and resumes when it is restored, but the exclusive-fullscreen and window-switch paths have not yet been verified in the Ascension client.
 - This mod is in active development. Bugs are expected; include `ModernWoWRenderer.log`, the zone, and reproduction steps when reporting one.
@@ -264,7 +279,7 @@ tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
 ```
 
-The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
+The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, the ambient-occlusion look (open surfaces untouched, contacts and corners darkened, fade with distance, blur not crossing edges), and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
 
 ## Project structure
 
@@ -277,7 +292,7 @@ NativeShadowDiagnostics.h   Native cascade discovery and enhancement
 TuningOverlay.h             F7 in-game settings interface
 src/Core/                   Shared frame state, math, and shader caches
 src/D3D9/                   Camera/depth capture and render-state guards
-src/Effects/                Volumetric and local-light render passes
+src/Effects/                Volumetric, ambient-occlusion and local-light render passes
 src/Environment/            Location profiles, shared wind and F7 controls
 src/Water/                  Sea state, wave fields and integrated wind-driven motion
 src/Lighting/               Trusted local-light collection and lifetime rules

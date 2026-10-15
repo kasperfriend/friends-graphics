@@ -35,9 +35,11 @@ $jobs = @(
     @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource', 'volumeBlurPixelSource', 'volumeCopyPixelSource', 'volumeTemporalPixelSource', 'contactShadowPixelSource', 'rayCompositePixelSource', 'solarRadialPixelSource', 'localLightPixelSource', 'celestialMarkerPixelSource', 'postProcessPixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
+    @{ File = 'src\Effects\GlobalIllumination.cpp'; Names = @('kGlobalIlluminationIntegrateSource', 'kGlobalIlluminationCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
-    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') }
+    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
+    @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') }
 )
 
 # A ps_3_0 device has to support at least 512 instruction slots and may report more, up to
@@ -60,6 +62,9 @@ $budgets = @{
     'kCloudMarchSource'      = 496
     'kCloudShadowSource'     = 512
     'kCloudCompositeSource'  = 512
+    'kGlobalIlluminationIntegrateSource' = 512
+    'kAmbientOcclusionSource' = 512
+    'kAmbientOcclusionApplySource' = 512
 }
 
 # Measured, reported, not capped. The water pixel stage used to sit in $budgets at 621 (597 slots

@@ -22,6 +22,7 @@ namespace renderer
         VolumetricUpsample,
         SunRadialGlare,
         PostProcess,
+        GlobalIllumination,
         TotalInjectedFrame,
         StageCount
     };
@@ -38,6 +39,7 @@ namespace renderer
         VolumetricClouds,
         LegacyComposite,
         Water,
+        GlobalIllumination,
         TotalGpu,
         GpuStageCount
     };

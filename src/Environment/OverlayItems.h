@@ -122,6 +122,20 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"DynamicLighting",L"Quality","LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)",0,2,1,1},
  {KIND_SLIDER,L"DynamicLighting",L"DebugMode","LIGHT DEBUG",0,4,1,0},
 
+ // === GLOBAL ILLUMINATION ===
+ {KIND_HEADER,nullptr,nullptr,"--- GLOBAL ILLUMINATION ---",0,0,0,0},
+ {KIND_TOGGLE,L"GlobalIllumination",L"Enabled","GI BOUNCE & AMBIENT",0,1,1,1},
+ {KIND_SLIDER,L"GlobalIllumination",L"IntensityPercent","GI INTENSITY",0,200,5,100},
+ {KIND_SLIDER,L"GlobalIllumination",L"SkyAmbientPercent","GI SKY LIGHT",0,200,5,80},
+ {KIND_SLIDER,L"GlobalIllumination",L"BouncePercent","GI BOUNCE",0,200,5,70},
+ {KIND_SLIDER,L"GlobalIllumination",L"OcclusionPercent","GI SHADOW POCKETS",0,100,5,70},
+ {KIND_SLIDER,L"GlobalIllumination",L"LampBouncePercent","GI LAMP BLEED",0,200,5,60},
+ {KIND_SLIDER,L"GlobalIllumination",L"RadiusPercent","GI RADIUS",25,300,5,100},
+ {KIND_TOGGLE,L"GlobalIllumination",L"FollowCloudShadows","GI CLOUD SHADOWS",0,1,1,1},
+ {KIND_TOGGLE,L"GlobalIllumination",L"FollowWeather","GI STORM DIMMING",0,1,1,1},
+ {KIND_SLIDER,L"GlobalIllumination",L"Quality","GI QUALITY (0 LOW 1 BAL 2 HIGH)",0,2,1,1},
+ {KIND_SLIDER,L"GlobalIllumination",L"DebugMode","GI DEBUG",0,3,1,0},
+
  // === DYNAMIC SHADOWS ===
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
  {KIND_TOGGLE,L"NativeShadows",L"Enabled","NATIVE SHADOWS",0,1,1,1},
@@ -132,6 +146,18 @@ inline std::vector<Item> items={
  // c12 floats changed, everything else byte-identical) for the 4 confirmed
  // receiver hashes, restoring the original shader after the draw.
  {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
+
+ // === AMBIENT OCCLUSION ===
+ // Screen-space ambient occlusion from the captured scene depth: seats
+ // objects on the ground and deepens creases. Bounded by design - an occluder
+ // more than ~2.5 radii away in depth never counts at all - so raising the
+ // radius is the only way it spreads, and strength alone cannot grey a wall.
+ {KIND_HEADER,nullptr,nullptr,"--- AMBIENT OCCLUSION ---",0,0,0,0},
+ {KIND_TOGGLE,L"AmbientOcclusion",L"Enabled","AMBIENT OCCLUSION",0,1,1,1},
+ {KIND_SLIDER,L"AmbientOcclusion",L"StrengthPercent","AO STRENGTH",0,150,5,60},
+ {KIND_SLIDER,L"AmbientOcclusion",L"RadiusUnits","AO RADIUS (UNITS)",1,6,1,1},
+ {KIND_SLIDER,L"AmbientOcclusion",L"DistanceFadeUnits","AO DISTANCE FADE (UNITS)",20,600,10,250},
+ {KIND_TOGGLE,L"AmbientOcclusion",L"DebugMask","AO DEBUG VIEW",0,1,1,0},
 
  // === AI MATERIALS & RELIEF ===
  {KIND_HEADER,nullptr,nullptr,"--- AI MATERIALS & RELIEF ---",0,0,0,0},
