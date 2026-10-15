@@ -1047,6 +1047,19 @@ struct Scope
             return;
         }
         const renderer::M2VertexLayout* layout = declared;
+        // And with the model sway switched off (its own F7 toggle, and it ships
+        // off) the model path ends here, before the first counter: the blade path
+        // above is the grass and is not this switch's business, but a model is a
+        // tree, a bush, or a piece of scenery the client happens to draw through
+        // the same path - and a player who turned this off wants every one of them
+        // standing still. `Status().modelsOff` is what the HUD prints instead of a
+        // "0 leaning" row that would read as a broken feature.
+        if (!settings.swayModels)
+        {
+            ++Status().modelsOff;
+            if (mirrorMaterial) ++Status().skippedLayout;
+            return;
+        }
         // Past the declaration the client's skinned model path is PROVEN -
         // POSITION + BLENDINDICES in stream 0, which terrain, WMOs, particles,
         // ribbons, effects and the interface never declare - so every counter

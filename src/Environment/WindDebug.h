@@ -88,6 +88,16 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
         lines.emplace_back("Plants: legacy (wind off or unlinked)");
         return lines;
     }
+    if (!settings.swayModels)
+    {
+        // The whole model path is off, not broken: the grass the client draws as
+        // cards is the blade path and reports on its own row.
+        char off[96]{};
+        std::snprintf(off, sizeof(off), "Trees & bushes: off (F7) | %u model draw(s) left alone",
+            status.modelsOff);
+        lines.emplace_back(off);
+        return lines;
+    }
     // "waiting" is the one number that is not a refusal and is not the effect
     // working either: a model that has been measured, is plant-shaped and is
     // standing still, but has not repeated itself in a second frame yet. It is

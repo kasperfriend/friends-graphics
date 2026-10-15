@@ -50,6 +50,13 @@ struct VegetationSettings
     // rewritten per session: see GrassShaderWind.h). It has a switch of its own
     // because it is the one part of the sway that rewrites something the client
     // compiled - off, every plant with a skeleton still sways.
+    // SwayModels: whether the models with a skeleton in them lean at all. This is
+    // the tree, bush and plant path - the bone-matrix lean - and it ships OFF: the
+    // trees and bushes of a real client are drawn as cards and canopies that do
+    // not read as a plant from the outside, so a player sees parts of the scenery
+    // move with them. Grass, which is the part that was asked for, is the blade
+    // path below and is unaffected by this switch.
+    bool swayModels = false;
     bool grassBlades = true;
     bool animatedModels = false; // SwayAnimatedModels: also lean models the client animates
     bool debugView = false;      // DebugView: extra diagnostic HUD line
@@ -68,6 +75,8 @@ struct VegetationStatus
 {
     unsigned candidates = 0;      // skinned M2 draw candidates considered this frame
     unsigned swaying = 0;         // instances leaning in this frame's last batch
+    // Model draws the SwayModels switch turned away before any other gate ran.
+    unsigned modelsOff = 0;       // trees/bushes switch off: nothing to report but that
     unsigned batches = 0;         // draw calls that received a lean this frame
     unsigned pending = 0;         // measured and plant-shaped, waiting for the second frame
     // Every draw that carried the client's skinned model declaration, whatever

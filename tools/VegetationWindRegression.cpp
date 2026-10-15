@@ -804,6 +804,16 @@ static void TestWindDebugLine()
         "an unlinked wind leaves the single row the HUD had before this feature");
     wind.affectVegetation = true;
 
+    // The model path ships OFF, and what a player reads with it off is that the
+    // trees and bushes are off - in words. The alternative on this row is a
+    // "0 leaning of 40 drew" that reads as a broken feature.
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 1 && rows[0].find("Trees & bushes: off (F7)") != std::string::npos &&
+          rows[0].find("model draw(s) left alone") != std::string::npos,
+        "the model path's own switch says so in words, not with a counter that reads as zero");
+    Check(rows[0].size() <= kVegetationHudRowBudget, "and that row fits the box like the others");
+    settings.swayModels = true;
+
     // Every row of the block, joined: the census is allowed to continue on the
     // next row when everything refuses at once (checked below), so what a label
     // says and the order it is said in are checked across the whole block.
@@ -941,6 +951,7 @@ static std::map<std::wstring, int> VegetationValues(const VegetationSettings& s)
         {L"GustPercent",int(std::lround(s.gust * 100))},{L"FlutterPercent",int(std::lround(s.flutter * 100))},
         {L"MaxAngleDegrees",int(std::lround(s.maxAngle))},{L"PlantPercent",int(std::lround(s.plantGain * 100))},
         {L"TreePercent",int(std::lround(s.treeGain * 100))},{L"DistanceYards",int(std::lround(s.distance))},
+        {L"SwayModels",s.swayModels},
         {L"GrassBlades",s.grassBlades},{L"SwayAnimatedModels",s.animatedModels},{L"DebugView",s.debugView}};
 }
 
@@ -973,6 +984,9 @@ static void TestConfigurationAndWiring()
     Check(defaults == VegetationValues(VegetationSettings{}),
         "configuration defaults match simulation defaults");
     Check(defaults == readDefaults, "the reader's fallbacks are the shipped defaults");
+    Check(VegetationSettings{}.swayModels == false && VegetationSettings{}.grassBlades == true,
+        "the shipped defaults are the ones the reports asked for: grass sways, the model path - the trees and the "
+        "bushes - does not");
     unsigned count = 0;
     for (const auto& control : tuningoverlay::items)
     {
@@ -2375,12 +2389,14 @@ static void TestGrassBlades()
         // card, and a measured card that IS flat is still refused.
         Check(blades.find("if (stride < layout.texcoordOffset + 8u || stride < layout.positionOffset + 12u)") !=
               blades.npos &&
-              blades.find("if (card.measured && (card.extentYards < renderer::kGrassBladeMinExtentYards ||") !=
+              blades.find("const bool bladeShaped = card.measured && card.pairs >= renderer::kGrassBladeMinPairs &&") !=
               blades.npos &&
-              blades.find("if (!card.measured && !entry->cardReported)") != blades.npos &&
+              blades.find("card.extentYards >= renderer::kGrassBladeMinExtentYards &&") != blades.npos &&
+              blades.find("card.extentYards <= renderer::kGrassBladeMaxExtentYards") != blades.npos &&
+              blades.find("if (!bladeShaped)") != blades.npos &&
               blades.find("card.measured = true;") == blades.npos,
-            "a measured card decides, an unread card is bent on the reference convention, and the fit test is a "
-            "strict inequality");
+            "a draw's own vertices are the whole admission - a readable card of a blade's size with a base and a tip "
+            "in it, and the fit test is a strict inequality");
         Check(main.find("grassblade::Substitute(&vs);") != main.npos &&
               main.find("grassblade::Substitute(&vs);") < main.find("renderer::g_trackedState.currentVS != vs"),
             "the bent shader is swapped in at the SetVertexShader hook, before this renderer tracks what is bound");
@@ -2411,6 +2427,50 @@ static void TestGrassBlades()
             "and a client that binds its shaders through state blocks - which never reach the Set hook - still draws "
             "the bent one, because the draw that proved it is a blade card binds it");
     }
+    // Where the wave field's world position comes from. A real session's shaders
+    // land the vertex with `add r0, r0, c3`, so c3 is the one term that has to
+    // come back OUT of r0 before the position is a world position again - and
+    // taking it from the shader's own constant, rather than from the frame's
+    // camera, is what keeps a walking player's grass from shaking: the camera this
+    // renderer captured is not the matrix the shader was drawn with, and the
+    // difference grows with the player's own movement.
+    Check(injected.viewTranslation == "c3" &&
+          injected.text.find("    sub r5.x, r0.x, c3.x\n    sub r5.y, r0.y, c3.y\n    sub r5.z, r0.z, c3.z\n"
+              "    dp3 r2.x, c0.xyz, r5.xyz\n    dp3 r2.y, c1.xyz, r5.xyz\n") != std::string::npos,
+        "the block subtracts the translation row of the shader's OWN view transform and rotates the rest back into "
+        "the world with the shader's own rows");
+    Check(injected.text.find("add r2.x, r2.x, c14.x") == std::string::npos &&
+          injected.text.find("add r2.y, r2.y, c14.y") == std::string::npos,
+        "so no term of that block comes from the frame's camera, which is what made the grass shake as the camera "
+        "moved");
+    Check(GrassBladeMotionBlock("v3", false).find("    dp3 r2.x, c0.xyz, r0.xyz\n    add r2.x, r2.x, c14.x\n") !=
+              std::string::npos &&
+          GrassBladeMotionBlock("v3", false, kGrassBladeFirstRegister, "c7").find("    sub r5.x, r0.x, c7.x\n") !=
+              std::string::npos &&
+          GrassBladeMotionBlock("v3", false, kGrassBladeFirstRegister, "c7").find("c14.x") == std::string::npos,
+        "a shader whose anchor names no translation row keeps the camera fallback, and the translated form has no "
+        "camera in it at all");
+    // The model path - trees, bushes and the plants the client draws as models -
+    // is switched off in the shipped INI, and the HUD says so in words rather than
+    // as a "0 leaning" row that reads like a broken feature.
+    {
+        const std::string sway = Read("src/Effects/VegetationSway.h");
+        const std::string wind = Read("src/Environment/WindDebug.h");
+        Check(sway.find("if (!settings.swayModels)") != sway.npos && sway.find("++Status().modelsOff;") != sway.npos,
+            "the model path ends at its own switch, before the first counter");
+        Check(wind.find("Trees & bushes: off (F7)") != wind.npos &&
+              Read("GraphicsEffects.ini").find("\nSwayModels=0\n") != wind.npos,
+            "and a player who turned it off reads that the trees are off rather than that nothing is leaning");
+    }
+    // Every part of the block a device would upload lives where the report says it
+    // does: the base is the shader's own, and the rows are one per register.
+    Check(Read("src/Effects/GrassBladeSway.h").find(
+              "device->SetVertexShaderConstantF(entry.firstRegister, entry.rows[0], renderer::kGrassBladeRows);") !=
+              std::string::npos &&
+          Read("src/Effects/GrassBladeSway.h").find(
+              "if (start < entry.firstRegister + renderer::kGrassBladeRows && end > entry.firstRegister)") !=
+              std::string::npos,
+        "the rows go to the base the shader was given, and the re-arm watches that same range, not c14..c19");
     Pass("grass blade wind: a shader text, the block injected into it, the constants it reads, and the wiring");
 }
 

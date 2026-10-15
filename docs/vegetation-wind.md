@@ -1,10 +1,20 @@
 # Wind-driven vegetation sway
 
-Grass, bushes, plants and trees lean and shimmer in the shared wind. The wind
-itself is not new: the sway is a consumer of the one world-space `WindState`
-that already moves the sea, the cloud deck and the precipitation continuity
-layer, and it creates no wind, clock, noise texture, render target or shader of
-its own.
+**Grass** leans and shimmers in the shared wind. The wind itself is not new: the
+sway is a consumer of the one world-space `WindState` that already moves the sea,
+the cloud deck and the precipitation continuity layer, and it creates no wind,
+clock, noise texture, render target or shader of its own.
+
+The client draws its ground grass as rigid, unskinned meshes, so the grass half
+of this feature is a **shader injection** - the client's own grass vertex shader,
+reassembled with a motion block in it (section 3 below) - and the model half, the
+bone-matrix lean that tilts trees, bushes and plants, ships **off**:
+`[Vegetation] SwayModels=0`, with its own F7 control. A player reported the model
+half as "parts of the buildings sway too": this client draws canopies, bushes and
+a good deal of scenery through the same path with foliage textures attached, and
+a card that is 20 yards tall bends visibly while a blade does not. The two halves
+are otherwise independent; the link, the wind snapshot and the HUD rows are
+shared.
 
 - **F7 → WIND → `VEGETATION SWAY`** turns the effect off and on; the link itself
   is **F7 → WIND → `DRIVE PLANTS & TREES`**, next to `DRIVE WAVES` and
@@ -213,30 +223,46 @@ Those draws are bent in **the client's own vertex shader** instead:
    `c17.w` and `c14.z` in one `mad` - is a whole still field), and no instruction
    carries an immediate float.
 4. The injected block moves each blade in the **world plane**: it reconstructs
-   the blade's world position from the view-space one the client just computed
-   and the frame's camera, displaces it by a travelling wave plus a per-blade
-   phase taken from that position (so blades do not move in lockstep and the
-   motion does not shimmer as the camera moves), and rotates the result back into
-   view space. The bend weight is the blade's own texture coordinate: zero at its
+   the blade's world position from the view-space one the client just computed and
+   the view transform's OWN translation row - the `cN` of the `add r0, r0, cN`
+   anchor line, subtracted off and rotated back with the shader's own rows -
+   displaces it by a travelling wave plus a per-blade phase taken from that
+   position (so blades do not move in lockstep and the motion does not shimmer as
+   the camera moves), and rotates the result back into view space. A shader whose
+   anchor names no such row falls back to the frame's camera correction, which is
+   correct only when the captured camera is the matrix the shader was drawn with -
+   a real session's grass shook while the player walked because it was not, and
+   the world position a wave is built from now has no term from the frame in it at
+   all. The bend weight is the blade's own texture coordinate: zero at its
    base, growing towards the tip, with the bottom third held rigid
    (`anchor`, 0.3) and faded with distance. At reference strength a blade's tip
    sways about five inches - the same order as the lean the model path gives a
    plant of the same size - over a field-wide wave 18 yards long travelling
    downwind at 3 yards per second. The constants ride in the block at
-   **c14..c19**, whose rows are written before each bent draw and re-armed if the
-   client writes over them.
-5. The draw's own vertices decide whether it is a card worth bending. Its
+   **c14..c19**, or - for a shader that reads one of those registers as its own
+   lighting, which a real session's 956 and 1048 byte shaders do - at the first
+   run of six registers above them that the shader never mentions (`c34` for
+   those two). The device writes each shader's rows at that shader's own base and
+   re-arms them when the client writes over that range.
+5. The draw's own vertices decide whether it is a card worth bending - and they
+   are the *whole* admission: nothing is bent that did not measure as a blade. Its
    texture coordinate, its height and the base/tip pairs in it are measured from
    the vertices the draw consumes (a strict fit: an element that ends exactly on
    the stride's last byte is inside the vertex - the client's tight
    `POSITION@0 COLOUR@12 TEXCOORD@16` cards are 24 bytes and were refused by a
    `<=` that treated them as out of bounds), and a card that is measurably flat -
    a decal or a shadow blob in a cut-out material - is refused on that geometry
-   and never looked at again. A draw whose vertices cannot be read at all (a
-   stream that will not lock, a batch that is not a triangle list) proves
-   *nothing* either way, and is bent with the reference client's blade convention
-   with a one-shot line saying so: refusing it is what leaves a field still, and
-   the measurement only decides which way up a blade's texture runs.
+   and never looked at again. A card taller than a grass tuft (3 yards) is not a
+   blade either: the log of a real session has this path bending a 22.91 yd card
+   with ten base/tip pairs in it - a canopy, or a wall carrying a foliage texture -
+   which at a blade's amplitude is invisible motion with a moving silhouette. A
+   draw whose vertices cannot be read at all (a stream that will not lock, a batch
+   that is not a triangle list) proves *nothing* either way and is not bent
+   either; refusing it costs the shader its chance only when every draw of it is
+   unreadable, and a real field measures in the first draw or two. Because one
+   shader is bent for all of its draws, a verdict waits for a few draws
+   (`kBladeCardTries`) before it is taken as final: the first draw of a chunk is
+   not always a blade.
 6. Every refusal is structural and one-shot logged: an empty disassembly, a
    shader that is not `vs_2_0`/`vs_3_0`, a declaration that never gives the block a
    texture coordinate, a shader that never lands its vertex in `r0` before a

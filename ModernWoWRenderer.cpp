@@ -123,15 +123,22 @@ void ReloadVegetationTuning()
 
 void ReloadWindTuning()
 {
-    // Every apply starts from what is on disk. The cached sections behind the
-    // scoped reads are what makes a crossing cost nothing (a hundred reads that
-    // were a hundred whole-file parses, 125 to 203 ms measured in a real
-    // session), and their lifetime is deliberately one apply: an apply is the
-    // moment the player's own edits, this project's saves and anything else that
-    // touched the files all have to be visible, and the burst of reads behind it
-    // is what the cache exists to collapse. This is first in the chain, so the
-    // eight reloads after it read the same freshly-taken view of the files.
-    renderer::locationtuning::InvalidateProfileValues();
+    // A crossing no longer drops the cached sections. It used to, on the argument
+    // that an apply is the moment every edit has to be visible - and the price
+    // was the crossing itself: with the sections gone, the nine reloads and the
+    // F7 menu's rows behind this call re-read every section of both files, and
+    // each of those is a whole-file parse. That is the number in this line: 62 to
+    // 78 ms on every settled crossing, dozens of times in one session's log, and
+    // what a player feels as the stall. What keeps the reads honest now is per
+    // read rather than per apply, and costs microseconds:
+    //   * every read stats the file first (ProfileIdentity), so an edit from
+    //     outside - an editor, another tool, this project's own Save - is visible
+    //     to the very next read;
+    //   * every write this module makes drops the values outright
+    //     (WriteProfile), because a file's last-write time is not a signal right
+    //     after a write;
+    //   * F12 still drops everything, which is the "read it all from disk again"
+    //     the key the client prints has always meant.
     const auto ini=g_basePath+L"GraphicsEffects.ini";
     g_windSystem.Configure(renderer::ReadWindSettings([&](const wchar_t* key,int fallback) {
         return static_cast<int>(renderer::locationtuning::ReadInt(L"Wind",key,fallback,ini.c_str()));

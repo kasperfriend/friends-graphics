@@ -65,6 +65,7 @@ inline std::vector<Item> items={
  // unless SWAY ANIMATED MODELS is on - which is why it ships off: it can make a
  // creature that stands still lean in the wind.
  {KIND_TOGGLE,L"Vegetation",L"Enabled","VEGETATION SWAY",0,1,1,1},
+ {KIND_TOGGLE,L"Vegetation",L"SwayModels","TREES & BUSHES SWAY",0,1,1,0},
  {KIND_SLIDER,L"Vegetation",L"SwayPercent","SWAY STRENGTH (%)",0,300,5,100},
  {KIND_SLIDER,L"Vegetation",L"GustPercent","SWAY GUSTS (%)",0,100,5,45},
  {KIND_SLIDER,L"Vegetation",L"FlutterPercent","GRASS FLUTTER (%)",0,200,5,100},

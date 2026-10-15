@@ -71,6 +71,13 @@ inline constexpr unsigned kBladeVertexSamples = 24;
 // once - a state the client set through a cached state block, a texture still
 // uploading - while a shader's own structure cannot change.
 inline constexpr unsigned kMaterialRetries = 3;
+// How many draws of one shader are measured before a card that is not a blade is
+// taken as the shader's answer. A shader is bent once for ALL of its draws, so
+// the measurement has to be about the shader rather than about the one draw that
+// happened to arrive first - and a chunk of grass is drawn as several cards, some
+// of them flat decals that carry the same material. Until a card measures as a
+// blade nothing is bent, which is the safe side of the same question.
+inline constexpr unsigned kBladeCardTries = 6;
 
 // One shader the client draws its world with, and what this build decided about
 // it. `original` is a live reference held on purpose: the entry is keyed by its
@@ -86,6 +93,7 @@ struct BladeShader
     float bladeExtentYards = 0.f; // how tall the draw's own vertices were
     unsigned bladePairs = 0;   // and how many of them looked like a base and its tip
     bool cardReported = false; // the one-shot line for a card whose vertices could not be read
+    unsigned cardTries = 0;    // cards of this shader measured and found not to be a blade
     bool worldShaped = false;  // its constants bind the world's projection: recorded, not refused
     bool worldReported = false;// the one-shot line for that shape
     bool worldSpace = false;   // the block it got reads r0 as the WORLD position (see the block's own note)
@@ -682,36 +690,45 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
     // reference client has v = 1 at the base, and a shader whose blades are the
     // other way up is bent by the same block with one constant's sign flipped.
     const renderer::GrassBladeCard card = MeasureBladeCard(device, layout, draw);
-    if (card.measured && (card.extentYards < renderer::kGrassBladeMinExtentYards ||
-            card.pairs < renderer::kGrassBladeMinPairs))
+    // A shader is bent only when the draw's OWN vertices say it is a blade: a
+    // measurable card, of a blade's size, with at least one base-and-tip pair in
+    // it. Nothing else is admitted - not a card that could not be read, not a card
+    // that measured zero, and not a card of a tree's size. That is the whole
+    // answer to "parts of the buildings sway": a real session bent a 22.91 yd card
+    // with ten pairs in it, which is a canopy or a wall carrying a foliage texture,
+    // and at that size the bend is invisible while the card's silhouette moves.
+    // The verdict takes a few draws, because one shader is bent for all of its
+    // draws and the first one to arrive is not always a blade (a chunk of grass is
+    // drawn as several cards, some of them flat: they share this material).
+    const bool bladeShaped = card.measured && card.pairs >= renderer::kGrassBladeMinPairs &&
+        card.extentYards >= renderer::kGrassBladeMinExtentYards &&
+        card.extentYards <= renderer::kGrassBladeMaxExtentYards;
+    if (!bladeShaped)
     {
-        // Measured, and it is not a blade: no height to bend along, or not one
-        // pair of vertices that looks like a base and its tip. A decal, a shadow
-        // blob, a flat card that happens to be a cut-out - refused on its own
-        // geometry, which is a fact about the draw, unlike its material.
+        ++entry->cardTries;
+        if (card.measured) ++g_status.cardRefused;
+        else ++g_status.cardUnreadable;
+        if (entry->cardTries < kBladeCardTries) return; // another draw gets to answer
         entry->structureRefused = true;
         ++g_status.refused;
-        ++g_status.cardRefused;
-        char text[360]{};
-        std::snprintf(text, sizeof(text),
-            "Grass blade sway: a foliage draw's own vertices are %.4f yd tall with %u blade-shaped pair(s) in "
-            "them, so it is a card lying flat (a decal, a shadow blob) rather than a blade, and no shader is bent "
-            "for it.", double(card.extentYards), card.pairs);
+        char text[420]{};
+        if (card.measured)
+            std::snprintf(text, sizeof(text),
+                "Grass blade sway: none of the %u draws offered for a foliage shader measured as a blade card (the "
+                "last was %.4f yd tall with %u blade-shaped pair(s); a blade is %.2f to %.1f yd with at least %u), so "
+                "no shader was bent for it. A canopy, a wall carrying a foliage texture and a decal all look like "
+                "this, and bending one of them moves a piece of the scenery instead of a blade.",
+                entry->cardTries, double(card.extentYards), card.pairs,
+                double(renderer::kGrassBladeMinExtentYards), double(renderer::kGrassBladeMaxExtentYards),
+                renderer::kGrassBladeMinPairs);
+        else
+            std::snprintf(text, sizeof(text),
+                "Grass blade sway: none of the %u draws offered for a foliage shader could be measured at all (the "
+                "stream is not lockable, or the batch is not a triangle list), so no shader was bent for it - an "
+                "unreadable draw is not evidence of a blade, and the grass of a real client measures in the first "
+                "draw or two.", entry->cardTries);
         Log(text);
         return;
-    }
-    if (!card.measured && !entry->cardReported)
-    {
-        // A draw whose vertices could not be read at all proves nothing either
-        // way, and refusing on it is what would leave a field of grass still: the
-        // shader is bent with the reference client's blade convention, and this
-        // says so, once, because it is also what would make a card bend the wrong
-        // way up.
-        entry->cardReported = true;
-        ++g_status.cardUnreadable;
-        Log("Grass blade sway: a foliage draw's own vertices could not be read (the stream is not lockable, or the "
-            "batch is not a triangle list), so this shader is bent with the reference client's blade convention and "
-            "the swap that measures it is skipped. Anything else about the draw is still proved before it is bent.");
     }
     entry->bladeVSign = card.sign;
     entry->bladeExtentYards = card.extentYards;
@@ -727,9 +744,9 @@ inline void ConsiderDraw(IDirect3DDevice9* device, const renderer::FrameContext&
         char text[360]{};
         std::snprintf(text, sizeof(text),
             "Grass blade sway: hash=0x%016llx binds the world's own projection in c4..c7, which is how this client "
-            "draws an unskinned card - it is bent anyway, because a card with no bones has no palette to prove it "
-            "with, and its own vertices measured %.2f yd of upright blade.",
-            static_cast<unsigned long long>(entry->hash), double(entry->bladeExtentYards));
+            "draws an unskinned card - it is bent, because its own vertices measured %.2f yd of upright blade in %u "
+            "pair(s), which is what a blade card is and what a piece of the world is not.",
+            static_cast<unsigned long long>(entry->hash), double(entry->bladeExtentYards), entry->bladePairs);
         Log(text);
     }
     // The draw that revealed the shader is not bent (there was nothing to bind

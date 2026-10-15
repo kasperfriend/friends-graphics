@@ -255,10 +255,18 @@ namespace renderer
         bool measured = false;
     };
 
-    // The smallest card this path will bend, and the fewest pairs it needs to
-    // have voted with. A blade a few inches tall is a blade; a decal lying on the
-    // ground has no height to bend and never shows v rising towards its tip.
+    // The smallest card this path will bend, the largest, and the fewest pairs it
+    // needs to have voted with. A blade a few inches tall is a blade; a decal
+    // lying on the ground has no height to bend and never shows v rising towards
+    // its tip. The ceiling is what keeps a TREE out of this path: a real session's
+    // log shows it bending a 22.91 yd card with ten pairs in it - a canopy, or a
+    // piece of scenery carrying a foliage texture - which is the "parts of the
+    // buildings sway" a player reports, and at that size a sway of a blade's
+    // amplitude is an invisible bend while the card's whole silhouette moves.
+    // Grass tufts measure well under a yard to about two; three yards leaves room
+    // for a big tuft and nothing else.
     inline constexpr float kGrassBladeMinExtentYards = .05f;
+    inline constexpr float kGrassBladeMaxExtentYards = 3.f;
     inline constexpr unsigned kGrassBladeMinPairs = 1;
 
     // What the draw's own vertices say about which way a blade's texture runs,
@@ -375,15 +383,35 @@ namespace renderer
     // fade is two instructions now, and the portable suite scans both variants of
     // this block for the shape: one constant register per instruction, always.
     inline std::string GrassBladeMotionBlock(const char* texcoord, bool worldSpace,
-        unsigned firstRegister = kGrassBladeFirstRegister)
+        unsigned firstRegister = kGrassBladeFirstRegister, const char* translation = nullptr)
     {
         // Where the vertex is, as the two coordinates the wave field and the
         // per-blade hash are built from.
-        char place[512]{};
+        //
+        // Three shapes, best first:
+        //   * the vertex is already in the world (the instance rows placed it):
+        //     the coordinate is r0 itself;
+        //   * the shader's own view transform is known from its anchor line
+        //     (`add r0, r0, cN`): world = R^T * (r0 - cN), R^T being the shader's
+        //     own rows c0/c1 that this block already reads - exact, and with no
+        //     term from the frame in it at all;
+        //   * neither: the frame's camera corrects a view position that is known
+        //     to be camera-relative and unrotated. This is the one shape that can
+        //     drift with the camera, and it is now a fallback rather than the
+        //     path every view-space shader took.
+        char place[640]{};
         if (worldSpace)
             std::snprintf(place, sizeof(place),
                 "    mov r2.x, r0.x\n"
                 "    mov r2.y, r0.y\n");
+        else if (translation && translation[0])
+            std::snprintf(place, sizeof(place),
+                "    sub r5.x, r0.x, %s.x\n"
+                "    sub r5.y, r0.y, %s.y\n"
+                "    sub r5.z, r0.z, %s.z\n"
+                "    dp3 r2.x, c0.xyz, r5.xyz\n"
+                "    dp3 r2.y, c1.xyz, r5.xyz\n",
+                translation, translation, translation);
         else
             std::snprintf(place, sizeof(place),
                 "    dp3 r2.x, c0.xyz, r0.xyz\n"
@@ -659,6 +687,56 @@ namespace renderer
         return ~size_t(0);
     }
 
+    // The translation row the shader's own view transform lands the vertex with,
+    // read off the anchor line: an `add r0, r0, cN` puts the vertex in view space
+    // through cN, and cN is then the one term that has to come OUT of the position
+    // again to get the world position back.
+    //
+    // Why this exists at all: the world position the wave field and the per-blade
+    // phase are built from used to come from the frame's camera (`r0 - viewCamera`
+    // rotated back), and the frame's camera is not the matrix the shader was drawn
+    // with - the client binds its grass matrices from its own camera, and a
+    // capture one frame behind (or from another camera entirely) turns into a
+    // field-wide phase error that GROWS while the player walks and settles when
+    // they stop: exactly the "the grass shakes when I move" a player reports.
+    // Taking the term from the shader's own constant makes the world position
+    // exact by construction, whatever the frame's camera is doing.
+    inline std::string GrassBladeViewTranslation(const std::string& disassembly, size_t anchor) noexcept
+    {
+        size_t at = 0, lineNumber = 0;
+        while (at <= disassembly.size())
+        {
+            const size_t end = disassembly.find('\n', at);
+            const std::string line = GrassBladeTrimmed(disassembly.substr(at,
+                end == std::string::npos ? std::string::npos : end - at));
+            if (lineNumber == anchor)
+            {
+                const std::vector<std::string> words = GrassBladeWords(line);
+                // `add r0, r0, cN` or `add r0, cN, r0`; a swizzle is allowed as
+                // long as it is the .xyz the position is built from.
+                if (words.size() == 4 && words[0] == "add" && GrassBladeWordIsRegister(words[1], "r0"))
+                {
+                    const std::string* constant = GrassBladeWordIsRegister(words[2], "r0") ? &words[3]
+                        : GrassBladeWordIsRegister(words[3], "r0") ? &words[2] : nullptr;
+                    if (constant)
+                    {
+                        const std::string word = *constant;
+                        const size_t dot = word.find('.');
+                        const std::string base = dot == std::string::npos ? word : word.substr(0, dot);
+                        const int reg = GrassBladeConstantRegister(base);
+                        if (reg >= 0 && (dot == std::string::npos || word.substr(dot) == ".xyz"))
+                            return base;
+                    }
+                }
+                return {};
+            }
+            if (end == std::string::npos) break;
+            at = end + 1;
+            ++lineNumber;
+        }
+        return {};
+    }
+
     // The constant registers a shader reads, as a set, for choosing where the block
     // may live. The engine's own upload fills c0..c13 (the matrices) and, for the
     // batches that carry lights, rows like c17/c18 (their colour and parameters)
@@ -831,6 +909,14 @@ namespace renderer
         // them itself - the first run of six registers above them that it never
         // mentions (see GrassBladeFreeConstantRun).
         unsigned firstRegister = kGrassBladeFirstRegister;
+        // The translation row of the shader's own view transform, when its anchor
+        // line names one (`add r0, r0, cN`). The block subtracts it and rotates
+        // what is left back with the shader's own rows, so the world position the
+        // waves are built from is exact and has no term from the frame in it -
+        // which is what keeps the field from shaking as the player walks. Empty
+        // for a shader whose anchor does not name one; the block then falls back
+        // to the frame's camera correction.
+        std::string viewTranslation;
     };
 
     // The whole injection, as a function of a disassembly and the shader model
@@ -891,7 +977,9 @@ namespace renderer
 
         char texcoordName[16]{};
         std::snprintf(texcoordName, sizeof(texcoordName), "v%u", texcoord);
-        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace, out.firstRegister);
+        if (!out.worldSpace) out.viewTranslation = GrassBladeViewTranslation(disassembly, anchor);
+        const std::string block = GrassBladeMotionBlock(texcoordName, out.worldSpace, out.firstRegister,
+            out.viewTranslation.c_str());
 
         // The assembled text: the shader's own lines, with the block after the line
         // that lands the vertex's position. The model token is prepended when the

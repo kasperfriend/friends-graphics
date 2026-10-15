@@ -565,8 +565,9 @@ static void TestConfigurationAndWiring()
     // not change the size either). A Save followed by the read-back that reports
     // the new state went stale exactly that way, which the water device
     // regression caught; every write path in Save now goes through WriteProfile.
-    Check(main.find("renderer::locationtuning::InvalidateProfileValues();") != main.npos &&
-          main.find("renderer::locationtuning::InvalidateProfileValues();") < main.find("g_windSystem.Configure(renderer::ReadWindSettings(") &&
+    Check(main.find("renderer::locationtuning::InvalidateProfileValues();") == main.npos &&
+          main.find("renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos &&
+          tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
           tuning.find("inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value)") != tuning.npos &&
           tuning.find("if(written)InvalidateProfileValues();") != tuning.npos &&
           tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }") != tuning.npos &&
