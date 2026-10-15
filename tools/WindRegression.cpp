@@ -547,7 +547,7 @@ static void TestConfigurationAndWiring()
     Check(tuning.find("GetPrivateProfileSectionW(scope.c_str()") != tuning.npos &&
           tuning.find("if(!ScopedValuePresent(scope,key))continue;") != tuning.npos &&
           tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
-          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear(); }") != tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }") != tuning.npos &&
           tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
           tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos,
           "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
@@ -559,6 +559,22 @@ static void TestConfigurationAndWiring()
           "and the values behind those reads come from a section read once per file identity: a crossing's hundred "
           "reads are map lookups and a stat each, not a hundred parses of the whole file (measured at 125-200 ms per "
           "crossing before this)");
+    // And nothing behind those reads may be stale: a write of this module's own
+    // drops the values, because a file's own last-write time is not a signal right
+    // after a write (NTFS updates it lazily, and a value of the same length does
+    // not change the size either). A Save followed by the read-back that reports
+    // the new state went stale exactly that way, which the water device
+    // regression caught; every write path in Save now goes through WriteProfile.
+    Check(main.find("renderer::locationtuning::InvalidateProfileValues();") != main.npos &&
+          main.find("renderer::locationtuning::InvalidateProfileValues();") < main.find("g_windSystem.Configure(renderer::ReadWindSettings(") &&
+          tuning.find("inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value)") != tuning.npos &&
+          tuning.find("if(written)InvalidateProfileValues();") != tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }") != tuning.npos &&
+          tuning.find("if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
+          tuning.find("if(!editable)return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
+          tuning.find("const bool written=WriteProfile(localFile.c_str(),scope.c_str(),key,value);") != tuning.npos,
+          "and every write it makes drops the cached values as well as the key memo, so a saved toggle is what the "
+          "next read answers");
     Check(tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
           tuning.find("inline const std::unordered_set<std::wstring>* ScopedKeysFor(") != tuning.npos,
           "the memo answers both the read path and HasScopedValue, so the water colours see the same file view");

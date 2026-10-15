@@ -123,6 +123,15 @@ void ReloadVegetationTuning()
 
 void ReloadWindTuning()
 {
+    // Every apply starts from what is on disk. The cached sections behind the
+    // scoped reads are what makes a crossing cost nothing (a hundred reads that
+    // were a hundred whole-file parses, 125 to 203 ms measured in a real
+    // session), and their lifetime is deliberately one apply: an apply is the
+    // moment the player's own edits, this project's saves and anything else that
+    // touched the files all have to be visible, and the burst of reads behind it
+    // is what the cache exists to collapse. This is first in the chain, so the
+    // eight reloads after it read the same freshly-taken view of the files.
+    renderer::locationtuning::InvalidateProfileValues();
     const auto ini=g_basePath+L"GraphicsEffects.ini";
     g_windSystem.Configure(renderer::ReadWindSettings([&](const wchar_t* key,int fallback) {
         return static_cast<int>(renderer::locationtuning::ReadInt(L"Wind",key,fallback,ini.c_str()));

@@ -40,7 +40,7 @@ inline std::unordered_map<std::wstring,std::unordered_set<std::wstring>>& Scoped
     static std::unordered_map<std::wstring,std::unordered_set<std::wstring>> keys;
     return keys;
 }
-inline void InvalidateScopedKeys() { ScopedKeys().clear(); }
+// InvalidateScopedKeys lives below, next to the value cache it also drops.
 // The identity of the file the memo was filled from. A memo of a scoped section
 // is a property of the FILE - which keys it has and what they hold - and not of
 // the place that happens to be active, so the one thing that has to drop it is a
@@ -171,6 +171,26 @@ inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWS
     }
     return GetPrivateProfileStringW(section,key,fallback,output,size,path);
 }
+// Every cached section of every file this module reads. A write invalidates them:
+// see WriteProfile.
+inline void InvalidateProfileValues() { ProfileCache().clear(); }
+// What F12 and an editor save mean: drop the key memo AND the values behind it.
+inline void InvalidateScopedKeys() { ScopedKeys().clear();InvalidateProfileValues(); }
+// The file's own identity is NOT a reliable signal right after a write of ours:
+// NTFS updates a file's last-write time lazily, so a stat taken straight after
+// WritePrivateProfileStringW can still report the old time, and a value of the
+// same length does not change the file's size either. A Save -> read-back round
+// trip went stale exactly that way - Save wrote a toggle, the very next read was
+// answered from the section the cache had taken before the write - and the water
+// device regression is what caught it. So every write this module makes drops the
+// values as well as the key memo, and the identity check stays for the writes
+// that come from outside.
+inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value) {
+    if(!path||!*path)return false;
+    const bool written=WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),path)!=0;
+    if(written)InvalidateProfileValues();
+    return written;
+}
 inline bool ScopedValuePresent(const std::wstring& scope,LPCWSTR key) {
     const auto* keys=ScopedKeysFor(scope);
     return keys&&keys->find(LowerKeyName(key))!=keys->end();
@@ -228,7 +248,7 @@ inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
     return false;
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
-    if(IsGlobal(section))return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
+    if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);
     // Per-location overrides are only meaningful once this client's location
     // has been verified against the database. On every other 3.3.5 build
     // (including a stock client) there is no verified location to scope the
@@ -238,12 +258,12 @@ inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     // GraphicsEffects.ini instead: ReadAtLevel already reads exactly that
     // value back whenever `editable` is false, so an edit now round-trips,
     // and a later verified session still leaves its scoped file untouched.
-    if(!editable)return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
+    if(!editable)return WriteProfile(baseFile.c_str(),section,key,value);
     const auto scope=Scope(editZone||!active.areaId?1:2)+L"."+section;
-    const bool written=WritePrivateProfileStringW(scope.c_str(),key,std::to_wstring(value).c_str(),localFile.c_str())!=0;
     // What the scoped cache holds is now one key out of date. An editor save is
     // a player action, not a per-frame event, so simply dropping it is cheaper
     // to reason about than patching the one section it wrote.
+    const bool written=WriteProfile(localFile.c_str(),scope.c_str(),key,value);
     if(written)InvalidateScopedKeys();
     return written;
 }
