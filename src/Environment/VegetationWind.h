@@ -51,18 +51,37 @@ struct VegetationSettings
 
 // Per-frame counters for the optional debug line and the log. Diagnostic only:
 // none of these change the sway.
+//
+// Every gate a draw can fail is counted here. The feature's first in-client
+// report was "nothing sways and the counter says zero", and the reason it said
+// zero was that the gates which rejected everything - the shader, the
+// declaration, the material, the camera - were the ones that incremented
+// nothing. A counter that cannot be zero while something is still wrong is the
+// whole point of the line.
 struct VegetationStatus
 {
     unsigned candidates = 0;      // skinned M2 draw candidates considered this frame
     unsigned swaying = 0;         // instances leaning in this frame's last batch
     unsigned batches = 0;         // draw calls that received a lean this frame
-    unsigned skippedPalette = 0;  // c31+ did not look like a bone palette
+    unsigned skippedMaterial = 0; // solid material: not foliage, so not a candidate
+    unsigned skippedCamera = 0;   // no accepted camera pose for the frame yet
+    unsigned skippedViewport = 0; // drawn into a viewport that is not the frame camera's
+    unsigned skippedShader = 0;   // neither a verified rigid M2 variant nor the M2 layout
+    unsigned skippedLayout = 0;   // vertex declaration is not POSITION + BLENDINDICES
+    unsigned skippedGeometry = 0; // couldn't read the draw's own vertices (the palette bound)
+    unsigned skippedPalette = 0;  // c31 did not look like a bone palette
     unsigned skippedAnimated = 0; // the client's own animation is moving the model
-    unsigned skippedShape = 0;    // too long/low to be a plant (fences, walls)
+    unsigned skippedShape = 0;    // too many bones, or too long/low to be a plant
     unsigned skippedSize = 0;     // outside the supported size range
     unsigned skippedRange = 0;    // beyond DistanceYards
+    unsigned learnedShaders = 0;  // new M2 layout variants accepted by proof this frame
+    unsigned unbounded = 0;       // candidates whose palette could not be bounded
     float maxAngle = 0.f;         // largest angle applied this frame
     float lastHeight = 0.f;       // world height of the last leaning instance
+    // The height the size gate last measured, whether it accepted the model or
+    // not: "size 300" in the HUD is only answerable if the number the gate looked
+    // at is on screen next to it.
+    float lastMeasured = 0.f;
 };
 
 // ---------------------------------------------------------------------------
@@ -294,6 +313,98 @@ inline bool M2BoneBlockValid(const float r0[4], const float r1[4], const float r
 }
 
 // ---------------------------------------------------------------------------
+// The model's own vertices
+// ---------------------------------------------------------------------------
+// The palette says which bones a model has and the mesh says how big it is, and
+// neither answer can be taken from the constant file alone: c31 is followed by
+// whatever the previous draw left there (so "how many blocks look like matrices"
+// counts another model's skeleton), and a model's bone pivots span no height at
+// all when it has one bone. src/Core/M2DrawGeometry.h reads both from the draw's
+// own vertices; everything here is the device-free half of that read, so the
+// bound and the measurement can be pinned without a device.
+inline constexpr unsigned kVegetationGeometrySamples = 32;
+
+struct VegetationGeometrySample
+{
+    float position[3]{0.f, 0.f, 0.f}; // model space
+    unsigned bone = 0;                // the bone block this vertex is skinned by
+};
+
+// The world-space box the model's own vertices occupy under one draw's palette.
+struct VegetationMeasurement
+{
+    bool valid = false;
+    unsigned samples = 0;
+    float lowest[3]{}, highest[3]{};
+    float SpanX() const noexcept { return highest[0] - lowest[0]; }
+    float SpanY() const noexcept { return highest[1] - lowest[1]; }
+    float SpanZ() const noexcept { return highest[2] - lowest[2]; }
+    float Footprint() const noexcept { return std::max(SpanX(), SpanY()); }
+};
+
+// One model-space vertex through the bone block it is skinned by, and then
+// through the accepted camera pose - the same two steps the flame capture runs
+// (view position = block * position, then ViewPositionToWorld). Model space ->
+// view space is a rigid transform per bone, so a lean applied to the bone blocks
+// carries every measured vertex with it and the measurement stays truthful for
+// the frame it was taken in.
+inline bool VegetationVertexToWorld(const VegetationGeometrySample& vertex, const float registers[][4],
+    unsigned boneBlocks, const float viewRaw[16], const float camera[3], float out[3]) noexcept
+{
+    if (!registers || !viewRaw || !camera || !boneBlocks) return false;
+    const unsigned bone = std::min(vertex.bone, boneBlocks - 1);
+    const float* r0 = registers[bone * kM2RegistersPerBone + 0];
+    const float* r1 = registers[bone * kM2RegistersPerBone + 1];
+    const float* r2 = registers[bone * kM2RegistersPerBone + 2];
+    const float view[3] = {
+        r0[0] * vertex.position[0] + r0[1] * vertex.position[1] + r0[2] * vertex.position[2] + r0[3],
+        r1[0] * vertex.position[0] + r1[1] * vertex.position[1] + r1[2] * vertex.position[2] + r1[3],
+        r2[0] * vertex.position[0] + r2[1] * vertex.position[1] + r2[2] * vertex.position[2] + r2[3] };
+    if (!std::isfinite(view[0]) || !std::isfinite(view[1]) || !std::isfinite(view[2])) return false;
+    ViewPositionToWorld(viewRaw, camera, view, out);
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
+inline VegetationMeasurement MeasureVegetationGeometry(const VegetationGeometrySample* samples, unsigned count,
+    const float registers[][4], unsigned boneBlocks, const float viewRaw[16], const float camera[3]) noexcept
+{
+    VegetationMeasurement out;
+    if (!samples || !count) return out;
+    bool any = false;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        float world[3]{};
+        if (!VegetationVertexToWorld(samples[i], registers, boneBlocks, viewRaw, camera, world)) continue;
+        if (!any) { for (int axis = 0; axis < 3; ++axis) out.lowest[axis] = out.highest[axis] = world[axis]; any = true; }
+        else for (int axis = 0; axis < 3; ++axis)
+        {
+            out.lowest[axis] = std::min(out.lowest[axis], world[axis]);
+            out.highest[axis] = std::max(out.highest[axis], world[axis]);
+        }
+        ++out.samples;
+    }
+    out.valid = any && out.samples > 0;
+    return out;
+}
+
+// Where the model is placed: the world position of block 0, the root bone every
+// batch of one model uploads first. This is the point a lean rotates about, and
+// it is deliberately NOT the lowest bone of the blocks this batch happened to
+// reveal - two batches of one tree rotating about two different points is
+// exactly the "trunk and canopy came apart" failure that the instance identity
+// exists to prevent. A WoW doodad is placed with its origin at the ground, so
+// this is where the model meets it.
+inline bool VegetationModelOrigin(const float registers[][4], const float viewRaw[16], const float camera[3],
+    float out[3]) noexcept
+{
+    if (!registers || !viewRaw || !camera) return false;
+    const float view[3] = { registers[0][3], registers[1][3], registers[2][3] };
+    if (!std::isfinite(view[0]) || !std::isfinite(view[1]) || !std::isfinite(view[2])) return false;
+    ViewPositionToWorld(viewRaw, camera, view, out);
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
+// ---------------------------------------------------------------------------
 // Which models are vegetation
 // ---------------------------------------------------------------------------
 // Policy, not preference: these are the gates that keep characters, creatures,
@@ -375,33 +486,31 @@ inline VegetationBones AnalyzeVegetationBones(const float registers[][4], unsign
     }
 
     float lowestZ = world[0][2], highestZ = world[0][2];
-    unsigned lowest = 0;
     for (unsigned i = 0; i < out.bones; ++i)
     {
-        if (world[i][2] < lowestZ) { lowestZ = world[i][2]; lowest = i; }
+        lowestZ = std::min(lowestZ, world[i][2]);
         highestZ = std::max(highestZ, world[i][2]);
     }
-    // The pivot is the ground contact: the lowest bone's plane, with the XY
-    // averaged over every bone inside a short band, so one stray bone cannot
-    // drag the pivot away from the trunk.
-    float px = 0.f, py = 0.f, pz = 0.f;
-    unsigned band = 0;
+    // The pivot is where the model is PLACED: block 0's world position, the root
+    // bone every batch of one model uploads first. It is not the lowest bone of
+    // the blocks this batch happened to reveal - that moves when a batch reveals
+    // more of the skeleton, and two batches of one tree leaning about two
+    // different points is the "trunk and canopy came apart" failure the instance
+    // identity exists to prevent. A WoW doodad is placed with its origin at the
+    // ground, so this is also where it meets it.
     float minX = world[0][0], maxX = world[0][0], minY = world[0][1], maxY = world[0][1];
     for (unsigned i = 0; i < out.bones; ++i)
     {
         minX = std::min(minX, world[i][0]); maxX = std::max(maxX, world[i][0]);
         minY = std::min(minY, world[i][1]); maxY = std::max(maxY, world[i][1]);
-        if (world[i][2] <= lowestZ + .75f)
-        {
-            px += world[i][0]; py += world[i][1]; pz += world[i][2];
-            ++band;
-        }
     }
-    if (!band) { px = world[lowest][0]; py = world[lowest][1]; pz = world[lowest][2]; band = 1; }
-    out.pivot[0] = px / band; out.pivot[1] = py / band; out.pivot[2] = pz / band;
-    for (int i = 0; i < 3; ++i) out.root[i] = world[0][i];
+    for (int i = 0; i < 3; ++i) { out.pivot[i] = world[0][i]; out.root[i] = world[0][i]; }
     out.top[0] = out.pivot[0]; out.top[1] = out.pivot[1]; out.top[2] = highestZ;
-    out.height = highestZ - out.pivot[2];
+    // The bone span is a LOWER bound on the model's height: pivots sit inside the
+    // model, so a stem is never taller than the bones that carry it. The draw's
+    // own vertices raise it to the real size (VegetationMeasurement), which is
+    // what a one-bone tuft needs - its bones span nothing at all.
+    out.height = std::max(highestZ - lowestZ, 0.f);
     out.footprint = std::max(maxX - minX, maxY - minY);
 
     // Pose signature: evenly spaced bones, relative to the root. Relative
@@ -435,21 +544,26 @@ inline float VegetationPoseDelta(const VegetationBones& previous, const Vegetati
     return delta;
 }
 
-// Identity of one placed model: the ground contact, the skeleton size and the
-// root orientation. Batches of one instance share all three; two different
-// models that share a spot differ in the skeleton or the orientation.
-inline uint64_t VegetationInstanceKey(const VegetationBones& bones) noexcept
+// Identity of one placed model - what a lean belongs to, rather than what a draw
+// call belongs to. Three things every batch of one model shares and no other
+// model does: where it is placed (block 0's world position), the root bone's
+// world orientation, and the vertex buffer it is drawn from. All three are
+// camera-independent, so a model keeps one identity while the player turns, and
+// none of them depends on how many bones a particular batch revealed - which is
+// what makes the trunk and the canopy of one tree meet in the same instance.
+inline uint64_t VegetationInstanceKey(const float origin[3], const float rootBasis[3][3], uint64_t model) noexcept
 {
     const auto quantize = [](float value, float scale) {
         return uint64_t(int64_t(std::llround(double(WindFinite(value, 0.f)) * double(scale))));
     };
     uint64_t key = 0x9e3779b97f4a7c15ull;
-    key ^= VegetationHash64(quantize(bones.pivot[0], 4.f) * 0x100000001b3ull);
-    key ^= VegetationHash64(quantize(bones.pivot[1], 4.f) * 0x100000001b3ull) << 1;
-    key ^= VegetationHash64(quantize(bones.pivot[2], 4.f)) << 7;
-    key ^= VegetationHash64(bones.bones * 0x51ull + quantize(bones.rootBasis[0][0], 32.f)) << 13;
-    key ^= VegetationHash64(quantize(bones.rootBasis[0][1], 32.f)) << 19;
-    key ^= VegetationHash64(quantize(bones.rootBasis[1][1], 32.f)) << 29;
+    key ^= VegetationHash64(quantize(origin[0], 4.f) * 0x100000001b3ull);
+    key ^= VegetationHash64(quantize(origin[1], 4.f) * 0x100000001b3ull) << 1;
+    key ^= VegetationHash64(quantize(origin[2], 4.f)) << 7;
+    key ^= VegetationHash64(quantize(rootBasis[0][0], 32.f)) << 13;
+    key ^= VegetationHash64(quantize(rootBasis[0][1], 32.f)) << 19;
+    key ^= VegetationHash64(quantize(rootBasis[1][1], 32.f)) << 29;
+    key ^= VegetationHash64(model * 0x2545f4914f6cdd1dull) << 37;
     return VegetationHash64(key);
 }
 

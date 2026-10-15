@@ -11,8 +11,13 @@ its own.
   `DRIVE CLOUDS`.
 - Settings live in the `[Vegetation]` section of `GraphicsEffects.ini` and obey
   the same per-location overrides as every other section (global, zone, subarea).
-- The optional diagnostic line is **F7 → WIND → `VEGETATION DEBUG VIEW`**; it
-  appears under the wind HUD and can be read with F7 closed.
+- The optional diagnostic **F7 → WIND → `VEGETATION DEBUG VIEW`** adds two rows
+  under the wind HUD, readable with F7 closed. The first says how many models are
+  leaning out of how many foliage draws arrived (and how many solid model draws
+  were passed over); the second names **the gate that refused something**, and
+  only the gates that refused something, so "nothing sways" is answered on the
+  spot instead of guessed at. They are also drawn while the wind HUD itself is
+  open, so the vegetation counts are visible from the wind tab.
 
 ## How it works
 
@@ -28,23 +33,39 @@ the draw**.
    plant; it is only leaned once its model is known, which is what keeps a
    tree's opaque trunk welded to the canopy above it.
 2. The draw has to use the client's skinned model layout (a vertex declaration
-   with `POSITION` float3, `BLENDINDICES` and `BLENDWEIGHT`) **and** one of the
-   rigid skinned M2 vertex shaders this project has verified live - the captured
-   list in `src/Lighting/TorchSignatures.h` that the torch effect also requires.
-   A fixed-function draw, an FVF draw, an unskinned model variant and any
-   unlisted shader (shadow-depth, portrait, UI, post-process) are all left
-   alone, because they are not paths where a bone palette in the frame camera's
-   own space has ever been proven.
-3. The bone palette the client uploaded at **c31** is validated block by block:
-   every block must be finite, orthogonal up to scale and hold a plausible
-   translation. The first block that is not ends the palette; nothing past it is
-   ever written.
-4. The validated blocks are reconstructed into a world pivot (where the model
-   meets the ground), a height and a footprint. The pivot, the height and the
-   model's root orientation together identify one *instance*, which is what makes
-   the sway follow a placed model rather than a draw call: the opaque trunk of a
-   tree leans with the alpha-tested canopy that revealed it, because both belong
-   to the same instance.
+   with `POSITION` float3 and `BLENDINDICES` in stream 0), come from a vertex
+   buffer, and its vertex shader has to be either one of the rigid skinned M2
+   variants this project has verified live (the captured list in
+   `src/Lighting/TorchSignatures.h` that the torch effect also requires) or a
+   variant that binds the client's **model projection in c2..c5** - the same
+   proof the material cache and the camera's sky fallback run on live draws - and
+   *not* one of the passes this project has already identified as never-a-model
+   (the native shadow casters, UI, precipitation and water). A variant proven
+   this way is leaned from that frame on and its hash is written to
+   `ModernWoWRenderer.log` once, with a note to add it to the captured list; the
+   HUD's `new` counter counts them. A fixed-function draw and an up-front
+   (particle, ribbon or interface) batch have no model identity at all and are
+   never considered.
+3. The bone palette the client uploaded at **c31** is bounded by the draw's
+   **own vertices**: the model's bones are the bone indices *its* vertices
+   reference, and the palette is read, validated and written no further than
+   that. This matters more than it sounds - the registers above a model's own
+   bones still hold whatever the previous draw left there, so a reader that walks
+   c31 upwards while the blocks look like matrices counts another model's
+   skeleton (a six-bone bush read as a seventy-five-bone one). Every block inside
+   the bound must then be finite, orthogonal up to scale and hold a plausible
+   translation; the first one that is not ends the palette.
+4. The validated blocks are reconstructed into the model's world **placement
+   point** (block 0, the root bone every batch of a model uploads first), its
+   root orientation, and its size. The size is measured from the draw's **own
+   vertices** through their bone blocks, with the bone span kept as a lower
+   bound: bone pivots sit inside a model, so a single-bone grass tuft spans no
+   height at all and would be refused forever by a size gate that trusted them.
+   The placement point, the root orientation and the model's vertex buffer
+   together identify one *instance*, which is what makes the sway follow a placed
+   model rather than a draw call: the opaque trunk of a tree leans with the
+   alpha-tested canopy that revealed it, even when the client draws the trunk
+   first, and the batches of one model all rotate about the same point.
 5. The instance's own phase - taken from its world identity, never from a frame
    counter - sets its flutter so two tufts a yard apart do not move in lockstep.
 6. Every validated bone gets **one** rigid rotation about that pivot, taken from
@@ -68,10 +89,13 @@ single byte is written:
   graphics off.** No palette is read at all. Disabling a link restores exactly
   the behaviour that existed before this feature for that consumer, and never
   resets the shared wind for the others.
-- **Models the client is already animating.** A static doodad repeats its pose
-  exactly, frame to frame, from any camera; a character, creature, mount or
-  animated prop never does. A model whose motion is ambiguous **never** sways:
-  it is dropped the moment two readings disagree.
+- **Models the client is already animating.** Two readings have to agree: the
+  skeleton's world pose, *and* the world positions of the model's own vertices
+  (which is what a particle or effect batch, re-uploaded every frame with new
+  data, fails even when every matrix it binds is still). A static doodad repeats
+  both exactly from any camera; a character, creature, mount or animated prop
+  never does. A model whose motion is ambiguous **never** sways: it is dropped
+  the moment the two readings disagree.
 - **Full skeletons.** More than 24 bones in the validated palette is a
   character, creature, mount or weapon, not a plant.
 - **Anything too small or too large** (below 0.15 yd or above 90 yd tall), and
@@ -87,6 +111,13 @@ single byte is written:
   palette, and the shadow-depth, portrait, UI and post-process shaders have
   never been shown to hold a palette there - or to share the frame camera's
   space, which is what makes a lean about the world ground contact correct.
+- **Draws that are not the frame camera's.** A model is only leaned when the
+  device is drawing into the viewport the accepted camera pose was captured in,
+  which is what keeps the client's portrait, target, minimap and reflection views
+  (cameras of their own, in viewports of their own) out of the wind.
+- **Up-front batches and fixed-function draws.** A particle, ribbon or interface
+  batch has no vertex buffer and therefore no model identity, no palette bound
+  and no placement point that outlives the call.
 - **Overlays and the F7 menu** - those draws are scoped out before any work
   happens.
 - A palette, a vertex layout or a camera pose that does not validate, and any
@@ -163,7 +194,7 @@ at the shipped defaults with a steady west wind.
 | `TreePercent` | TREE GAIN | 100 | 0..200 | Gain for models above ~6 yd, blended in between. 0 stops trees only. |
 | `DistanceYards` | SWAY DISTANCE (YARDS) | 120 | 20..300 | Sway fades to nothing by this range. |
 | `SwayAnimatedModels` | SWAY ANIMATED MODELS (MAY MOVE CREATURES) | 0 | on/off | Also leans models the client animates. Off by default; see above. |
-| `DebugView` | VEGETATION DEBUG VIEW | 0 | on/off | Extra diagnostic HUD line. |
+| `DebugView` | VEGETATION DEBUG VIEW | 0 | on/off | Two extra diagnostic HUD rows: what leans, and which gate refused the rest. |
 
 `[Wind] AffectVegetation` (F7 → WIND → `DRIVE PLANTS & TREES`, default on) is the
 link, exactly like `AffectWaves` and `AffectClouds`.
@@ -189,8 +220,27 @@ Linux and is wired into CI, and it pins:
 - strength, size classes, gains, range fade, flutter, and all three switches
   (master wind, the link, the effect);
 - the shader whitelist: every captured rigid M2 variant is accepted, every
-  unskinned variant and every unknown hash is not, and the gate sits above the
-  first device call in the draw scope;
+  unskinned variant and every unknown hash is not, the never-a-model list (shadow
+  casters, UI, precipitation, water) is refused and does not overlap it, and the
+  client's model projection is recognized while a terrain/WMO-style or transposed
+  one is not;
+- the model's own vertices: the palette bound comes from the bone indices the
+  draw's vertices reference (never from the constant file), the size gate
+  measures the vertices themselves - a one-bone tuft with a 1.6 yd mesh measures
+  1.6 yd where its bone pivots measure nothing - a vertex bound to an unrevealed
+  bone is clamped instead of reading past the bound, and the lean pivots on the
+  model's placement point;
+- instance identity: the placement point, the root orientation and the vertex
+  buffer decide it, a moving camera does not change it, and **batches of one model
+  that reveal different numbers of bones stay one instance** - the failure that
+  made every plant a new, never-stable instance and left the HUD reading zero;
+- the HUD itself: every gate the device half counts has a name on the gate row,
+  the row lists only the gates that refused something and in the order they run
+  in, and both rows fit the box they are drawn in;
+- every counter the HUD can report is incremented by the device half, so a gate
+  that refuses silently is a test failure rather than a bug report;
+- the guard sits above the first palette read in the draw scope, and the four
+  draw entry points each describe their own batch exactly once;
 - INI/F7/default parity for every `[Vegetation]` key and for
   `[Wind] AffectVegetation`, no duplicated key in any section, and the production
   wiring itself (four draw hooks, one update next to the wind snapshot, the reset
@@ -200,8 +250,13 @@ In-client acceptance checks (Windows and the Ascension client):
 
 1. Stand in a forest at day and at night, with the F7 WIND tab open on
    `VEGETATION DEBUG VIEW`. Grass, bushes and tree canopies lean downwind and
-   shimmer; the counts rise with the number of visible plants and the "skipped"
-   counters explain what was passed over.
+   shimmer; `leaning` rises with the number of visible plants, and if it does not,
+   the second row names the gate that refused them (`vs` for an unproven shader,
+   `decl` for a declaration that is not the client's skinned layout, `geo` for
+   vertices that could not be read, `pal` for a palette that failed validation,
+   `shape`/`size` for a model that did not look like a plant, `move` for a model
+   the client is animating, `far` for range). `new` above zero means a shader
+   variant was proven this frame and should be added to the captured list.
 2. Set `SWAY STRENGTH` to 0 and back, then `VEGETATION SWAY` off and on. Nothing
    jumps; off is indistinguishable from the renderer without the feature.
 3. Set `DRIVE PLANTS & TREES` off. Plants stand still, waves and clouds keep
@@ -227,10 +282,11 @@ In-client acceptance checks (Windows and the Ascension client):
   pose. This is the conservative choice - a lean built in the wrong camera's
   space would be a visibly broken shadow, not a missing one. Whether that pass
   should lean too is a separate decision in `TODO.md`.
-- Only the shader variants captured in `src/Lighting/TorchSignatures.h` sway. If
-  a foliage variant in the client is not in that list it stays still; extending
-  the list needs the variant's hash, which the diagnostic line's counters and
-  the renderer log identify.
+- A foliage variant outside the captured list sways only once it has proven that
+  it binds the client's model projection in c2..c5 - which the renderer checks
+  for it, reports once in `ModernWoWRenderer.log` by hash and counts as `new` on
+  the HUD row so the captured list can be extended. A variant that is *not* the
+  model path stays still, by design.
 - A model the client animates is skipped even if it is a plant, unless
   `SWAY ANIMATED MODELS` is enabled. A zone whose foliage is animated therefore
   needs that switch - and accepts that a motionless creature can lean.

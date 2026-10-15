@@ -220,21 +220,23 @@ inline void SetupOverlayState(IDirect3DDevice9* d){
  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
  d->SetRenderState(D3DRS_COLORWRITEENABLE,15);
 }
-inline void DrawWindDebug(IDirect3DDevice9* d,const renderer::WindState& wind,const std::string& extra={}){
+inline void DrawWindDebug(IDirect3DDevice9* d,const renderer::WindState& wind,const std::vector<std::string>& extra={}){
  if(!d||(!wind.debugView&&extra.empty()))return;
  renderer::ScopedStateBlock state(d);
  if(FAILED(state.CaptureResult()))return;
  D3DVIEWPORT9 viewport{};
  if(FAILED(d->GetViewport(&viewport))||!viewport.Width||!viewport.Height)return;
  // Text HUD only. No world arrows/particles, no inputs intercepted and no
- // changes to the simulated state. It remains readable with F7 closed.
- const bool hasExtra=!extra.empty();
- const float scale=std::min({1.f,float(viewport.Width)/620.f,float(viewport.Height)/(hasExtra?164.f:142.f)});
- const float width=600*scale,height=(hasExtra?148.f:126.f)*scale;
+ // changes to the simulated state. It remains readable with F7 closed. The box
+ // is sized by the rows it actually has, so an effect that adds a diagnostic row
+ // gets the room for it instead of a line drawn over the panel below.
+ const float content=126.f+22.f*float(extra.size());
+ const float scale=std::min({1.f,float(viewport.Width)/620.f,float(viewport.Height)/(content+16.f)});
+ const float width=600*scale,height=content*scale;
  const float x=float(viewport.X+viewport.Width)-width-8*scale,y=float(viewport.Y)+8*scale;
  auto lines=renderer::WindDebugLines(wind);
  std::vector<std::string> rows(lines.begin(),lines.end());
- if(hasExtra)rows.push_back(extra);
+ rows.insert(rows.end(),extra.begin(),extra.end());
  const bool hasFont=windDebugFont.Ensure(d,std::max(6,int(std::round(16*scale))));
  std::vector<V> vertices;
  Rect(vertices,x,y,width,height,0xed101e28);

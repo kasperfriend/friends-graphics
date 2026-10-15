@@ -35,6 +35,50 @@ namespace renderer
         return false;
     }
 
+    // Draws that must never be leaned, whatever their constants happen to look
+    // like. The caster variants are the client's native shadow-map producers,
+    // captured from a live client (docs/round6-native-shadow-findings.md): they
+    // skin in the LIGHT's space, so a lean built from the frame camera's up and
+    // downwind would be a visibly broken shadow rather than a missing one. UI,
+    // precipitation and water are the other passes this project has already
+    // identified; none of them is a model in the frame camera.
+    inline constexpr uint64_t kNonModelShaders[] = {
+        0xd9e7756460af6296ull, // UI vertex shader
+        0xc29c7060b723c0c6ull, // UI pixel shader
+        0x8832bcc5ed4ff2a6ull, // native rain/sandstorm vertex shader
+        0xec9ee827b8bf5afaull, // native snow vertex shader
+        0x202b452e580a7742ull, 0x8535271f53b044b4ull, 0xea99ea307a197a84ull, // native shadow casters
+        0x4f20b99325ed9c47ull, 0x78641e03a615f46aull, // their pixel shaders
+        0x206d861fd0a721ddull, 0xfdd9528ed3ac30eaull, 0x48a82796bd612aebull,
+        0x70faf83955e2b668ull // liquid vertex variants
+    };
+
+    inline bool IsNonModelShader(uint64_t hash) noexcept
+    {
+        for (uint64_t candidate : kNonModelShaders)
+            if (candidate == hash) return true;
+        return false;
+    }
+
+    // The client's M2 model layout, as live captures describe it: the model path
+    // binds its projection in c2..c5 (row-major) instead of the c4..c7 the
+    // terrain and WMO paths use. This project already decides "this draw is an M2
+    // model" from exactly these six registers in two verified places
+    // (src/Scene/DrawCallClassifier.cpp, and CameraCapture's sky fallback), so an
+    // unknown M2 variant can be recognized by the block the client bound for it
+    // instead of by a hash this project happened to capture somewhere else.
+    inline bool IsM2ModelConstants(const float constants[6][4]) noexcept
+    {
+        if (!constants) return false;
+        for (int row = 0; row < 6; ++row)
+            for (int column = 0; column < 4; ++column)
+                if (!std::isfinite(constants[row][column])) return false;
+        return std::fabs(constants[5][2] - 1.0f) < 0.02f &&
+            std::fabs(constants[5][0]) < 0.01f && std::fabs(constants[5][1]) < 0.01f &&
+            std::fabs(constants[5][3]) < 0.01f &&
+            constants[2][0] > 0.1f && constants[3][1] > 0.1f;
+    }
+
     inline constexpr unsigned kM2BoneBaseRegister = 31;
     inline constexpr unsigned kM2MaxBones = 75;
     inline constexpr unsigned kM2RegistersPerBone = 3;

@@ -106,11 +106,14 @@ simulation time; no unverified in-game time-of-day memory is read.
   both the visible deck and its shadow/light field use those same offsets.
   Sampling velocity is the negative of travel velocity, including top shear.
 - `src/Effects/VegetationSway.h` is a per-draw scope with no state of its own
-  beyond the wind: it validates the client's own bone palette at c31 for the
-  draw, leans it about the model's reconstructed world ground contact and puts
-  the client's matrices back immediately after the draw. It adds no shader
+  beyond the wind: it bounds the client's own bone palette at c31 by the bone
+  indices the draw's own vertices reference, measures the model from those same
+  vertices, leans every one of its bones about the model's placement point and
+  puts the client's matrices back immediately after the draw. It adds no shader
   constant, and with the wind, the link or the effect off it makes no device call
-  at all. See [vegetation sway](vegetation-wind.md).
+  at all. Every gate a draw can fail is counted, and the counts are named on the
+  optional HUD rows: a report of "nothing sways" is answered there instead of
+  from a log. See [vegetation sway](vegetation-wind.md).
 - `src/Water/WaveMotion.h` integrates each dispersion/shear/UV phase separately
   in double precision and wraps it in its own period. Changing speed, shear or
   wind never recalculates displacement from `session age × new speed`.

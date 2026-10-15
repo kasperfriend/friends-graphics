@@ -313,6 +313,16 @@ static void TestBoneAnalysis()
     Pass("bone palette: accepted only when the blocks can be object -> view matrices");
 }
 
+// One placed model's identity, as the device half builds it: where it is placed,
+// how its root is oriented, and the vertex buffer it is drawn from. The skeleton
+// is deliberately NOT part of it - a batch that reveals fewer bones than another
+// batch of the same model is the same plant, and treating it as a second one is
+// how a trunk and its canopy come apart.
+static uint64_t KeyOf(const VegetationBones& bones, uint64_t model = 0x5eedull)
+{
+    return VegetationInstanceKey(bones.root, bones.rootBasis, model);
+}
+
 static void TestStaticPoseDetection()
 {
     // A static model must read as static from a moving camera, even far away -
@@ -342,8 +352,17 @@ static void TestStaticPoseDetection()
     // for a static model, and why a static one is never called animated.
     Check(VegetationPoseDelta(readA, readB) < kVegetationPoseTolerance * .5f,
         "a static model reads as static from a camera 500 yards away");
-    Check(VegetationInstanceKey(readA) == VegetationInstanceKey(readB),
-        "one placed model keeps one instance identity as the camera moves");
+    Check(KeyOf(readA) == KeyOf(readB), "one placed model keeps one instance identity as the camera moves");
+    Check(Near(readA.rootBasis[0][0], readB.rootBasis[0][0], 1e-4) &&
+          Near(readA.rootBasis[1][1], readB.rootBasis[1][1], 1e-4),
+        "and the world orientation the identity is built on is camera independent");
+    Check(KeyOf(readA, 0x11ull) != KeyOf(readA, 0x22ull),
+        "two models drawn from different vertex buffers are different instances");
+    // The origin is quantized, so the sub-centimetre noise of two world
+    // reconstructions cannot split one model into a new instance every frame.
+    VegetationBones nudged = readA;
+    nudged.root[0] += .01f; nudged.root[1] -= .01f;
+    Check(KeyOf(nudged) == KeyOf(readA), "reconstruction noise does not create a new instance");
 
     Palette animated;
     build(animated, cameraB);
@@ -362,15 +381,135 @@ static void TestStaticPoseDetection()
     const auto readRotated = AnalyzeVegetationBones(reinterpret_cast<const float(*)[4]>(rotated.registers.data()),
         kRegisters, cameraB.view, cameraB.position);
     Check(VegetationPoseDelta(readB, readRotated) > .5f, "a model that turned in place is not static");
+    Check(KeyOf(readB) != KeyOf(readRotated),
+        "and the same skeleton facing another way is a different instance");
 
-    // Different models in the same place are different instances.
+    // The bug this identity exists to prevent: the client draws one model in
+    // several batches and each batch's own vertices reference a different number
+    // of bones. Under the old key (which carried the skeleton) every such batch
+    // was a NEW instance, so nothing was ever stable, nothing ever leaned, and
+    // the HUD said 0. Two readings of one model that reveal different numbers of
+    // bones have to stay ONE instance.
     Palette shorter;
     for (unsigned i = 0; i < 4; ++i) shorter.Place(cameraA, i, chain[i]);
     const auto readShorter = AnalyzeVegetationBones(reinterpret_cast<const float(*)[4]>(shorter.registers.data()),
         kRegisters, cameraA.view, cameraA.position);
-    Check(VegetationInstanceKey(readA) != VegetationInstanceKey(readShorter),
-        "a smaller skeleton at the same spot is a different instance");
+    Check(readShorter.bones == 4 && Near(readShorter.pivot[0], readA.pivot[0], 1e-3) &&
+          Near(readShorter.pivot[2], readA.pivot[2], 1e-3),
+        "a batch that reveals four of six bones is the same placed model");
+    Check(KeyOf(readA) == KeyOf(readShorter),
+        "batches that reveal different numbers of bones are one instance, not two");
     Pass("static pose: a static model reads static from any camera, animated ones never do");
+}
+
+// ---------------------------------------------------------------------------
+// Model size: the draw's own vertices, not its bone pivots
+// ---------------------------------------------------------------------------
+static void TestGeometryMeasurement()
+{
+    const float eye[3] = { 0.f, 0.f, 0.f };
+    const Camera camera(eye, 0.f, 0.f);
+    const float ground[3] = { 120.f, -40.f, 31.f };
+    Palette palette;
+    // A grass tuft: ONE bone. Its pivot spans no height at all, which is exactly
+    // why the old size gate (height from the bone pivots) refused every tuft in
+    // the game and the HUD said 0 swaying with a one-bone model drawn.
+    palette.Place(camera, 0, ground);
+    const auto bones = AnalyzeVegetationBones(reinterpret_cast<const float(*)[4]>(palette.registers.data()),
+        kRegisters, camera.view, camera.position);
+    Check(bones.valid && bones.bones == 1, "a one-bone tuft is a valid palette");
+    Check(Near(bones.height, 0.0, 1e-6), "and its bone pivots span no height at all");
+
+    // The model's own vertices, from its base to its tip: 1.6 yards tall and a
+    // third of a yard across.
+    std::vector<VegetationGeometrySample> samples;
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        VegetationGeometrySample sample;
+        sample.position[0] = (i % 2) ? .18f : -.18f;
+        sample.position[1] = (i % 3) ? .12f : -.12f;
+        sample.position[2] = 1.6f * float(i) / 7.f;
+        sample.bone = 0;
+        samples.push_back(sample);
+    }
+    const auto measured = MeasureVegetationGeometry(samples.data(), unsigned(samples.size()),
+        reinterpret_cast<const float(*)[4]>(palette.registers.data()), 1, camera.view, camera.position);
+    Check(measured.valid && measured.samples == samples.size(), "the draw's own vertices measure the model");
+    Check(Near(measured.SpanZ(), 1.6, 1e-3), "the measured height is the model's real height");
+    Check(Near(measured.Footprint(), .36, 1e-3), "and the measured footprint is its real footprint");
+    Check(Near(measured.lowest[2], ground[2], 1e-3), "measured from the ground the model is placed on");
+    Check(measured.SpanZ() > bones.height, "which is information the bone pivots never had");
+
+    // A model-space vertex that references a bone the batch did not reveal is
+    // clamped to the last block instead of reading past the bound.
+    VegetationGeometrySample beyond = samples.front();
+    beyond.bone = 40;
+    float clamped[3]{};
+    Check(VegetationVertexToWorld(beyond, reinterpret_cast<const float(*)[4]>(palette.registers.data()), 1,
+              camera.view, camera.position, clamped),
+        "a vertex bound to an unrevealed bone is clamped, not dropped");
+    Check(Near(clamped[2], ground[2], 1e-3), "and lands where the last revealed bone puts it");
+
+    // The point a lean rotates about is where the model is PLACED - block 0 -
+    // and not the lowest vertex of whichever batch is being drawn: two batches of
+    // one tree rotating about two different points is the failure that pulls a
+    // trunk away from its canopy.
+    float origin[3]{};
+    Check(VegetationModelOrigin(reinterpret_cast<const float(*)[4]>(palette.registers.data()), camera.view,
+              camera.position, origin),
+        "the model has a placement point");
+    Check(Near(origin[0], ground[0], 1e-3) && Near(origin[1], ground[1], 1e-3) && Near(origin[2], ground[2], 1e-3),
+        "which is block 0's world position");
+
+    // Nothing to measure, nothing claimed.
+    Check(!MeasureVegetationGeometry(nullptr, 3, reinterpret_cast<const float(*)[4]>(palette.registers.data()), 1,
+              camera.view, camera.position).valid,
+        "no samples measure nothing");
+    Check(!MeasureVegetationGeometry(samples.data(), 0, reinterpret_cast<const float(*)[4]>(palette.registers.data()),
+              1, camera.view, camera.position).valid,
+        "an empty batch measures nothing");
+    std::vector<VegetationGeometrySample> broken(2, samples.front());
+    broken[0].position[0] = std::numeric_limits<float>::quiet_NaN();
+    const auto partial = MeasureVegetationGeometry(broken.data(), unsigned(broken.size()),
+        reinterpret_cast<const float(*)[4]>(palette.registers.data()), 1, camera.view, camera.position);
+    Check(partial.valid && partial.samples == 1, "a broken vertex is dropped, not propagated");
+    Pass("model size: measured from the draw's own vertices, and pivoted on its placement point");
+}
+
+// ---------------------------------------------------------------------------
+// Which draws may be leaned at all
+// ---------------------------------------------------------------------------
+static void TestShaderAdmission()
+{
+    // The client's M2 model layout: the projection in c2..c5, exactly as
+    // DrawCallClassifier and CameraCapture's sky fallback read it.
+    float model[6][4] = { { 1.5f, 0.f, 0.f, 0.f }, { 0.f, 1.5f, 0.f, 0.f }, { 1.5f, 0.f, 0.f, 0.f },
+        { 0.f, 1.5f, 0.f, 0.f }, { 0.f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 1.f, 0.f } };
+    Check(IsM2ModelConstants(model), "the client's model projection identifies an M2 draw");
+    float terrain[6][4] = { { 0.f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f, 0.f }, { 1.5f, 0.f, 0.f, 0.f },
+        { 0.f, 1.5f, 0.f, 0.f }, { 0.f, 0.f, 0.2f, 0.f }, { 0.f, 0.f, 0.f, 1.f } };
+    Check(!IsM2ModelConstants(terrain), "a layout whose projection is not the model row is not a model");
+    float transposed[6][4] = { { 0.f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f, 0.f }, { 0.f, 1.5f, 0.f, 0.f },
+        { 1.5f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f, 0.f }, { 0.f, 0.f, 1.f, 0.f } };
+    Check(!IsM2ModelConstants(transposed), "and neither is a projection with its rows the other way round");
+    float broken[6][4]{};
+    for (int i = 0; i < 6; ++i) for (int j = 0; j < 4; ++j) broken[i][j] = model[i][j];
+    broken[3][3] = std::numeric_limits<float>::quiet_NaN();
+    Check(!IsM2ModelConstants(broken), "NaN constants prove nothing");
+    Check(!IsM2ModelConstants(nullptr), "and no constants at all prove nothing");
+
+    for (uint64_t hash : kRigidM2Shaders)
+        Check(IsRigidM2Shader(hash), "a verified rigid M2 shader is accepted");
+    for (uint64_t hash : kUnskinnedM2Shaders)
+        Check(!IsRigidM2Shader(hash), "an unskinned model variant is not");
+    Check(!IsRigidM2Shader(0) && !IsRigidM2Shader(~0ull), "an unproven shader is not");
+    for (uint64_t hash : kNonModelShaders)
+    {
+        Check(IsNonModelShader(hash), "a pass that must never be leaned is refused");
+        Check(!IsRigidM2Shader(hash), "and it is not on the rigid list as well");
+    }
+    Check(!IsNonModelShader(0) && !IsNonModelShader(~0ull), "an unknown shader is not a known non-model");
+    Pass("shader admission: the model layout or a captured variant, and never the shadow/UI/water passes");
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +763,43 @@ static void TestWindDebugLine()
     wind.affectVegetation = false;
     Check(WindDebugLines(wind)[4].find("Plants: legacy") != std::string::npos,
         "and reports the legacy state when unlinked");
-    Pass("the optional wind HUD reports the vegetation link");
+
+    // The vegetation rows. The first in-client report of this feature was "the
+    // HUD says 0 swaying and nothing moves", and the gates that refused every
+    // draw were the ones that counted nothing - so what the rows say, and how
+    // short they are, is pinned here rather than left to a comment.
+    VegetationSettings settings;
+    VegetationStatus status;
+    settings.enabled = false;
+    auto rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 1 && rows[0] == "Plants: off (F7)", "an off effect says so in one line");
+    settings.enabled = true;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 1 && rows[0].find("legacy") != std::string::npos,
+        "an unlinked wind leaves the single row the HUD had before this feature");
+    wind.affectVegetation = true;
+
+    status.swaying = 34; status.batches = 51; status.candidates = 51;
+    status.skippedMaterial = 812; status.maxAngle = 12.3f; status.lastMeasured = 4.2f;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows.size() == 2, "an active session gets the state row and the gate row");
+    Check(rows[0].find("34 leaning of 51 drew") != std::string::npos,
+        "the state row counts what leans out of the foliage draws that arrived");
+    Check(rows[0].find("812 solid") != std::string::npos,
+        "and how many solid model draws it passed over, which is what a solid-material bug looks like");
+    Check(rows[1].find("none refused") != std::string::npos, "the gate row is quiet while nothing is refused");
+    Check(rows[1].find("h 4.2 yd") != std::string::npos, "and always shows the size the gate looked at");
+    status.skippedShader = 812; status.skippedPalette = 3; status.learnedShaders = 1;
+    rows = VegetationDebugLines(status, settings, wind);
+    Check(rows[1].find("vs 812") != std::string::npos && rows[1].find("pal 3") != std::string::npos &&
+          rows[1].find("new 1") != std::string::npos, "and names every gate that refused, with its count");
+    Check(rows[1].find("vs 812") < rows[1].find("pal 3"), "in the order the gates run in");
+    Check(rows[1].find("mat") == std::string::npos, "without offering a solid trunk as a refusal");
+    // The rows have to fit the HUD's own box: 600 logical pixels at a 16 pixel
+    // font, drawn 10 pixels in from the left and clipped 18 short of the right.
+    // A clipped diagnostic is exactly as useful as the "0" the player reported.
+    for (const auto& row : rows) Check(row.size() <= 72, "a vegetation HUD row fits in the box it is drawn in");
+    Pass("the vegetation HUD: what leans, what arrived, and the gate that is refusing");
 }
 
 // ---------------------------------------------------------------------------
@@ -716,37 +891,74 @@ static void TestConfigurationAndWiring()
         "vegetation consumes the published snapshot, in the same place the waves and clouds do");
     Check(main.find("vegetation::Reset(d)") != main.npos, "device reset drops the vegetation draw caches");
     Check(main.find("ReloadVegetationTuning()") != main.npos, "F7, F12 and location changes reload it");
+    // Each of the four draw entry points describes its own batch, so none of them
+    // can pass an argument in the wrong order.
+    for (const char* factory : { "vegetation::PlainDraw(", "vegetation::IndexedDraw(",
+                                 "vegetation::PlainUpDraw(", "vegetation::IndexedUpDraw(" })
+    {
+        size_t uses = 0, at = 0;
+        while ((at = main.find(factory, at)) != main.npos) { ++uses; at += 1; }
+        Check(uses == 1, "each draw entry point describes its batch exactly once");
+    }
+    Check(main.find("vegetation::DebugLines()") != main.npos,
+        "the vegetation HUD rows are drawn by the wind debug text");
+
     const auto sway = Read("src/Effects/VegetationSway.h");
     Check(sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos &&
           sway.find("SetVertexShaderConstantF(renderer::kM2BoneBaseRegister") != sway.npos,
           "the lean is written over the client's own bone palette registers");
-    Check(sway.find("saved") != sway.npos && sway.find("restore") != sway.npos,
+    Check(sway.find("m_saved") != sway.npos && sway.find("restore") != sway.npos,
         "and the client's matrices are put back after the draw");
-    // The disabled path is inert by construction: every early return (skip flag,
-    // F11, [Vegetation] Enabled, the wind link, the camera gate, the cutout gate
-    // and the skinned-layout gate) sits ABOVE the first device call, so with the
-    // wind, the link or the effect off, a draw makes no palette read and no
-    // constant write at all. Ordering is the whole guarantee, so it is pinned
-    // here rather than left to a comment.
-    const auto scopeStart = sway.find("Scope(IDirect3DDevice9* device, bool skip)");
-    const auto firstDeviceCall = sway.find("GetVertexShaderConstantF", scopeStart);
-    const auto cutoutGate = sway.find("if (!foliageMaterial && !g_anySwaying) return;", scopeStart);
-    const auto skinnedGate = sway.find("if (!detail::Skinned(renderer::g_trackedState.currentVDecl", scopeStart);
+    // The bug this rewrite exists to fix. The palette bound used to be taken from
+    // the constant file itself - read c31 upwards while the blocks still look
+    // like matrices - which counts the PREVIOUS draw's bones as this model's, so
+    // a six-bone bush was analysed as a seventy-five-bone skeleton and its height
+    // came from bone pivots that span nothing at all. Both facts now come from
+    // the draw's own vertices, and the palette is never read wider than the
+    // model's own bones.
+    Check(sway.find("detail::BatchGeometry") != sway.npos,
+        "the model's bone bound and its own vertices are read from the draw");
+    Check(sway.find("MeasureVegetationGeometry") != sway.npos, "the size gate measures those vertices");
+    Check(sway.find("VegetationModelOrigin") != sway.npos, "and the lean pivots on the model's placement point");
+    Check(sway.find("ReadPalette(device, rootKey, frame.frameIndex, bound") != sway.npos,
+        "the palette is read bounded, never as the whole constant file");
+    // Inert when off, and every refusal counted. Ordering is the whole guarantee
+    // of the first, so it is pinned here rather than left to a comment: the
+    // disabled, unlinked, up-front (particle/UI), unverified-shader and
+    // non-model-declaration paths all return above the first palette read.
+    const auto scopeStart = sway.find("Scope(IDirect3DDevice9* device, bool skip");
+    const auto firstPaletteRead = sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister", scopeStart);
+    const auto linkGate = sway.find("if (!frame.wind.DrivesVegetation()) return;", scopeStart);
+    const auto upGate = sway.find("if (draw.verticesUP) return;", scopeStart);
     const auto shaderGate = sway.find(
-        "if (!renderer::IsRigidM2Shader(renderer::g_trackedState.vsHash)) return;", scopeStart);
-    Check(scopeStart != sway.npos && firstDeviceCall != sway.npos &&
-          cutoutGate != sway.npos && cutoutGate < firstDeviceCall &&
-          skinnedGate != sway.npos && skinnedGate < firstDeviceCall &&
-          shaderGate != sway.npos && shaderGate < firstDeviceCall,
-        "the disabled, unlinked and non-vegetation paths return before any device call");
-    // The whitelist that keeps the lean geometry honest: only the client's
-    // verified rigid skinned M2 shaders - the captures the torch path proved in
-    // the client - have an object -> view bone palette at c31 in the frame
-    // camera's own space. The unskinned variants keep one matrix there, and an
-    // unknown (shadow-depth, portrait, UI, post) shader is never touched.
-    for (uint64_t hash : kRigidM2Shaders) Check(IsRigidM2Shader(hash), "a verified rigid M2 shader is accepted");
-    for (uint64_t hash : kUnskinnedM2Shaders) Check(!IsRigidM2Shader(hash), "an unskinned model variant is not");
-    Check(!IsRigidM2Shader(0) && !IsRigidM2Shader(~0ull), "an unproven shader is not");
+        "if (!detail::ShaderAccepted(device, frame, renderer::g_trackedState.vsHash", scopeStart);
+    const auto layoutGate = sway.find("detail::Layout(renderer::g_trackedState.currentVDecl", scopeStart);
+    Check(scopeStart != sway.npos && firstPaletteRead != sway.npos &&
+          linkGate != sway.npos && linkGate < firstPaletteRead &&
+          upGate != sway.npos && upGate < firstPaletteRead &&
+          shaderGate != sway.npos && shaderGate < firstPaletteRead &&
+          layoutGate != sway.npos && layoutGate < firstPaletteRead,
+        "the disabled, unlinked and non-model paths return before the first palette read");
+    for (const char* counter : { "candidates", "skippedMaterial", "skippedCamera", "skippedViewport",
+                                 "skippedShader", "skippedLayout", "skippedGeometry", "skippedPalette",
+                                 "skippedShape", "skippedSize", "skippedAnimated", "skippedRange",
+                                 "unbounded", "learnedShaders", "swaying", "batches", "maxAngle",
+                                 "lastHeight", "lastMeasured" })
+        Check(sway.find(std::string("Status().") + counter) != sway.npos,
+            "every counter the HUD can report is incremented by the device half");
+    // The one thing a counter cannot say is WHICH shader it counted, so both
+    // verdicts on a variant this build had not seen go to the renderer's log by
+    // hash - and the log is wired from the same place the settings are reloaded.
+    Check(sway.find("ReportShader") != sway.npos &&
+          sway.find("a foliage vertex shader was refused") != sway.npos &&
+          sway.find("Add it to kRigidM2Shaders") != sway.npos,
+        "an unproven shader is reported by hash, accepted or refused");
+    Check(main.find("vegetation::logLine=Log;") != main.npos,
+        "and those reports reach the renderer's own log");
+    const auto hud = Read("src/Environment/WindDebug.h");
+    for (const char* label : { "cam", "vs", "decl", "geo", "pal", "shape", "size", "move", "far", "new" })
+        Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
+            "every gate the device half counts has a name on the HUD row");
     Check(sway.find("alphaTest || renderer::g_trackedState.alphaBlend") != sway.npos,
         "both transparent material modes reveal foliage, not just the alpha tested one");
     Check(Read("src/Core/M2ShaderProbe.h").find("kM2BoneBaseRegister") != std::string::npos,
@@ -768,6 +980,8 @@ int main() try
     TestFieldAndSampling();
     TestStrengthSizesAndGates();
     TestWindDebugLine();
+    TestGeometryMeasurement();
+    TestShaderAdmission();
     TestConfigurationAndWiring();
     std::puts("Vegetation wind regressions passed");
     return 0;
