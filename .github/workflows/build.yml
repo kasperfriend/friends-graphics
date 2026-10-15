@@ -136,15 +136,23 @@ jobs:
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
-          & cmd.exe /c tools\Test-Wind.cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = & cmd.exe /c tools\Test-Wind.cmd 2>&1
+          if ($LASTEXITCODE -ne 0) { $output | Write-Output; exit $LASTEXITCODE }
+          # The suite's own PASS lines are the evidence a report is read for: the
+          # crossing gate's real-file checks run nowhere else.
+          $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '
+          $passed = $passed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Wind regressions::$passed"
 
       - name: Vegetation wind sway regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
-          & cmd.exe /c tools\Test-VegetationWind.cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = & cmd.exe /c tools\Test-VegetationWind.cmd 2>&1
+          if ($LASTEXITCODE -ne 0) { $output | Write-Output; exit $LASTEXITCODE }
+          $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '
+          $passed = $passed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Vegetation sway regressions::$passed"
 
       - name: F7 overlay state regressions
         if: matrix.configuration == 'Release'

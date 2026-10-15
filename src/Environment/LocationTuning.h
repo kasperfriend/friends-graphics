@@ -1,5 +1,8 @@
 #pragma once
 #include <windows.h>
+#include <algorithm>
+#include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,6 +69,12 @@ inline bool ScopedFileUnchanged() {
 }
 inline std::wstring LowerKeyName(const wchar_t* key) {
     std::wstring text=key?key:L"";
+    for(auto& c:text)if(c>=L'A'&&c<=L'Z')c=static_cast<wchar_t>(c+(L'a'-L'A'));
+    return text;
+}
+// Section names come off a listing that is already lowercased, so the fingerprint
+// has no reason to build the string LowerKeyName would return from scratch.
+inline std::wstring& LowerInPlace(std::wstring& text) {
     for(auto& c:text)if(c>=L'A'&&c<=L'Z')c=static_cast<wchar_t>(c+(L'a'-L'A'));
     return text;
 }
@@ -243,34 +252,200 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
 // a scoped read identically when neither of them overrides anything, which is the
 // common case for the `Area=0`/`Area=223` flap this client produces walking a
 // border. What decides it is therefore the VALUES a place resolves to, not its
-// ids: the global file's identity plus every scoped section that belongs to the
+// ids: both files' own identity plus every scoped section that belongs to the
 // place's three levels, keys and values. Two places with the same fingerprint
 // answer all nine subsystems the same way, so the reload is skipped and the log
-// says 0 ms instead of a stalled second.
-inline uint64_t FingerprintMix(uint64_t hash,const std::wstring& text) {
+// says 0 us instead of a stalled second - and the nine subsystems read this place
+// through nothing else: every one of them goes through ReadInt/ReadString/
+// HasScopedValue, which resolve against these levels and these files alone.
+//
+// The sections are read from the FILE, never from what a previous read happened
+// to cache. That distinction is what keeps this from trading a stall for a setting
+// that quietly stops working: a place whose own scope was written by hand, or by
+// the editor, in a section no read in this session ever touched has no cached
+// section at all, so a fingerprint built from the cache would equal the last
+// place's, the crossing would be skipped, and the override would never be read.
+// The file's own section list answers that question honestly, one listing per file
+// identity, and a listing that cannot be proven (truncated at the profile API's
+// own buffer ceiling) refuses the skip instead of guessing.
+//
+inline void FingerprintMix(uint64_t& hash,const std::wstring& text) {
     for(const wchar_t character:text)hash=(hash^static_cast<uint64_t>(character))*1099511628211ull;
-    return hash*1099511628211ull;
+    hash*=1099511628211ull;
 }
-inline uint64_t ScopedFingerprint(const LocationContext& location) {
-    uint64_t hash=1469598103934665603ull;
-    auto& cache=ProfileCache();
-    for(const std::wstring& path:{baseFile,localFile}) {
-        auto found=cache.find(path);
-        if(found==cache.end())continue;
-        hash^=found->second.written;hash*=1099511628211ull;
-        hash^=found->second.bytes;hash*=1099511628211ull;
-    }
-    const auto& sections=cache[localFile].sections;
-    for(int level=0;level<3;++level) {
-        const std::wstring prefix=LowerKeyName((Scope(level)+L".").c_str());
-        for(const auto& [name,values]:sections) {
-            if(name.compare(0,prefix.size(),prefix)!=0)continue;
-            hash=FingerprintMix(hash,name);
-            for(const auto& [key,value]:values) {hash=FingerprintMix(hash,key);hash=FingerprintMix(hash,value);}
+// What a file IS right now - the stat a read would make, not what an earlier read
+// remembered of it.
+inline void FileIdentity(const std::wstring& path,ULONGLONG& written,DWORD& bytes) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if(!GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)) {written=0;bytes=0;return;}
+    written=(static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
+    bytes=info.nFileSizeLow;
+}
+// Every section name a file holds, read from the file itself and kept per identity,
+// so a section that has never been read still counts.
+struct SectionListing {
+    bool known=false;
+    ULONGLONG written=0;
+    DWORD bytes=0;
+    std::vector<std::wstring> names;
+};
+inline std::unordered_map<std::wstring,SectionListing>& SectionNameCache() {
+    static std::unordered_map<std::wstring,SectionListing> files;
+    return files;
+}
+// nullptr means "this listing proves nothing" - the profile API truncated it at
+// its own buffer ceiling - and the caller then refuses to skip rather than assume
+// a file holds no more sections than fit.
+inline const std::vector<std::wstring>* SectionNamesOf(const std::wstring& path,ULONGLONG written,DWORD bytes) {
+    if(path.empty())return nullptr;
+    SectionListing& listing=SectionNameCache()[path];
+    if(!listing.known||listing.written!=written||listing.bytes!=bytes) {
+        // The profile API's ceiling for a section-name string; a file this module
+        // writes cannot come near it.
+        std::vector<wchar_t> buffer(32768);
+        const DWORD length=GetPrivateProfileSectionNamesW(buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str());
+        listing.known=false;listing.written=written;listing.bytes=bytes;listing.names.clear();
+        if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;
+        listing.known=true;
+        DWORD at=0;
+        while(at<length&&buffer[at]) {
+            const std::wstring name(&buffer[at]);
+            at+=static_cast<DWORD>(name.size())+1;
+            listing.names.push_back(LowerKeyName(name.c_str()));
         }
     }
-    return hash;
+    return listing.known?&listing.names:nullptr;
 }
+// Which section a name belongs to. A section is named `Scope(level) + "." + suffix`
+// by the scoped writes and by the suffix alone in the shipped file, so stripping a
+// leading map/zone/area chain leaves the suffix both files agree on: `wind`,
+// `water`, `postprocess` - never the ids of the place that wrote it.
+inline std::wstring SectionSuffixOf(const std::wstring& name) {
+    // Both files answer the same way: the listing of the scoped file is lowercased
+    // already, the shipped one is not.
+    std::wstring lowered(name);
+    LowerInPlace(lowered);
+    if(lowered.compare(0,4,L"map.")!=0)return lowered;
+    const auto number=[&lowered](size_t& at) {
+        const size_t begin=at;
+        while(at<lowered.size()&&lowered[at]>=L'0'&&lowered[at]<=L'9')++at;
+        return at>begin;
+    };
+    size_t at=4;
+    if(!number(at)||at>=lowered.size()||lowered[at]!=L'.')return lowered;
+    ++at;
+    if(lowered.compare(at,5,L"zone.")==0) {
+        at+=5;
+        if(!number(at)||at>=lowered.size()||lowered[at]!=L'.')return lowered;
+        ++at;
+    }
+    if(lowered.compare(at,5,L"area.")==0) {
+        at+=5;
+        if(!number(at)||at>=lowered.size()||lowered[at]!=L'.')return lowered;
+        ++at;
+    }
+    return at<lowered.size()?lowered.substr(at):lowered;
+}
+// What the last apply was FOR, and whether the same thing is still in force.
+// This client's place flaps across a boundary while the player walks it (`Area=0`
+// and `Area=223` trading places, each alternation a settle), and a settle of a
+// place whose tuning is already in force needs no re-read at all: the values can
+// only differ if one of the two files changed in between, and both are checked
+// here by their own identity - the same stat a read would make. This is the
+// difference between a crossing that re-reads nine subsystems and one that does
+// nothing, and it is what the log line of the next report is read for.
+// A place does not have to be the SAME place to need no re-read: two areas answer
+// a scoped read identically when neither of them overrides anything, which is the
+// common case for the `Area=0`/`Area=223` flap this client produces walking a
+// border. What decides it is therefore the VALUES a place resolves to, not its
+// ids: both files' own identity plus every scoped section that belongs to the
+// place's three levels, keys and values. Two places with the same fingerprint
+// answer all nine subsystems the same way, so the reload is skipped and the log
+// says 0 us instead of a stalled second - and the nine subsystems read this place
+// through nothing else: every one of them goes through ReadInt/ReadString/
+// HasScopedValue, which resolve against these levels and these files alone.
+//
+// The sections are read from the FILE, never from what a previous read happened
+// to cache. That distinction is what keeps this from trading a stall for a setting
+// that quietly stops working: a place whose own scope was written by hand, or by
+// the editor, in a section no read in this session ever touched has no cached
+// section at all, so a fingerprint built from the cache would equal the last
+// place's, the crossing would be skipped, and the override would never be read.
+// The file's own section list answers that question honestly, one listing per file
+// identity, and a listing that cannot be proven (truncated at the profile API's
+// own buffer ceiling) refuses the skip instead of guessing.
+//
+// What is compared per place is the ANSWER, not the file: for every suffix that
+// either file names a section with, the value a scoped read of that section would
+// resolve - the deepest level holding the key wins, exactly as ReadAtLevel walks
+// it - plus whether a scope holds the key at all, which is the second question the
+// same reads ask (the water colours use it so that a shipped per-zone colour never
+// outranks a player's own scope). Which LEVEL answered is not part of the answer:
+// two scopes that resolve to the same value answer every read the same way, and
+// mixing the level in would refuse to skip the very `Area=0`/`Area=223` flap this
+// exists for.
+inline uint64_t ScopedFingerprint(const LocationContext& location) {
+    // Scope() names a scope from the active place, and this is asked about the
+    // place that settled: answer as that place and put the active one back.
+    const LocationContext previous=active;
+    active=location;
+    uint64_t hash=1469598103934665603ull;
+    bool provable=true;
+    const std::vector<std::wstring>* localNames=nullptr;
+    const std::vector<std::wstring>* baseNames=nullptr;
+    for(const std::wstring& path:{baseFile,localFile}) {
+        if(path.empty())continue;
+        ULONGLONG written=0;DWORD bytes=0;
+        FileIdentity(path,written,bytes);
+        FingerprintMix(hash,std::to_wstring(written));
+        FingerprintMix(hash,std::to_wstring(bytes));
+        const std::vector<std::wstring>* names=SectionNamesOf(path,written,bytes);
+        if(!names)provable=false;
+        if(path==localFile)localNames=names; else baseNames=names;
+    }
+    if(provable&&!localFile.empty()) {
+        std::vector<std::wstring> suffixes;
+        for(const std::vector<std::wstring>* names:{localNames,baseNames}) {
+            if(!names)continue;
+            for(const std::wstring& name:*names) {
+                std::wstring suffix=SectionSuffixOf(name);
+                if(suffix.empty())continue;
+                if(std::find(suffixes.begin(),suffixes.end(),suffix)==suffixes.end())
+                    suffixes.push_back(std::move(suffix));
+            }
+        }
+        std::sort(suffixes.begin(),suffixes.end());
+        ProfileValues& file=ProfileCache()[localFile];
+        ProfileIdentity(file,localFile);
+        const int top=location.areaId?2:1;
+        for(const std::wstring& suffix:suffixes) {
+            // The walk ReadAtLevel makes, answered from the same cache it uses:
+            // the deepest level holding a key decides its value, and whether any
+            // scope holds it at all is mixed too.
+            std::map<std::wstring,std::wstring> effective;
+            std::set<std::wstring> present;
+            for(int level=top;level>=0;--level) {
+                const std::wstring section=LowerKeyName((Scope(level)+L"."+suffix).c_str());
+                const auto* values=ProfileSection(file,localFile,section.c_str());
+                if(!values)continue;
+                for(const auto& [key,value]:*values) {
+                    present.insert(key);
+                    effective.try_emplace(key,value);
+                }
+            }
+            FingerprintMix(hash,suffix);
+            for(const auto& [key,value]:effective) {FingerprintMix(hash,key);FingerprintMix(hash,value);}
+            if(!present.empty()) {
+                FingerprintMix(hash,L"scoped");
+                for(const std::wstring& key:present)FingerprintMix(hash,key);
+            }
+        }
+    }
+    active=previous;
+    return provable?hash:0;
+}
+// The fingerprint the nine subsystems were last configured with, and whether that
+// configuration is still the one this place would produce.
 inline uint64_t appliedFingerprint=0;
 inline bool appliedEditable=false;
 inline bool AppliedTuningStillInForce(const LocationContext& location,bool verified) {
@@ -278,7 +453,8 @@ inline bool AppliedTuningStillInForce(const LocationContext& location,bool verif
     if(appliedEditable!=(location.valid&&verified))return false;
     if(!ScopedFileUnchanged())return false;
     if(!baseFile.empty()&&!ProfileIdentity(ProfileCache()[baseFile],baseFile))return false;
-    return ScopedFingerprint(location)==appliedFingerprint;
+    const uint64_t current=ScopedFingerprint(location);
+    return current!=0&&current==appliedFingerprint;
 }
 inline void MarkTuningApplied(const LocationContext& location,bool verified) {
     appliedEditable=location.valid&&verified;

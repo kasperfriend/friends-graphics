@@ -603,6 +603,22 @@ static void TestConfigurationAndWiring()
           main.find("if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}") != main.npos,
           "a location change is applied once the place has held still, one reload per gap, and the first one at once so "
           "startup configures itself - while a place whose tuning is already in force is skipped without spending the gap");
+    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(") != tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") != tuning.npos &&
+          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") != tuning.npos &&
+          tuning.find("const std::vector<std::wstring>* names=SectionNamesOf(path,written,bytes);") != tuning.npos &&
+          tuning.find("if(path==localFile)localNames=names; else baseNames=names;") != tuning.npos &&
+          tuning.find("std::wstring suffix=SectionSuffixOf(name);") != tuning.npos &&
+          tuning.find("effective.try_emplace(key,value);") != tuning.npos &&
+          tuning.find("present.insert(key);") != tuning.npos &&
+          tuning.find("FingerprintMix(hash,L\"scoped\");") != tuning.npos &&
+          tuning.find("FingerprintMix(hash,suffix);") != tuning.npos &&
+          tuning.find("return current!=0&&current==appliedFingerprint;") != tuning.npos &&
+          tuning.find("return provable?hash:0;") != tuning.npos,
+          "the skip is decided on what the FILE holds, never on what a previous read cached: the section list and "
+          "the per-suffix answers are read from the profile file itself, so a scope written by hand - or by the "
+          "editor - in a section no read has touched still refuses the skip instead of quietly never applying, and a "
+          "listing the API truncated refuses to skip at all rather than assume the file holds no more sections");
     const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");
@@ -653,7 +669,54 @@ static void TestConfigurationAndWiring()
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
-    Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence and manual reload");
+    // The crossing gate, against the real profile API: a settle of a place whose own
+    // scoped settings already resolve to what the nine subsystems are running must be
+    // skippable, and a place whose scope holds anything a read would pick up must
+    // NEVER be skipped. The second half is what keeps this from trading a stall for a
+    // setting that quietly stops working: a skip decided from what was cached instead
+    // of from what the file holds leaves a scope written by the editor, or by hand,
+    // unread - and its value dead - until something else happens to change.
+    const auto here = LocationContext{0,12,87,true};
+    const auto next = LocationContext{0,12,88,true};
+    const auto scoped = base + L"LocationGraphics.ini";
+    locationtuning::Sync(base, here, true);
+    locationtuning::MarkTuningApplied(here, true);
+    Check(locationtuning::AppliedTuningStillInForce(here, true), "the place that was just applied is still in force");
+    locationtuning::Sync(base, next, true);
+    Check(locationtuning::AppliedTuningStillInForce(next, true),
+          "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
+          "into it is skipped without re-reading nine subsystems");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
+          "a scope written for the neighbouring area, as the editor or a hand edit would");
+    locationtuning::Sync(base, next, true);
+    Check(load().direction == WindDirection::South, "the neighbouring area's own scope is what a read answers now");
+    locationtuning::Sync(base, next, true);
+    Check(!locationtuning::AppliedTuningStillInForce(next, true),
+          "an area whose own scope overrides a value is never skipped: the reload has to read it");
+    locationtuning::MarkTuningApplied(next, true);
+    Check(locationtuning::AppliedTuningStillInForce(next, true), "the neighbouring place is in force once it was applied");
+    Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for the neighbouring area yet");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
+          "a scope written into a section no read in this session has touched");
+    locationtuning::Sync(base, next, true);
+    Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
+    locationtuning::Sync(base, next, true);
+    Check(locationtuning::HasScopedValue(L"Water", L"WaterColour"),
+          "what the water colours ask - does this scope hold the key at all - is answered by the hand-written scope");
+    Check(!locationtuning::AppliedTuningStillInForce(next, true),
+          "a scope no read in this session ever touched still changes the place's fingerprint, so a crossing is "
+          "never skipped past the value it holds");
+    locationtuning::MarkTuningApplied(next, true);
+    Check(locationtuning::AppliedTuningStillInForce(next, true), "and once that was applied the place is skipped again");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
+          "the neighbouring area's wind is edited");
+    locationtuning::Sync(base, next, true);
+    Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
+    locationtuning::Sync(base, next, true);
+    Check(!locationtuning::AppliedTuningStillInForce(next, true),
+          "an edited value refuses the skip with nothing else changed");
+    Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence, manual reload and the "
+         "crossing gate over real files");
 #endif
 }
 int main() try
