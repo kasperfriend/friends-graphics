@@ -6,6 +6,7 @@
 // runner, so the settings parity checked here is also checked where the real
 // location-scoped INI read/save/reload path lives.
 #include "../src/Core/TextureCutout.h"
+#include "../src/Environment/GrassShaderWind.h"
 #include "../src/Environment/VegetationWind.h"
 #include "../src/Environment/WindTuning.h"
 #include "../src/Environment/WindDebug.h"
@@ -940,7 +941,7 @@ static std::map<std::wstring, int> VegetationValues(const VegetationSettings& s)
         {L"GustPercent",int(std::lround(s.gust * 100))},{L"FlutterPercent",int(std::lround(s.flutter * 100))},
         {L"MaxAngleDegrees",int(std::lround(s.maxAngle))},{L"PlantPercent",int(std::lround(s.plantGain * 100))},
         {L"TreePercent",int(std::lround(s.treeGain * 100))},{L"DistanceYards",int(std::lround(s.distance))},
-        {L"SwayAnimatedModels",s.animatedModels},{L"DebugView",s.debugView}};
+        {L"GrassBlades",s.grassBlades},{L"SwayAnimatedModels",s.animatedModels},{L"DebugView",s.debugView}};
 }
 
 static void TestConfigurationAndWiring()
@@ -1051,8 +1052,29 @@ static void TestConfigurationAndWiring()
         "the model's bone bound and its own vertices are read from the draw");
     Check(sway.find("MeasureVegetationGeometry") != sway.npos, "the size gate measures those vertices");
     Check(sway.find("VegetationModelOrigin") != sway.npos, "and the lean pivots on the model's placement point");
-    Check(sway.find("ReadPalette(device, rootKey, frame.frameIndex, bound") != sway.npos,
+    Check(sway.find("ReadPalette(device, bound, registers)") != sway.npos,
         "the palette is read bounded, never as the whole constant file");
+    // The defect this build removes, and the two things that make the roll-back
+    // provable. A palette remembered from an earlier batch of the same instance
+    // is not what the device holds at this draw - the client re-uploads bones in
+    // the middle of a frame - so the read is per draw, the write is armed before
+    // it is attempted so a refused write is rolled back too, and the first leans
+    // of a session have their roll-back read back and compared.
+    Check(sway.find("g_palette") == sway.npos && sway.find("PaletteCache") == sway.npos &&
+          sway.find("registersRead") == sway.npos,
+        "no palette is remembered from another batch: the roll-back is this draw's own values");
+    Check(sway.find("m_wrote = true;") < sway.find("SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, leaned[0]") &&
+          sway.find("SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, leaned[0]") != sway.npos,
+        "the roll-back is armed before the write is attempted, not after it succeeded");
+    Check(sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, back[0], m_count)") != sway.npos &&
+          sway.find("if (std::memcmp(back[row], m_saved[row], sizeof(float[4])) != 0) ++differing;") != sway.npos &&
+          sway.find("std::memcmp(back[row], m_saved[row]") < sway.find("char text[416]") &&
+          sway.find("Status().restoreMismatch = differing;") != sway.npos,
+        "and what went back is read back and compared, because a write that did not land is the one failure a "
+        "report of a deformed shoulder cannot otherwise be told apart from a gate that let the wrong draw through");
+    Check(Read("src/Environment/VegetationWind.h").find("unsigned restoreMismatch = 0;") != std::string::npos &&
+          Read("src/Environment/WindDebug.h").find("report(\"restore\", status.restoreMismatch);") != std::string::npos,
+        "a mismatch is counted where the player can see it, not only in the log");
     // Inert when off, and every refusal counted. Ordering is the whole guarantee
     // of the first, so it is pinned here rather than left to a comment: the
     // disabled, unlinked, up-front (particle/UI), unverified-shader and
@@ -1062,14 +1084,23 @@ static void TestConfigurationAndWiring()
     const auto linkGate = sway.find("if (!frame.wind.DrivesVegetation()) return;", scopeStart);
     const auto upGate = sway.find("if (draw.verticesUP) return;", scopeStart);
     const auto shaderGate = sway.find("detail::ShaderAccepted(device, frame, shader.hash)", scopeStart);
-    const auto layoutGate = sway.find("detail::Layout(device, detail::BoundDeclaration(device)", scopeStart);
-    const auto layoutReport = sway.find("frame.frameIndex, true);", layoutGate);
+    const auto declarationRead = sway.find("IDirect3DVertexDeclaration9* declaration = detail::BoundDeclaration(device);",
+        scopeStart);
+    const auto layoutGate = sway.find("detail::Layout(device, declaration, frame.frameIndex, true, false)", scopeStart);
+    // And the branch that hands an unskinned foliage draw to the blade path is
+    // one of those early paths: it must run before any palette is read, because
+    // the draws it serves are exactly the ones that have no palette at all.
+    const auto bladeBranch = sway.find("grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,",
+        scopeStart);
     Check(scopeStart != sway.npos && firstPaletteRead != sway.npos &&
           linkGate != sway.npos && linkGate < firstPaletteRead &&
           upGate != sway.npos && upGate < firstPaletteRead &&
           shaderGate != sway.npos && shaderGate < firstPaletteRead &&
-          layoutGate != sway.npos && layoutGate < firstPaletteRead,
-        "the disabled, unlinked and non-model paths return before the first palette read");
+          declarationRead != sway.npos && declarationRead < firstPaletteRead &&
+          layoutGate != sway.npos && layoutGate < firstPaletteRead &&
+          bladeBranch != sway.npos && bladeBranch < firstPaletteRead,
+        "the disabled, unlinked and non-model paths return before the first palette read, and the blade path is one of "
+        "them");
     for (const char* counter : { "candidates", "modelDraws", "skippedMaterial", "skippedCamera",
                                  "skippedViewport", "skippedFixedFunction", "skippedNeverModel",
                                  "skippedShader", "skippedWorld", "skippedLayout", "skippedGeometry",
@@ -1201,8 +1232,9 @@ static void TestConfigurationAndWiring()
     Check(sway.find("detail::BoundDeclaration(device)") != sway.npos &&
           sway.find("device->GetVertexDeclaration(bound.GetAddressOf())") != sway.npos,
         "and the declaration is the one the device is drawing through");
-    Check(layoutReport != sway.npos,
-        "a declaration that is not the model path is named in the log, mirror or not");
+    Check(sway.find("frame.frameIndex, true, false)") != sway.npos,
+        "a declaration that is not the model path is named in the log, mirror or not - and still read, because the "
+        "blade path needs what it says about the texture coordinate");
     Check(sway.find("renderer::g_trackedState.vsHash, mirrorMaterial") == sway.npos &&
           sway.find("detail::Layout(renderer::g_trackedState.currentVDecl") == sway.npos,
         "no gate decides a draw's identity from the state mirror");
@@ -1279,8 +1311,12 @@ static void TestConfigurationAndWiring()
         "read as the device has it bound, read-only, so the client's texture is never disturbed");
     Check(sway.find("ClassifyTextureCutout(") != sway.npos,
         "and decoded by the portable classifier, which is what the suite above tests");
-    Check(sway.find("const bool stateCutout = detail::TransparentMaterial(device);") <
-          sway.find("detail::TextureIsCutout(device)") &&
+    // Read from the palette ladder's own state test onwards: the blade branch
+    // ahead of the ladder is allowed to probe its texture (that is how it
+    // decides), but inside the ladder the order the report demanded still holds.
+    const auto statePosition = sway.find("const bool stateCutout = detail::TransparentMaterial(device);");
+    const auto ladderTexture = sway.find("detail::TextureIsCutout(device)", statePosition);
+    Check(statePosition != sway.npos && ladderTexture != sway.npos && ladderTexture > statePosition &&
           sway.find("instanceCutout = stateCutout ?") != sway.npos,
         "the state answers the cut-out half, and the texture is asked the half the state cannot answer: whether it "
         "is green");
@@ -1302,11 +1338,16 @@ static void TestConfigurationAndWiring()
     // proves the draw is a model before the material read is paid for, and the
     // texture is only examined where nothing else could answer.
     const auto rootGate = sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister", scopeStart);
-    const auto textureGate = sway.find("detail::TextureIsCutout(device)");
+    // The first place in a frame a texture can be locked is the blade branch, and
+    // it is behind the same colour-write test - written on the same line as its
+    // own other gates - so the shadow map is still never examined either way.
+    const auto bladeGuard = sway.find("frame.wind.DrivesVegetation() && detail::WritesColor(device))", scopeStart);
+    const auto textureGate = sway.find("detail::TextureIsCutout(device)", scopeStart);
     const auto neverVerdict = sway.find("++Status().skippedNeverModel;");
-    Check(colourGate != sway.npos && colourGate < textureGate,
+    Check(colourGate != sway.npos && bladeGuard != sway.npos && bladeGuard < textureGate,
         "the colour-write test runs before any texture is locked: the shadow map is never examined");
-    Check(rootGate != sway.npos && rootGate < textureGate && rootGate > neverVerdict,
+    Check(rootGate != sway.npos && rootGate > neverVerdict &&
+          sway.find("detail::TextureIsCutout(device)", rootGate) != sway.npos,
         "the root block - the proof the draw is a model at all - runs before the material read");
     Check(sway.find("g_textureCutouts") != sway.npos && sway.find("g_textureCutouts.clear();") != sway.npos,
         "one texture is examined once, and a device reset drops what was learned about it");
@@ -1786,6 +1827,296 @@ static void TestMergedPatchSkeleton()
     Pass("merged patch skeleton: a field of grass in one draw is not a creature, and a creature is not a patch");
 }
 
+// ---------------------------------------------------------------------------
+// The grass the client draws as blades: a shader text, the block inserted into
+// it, and the constants that block reads. All of it is text and numbers, which
+// is the point - the injection can be checked in a garden of shader texts, on a
+// machine with no device and no d3dcompiler, before it is ever reassembled.
+// ---------------------------------------------------------------------------
+static void TestGrassBlades()
+{
+    // The model token, from the blob's own first dword. A pixel shader's token or
+    // a vs_1_1 is a shader this build must not rewrite.
+    {
+        const auto blob = [](uint32_t token) {
+            uint8_t bytes[64]{};
+            std::memcpy(bytes, &token, sizeof(token));
+            return std::vector<uint8_t>(bytes, bytes + sizeof(bytes));
+        };
+        const std::vector<uint8_t> vs20 = blob(0xFFFE0200u), vs30 = blob(0xFFFE0300u);
+        const std::vector<uint8_t> ps30 = blob(0xFFFF0300u), vs11 = blob(0xFFFE0101u);
+        uint8_t shortBlob[8]{};
+        Check(std::strcmp(GrassBladeShaderModel(vs20.data(), vs20.size()), "vs_2_0") == 0,
+            "a 0xFFFE0200 blob is a vs_2_0 shader");
+        Check(std::strcmp(GrassBladeShaderModel(vs30.data(), vs30.size()), "vs_3_0") == 0,
+            "a 0xFFFE0300 blob is a vs_3_0 shader");
+        Check(GrassBladeShaderModel(ps30.data(), ps30.size())[0] == 0 &&
+              GrassBladeShaderModel(vs11.data(), vs11.size())[0] == 0 &&
+              GrassBladeShaderModel(shortBlob, sizeof(shortBlob))[0] == 0 &&
+              GrassBladeShaderModel(nullptr, 0)[0] == 0,
+            "and a pixel shader, an older vertex shader model or a truncated blob is not rewritten at all");
+    }
+
+    // A disassembly in the shape a client's detail-doodad shader has: the view
+    // transform of the vertex, a texture coordinate, a clip-space output, and
+    // nothing but r0/r1 for temporaries.
+    const std::string grass =
+        "// Generated by Microsoft (R) HLSL Shader Compiler\n"
+        "    vs_2_0\n"
+        "    def c13, 1, 1, 1, 1\n"
+        "    dcl_position v0\n"
+        "    dcl_normal v1\n"
+        "    dcl_color0 v2\n"
+        "    dcl_texcoord0 v3\n"
+        "    dp3 r0.x, c0, v0\n"
+        "    dp3 r0.y, c1, v0\n"
+        "    dp3 r0.z, c2, v0\n"
+        "    add r0, r0, c3\n"
+        "    mov oPos, r0\n"
+        "    mov oT0, v3\n";
+    const GrassBladeInjection injected = BuildGrassBladeInjection(grass, "vs_2_0");
+    Check(injected.ok, "a detail-doodad shader takes the motion block");
+    Check(injected.texcoordRegister == 3, "the block reads the register the shader itself declares its texcoord in");
+    Check(injected.text.find("injected grass wind") != std::string::npos &&
+          injected.text.find("v3.y") != std::string::npos,
+        "and the text that comes back carries the block, reading that register");
+    // After the view transform and before the projection: the block has to see a
+    // view-space position, and it must land before anything reads r0 again.
+    const auto anchorAt = injected.text.find("add r0, r0, c3");
+    const auto blockAt = injected.text.find("injected grass wind");
+    const auto projectedAt = injected.text.find("mov oPos, r0");
+    Check(anchorAt != std::string::npos && blockAt != std::string::npos && projectedAt != std::string::npos &&
+          anchorAt < blockAt && blockAt < projectedAt,
+        "the block lands between the view transform it needs and the projection that consumes it");
+    Check(anchorAt < injected.text.find("mov oT0, v3"),
+        "and the shader's own instructions after the anchor are all still there");
+
+    // A shader that declares its coordinate somewhere else is bent the same way:
+    // the block is written against the register the shader itself reads.
+    {
+        std::string other = grass;
+        other.replace(other.find("dcl_texcoord0 v3"), 16, "dcl_texcoord0 v2");
+        const GrassBladeInjection moved = BuildGrassBladeInjection(other, "vs_3_0");
+        Check(moved.ok && moved.texcoordRegister == 2 && moved.text.find("v2.y") != std::string::npos,
+            "a blade whose texture coordinate is declared in another register is bent by that register");
+        Check(GrassBladeTexcoordRegister(other) == 2, "and the register is read out of the declaration");
+    }
+
+    // The model token is prepended when the disassembler did not write one: an
+    // assembler needs a model to assemble against.
+    {
+        std::string bare = grass;
+        bare.replace(bare.find("    vs_2_0\n"), 11, "");
+        const GrassBladeInjection model = BuildGrassBladeInjection(bare, "vs_2_0");
+        Check(model.ok && model.text.compare(0, 7, "vs_2_0\n") == 0,
+            "a text without a model token gets one, at the top, where an assembler wants it");
+    }
+
+    // Comments and spacing are the disassembler's business, not the parser's: a
+    // shader whose anchor is written with a different mask, or with a note after
+    // it, is the same shader.
+    {
+        std::string loose = grass;
+        loose.replace(loose.find("    add r0, r0, c3\n"), 20, "    add r0.xyz,r0.xyz,c3.xyz ; view\n");
+        const GrassBladeInjection spaced = BuildGrassBladeInjection(loose, "vs_2_0");
+        Check(spaced.ok && spaced.anchorLine == 10,
+            "an anchor written with a mask, no spaces and a trailing comment is found where it is");
+    }
+
+    // Every refusal, in the words the log would carry, and all of them leave the
+    // client's shader alone.
+    {
+        std::string noTexcoord = grass;
+        noTexcoord.replace(noTexcoord.find("    dcl_texcoord0 v3\n"), 21, "");
+        const GrassBladeInjection none = BuildGrassBladeInjection(noTexcoord, "vs_2_0");
+        Check(!none.ok && none.text.empty() && std::strlen(none.reason) > 0,
+            "a shader with no texture coordinate cannot be bent (a blade has no height to bend by)");
+
+        std::string temps = grass;
+        temps.replace(temps.find("    mov oT0, v3\n"), 16, "    mul r2, v3, c13\n");
+        const GrassBladeInjection used = BuildGrassBladeInjection(temps, "vs_2_0");
+        Check(!used.ok && std::string(used.reason).find("scratch") != std::string::npos,
+            "a shader that already uses one of the block's scratch registers is refused, never clobbered");
+
+        std::string noAnchor = grass;
+        noAnchor.replace(noAnchor.find("    add r0, r0, c3\n"), 20, "");
+        Check(!BuildGrassBladeInjection(noAnchor, "vs_2_0").ok,
+            "a shader with no view transform has nowhere for the block to go");
+
+        std::string noPosition = grass;
+        noPosition.replace(noPosition.find("    mov oPos, r0\n"), 17, "");
+        Check(!BuildGrassBladeInjection(noPosition, "vs_2_0").ok,
+            "and a body that writes no clip-space position is not a vertex shader's body at all");
+
+        Check(!BuildGrassBladeInjection("", "vs_2_0").ok && !BuildGrassBladeInjection(grass, "").ok,
+            "an empty disassembly and an unknown model token are both refusals");
+        Check(GrassBladeAnchorLine(grass) != ~size_t(0) && GrassBladeAnchorLine(noAnchor) == ~size_t(0),
+            "the anchor is found by what the instruction does, and reported as absent when it is");
+    }
+
+    // The block is arithmetic over the engine's own modelview rows and the free
+    // registers, and the check that matters without a device: it never writes a
+    // register outside the ones the caller proved free (r2..r5) and the
+    // position's own r0.
+    {
+        const std::string block = GrassBladeMotionBlock("v3");
+        for (const char* forbidden : { "r6", "r7", "r1.", "r1,", " c4", " c5", " c14.x, c14.y, c30" })
+            Check(block.find(forbidden) == std::string::npos,
+                "the block stays inside r0 and r2..r5 and the registers this module writes itself");
+        Check(block.find("add r0.x, r0.x") != std::string::npos && block.find("sincos r4.xy") != std::string::npos &&
+              block.find("sincos r5.xy") != std::string::npos,
+            "and it adds its displacement to the view position the engine built, from two travelling waves");
+        Check(block.find("c19.x, c19.y") != std::string::npos,
+            "with the blade's own direction (which way its texture runs) read from a constant");
+    }
+
+    // The constants: one block, six rows, every component accounted for.
+    {
+        GrassBladeFrame frame;
+        frame.directionX = 0.f;
+        frame.directionY = 1.f; // wind travelling towards +Y (west, in WoW's axes)
+        frame.strength = 1.f;
+        frame.cameraX = 10.f;
+        frame.cameraY = -4.f;
+        frame.distanceYards = 100.f;
+        frame.phasePrimary = .5f;
+        frame.phaseCross = 1.5f;
+        frame.settings.tipAmplitudeYards = .2f;
+        frame.settings.wavelengthYards = 20.f;
+        frame.settings.crossWavelengthYards = 5.f;
+        frame.settings.crossAmplitudeRatio = .5f;
+        frame.settings.crossAngleDegrees = 90.f;
+        frame.settings.anchor = .25f;
+        frame.settings.variance = .6f;
+        frame.settings.leanFraction = .4f;
+        const GrassBladeConstants packed = PackGrassBladeConstants(frame, 0);
+
+        Check(Near(packed.rows[0][0], 10.f) && Near(packed.rows[0][1], -4.f) && Near(packed.rows[0][2], 1.f),
+            "the block carries the camera the wave field is anchored to, and a 1 for the blade's ramp and fade");
+        Check(Near(packed.rows[0][3], .4f), "the lean");
+        const float k = float(2.0 * 3.14159265358979323846 / 20.0);
+        Check(Near(packed.rows[1][0], 0.f) && Near(packed.rows[1][1], k) && Near(packed.rows[1][2], 0.f) &&
+              Near(packed.rows[1][3], .2f),
+            "the primary wave's heading is carried twice: as the phase basis (dir * k) and as the displacement (dir * amplitude)");
+        Check(Near(packed.rows[2][2], -.1f),
+            "and the cross-swell's amplitude is its own share of the primary's, along its own heading");
+        Check(Near(packed.rows[2][1], 0.f) && std::fabs(packed.rows[2][0]) > .1f,
+            "turned off the wind by the cross angle, as the setting says");
+        Check(Near(packed.rows[3][0], .5f) && Near(packed.rows[3][1], 1.5f) && Near(packed.rows[3][3], -.01f),
+            "the two phases travel with the frame, and the range fade is written as a fall-off per yard");
+        Check(Near(packed.rows[4][0], 1.f / .75f) && Near(packed.rows[4][1], -.25f / .75f) &&
+              Near(packed.rows[4][2], .7f) && Near(packed.rows[4][3], .6f),
+            "the ramp holds the bottom share of the blade rigid, and every blade gets its own amplitude within the variance");
+        Check(Near(packed.rows[5][0], -1.f) && Near(packed.rows[5][1], 1.f),
+            "and the default blade runs the reference client's way up: 1 at the base, 0 at the tip");
+        const GrassBladeConstants flipped = PackGrassBladeConstants(frame, 1);
+        Check(Near(flipped.rows[5][0], 1.f) && Near(flipped.rows[5][1], 0.f),
+            "a blade whose own vertices measured the other way up is bent by the same block with that sign flipped");
+        // A calm frame moves nothing, like every other part of this feature.
+        frame.strength = 0.f;
+        const GrassBladeConstants calm = PackGrassBladeConstants(frame, 0);
+        Check(Near(calm.rows[1][2], 0.f) && Near(calm.rows[1][3], 0.f) && Near(calm.rows[2][2], 0.f),
+            "and a frame with no wind carries no displacement at all");
+    }
+
+    // The phases walk forward and are wrapped, so a shader's sine never sees an
+    // hour's worth of radians.
+    {
+        float phase = 0.f;
+        phase = GrassBladePhase(phase, 3.f, 18.f, .5f);
+        const float k = float(2.0 * 3.14159265358979323846 / 18.0);
+        Check(Near(phase, 6.2831853f - k * 3.f * .5f, 1e-3),
+            "the crests travel downwind: the phase falls by the wave speed times the frame, wrapped");
+        for (int i = 0; i < 5000; ++i) phase = GrassBladePhase(phase, 3.f, 18.f, .05f);
+        Check(phase >= 0.f && phase < 6.283186f, "and it is wrapped every frame, however long the session runs");
+        Check(Near(GrassBladePhase(2.f, 0.f, 18.f, .5f), 2.f), "a still frame does not advance it");
+        Check(Near(GrassBladePhase(.5f, 3.f, 18.f, 0.f), .5f), "and neither does a frame of no length");
+    }
+
+    // Which way up a blade's texture runs, from the vertices themselves: the
+    // sign of v against height, by majority over the card's own pairs.
+    {
+        const float falling[6][3] = { { 0.f, 1.f, 0.f }, { 0.f, 0.f, .5f }, { 0.f, 1.f, 0.f }, { 0.f, 0.f, .4f },
+                                      { 0.f, 1.f, .1f }, { 0.f, 0.f, .6f } };
+        const float rising[6][3] = { { 0.f, 0.f, 0.f }, { 0.f, 1.f, .5f }, { 0.f, 0.f, 0.f }, { 0.f, 1.f, .4f },
+                                     { 0.f, 0.f, .1f }, { 0.f, 1.f, .6f } };
+        Check(GrassBladeVerticalSign(falling, 6) == -1,
+            "a blade whose texture is 1 at its base measures as the reference client has it");
+        Check(GrassBladeVerticalSign(rising, 6) == 1, "and one that runs the other way measures as the other way");
+        const float noise[4][3] = { { 0.f, .5f, 0.f }, { 0.f, .52f, 1.f }, { 0.f, .5f, 0.f }, { 0.f, .48f, 1.f } };
+        Check(GrassBladeVerticalSign(noise, 4) == 0,
+            "vertices that carry no v that follows their height measure as nothing, and nothing means the default");
+        Check(GrassBladeVerticalSign(nullptr, 4) == 0 && GrassBladeVerticalSign(falling, 1) == 0,
+            "and so does a draw with too few vertices to vote");
+    }
+
+    // The HUD rows the blade path adds, in the wind debug box.
+    {
+        GrassBladeSettings blades;
+        GrassBladeStatus status;
+        status.bladeDraws = 37;
+        status.uploads = 2;
+        status.amplitudeYards = .15f;
+        status.examined = 4;
+        status.injected = 1;
+        const std::vector<std::string> lines = GrassBladeDebugLines(status, blades);
+        Check(lines.size() == 2 && lines[0].find("37") != std::string::npos &&
+              lines[0].find("0.15") != std::string::npos,
+            "the blade row says how many draws went out with the wind and how far a tip moves");
+        Check(lines[1].find("4 looked at, 1 bent") != std::string::npos &&
+              lines[1].find("none refused") != std::string::npos,
+            "and the gate row says how many of the client's shaders this build has looked at and bent");
+        status.materialRefused = 6;
+        status.noTexcoord = 2;
+        status.refused = 1;
+        const std::vector<std::string> refused = GrassBladeDebugLines(status, blades);
+        Check(!refused.empty() && refused.back().find("mat 6") != std::string::npos &&
+              refused.back().find("decl 2") != std::string::npos &&
+              refused.back().find("asm 1") != std::string::npos,
+            "a refusal is named on the row, so a field of static grass is answerable on screen");
+        blades.enabled = false;
+        Check(GrassBladeDebugLines(status, blades).empty(), "and a switched-off blade wind adds no rows at all");
+    }
+
+    // The wiring: the blade path is reached from the one place an unskinned
+    // foliage draw can be, the swap happens before state tracking, the block is
+    // re-armed by the constant-write hook, and the whole path is behind the same
+    // switches as the sway it belongs to.
+    {
+        const std::string sway = Read("src/Effects/VegetationSway.h");
+        const std::string blades = Read("src/Effects/GrassBladeSway.h");
+        const std::string main = Read("ModernWoWRenderer.cpp");
+        const std::string tuning = Read("src/Environment/WindTuning.h");
+        Check(sway.find("grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,") !=
+              sway.npos &&
+              sway.find("if (!declared || !declared->valid)") != sway.npos,
+            "an unskinned foliage draw is handed to the blade path from the branch that refuses the model path");
+        Check(sway.find("detail::TextureIsCutout(device); });") != sway.npos,
+            "and the texture probe it needs is asked for lazily, because most draws on that branch are not grass");
+        Check(main.find("grassblade::Substitute(&vs);") != main.npos &&
+              main.find("grassblade::Substitute(&vs);") < main.find("renderer::g_trackedState.currentVS != vs"),
+            "the bent shader is swapped in at the SetVertexShader hook, before this renderer tracks what is bound");
+        Check(main.find("grassblade::NoteConstantWrite(start, count);") != main.npos &&
+              main.find("originalSetVertexShaderConstantF=reinterpret_cast<SetVertexShaderConstantFFn>(table[94]);") !=
+              main.npos,
+            "and the constant-write hook (device vtable 94) is what re-arms the block when the client writes over it");
+        Check(main.find("grassblade::logLine=Log;") != main.npos && main.find("grassblade::active=grassblade::active=graphicsActive;") == main.npos &&
+              main.find("vegetation::active=grassblade::active=graphicsActive;") != main.npos &&
+              main.find("grassblade::Update(nextFrame,vegetation::settings.sway);") != main.npos,
+            "it shares the sway's log, its F11 switch, its wind snapshot and its SwayPercent");
+        Check(tuning.find("read(L\"GrassBlades\", 1) != 0") != tuning.npos &&
+              Read("src/Environment/OverlayItems.h").find("L\"GrassBlades\",\"GRASS BLADE WIND\"") != sway.npos,
+            "and it has its own switch in the INI and in the F7 menu, because it rewrites a shader the client compiled");
+        Check(blades.find("D3DDisassemble") != blades.npos && blades.find("D3DAssemble") != blades.npos &&
+              blades.find("d3dcompiler_47.dll") != blades.npos,
+            "the compiler it needs is resolved by name, and a machine without it loses only the blade wind");
+        Check(blades.find("entry.structureRefused = true;") != blades.npos &&
+              blades.find("g_status.refused;") != blades.npos,
+            "and every refusal is recorded on the shader that failed, so nothing is examined twice");
+    }
+    Pass("grass blade wind: a shader text, the block injected into it, the constants it reads, and the wiring");
+}
+
 int main() try
 {
     TestLeanGeometry();
@@ -1800,6 +2131,7 @@ int main() try
     TestTextureCutoutDecode();
     TestPerBoneLean();
     TestMergedPatchSkeleton();
+    TestGrassBlades();
     TestConfigurationAndWiring();
     std::puts("Vegetation wind regressions passed");
     return 0;

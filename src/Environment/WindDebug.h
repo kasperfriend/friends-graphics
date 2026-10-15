@@ -1,4 +1,5 @@
 #pragma once
+#include "GrassShaderWind.h"
 #include "WindSystem.h"
 #include "VegetationWind.h"
 #include <array>
@@ -123,6 +124,8 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     //   far   beyond DistanceYards
     //   calm  inside the range, but the wind leaves a zero angle at that spot
     //   write the leaned registers could not be written back
+    //   restore the client's own matrices did not come back - this renderer's
+    //         write is what deformed a model, whatever the model was
     //   new   model vertex shaders this build had not captured (the hashes the
     //         renderer log just named: add the foliage ones to TorchSignatures.h)
     //
@@ -155,6 +158,7 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("far", status.skippedRange);
     report("calm", status.skippedCalm);
     report("write", status.skippedWrite);
+    report("restore", status.restoreMismatch);
     report("new", status.learnedShaders);
     // The head carries the size the gate last measured and the number of draws
     // that arrived as the client's skinned model path at all: "no gate refused
@@ -193,6 +197,65 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     {
         std::snprintf(text, sizeof(text), "ModernWoWRenderer %s", buildStamp);
         lines.emplace_back(text);
+    }
+    return lines;
+}
+
+// And the grass the client draws as blades, when this build has bent a shader for
+// it. Two rows at most, in the same shape as the model rows above:
+//
+//   blades  draws that went out carrying the wind - the field the player is
+//           standing in, counted per draw because that is what is being bent
+//   shaders how many of the client's shaders this build has rewritten, how many
+//           it looked at and left alone, and how far a blade's tip moves
+//
+// The refusal row only appears when something WAS refused, and it names the
+// reason in the same six-character style as the gate row above, because "the
+// grass still does not move" has exactly three answers on this path: the client
+// does not draw it as blades at all (nothing on the row), the material was not
+// foliage (`mat`), or the shader could not be rewritten (`decl` for a draw with
+// no texture coordinate, `vs` for one whose coordinate is not where the shader
+// reads it, `asm` for a shader that could not be disassembled, reassembled or
+// created, `spread` for one whose declaration and shader disagree).
+inline std::vector<std::string> GrassBladeDebugLines(const GrassBladeStatus& status,
+    const GrassBladeSettings& settings)
+{
+    std::vector<std::string> lines;
+    if (!settings.enabled) return lines;
+    char text[256]{};
+    std::snprintf(text, sizeof(text), "Blades: %u swaying, %u blocks/s | %.2f yd at the tip",
+        status.bladeDraws, status.uploads, double(status.amplitudeYards));
+    lines.emplace_back(text);
+    std::vector<std::pair<const char*, unsigned>> refused;
+    const auto report = [&refused](const char* label, unsigned value) {
+        if (value) refused.emplace_back(label, value);
+    };
+    report("mat", status.materialRefused);
+    report("decl", status.noTexcoord);
+    report("vs", status.registerMismatch);
+    report("asm", status.refused);
+    std::snprintf(text, sizeof(text), "Blades gate: %u looked at, %u bent | ", status.examined,
+        status.injected);
+    if (refused.empty())
+        lines.emplace_back(std::string(text) + "none refused");
+    else
+    {
+        std::string row = text;
+        bool startsRow = true;
+        for (const auto& [label, value] : refused)
+        {
+            const std::string entry = std::string(label) + ' ' + std::to_string(value);
+            if (!startsRow && row.size() + entry.size() + 1 > kVegetationHudRowBudget)
+            {
+                lines.emplace_back(row);
+                row = kMoreGatesPrefix;
+                startsRow = true;
+            }
+            if (!startsRow) row += ' ';
+            row += entry;
+            startsRow = false;
+        }
+        lines.emplace_back(row);
     }
     return lines;
 }

@@ -45,6 +45,12 @@ struct VegetationSettings
     float plantGain = 1.f;       // PlantPercent: grass/bush gain (models below ~1.5 yards)
     float treeGain = 1.f;        // TreePercent: tree gain (models above ~6 yards)
     float distance = 120.f;      // DistanceYards: sway fades out to nothing by this range
+    // GrassBlades: the grass the client bakes into its own meshes has no bones to
+    // turn, so it is bent in the client's own vertex shader instead (one shader
+    // rewritten per session: see GrassShaderWind.h). It has a switch of its own
+    // because it is the one part of the sway that rewrites something the client
+    // compiled - off, every plant with a skeleton still sways.
+    bool grassBlades = true;
     bool animatedModels = false; // SwayAnimatedModels: also lean models the client animates
     bool debugView = false;      // DebugView: extra diagnostic HUD line
 };
@@ -91,6 +97,11 @@ struct VegetationStatus
     unsigned skippedWrite = 0;    // the leaned registers could not be written back
     unsigned learnedShaders = 0;  // new M2 layout variants accepted by proof this frame
     unsigned unbounded = 0;       // candidates whose palette could not be bounded
+    // The roll-back that was read back and did not match: the client's own
+    // matrices were not on the device any more after this renderer leaned a draw.
+    // Zero on a healthy client, and the number that separates "the lean deformed
+    // it" from "the gates let the wrong draw through" on the HUD.
+    unsigned restoreMismatch = 0;
     float maxAngle = 0.f;         // largest angle applied this frame
     float lastHeight = 0.f;       // world height of the last leaning instance
     // The height the size gate last measured, whether it accepted the model or

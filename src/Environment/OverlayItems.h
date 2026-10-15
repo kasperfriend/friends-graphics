@@ -72,6 +72,12 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Vegetation",L"PlantPercent","GRASS & BUSH GAIN (%)",0,200,5,100},
  {KIND_SLIDER,L"Vegetation",L"TreePercent","TREE GAIN (%)",0,200,5,100},
  {KIND_SLIDER,L"Vegetation",L"DistanceYards","SWAY DISTANCE (YARDS)",20,300,10,120},
+ // The grass the client bakes into its own meshes has no bones to turn, so it
+ // is bent inside the client's own vertex shader instead (one shader rewritten
+ // per session, see src/Environment/GrassShaderWind.h). It is a switch of its
+ // own because it is the one part of the sway that rewrites something the
+ // client compiled: off, every plant with a skeleton still sways.
+ {KIND_TOGGLE,L"Vegetation",L"GrassBlades","GRASS BLADE WIND",0,1,1,1},
  {KIND_TOGGLE,L"Vegetation",L"SwayAnimatedModels","SWAY ANIMATED MODELS (MAY MOVE CREATURES)",0,1,1,0},
  {KIND_TOGGLE,L"Vegetation",L"DebugView","VEGETATION DEBUG VIEW",0,1,1,0},
 

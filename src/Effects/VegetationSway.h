@@ -110,8 +110,10 @@
 #include "../Core/ShaderCache.h"
 #include "../D3D9/CameraContinuity.h"
 #include "../D3D9/TrackedRenderState.h"
+#include "../Environment/GrassShaderWind.h"
 #include "../Environment/VegetationWind.h"
 #include "../Environment/WindDebug.h"
+#include "GrassBladeSway.h"
 
 namespace vegetation
 {
@@ -250,23 +252,18 @@ struct Instance
     bool swaying = false;
 };
 
-// The last palette read, reused by every further batch of the same instance in
-// the same frame. Keyed by the raw root block, so a different model - or the
-// same model seen through another camera in this frame - always re-reads.
-struct PaletteCache
-{
-    float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
-    uint64_t rootKey = 0;
-    uint64_t frame = ~0ull;
-    unsigned registersRead = 0;
-    bool valid = false;
-};
-
 inline std::unordered_map<const void*, MeshProfile> g_meshes;
 inline std::unordered_map<uint64_t, ShaderProfile> g_shaders;
 inline std::unordered_map<uint64_t, GeometryProfile> g_geometry;
 inline std::unordered_map<uint64_t, Instance> g_instances;
-inline PaletteCache g_palette;
+// How many leans have their roll-back read back, and how many of those did not
+// come back exactly as the client had them. A read-back is paid for out of a
+// frame's budget, so only the first few leans of a session are checked - and a
+// mismatch is reported once, loudly, because it is the one failure a report of
+// "the shoulders / the sword / the mount deformed" can be told apart by.
+inline constexpr unsigned kRestoreChecks = 8;
+inline unsigned g_restoreChecks = 0;
+inline unsigned g_restoreMismatches = 0;
 // One texture examined per stage-0 texture, ever: the read is a level 0 lock, so
 // it is paid once for the handful of textures a client draws foliage with. The
 // key is the texture pointer; the device reset clears the map, which is what
@@ -328,7 +325,8 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_shaders.clear();
     g_geometry.clear();
     g_instances.clear();
-    g_palette = {};
+    g_restoreChecks = 0;
+    g_restoreMismatches = 0;
     g_textureCutouts.clear();
     g_anySwaying = false;
     g_reportedUnreadableGeometry = false;
@@ -346,6 +344,10 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_reportedSolidModel = false;
     g_reportedRootBlock = false;
     probe.Clear();
+    // The blade shaders are device resources like everything else here, and the
+    // client creates new ones after a reset, so the map of what this build has
+    // bent is dropped with them.
+    grassblade::Reset();
 }
 
 // The optional HUD, drawn by the wind debug text only while a debug view asks
@@ -356,7 +358,13 @@ inline std::vector<std::string> DebugLines()
 {
     const renderer::FrameContext& frame = renderer::FrameContext::Current();
     if (!settings.debugView && !frame.wind.debugView) return {};
-    return renderer::VegetationDebugLines(wind.Status(), settings, frame.wind);
+    std::vector<std::string> lines = renderer::VegetationDebugLines(wind.Status(), settings, frame.wind);
+    // And the grass the client draws as blades, which no palette touches: its own
+    // two rows, so a field of static grass is answerable on screen instead of
+    // being an absence.
+    const std::vector<std::string> blades = grassblade::DebugLines();
+    lines.insert(lines.end(), blades.begin(), blades.end());
+    return lines;
 }
 
 namespace detail
@@ -396,6 +404,10 @@ namespace detail
     {
         uint64_t hash = 0;   // 0 = the identity could not be read
         bool bound = false;  // false = fixed function: no vertex shader at all
+        // The device's own object, borrowed: what the branch that bends a
+        // client's blade shader has to key its cache on. Valid for this call
+        // only, which is all it is used for.
+        IDirect3DVertexShader9* object = nullptr;
     };
 
     inline BoundShader BoundVertexShader(IDirect3DDevice9* device) noexcept
@@ -411,6 +423,7 @@ namespace detail
         }
         result.bound = bound != nullptr;
         if (!result.bound) return result;
+        result.object = bound.Get();
         if (renderer::g_trackedState.currentVS == bound.Get()) result.hash = renderer::g_trackedState.vsHash;
         if (!result.hash) result.hash = renderer::ShaderCache::Instance().GetShaderHash(bound.Get());
         return result;
@@ -450,7 +463,7 @@ namespace detail
     inline renderer::TextureAlphaProbe TextureIsCutout(IDirect3DDevice9* device) noexcept;
 
     inline const renderer::M2VertexLayout* Layout(IDirect3DDevice9* device, IDirect3DVertexDeclaration9* declaration,
-        uint64_t frame, bool report)
+        uint64_t frame, bool report, bool requireModelPath = true)
     {
         if (!declaration) return nullptr;
         auto found = g_meshes.find(static_cast<const void*>(declaration));
@@ -458,7 +471,7 @@ namespace detail
         {
             MeshProfile& profile = found->second;
             profile.lastSeenFrame = frame;
-            return profile.layout.valid ? &profile.layout : nullptr;
+            return (!requireModelPath || profile.layout.valid) ? &profile.layout : nullptr;
         }
         if (g_meshes.size() >= kMaxMeshProfiles) Evict(g_meshes, kMaxMeshProfiles);
         D3DVERTEXELEMENT9 elements[MAXD3DDECLLENGTH + 1]{};
@@ -503,7 +516,7 @@ namespace detail
             }
             Log(text);
         }
-        return stored.layout.valid ? &stored.layout : nullptr;
+        return (!requireModelPath || stored.layout.valid) ? &stored.layout : nullptr;
     }
 
     // Is this a transparent material - the leaves, the grass, the cloth? Read
@@ -852,29 +865,28 @@ namespace detail
         return &g_instances.emplace(key, fresh).first->second;
     }
 
-    // The client's own matrices, bounded to the model's own bones: a later batch
-    // of the same instance sees the values the client uploaded, not the lean this
-    // renderer already restored.
-    inline bool ReadPalette(IDirect3DDevice9* device, uint64_t rootKey, uint64_t frame, unsigned bound,
+    // The client's own matrices, bounded to the model's own bones, read from the
+    // DEVICE at the draw that is about to be leaned - never from a copy taken for
+    // an earlier batch.
+    //
+    // That copy is the defect this build removes. It served every further batch
+    // of the same instance in a frame, and what it held was the palette as it was
+    // when the FIRST batch of that instance was measured. The client re-uploads a
+    // palette whenever it likes - an animated model every frame, a mount and a
+    // rider, anything the client draws twice in one frame - and the value this
+    // renderer writes back after a lean has to be the value the device holds at
+    // THIS draw. Restoring a remembered palette instead hands the model a
+    // skeleton the client never gave it, which is what a broken shoulder, a bent
+    // sword and a mount's backside look like from the outside. One
+    // GetVertexShaderConstantF per leaning draw is the price of a roll-back that
+    // is provably the client's own value put back.
+    inline bool ReadPalette(IDirect3DDevice9* device, unsigned bound,
         float (&out)[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4])
     {
         const unsigned registers = std::min(bound * renderer::kM2RegistersPerBone,
             renderer::kM2MaxBones * renderer::kM2RegistersPerBone);
         if (!registers) return false;
-        if (g_palette.valid && g_palette.frame == frame && g_palette.rootKey == rootKey &&
-            g_palette.registersRead >= registers)
-        {
-            std::memcpy(out, g_palette.registers, sizeof(float[4]) * registers);
-            return true;
-        }
-        if (FAILED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, out[0], registers)))
-            return false;
-        std::memcpy(g_palette.registers, out, sizeof(float[4]) * registers);
-        g_palette.rootKey = rootKey;
-        g_palette.frame = frame;
-        g_palette.registersRead = registers;
-        g_palette.valid = true;
-        return true;
+        return SUCCEEDED(device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, out[0], registers));
     }
 }
 
@@ -981,13 +993,31 @@ struct Scope
         // the material, and only counted for the HUD when it could be foliage:
         // the log is what a report is diagnosed from, and the counter is what a
         // player reads, so they are gated by different things on purpose.
-        const renderer::M2VertexLayout* layout = detail::Layout(device, detail::BoundDeclaration(device),
-            frame.frameIndex, true);
-        if (!layout)
+        IDirect3DVertexDeclaration9* declaration = detail::BoundDeclaration(device);
+        // Read whether or not it says the client's model path: a declaration with
+        // no bone indices is refused below, and the blade-shader branch needs what
+        // it still does say - that its vertices carry a texture coordinate, and
+        // which input register that coordinate is in.
+        const renderer::M2VertexLayout* declared = detail::Layout(device, declaration, frame.frameIndex, true, false);
+        if (!declared || !declared->valid)
         {
+            // Not the client's skinned model path, so no palette can bend it -
+            // and this is where the grass a client bakes into its own meshes
+            // arrives: unskinned vertices, textured with a leaf card, drawn in
+            // the world. It is handed to the blade path, which bends it in the
+            // client's own vertex shader instead (src/Environment/GrassShaderWind.h).
+            // Everything else a declaration like this belongs to - terrain, WMOs,
+            // particles, the interface - is refused there on its material in one
+            // cached read and never looked at twice. The texture probe is asked
+            // for lazily, because it is a level 0 lock and most of these draws
+            // are not grass.
+            if (declared && frame.wind.DrivesVegetation() && detail::WritesColor(device))
+                grassblade::ConsiderDraw(device, frame, shader.hash, shader.object, *declared, draw,
+                    [device] { return detail::TextureIsCutout(device); });
             if (mirrorMaterial) ++Status().skippedLayout;
             return;
         }
+        const renderer::M2VertexLayout* layout = declared;
         // Past the declaration the client's skinned model path is PROVEN -
         // POSITION + BLENDINDICES in stream 0, which terrain, WMOs, particles,
         // ribbons, effects and the interface never declare - so every counter
@@ -1262,7 +1292,7 @@ struct Scope
             known = owner;
             float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
             const unsigned bound = std::max(known->boneBound, 1u);
-            if (!detail::ReadPalette(device, rootKey, frame.frameIndex, bound, registers))
+            if (!detail::ReadPalette(device, bound, registers))
             {
                 ++Status().unbounded;
                 return;
@@ -1410,7 +1440,7 @@ struct Scope
         }
 
         float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
-        if (!detail::ReadPalette(device, rootKey, frame.frameIndex, bound, registers))
+        if (!detail::ReadPalette(device, bound, registers))
         {
             ++Status().unbounded;
             return;
@@ -1683,8 +1713,34 @@ struct Scope
         // The client's own matrices go back immediately, in the same call shape
         // the lean used, so the next draw and any state the game applies
         // afterwards see exactly what it uploaded.
-        if (m_wrote && m_device)
-            m_device->SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, m_saved[0], m_count);
+        if (!m_wrote || !m_device) return;
+        m_wrote = false;
+        m_device->SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, m_saved[0], m_count);
+        // And, while the session is young, what went back is read back. This is
+        // the one measurement that tells two reports apart that look identical
+        // from the outside: a roll-back that did not land (this renderer's write
+        // is what deformed a model) and a lean applied to a draw that was never a
+        // plant (the gates are what deformed it). A mismatch is reported once,
+        // with the registers that differ, and the gate row carries the count.
+        if (g_restoreChecks >= kRestoreChecks) return;
+        ++g_restoreChecks;
+        float back[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
+        if (FAILED(m_device->GetVertexShaderConstantF(renderer::kM2BoneBaseRegister, back[0], m_count))) return;
+        unsigned differing = 0;
+        for (unsigned row = 0; row < m_count; ++row)
+            if (std::memcmp(back[row], m_saved[row], sizeof(float[4])) != 0) ++differing;
+        if (!differing) return;
+        Status().restoreMismatch = differing;
+        if (g_restoreMismatches++) return;
+        char text[416]{};
+        std::snprintf(text, sizeof(text),
+            "Vegetation sway: after leaning a draw, %u of the %u registers this renderer wrote came back as "
+            "something else - the client's own matrices are NOT on the device any more, and this write is what "
+            "would deform a model drawn after it. Registers c%u onwards, %u bone blocks. Nothing else in this "
+            "build writes constants there.",
+            differing, m_count, unsigned(renderer::kM2BoneBaseRegister),
+            unsigned(m_count / renderer::kM2RegistersPerBone));
+        Log(text);
     }
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
@@ -1798,6 +1854,12 @@ private:
             std::memcpy(leaned + bone * renderer::kM2RegistersPerBone, out,
                 renderer::kM2RegistersPerBone * sizeof(float[4]));
         }
+        // Armed BEFORE the write, never after it: a write the device refuses can
+        // still have changed part of the range, and a draw that is not rolled
+        // back is a model left drawn with this renderer's numbers. Whatever the
+        // call returns, the destructor puts the client's own matrices back over
+        // exactly these registers.
+        m_wrote = true;
         if (FAILED(m_device->SetVertexShaderConstantF(renderer::kM2BoneBaseRegister, leaned[0], m_count)))
         {
             // The one failure that leaves the draw exactly as the client made it
@@ -1807,7 +1869,6 @@ private:
             ++Status().skippedWrite;
             return;
         }
-        m_wrote = true;
         if (!g_reportedLean)
         {
             // The first draw of a session that actually leans, with the numbers

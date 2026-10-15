@@ -40,6 +40,7 @@ template<class Reader> VegetationSettings ReadVegetationSettings(Reader read)
     s.treeGain = std::clamp(read(L"TreePercent", 100), 0, 200) * .01f;
     s.distance = float(std::clamp(read(L"DistanceYards", 120), 20, 300));
     s.animatedModels = read(L"SwayAnimatedModels", 0) != 0;
+    s.grassBlades = read(L"GrassBlades", 1) != 0;
     s.debugView = read(L"DebugView", 0) != 0;
     return s;
 }

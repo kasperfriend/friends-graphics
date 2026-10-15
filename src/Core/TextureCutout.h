@@ -322,7 +322,6 @@ namespace renderer
             step = static_cast<unsigned>((rowCount + budgetRows - 1) / budgetRows);
 
         uint64_t hash = kTextureAlphaHashOffset;
-        size_t examined = 0;
         for (unsigned row = 0; row < rowCount; row += step)
         {
             const size_t offset = size_t(row) * pitch;
@@ -331,7 +330,6 @@ namespace renderer
             const size_t read = room < pitch ? room : pitch;
             const uint8_t* base = pixels + offset;
             if (read < rowBytes) break;
-            examined += rowBytes;
             for (size_t i = 0; i < rowBytes; ++i)
             {
                 hash ^= base[i];

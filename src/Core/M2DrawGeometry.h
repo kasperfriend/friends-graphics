@@ -49,16 +49,32 @@ struct M2VertexLayout
     bool weighted = false;
     unsigned positionOffset = 0;
     unsigned boneOffset = 0;
+    // The texture coordinate, for the one reader that needs it without needing a
+    // skeleton: the blade-shader path bends a grass card by the HEIGHT ALONG THE
+    // BLADE, which is that coordinate's v - and the register the shader reads it
+    // from is the element's own place in the declaration, because that is how
+    // D3D9 assigns input registers. A draw whose vertices carry no such element
+    // can never be a blade card, so this is filled whatever `valid` says.
+    bool texcoord = false;
+    bool texcoordIsFloat2 = false; // the block reads .y, so two floats are what it needs
+    unsigned texcoordRegister = 0;
+    unsigned texcoordOffset = 0;
 };
 
 inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned count, M2VertexLayout& out) noexcept
 {
     out = {};
     if (!elements) return false;
+    unsigned stream0Register = 0;
     for (unsigned i = 0; i < count; ++i)
     {
         const D3DVERTEXELEMENT9& element = elements[i];
+        // Every element in the declaration takes an input register in the order
+        // it is declared, stream by stream, so the register is counted before
+        // anything is skipped.
+        const unsigned inputRegister = stream0Register;
         if (element.Stream != 0) continue;
+        ++stream0Register;
         // FLOAT4 positions are accepted as well as the client's own FLOAT3: the
         // fourth component of a valid model position is 1 and is ignored by the
         // 3x4 bone matrices either way.
@@ -79,6 +95,13 @@ inline bool ParseM2VertexLayout(const D3DVERTEXELEMENT9* elements, unsigned coun
             out.boneOffset = element.Offset;
         }
         if (element.Usage == D3DDECLUSAGE_BLENDWEIGHT) out.weighted = true;
+        if (element.Usage == D3DDECLUSAGE_TEXCOORD && element.UsageIndex == 0 && !out.texcoord)
+        {
+            out.texcoord = true;
+            out.texcoordIsFloat2 = element.Type == D3DDECLTYPE_FLOAT2;
+            out.texcoordRegister = inputRegister;
+            out.texcoordOffset = element.Offset;
+        }
     }
     out.valid = out.position && out.skinned;
     return out.valid;

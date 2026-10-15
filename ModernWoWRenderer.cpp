@@ -111,6 +111,14 @@ void ReloadVegetationTuning()
     vegetation::Configure(renderer::ReadVegetationSettings([&](const wchar_t* key,int fallback) {
         return static_cast<int>(renderer::locationtuning::ReadInt(L"Vegetation",key,fallback,ini.c_str()));
     }));
+    // The grass the client draws as blades is bent in the client's own vertex
+    // shader, so it has its own switch ([Vegetation] GrassBlades) and the same
+    // log: the two share the INI, the wind snapshot and the HUD, and nothing
+    // else. Both are read here so a reload reaches them together.
+    grassblade::logLine=Log;
+    renderer::GrassBladeSettings blades;
+    blades.enabled=vegetation::settings.grassBlades;
+    grassblade::Configure(blades);
 }
 
 void ReloadWindTuning()
@@ -197,7 +205,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
-            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;vegetation::active=graphicsActive;
+            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;vegetation::active=grassblade::active=graphicsActive;
             Log(graphicsActive?"F11 graphics ON":"F11 graphics OFF");
         }
         graphicsKeyDown=down;
@@ -223,6 +231,11 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     // a device reset or an Alt+Tab cannot move a plant.
     vegetation::Update(nextFrame.wind);
     vegetation::BeginFrame();
+    // The blade wind is the same snapshot and the same frame: its phases walk
+    // forward by the snapshot's own delta and its block is packed for the frame,
+    // so a blade and a bush on the same square yard of ground move together.
+    grassblade::Update(nextFrame,vegetation::settings.sway);
+    grassblade::BeginFrame();
     volume::cloudWeather=static_cast<renderer::CloudWeather>(weather.kind);
     volume::cloudWeatherStrength=weather.strength;
     watereffect::FeedWeather(weather.kind,weather.strength);
@@ -281,6 +294,7 @@ using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTex
 using SetVertexDeclarationFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
 using SetFVFFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD);
 using SetVertexShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
+using SetVertexShaderConstantFFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
 using SetPixelShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
 
 SetRenderStateFn originalSetRenderState = nullptr;
@@ -289,6 +303,7 @@ SetTextureFn originalSetTexture = nullptr;
 SetVertexDeclarationFn originalSetVertexDeclaration = nullptr;
 SetFVFFn originalSetFVF = nullptr;
 SetVertexShaderFn originalSetVertexShader = nullptr;
+SetVertexShaderConstantFFn originalSetVertexShaderConstantF = nullptr;
 SetPixelShaderFn originalSetPixelShader = nullptr;
 
 HRESULT WINAPI HookedSetLight(IDirect3DDevice9* d, DWORD index, const D3DLIGHT9* light)
@@ -332,12 +347,28 @@ HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseT
 
 HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs)
 {
+    // A shader this project has bent for the wind is swapped in HERE, before a
+    // single byte of it is tracked: what the device holds and what this
+    // renderer's state mirror believes have to be the same object, or every
+    // gate downstream of this line is reading a shader that is not being drawn.
+    grassblade::Substitute(&vs);
     if (renderer::g_trackedState.currentVS != vs || (vs && renderer::g_trackedState.vsHash == 0))
     {
         renderer::g_trackedState.currentVS = vs;
         renderer::g_trackedState.vsHash = (vs && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
     }
     return originalSetVertexShader(d, vs);
+}
+
+HRESULT WINAPI HookedSetVertexShaderConstantF(IDirect3DDevice9* d, UINT start, const float* values, UINT count)
+{
+    // The blade wind writes its constants into c14..c19 and re-uploads them when
+    // they are gone. Nothing else in this project touches that block, and the
+    // engine's own per-chunk upload fills c0..c13 - so a write that reaches into
+    // the block means somebody else has just overwritten the wind, and the next
+    // grass draw has to put it back.
+    grassblade::NoteConstantWrite(start, count);
+    return originalSetVertexShaderConstantF(d, start, values, count);
 }
 
 HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* ps)
@@ -590,6 +621,7 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     InterlockedExchangePointer(&table[87],reinterpret_cast<void*>(HookedSetVertexDeclaration));
     InterlockedExchangePointer(&table[89],reinterpret_cast<void*>(HookedSetFVF));
     InterlockedExchangePointer(&table[92],reinterpret_cast<void*>(HookedSetVertexShader));
+    InterlockedExchangePointer(&table[94],reinterpret_cast<void*>(HookedSetVertexShaderConstantF));
     InterlockedExchangePointer(&table[107],reinterpret_cast<void*>(HookedSetPixelShader));
     // Wind/weather observation and F7 need frame/draw hooks even when all
     // visual backends are disabled or a shader failed. Re-enabling is live.
@@ -639,6 +671,7 @@ void HookDevice(IDirect3DDevice9* device)
     originalSetVertexDeclaration=reinterpret_cast<SetVertexDeclarationFn>(table[87]);
     originalSetFVF=reinterpret_cast<SetFVFFn>(table[89]);
     originalSetVertexShader=reinterpret_cast<SetVertexShaderFn>(table[92]);
+    originalSetVertexShaderConstantF=reinterpret_cast<SetVertexShaderConstantFFn>(table[94]);
     originalSetPixelShader=reinterpret_cast<SetPixelShaderFn>(table[107]);
     originalSetLight=reinterpret_cast<SetLightFn>(table[51]);
     originalLightEnable=reinterpret_cast<LightEnableFn>(table[53]);
@@ -652,6 +685,7 @@ void HookDevice(IDirect3DDevice9* device)
     InterlockedExchangePointer(&table[87], reinterpret_cast<void*>(HookedSetVertexDeclaration));
     InterlockedExchangePointer(&table[89], reinterpret_cast<void*>(HookedSetFVF));
     InterlockedExchangePointer(&table[92], reinterpret_cast<void*>(HookedSetVertexShader));
+    InterlockedExchangePointer(&table[94], reinterpret_cast<void*>(HookedSetVertexShaderConstantF));
     InterlockedExchangePointer(&table[107], reinterpret_cast<void*>(HookedSetPixelShader));
 
     // CPU wind and its F7 controls must not depend on a working visual

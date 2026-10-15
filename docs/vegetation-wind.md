@@ -143,9 +143,78 @@ the draw**.
    the client's own matrices are **restored immediately after it**, in the same
    call, so the next draw and any state the game applies afterwards see exactly
    what it uploaded.
+10. The values that are put back are the ones **this draw** read, a few
+    microseconds earlier, from the device - never a copy remembered from an
+    earlier batch of the same instance. A client re-uploads a palette whenever it
+    likes, in the middle of a frame as much as at the start of one, so a
+    remembered palette is not what the device holds at the draw being leaned, and
+    restoring it hands a model a skeleton the client never gave it. That is what
+    a bent shoulder, a sword and a mount's backside look like from the outside,
+    and it is why one `GetVertexShaderConstantF` per leaning draw is paid
+    without hesitation. The write is also armed for roll-back *before* it is
+    attempted, so a write the device refuses is put back over just the same - and
+    the first few leans of a session have their roll-back **read back and
+    compared**, bit for bit, with the mismatch reported in
+    `ModernWoWRenderer.log` and counted as `restore` on the HUD row. On a healthy
+    client that number is zero; when it is not, the renderer's own write - not
+    the gates - is what deformed a model, and the report says so.
 
 Nothing else is touched: no render state, no shader, no constant above c31, no
 render target.
+
+## The grass that has no bones
+
+A field of ground grass in this client is often not a model at all: the blades
+arrive as **one rigid mesh**, drawn with a vertex declaration that carries no
+bone indices (`POSITION + NORMAL + COLOUR + TEXCOORD`), textured with a leaf
+card. There is no palette to bend and no animation to follow, which is why such
+a field stays perfectly still however many plants the sway leans - on a field
+with a hundred blade draws in it, `decl` on the gate row is the whole answer.
+
+Those draws are bent in **the client's own vertex shader** instead:
+
+1. The draw reaches the same early gates as everything else: master wind, the
+   link, the effect switch, a frame camera pose, colour writes, no up-front
+   (particle/ribbon/interface) batch. It is a draw the sway would otherwise
+   count as `decl`.
+2. Its vertex declaration has to carry a **`FLOAT2` texture coordinate** - that
+   coordinate is the bend weight, and it is also what the injected code reads -
+   and its stage 0 texture has to be a **green cut-out**: the same witness the
+   material gate uses above, for the same reason. A cut-out that is not green
+   (a cloak, a shoulder pad, a banner) is refused and never looked at again.
+3. The shader it is drawn with is looked at **once per session**. Its bytecode is
+   taken from the device, disassembled (`D3DDisassemble`), and a motion block is
+   inserted after the instruction that finishes the world-to-view transform
+   (`add r0, r0, c3`) - the point where the draw's own view-space position is
+   known and the draw's own free scratch registers can be used. The text is then
+   reassembled (`D3DAssemble`) and created on the device, and from that draw on
+   the client is handed the bent shader instead of its own whenever it binds it.
+   Both compiler entry points come from `d3dcompiler_47.dll`; if that library is
+   not there, the path switches itself off and says so.
+4. The injected block moves each blade in the **world plane**: it reconstructs
+   the blade's world position from the view-space one the client just computed
+   and the frame's camera, displaces it by a travelling wave plus a per-blade
+   phase taken from that position (so blades do not move in lockstep and the
+   motion does not shimmer as the camera moves), and rotates the result back into
+   view space. The bend weight is the blade's own texture coordinate: zero at its
+   base, growing towards the tip, with the bottom third held rigid
+   (`anchor`, 0.3) and faded with distance. At reference strength a blade's tip
+   sways about five inches - the same order as the lean the model path gives a
+   plant of the same size - over a field-wide wave 18 yards long travelling
+   downwind at 3 yards per second. The constants ride in the block at
+   **c14..c19**, whose rows are written before each bent draw and re-armed if the
+   client writes over them.
+5. Every refusal is structural and one-shot logged: an empty disassembly, a
+   shader that is not `vs_2_0`/`vs_3_0`, scratch registers the block would need
+   already in use, no transform anchor, no position output, a declaration whose
+   texture coordinate is not the register the shader reads, or an assembler that
+   refuses the text. In that last case the shader's **whole disassembly** goes to
+   `ModernWoWRenderer.log` once, so the next build can be written against the
+   exact code the client ships.
+
+The switch is `[Vegetation] GrassBlades` (F7 → `GRASS BLADE WIND`, on by
+default). Off, every plant with a skeleton still sways and no shader is ever
+rewritten.
 
 ## What it refuses to touch
 
@@ -359,6 +428,7 @@ at the shipped defaults with a steady west wind.
 | `PlantPercent` | GRASS & BUSH GAIN | 100 | 0..200 | Gain for models below ~1.5 yd. 0 stops undergrowth and leaves trees alone. |
 | `TreePercent` | TREE GAIN | 100 | 0..200 | Gain for models above ~6 yd, blended in between. 0 stops trees only. |
 | `DistanceYards` | SWAY DISTANCE (YARDS) | 120 | 20..300 | Sway fades to nothing by this range. |
+| `GrassBlades` | GRASS BLADE WIND | 1 | on/off | Bends the client's own vertex shader so the grass drawn as rigid, bone-less blade meshes moves too. Off, only models with skeletons sway. |
 | `SwayAnimatedModels` | SWAY ANIMATED MODELS (MAY MOVE CREATURES) | 0 | on/off | Also leans models the client animates. Off by default; see above. |
 | `DebugView` | VEGETATION DEBUG VIEW | 0 | on/off | Two extra diagnostic HUD rows: what leans, and which gate refused the rest, by name and count. |
 
@@ -383,6 +453,12 @@ Linux and is wired into CI, and it pins:
   moved 25 cm does not, and a model that turned in place does not;
 - the gust field: bounded, continuous across the world including its wrap period,
   continuous in time, travelling downwind, and costless in calm air;
+- the grass that has no bones: the shader model tokens, the injection point (after
+  the world-to-view anchor, before the position output), the texture-coordinate
+  register read from the declaration, every structural refusal (no texture
+  coordinate, occupied scratch registers, no anchor, no output, unknown model,
+  empty text), the register discipline of the injected block, and the packing of
+  the constants it reads, including the calm frame;
 - strength, size classes, gains, range fade, flutter, and all three switches
   (master wind, the link, the effect);
 - admission: every captured model variant is accepted on sight, the
@@ -509,9 +585,12 @@ In-client acceptance checks (Windows and the Ascension client):
   itself twice again before it leans - which shows up as a `waiting` count on the
   state row rather than as silence. The per-frame sweep is what keeps the maps
   small in practice; the caps are only the floor under a flood.
-- Only the client's skinned M2 path sways. Terrain-bound grass that the client
-  does not draw as a model, and anything the client itself deforms in a vertex
-  shader outside the bone palette, is untouched.
+- The client's skinned M2 path sways through its bone palette, and the rigid
+  bone-less blade meshes sways through their own vertex shader (see *The grass
+  that has no bones*). Anything else the client deforms itself - a shader that
+  reads no texture coordinate, a draw that is not a green cut-out - is untouched,
+  and a blade draw is never bent if its shader cannot be disassembled and
+  reassembled on the machine.
 - The client's own shadow pass is not leaned: it is one of the never-a-model
   passes, it writes no colour, and it renders into its own 2048x2048 viewport, so
   a leaning tree's native shadow stays with the client's pose. This is the
