@@ -217,6 +217,12 @@ struct Instance
     unsigned boneBound = 0;
     unsigned poseBound = 0;   // the bound the stored pose was taken with
     unsigned stable = 0;
+    // The pose the current run of identical frames started with, and the frame it
+    // started on: a model has to hold this for the whole stance before a byte is
+    // written to its palette.
+    renderer::VegetationBones stance;
+    unsigned stanceBound = 0;
+    uint64_t stanceFrame = 0;
     // How many plants this model's draw carries. One for a single tuft, bush or
     // tree; every tuft of a patch for a draw the client merged a field's grass
     // into. It is what the HUD's "leaning" counts, because that is what the
@@ -232,6 +238,15 @@ struct Instance
     // placement point to compare against and no size to trust: a fresh instance
     // is "waiting", never "placed and still".
     bool measured = false;
+    // The model was measured and is NOT a plant, and that verdict is about the
+    // model rather than about its motion, so no batch of it may ever lean and no
+    // future frame re-opens the question. Two things set it: a skeleton the
+    // model's own vertices say is a body's rather than a patch's or a tree's, and
+    // geometry that hangs from its placement point instead of standing on it.
+    // This is what keeps a character's body out after one of its cloth batches
+    // was measured, and what keeps a shoulder pad, a sword and a saddle out even
+    // though a standing character does not move.
+    bool notPlant = false;
     bool swaying = false;
 };
 
@@ -265,6 +280,8 @@ inline bool g_reportedSize = false;
 inline bool g_reportedMoved = false;
 inline bool g_reportedMerged = false;
 inline bool g_reportedLean = false;
+inline bool g_reportedSkeleton = false;
+inline bool g_reportedGround = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
 inline bool g_reportedSolidModel = false;
@@ -321,6 +338,8 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_reportedMoved = false;
     g_reportedMerged = false;
     g_reportedLean = false;
+    g_reportedSkeleton = false;
+    g_reportedGround = false;
     g_reportedUnidentifiedShader = false;
     g_reportedSolidModel = false;
     g_reportedRootBlock = false;
@@ -1208,6 +1227,11 @@ struct Scope
                 // prop, which is what the material gate already counted it as.
                 return;
             }
+            if (owner->notPlant)
+            {
+                ++Status().skippedShape;
+                return;
+            }
             known = owner;
             float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
             const unsigned bound = std::max(known->boneBound, 1u);
@@ -1222,6 +1246,31 @@ struct Scope
             {
                 ++Status().skippedPalette;
                 probe.Observe(false, 0, frame.frameIndex);
+                return;
+            }
+            // THIS batch's own vertices, read for the model's identity above: they
+            // are what says whether this is a body. A character's cloth batch can
+            // pass every motion test its model's body never sees - the body is
+            // opaque and refused by the material gate - and this is where the body
+            // gets its say: it references a whole skeleton, so the model is marked
+            // and every batch of it stops leaning, at once.
+            const bool solidSpatial = renderer::VegetationSkeletonIsSpatial(bones);
+            if (solidModel.bones > renderer::kVegetationMaxBones && !solidSpatial)
+            {
+                known->notPlant = true;
+                StopLeaning(*known);
+                ++Status().skippedShape;
+                return;
+            }
+            // And this batch's own geometry, through its own bones: a saddle or a
+            // shoulder pad hangs below the point the model is placed at.
+            const auto solidMeasured = renderer::MeasureVegetationGeometry(solidModel.sample, solidModel.samples,
+                registers, bound, &frame.viewRaw.m[0][0], &frame.cameraPosition.x);
+            if (renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot))
+            {
+                known->notPlant = true;
+                StopLeaning(*known);
+                ++Status().skippedGround;
                 return;
             }
             const float moved = std::sqrt((bones.pivot[0] - known->pivot[0]) * (bones.pivot[0] - known->pivot[0]) +
@@ -1296,6 +1345,14 @@ struct Scope
         if (!instance) return;
         const unsigned bound = std::max(model.bones, std::max(instance->boneBound, 1u));
         instance->boneBound = bound;
+        // A model this renderer has already measured and found not to be a plant -
+        // a body's skeleton, or geometry hanging from its placement point - is
+        // never measured again.
+        if (instance->notPlant)
+        {
+            ++Status().skippedShape;
+            return;
+        }
 
         // A placed doodad does not travel. Its placement point is part of its
         // identity, so a model whose point moved between two frames is being
@@ -1345,19 +1402,30 @@ struct Scope
         // a patch of grass has more "bones" than any creature while being nothing
         // but grass. What a creature's skeleton has instead is COMPACTNESS - every
         // bone inside one body a couple of yards across - so that is what the cap
-        // is applied to, and the merged case is bounded by size further down.
+        // is applied to. And the count it is applied to comes from the draw's own
+        // VERTICES, not from the palette reader: the reader stops at
+        // kM2MaxBones blocks, so a count of the blocks it validated can never
+        // exceed that, and the old shape of this test could not fire at all - a
+        // character's body walked through it.
         const bool merged = renderer::VegetationSkeletonIsSpatial(bones);
-        const bool manyPlants = renderer::VegetationCarriesManyPlants(bones);
-        if (bones.bones > renderer::kVegetationMaxBones && !merged)
+        if (bound > renderer::kVegetationMaxBones && !merged)
         {
-            // A full skeleton: character, creature, mount, weapon.
+            // A full skeleton: character, creature, mount, weapon. This is a
+            // verdict about the MODEL, not about its motion, so it is recorded on
+            // the instance and every later batch of the same model is refused
+            // without being measured at all.
+            instance->notPlant = true;
+            StopLeaning(*instance);
             ++Status().skippedShape;
-            if (!g_reportedShape)
+            if (!g_reportedSkeleton)
             {
-                g_reportedShape = true;
-                Log("Vegetation sway: a model draw carries " + std::to_string(bones.bones) +
-                    " bones in a spread of " + std::to_string(bones.spread) + " yd, which is a creature, a mount or a "
-                    "character rather than a plant. The HUD counts these as `shape`.");
+                g_reportedSkeleton = true;
+                Log("Vegetation sway: a model draw's own vertices reference " + std::to_string(bound) +
+                    " bones in a " + std::to_string(bones.spread) + " yd spread, which is a character, a creature or a "
+                    "mount rather than a plant (the palette reader can only count " +
+                    std::to_string(renderer::kVegetationMaxBones) +
+                    " bone blocks, so this bound comes from the vertices). Nothing of this model will lean. The HUD "
+                    "counts these as `shape`.");
             }
             return;
         }
@@ -1408,13 +1476,34 @@ struct Scope
             }
             return;
         }
+        // Where the model stands, which is the second positive witness: a plant
+        // grows out of the point it is placed at, while everything the client
+        // hangs from a joint - a cape, a shoulder pad, a sword, a saddle, a banner
+        // - has its geometry below its own origin. Nothing about a standing
+        // character moves, so the motion witnesses cannot refuse its shoulder
+        // pads; this one can, and it refuses them on the model's shape alone.
+        if (renderer::VegetationHangsFromItsOrigin(measured, origin))
+        {
+            instance->notPlant = true;
+            StopLeaning(*instance);
+            ++Status().skippedGround;
+            if (!g_reportedGround)
+            {
+                g_reportedGround = true;
+                Log("Vegetation sway: a model draw's own vertices reach " +
+                    std::to_string(origin[2] - measured.lowest[2]) + " yd BELOW the point it is placed at, so it hangs "
+                    "from a joint instead of growing out of the ground (a cape, a shoulder pad, a sword, a saddle, a "
+                    "banner). Nothing of this model will lean. The HUD counts these as `ground`.");
+            }
+            return;
+        }
         Status().lastMeasured = height;
         instance->height = height;
         instance->footprint = footprint;
         instance->rootKey = rootKey;
         instance->rootKeyFrame = frame.frameIndex;
         instance->measured = true;
-        instance->plants = manyPlants ? bones.bones : 1;
+        instance->plants = renderer::VegetationCarriesManyPlants(bones, height) ? bones.bones : 1;
         if (merged && !g_reportedMerged)
         {
             g_reportedMerged = true;
@@ -1469,9 +1558,31 @@ struct Scope
         const bool sameFrame = instance->poseFrame == frame.frameIndex;
         const bool samePose = comparable &&
             renderer::VegetationPoseDelta(instance->pose, bones) <= renderer::kVegetationPoseTolerance;
+        // The stance: the pose this model has to hold FOR A WHILE, not just for
+        // the frame before this one. An idle creature breathes slowly, and a
+        // shoulder that has not moved in two frames has not moved in a quarter of
+        // a second either - but a shoulder that has not moved in half a second is
+        // a plant. Keeping the pose the run started with is what turns "it did not
+        // move since the last frame" into "it has not moved at all", which is the
+        // only form of this witness a standing character cannot satisfy.
+        const bool stanceSame = instance->stance.valid && instance->stanceBound == bound &&
+            renderer::VegetationPoseDelta(instance->stance, bones) <= renderer::kVegetationPoseTolerance;
         if (meshStable)
         {
-            if (samePose) instance->stable = std::min(instance->stable + 1, kMaxStableFrames);
+            if (samePose && stanceSame) instance->stable = std::min(instance->stable + 1, kMaxStableFrames);
+            else if (samePose)
+            {
+                // It matches the frame before but not the stance it started: the
+                // client is animating it slowly. Counted as motion, and the run
+                // starts again from here.
+                ++Status().skippedAnimated;
+                instance->movedFrame = frame.frameIndex;
+                instance->stable = 0;
+                instance->stance = bones;
+                instance->stanceFrame = frame.frameIndex;
+                instance->stanceBound = bound;
+                StopLeaning(*instance);
+            }
             else if (comparable)
             {
                 // The client is moving it after all. It stops leaning immediately,
@@ -1479,9 +1590,19 @@ struct Scope
                 // by accident, and those must not put it back in the wind.
                 ++Status().skippedAnimated;
                 instance->movedFrame = frame.frameIndex;
+                instance->stable = 0;
+                instance->stance = bones;
+                instance->stanceFrame = frame.frameIndex;
+                instance->stanceBound = bound;
                 StopLeaning(*instance);
             }
-            else if (!sameFrame || instance->poseBound != bound) instance->stable = 0;
+            else if (!sameFrame || instance->poseBound != bound)
+            {
+                instance->stable = 0;
+                instance->stance = bones;
+                instance->stanceFrame = frame.frameIndex;
+                instance->stanceBound = bound;
+            }
         }
         else
         {
@@ -1503,7 +1624,9 @@ struct Scope
         // from scratch. A creature's idle animation is quiet for a frame or two;
         // it is not quiet for six, and it is not quiet at all once it has been
         // seen to move.
-        if (instance->stable < renderer::kVegetationStableFrames && !settings.animatedModels)
+        const bool stanceHeld = instance->stanceFrame != 0 && frame.frameIndex > instance->stanceFrame &&
+            frame.frameIndex - instance->stanceFrame >= renderer::kVegetationStanceFrames;
+        if ((instance->stable < renderer::kVegetationStableFrames || !stanceHeld) && !settings.animatedModels)
         {
             // Measured, plant-shaped, standing still - and not leaning yet: the
             // static proof needs the model to repeat itself over a run of frames

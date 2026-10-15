@@ -115,8 +115,10 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     //         projection, refused once the palette failed to prove otherwise
     //   pal   the palette does not look like object -> view matrices / is short
     //   geo   the draw's own vertices could not be read (the palette bound)
-    //   shape too many bones, or longer than it is tall
+    //   shape a body's worth of bones, or longer than it is tall
     //   size  outside the supported height range, measured against `h`
+    //   ground the model hangs from its placement point instead of standing on
+    //         it: a cape, a shoulder pad, a sword, a saddle
     //   move  the client is animating it
     //   far   beyond DistanceYards
     //   calm  inside the range, but the wind leaves a zero angle at that spot
@@ -148,6 +150,7 @@ inline std::vector<std::string> VegetationDebugLines(const VegetationStatus& sta
     report("geo", status.skippedGeometry);
     report("shape", status.skippedShape);
     report("size", status.skippedSize);
+    report("ground", status.skippedGround);
     report("move", status.skippedAnimated);
     report("far", status.skippedRange);
     report("calm", status.skippedCalm);

@@ -29,7 +29,9 @@ its own.
   a model), `geo` (the draw's vertices could not be read), `depth` (a pass that
   writes no colour), `cam` (no frame camera, or another view's viewport), `pal`
   (a palette that failed validation, including a c31 that is not a bone block at
-  all), `shape`/`size` (not a plant), `move` (the client is animating it), `far`
+  all), `shape`/`size` (not a plant by its skeleton or its proportions), `ground`
+  (a model that hangs from its placement point: a cape, a shoulder pad, a sword,
+  a saddle), `move` (the client is animating it), `far`
   (beyond the range), `calm` (inside the range, but the wind and its gust field
   leave a zero angle at that spot), `write` (the device refused the leaned
   registers), `new` (shader variants
@@ -154,6 +156,21 @@ single byte is written:
   graphics off.** No palette is read at all. Disabling a link restores exactly
   the behaviour that existed before this feature for that consumer, and never
   resets the shared wind for the others.
+- **A body's skeleton.** The bones a model's own *vertices* reference are the
+  skeleton that model has, and a plant's is a tuft, a bush or a tree's branches -
+  never a body's. The palette reader can only count the blocks it can hold
+  (`kM2MaxBones`), so this count is taken from the vertices, where it is honest:
+  a character, a mount or a creature references more than a plant's worth, and is
+  refused for good the moment its model is measured. A merged patch and a tree
+  are the two exceptions, and only because their skeletons are *spatial* (see
+  below).
+- **Geometry that hangs instead of standing.** A plant grows out of the point it
+  is placed at: a WoW doodad is placed with its base on the ground, so its
+  vertices are above its own origin. Everything the client hangs from a joint
+  reaches *below* it - a cape, a shoulder pad, a sword, a saddle, a banner - and
+  that is a witness about the model's shape, so it refuses them even though a
+  standing character's shoulder is not moving
+  (`kVegetationBelowPivot`).
 - **Models the client is already animating.** Four readings have to agree, and
   any one of them refusing is enough to keep a model out of the wind for good:
   1. *The skeleton's world pose* has to be identical between frames;
@@ -164,8 +181,12 @@ single byte is written:
      travel, while a mount under a player, a walking creature and an object held
      in someone's hands move constantly;
   4. *the pose has to repeat for a run of consecutive frames*
-     (`kVegetationStableFrames`), not for one: a creature breathing, a tail
-     swishing or a walk cycle only looks still for a frame or two.
+     (`kVegetationStableFrames`) **and to hold for a stretch of time**
+     (`kVegetationStanceFrames`): the model has to still be in the pose its run
+     started with. A creature breathing, a tail swishing or a walk cycle only
+     looks still for a frame or two, and - because the comparison is against the
+     stance and not only against the frame before - a slow idle animation is
+     caught as motion rather than passing as stillness.
   A model that fails any of them is refused, stops leaning immediately, and is
   refused for a while afterwards (`kVegetationMoveCooldownFrames`), so a walk
   cycle cannot flicker back into the wind between two frames that happen to
@@ -450,8 +471,10 @@ In-client acceptance checks (Windows and the Ascension client):
    `pal` for a palette that failed validation - including a c31 that is not a
    bone block at all, which is what a client that keeps its bones somewhere else
    looks like - `geo` for vertices that could not be read,
-   `shape`/`size` for a model that did not look like a plant, `move` for a model
-   the client is animating, `far` for range, `calm` for a plant the wind's own
+   `shape` for a model whose own vertices reference a body's skeleton or whose
+   shape is not a plant's, `size` for one outside the supported size range,
+   `ground` for one whose geometry hangs below the point it is placed at, `move`
+   for a model the client is animating, `far` for range, `calm` for a plant the wind's own
    gust field leaves with nothing to apply, `write` for a refused device write;
    the list continues on the next row if it does not fit, and a `waiting` count
    on the row above means those models are being measured, not refused). The

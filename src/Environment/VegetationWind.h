@@ -83,8 +83,9 @@ struct VegetationStatus
     unsigned skippedDepthOnly = 0; // writes no colour: a shadow map, a depth fill, a prepass
     unsigned skippedPalette = 0;  // c31 did not look like a bone palette
     unsigned skippedAnimated = 0; // the client's own animation is moving the model
-    unsigned skippedShape = 0;    // too many bones, or too long/low to be a plant
+    unsigned skippedShape = 0;    // a body's worth of bones, or longer than it is tall
     unsigned skippedSize = 0;     // outside the supported size range
+    unsigned skippedGround = 0;   // hangs from its origin instead of standing on it
     unsigned skippedRange = 0;    // beyond DistanceYards
     unsigned skippedCalm = 0;     // inside the range, but the wind leaves a zero angle here
     unsigned skippedWrite = 0;    // the leaned registers could not be written back
@@ -449,6 +450,11 @@ inline constexpr float kVegetationMaxFootprint = 80.f;   // yards: a larger sing
 // looks still for a frame or two. Six consecutive identical frames is what keeps
 // mounts and characters out of the wind with the animated-models switch off.
 inline constexpr unsigned kVegetationStableFrames = 6;
+// And for at least this many frames, which is what makes the proof about a
+// stretch of time rather than about two neighbouring frames: a creature's idle
+// animation is slow, and "it did not move since the last frame" is a test a
+// breathing shoulder can pass for a while.
+inline constexpr uint64_t kVegetationStanceFrames = 20;
 // And once a model HAS been seen moving, it is refused for this many frames
 // afterwards, so a walk cycle cannot flicker back into leaning between steps.
 inline constexpr uint64_t kVegetationMoveCooldownFrames = 90;
@@ -456,6 +462,16 @@ inline constexpr uint64_t kVegetationMoveCooldownFrames = 90;
 // placed doodad does not travel, and a mount, a creature or an object carried by
 // the player does.
 inline constexpr float kVegetationPlacedEpsilon = .05f;
+// How far a model's own geometry may sit BELOW the point it is placed at and
+// still be a plant. A plant grows out of its origin: a WoW doodad is placed with
+// its base on the ground, so its vertices are above the point it is placed at -
+// a tuft, a bush and a tree alike, which is why this holds for all three. What
+// hangs from an origin instead is everything the client attaches to a joint: a
+// cape, a shoulder pad, a sword, a saddle, a banner on a wall. Those are the
+// models that broke when a standing character was measured as a plant, and this
+// is the witness that refuses them without asking how they move - because a
+// standing character's shoulder does not move.
+inline constexpr float kVegetationBelowPivot = .25f;
 inline constexpr float kVegetationMinModelHeight = .15f; // yards: below this there is nothing to bend
 inline constexpr float kVegetationMaxModelHeight = 90.f; // yards: the sway of a hill-sized tree is invisible
 inline constexpr float kVegetationMinFootprint = 3.f;   // yards of absolute horizontal slack
@@ -509,10 +525,23 @@ inline bool VegetationSkeletonIsSpatial(const VegetationBones& bones) noexcept
     return bones.spread > kVegetationMergedSpread || bones.height > kVegetationTallSkeleton;
 }
 
-inline bool VegetationCarriesManyPlants(const VegetationBones& bones) noexcept
+// The height passed here is the MEASURED height of the draw (its own vertices),
+// not the span of its bone translations: a big tree's bones all sit in its trunk
+// while its canopy reaches twenty yards up, and counting that tree as twenty
+// plants would be as wrong as counting a field as one.
+inline bool VegetationCarriesManyPlants(const VegetationBones& bones, float measuredHeight) noexcept
 {
     return bones.bones > 1 && bones.spread > kVegetationMergedSpread &&
-        bones.height <= kVegetationTallSkeleton;
+        measuredHeight <= kVegetationTallSkeleton;
+}
+
+// The other positive witness: a plant stands ON its origin, a joint attachment
+// hangs FROM it. Measured in world space, from the draw's own vertices through
+// their own bone blocks, so it costs no extra read.
+inline bool VegetationHangsFromItsOrigin(const VegetationMeasurement& measured, const float origin[3]) noexcept
+{
+    if (!measured.valid || !origin) return false;
+    return origin[2] - measured.lowest[2] > kVegetationBelowPivot;
 }
 
 // The palette is passed as the raw float4 registers the client uploaded, in the

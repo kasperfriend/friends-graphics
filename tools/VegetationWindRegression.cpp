@@ -898,12 +898,13 @@ static void TestWindDebugLine()
     status.skippedLayout = 3200; status.skippedGeometry = 12; status.skippedDepthOnly = 900;
     status.skippedCamera = 3; status.skippedViewport = 1; status.skippedShape = 4; status.skippedSize = 2;
     status.skippedAnimated = 5; status.skippedRange = 6; status.unbounded = 2;
+    status.skippedGround = 3;
     status.skippedFixedFunction = 2; status.skippedNeverModel = 44;
     rows = VegetationDebugLines(status, settings, wind);
     Check(rows.size() > 2, "a frame that refuses at every gate continues on the next row");
     Check(rows[2].find(kMoreGatesPrefix) == 0, "and the continuation says that it is one");
     for (const char* label : { "flat", "decl", "world", "vs", "geo", "depth", "never", "cam", "pal", "shape",
-                               "size", "move", "far", "calm", "write", "new" })
+                               "size", "ground", "move", "far", "calm", "write", "new" })
         Check(all(rows).find(std::string(label) + " ") != std::string::npos,
             "every gate that refused is on the rows, even when they do not fit one");
     // The row that names the build. An in-client report of "it does not work"
@@ -1104,8 +1105,10 @@ static void TestConfigurationAndWiring()
     // batch that gets leaned, so the solid shortcut is checked too.
     Check(sway.find("const bool merged = renderer::VegetationSkeletonIsSpatial(bones);") != sway.npos &&
           wind.find("return bones.spread > kVegetationMergedSpread || bones.height > kVegetationTallSkeleton;") != sway.npos &&
-          sway.find("if (bones.bones > renderer::kVegetationMaxBones && !merged)") != sway.npos,
-        "a batch of many plants is not a creature: the bone cap is applied to compact skeletons only");
+          sway.find("if (bound > renderer::kVegetationMaxBones && !merged)") != sway.npos &&
+          sway.find("if (solidModel.bones > renderer::kVegetationMaxBones && !solidSpatial)") != sway.npos,
+        "a batch of many plants is not a creature: the cap is applied to compact skeletons only, and to the bound "
+        "the draw's own vertices give (the palette reader's count can never exceed its own limit)");
     Check(sway.find("const float footprintLimit = merged ? renderer::kVegetationMaxFootprint") != sway.npos,
         "and a merged patch is allowed to be wide and low, which is what a field's grass draw is");
     Check(sway.find("renderer::kVegetationPlacedEpsilon") != sway.npos &&
@@ -1124,9 +1127,9 @@ static void TestConfigurationAndWiring()
     Check(sway.find("const float bonePivot[3] = { block[0][3], block[1][3], block[2][3] };") != sway.npos &&
           sway.find("const auto boneLean = bone == 0 ? lean") != sway.npos,
         "every bone turns about its own position, so a merged patch bends plant by plant");
-    Check(sway.find("const bool manyPlants = renderer::VegetationCarriesManyPlants(bones);") != sway.npos &&
+    Check(sway.find("renderer::VegetationCarriesManyPlants(bones, height)") != sway.npos &&
           wind.find("return bones.bones > 1 && bones.spread > kVegetationMergedSpread &&") != sway.npos &&
-          sway.find("instance->plants = manyPlants ? bones.bones : 1;") != sway.npos &&
+          sway.find("? bones.bones : 1;") != sway.npos &&
           sway.find("Status().swaying += std::max(instance.plants, 1u);") != sway.npos,
         "a merged draw counts the plants it carries, so a whole field does not read as two leaning");
     // Three one-shot lines that make the next report answerable without a second
@@ -1151,8 +1154,20 @@ static void TestConfigurationAndWiring()
           main.find("FileTimeToSystemTime") != main.npos,
         "the build stamp is the loaded dll's own file time");
     const auto hud = Read("src/Environment/WindDebug.h");
+    // The witnesses a standing character cannot pass by not moving: its items hang
+    // from joints and its body references a whole skeleton, and both verdicts are
+    // about the MODEL, so they are recorded and never re-opened.
+    Check(sway.find("if (renderer::VegetationHangsFromItsOrigin(measured, origin))") != sway.npos &&
+          sway.find("renderer::VegetationHangsFromItsOrigin(solidMeasured, bones.pivot)") != sway.npos &&
+          sway.find("instance->notPlant = true;") != sway.npos &&
+          sway.find("if (instance->notPlant)") != sway.npos &&
+          sway.find("if (owner->notPlant)") != sway.npos &&
+          wind.find("return origin[2] - measured.lowest[2] > kVegetationBelowPivot;") != sway.npos &&
+          hud.find("report(\"ground\", status.skippedGround);") != sway.npos,
+        "a model that hangs from its placement point, or whose vertices reference a body's skeleton, is not a plant, "
+        "and no batch of it ever leans");
     for (const char* label : { "flat", "decl", "world", "vs", "geo", "depth", "never", "cam", "pal", "shape",
-                               "size", "move", "far", "calm", "write", "new" })
+                               "size", "ground", "move", "far", "calm", "write", "new" })
         Check(hud.find(std::string("report(\"") + label + "\"") != hud.npos,
             "every gate the device half counts has a name on the HUD row");
     Check(hud.find("inline const char* buildStamp") != hud.npos &&
@@ -1691,13 +1706,35 @@ static void TestMergedPatchSkeleton()
     Check(!renderer::VegetationSkeletonIsSpatial(skeleton(7, 1.f, 2.f)),
         "a bush is one body's worth of bones in one body's worth of space: compact and short");
     Check(renderer::VegetationSkeletonIsSpatial(skeleton(60, 40.f, 1.f)) &&
-          renderer::VegetationCarriesManyPlants(skeleton(60, 40.f, 1.f)),
+          renderer::VegetationCarriesManyPlants(skeleton(60, 40.f, 1.f), 1.f),
         "a field of grass merged into one draw is low and wide, so it is a patch of many plants");
     Check(renderer::VegetationSkeletonIsSpatial(skeleton(40, 3.f, 12.f)) &&
-          !renderer::VegetationCarriesManyPlants(skeleton(40, 3.f, 12.f)),
+          !renderer::VegetationCarriesManyPlants(skeleton(40, 3.f, 12.f), 12.f),
         "a tree is tall: admitted with all its branches, and still one plant");
-    Check(!renderer::VegetationCarriesManyPlants(skeleton(1, 40.f, 1.f)),
+    Check(!renderer::VegetationCarriesManyPlants(skeleton(1, 40.f, 1.f), 1.f),
         "and one bone is one plant, however wide the patch it belongs to measures");
+    // The two positive witnesses, which are what a standing character cannot pass
+    // by not moving: a plant's skeleton is not a body's, and a plant's geometry
+    // stands on its own origin instead of hanging from it.
+    const auto measurement = [](float lowestZ, float highestZ) {
+        renderer::VegetationMeasurement measurement{};
+        measurement.valid = true;
+        measurement.samples = 8;
+        measurement.lowest[2] = lowestZ;
+        measurement.highest[2] = highestZ;
+        return measurement;
+    };
+    const float ground[3] = { 100.f, 200.f, 3.f };
+    Check(!renderer::VegetationHangsFromItsOrigin(measurement(3.02f, 3.6f), ground),
+        "a tuft whose vertices all sit at or above the point it is placed at is a plant growing out of the ground");
+    Check(renderer::VegetationHangsFromItsOrigin(measurement(1.4f, 1.9f), ground),
+        "a cape, a shoulder pad, a sword and a saddle reach BELOW the joint they are placed at, and that is what "
+        "they are");
+    Check(!renderer::VegetationHangsFromItsOrigin(measurement(2.8f, 3.6f), ground),
+        "the slack is a plant's own body: a doodad whose origin sits a little inside its base still passes");
+    Check(!renderer::VegetationHangsFromItsOrigin(renderer::VegetationMeasurement{}, ground),
+        "and a measurement that could not be taken refuses nothing - a draw nobody could measure is left alone, "
+        "never banned on a guess");
     Pass("merged patch skeleton: a field of grass in one draw is not a creature, and a creature is not a patch");
 }
 
