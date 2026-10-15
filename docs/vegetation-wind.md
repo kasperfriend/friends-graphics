@@ -175,7 +175,10 @@ single byte is written:
   dropped the moment the model stops leaning - a spot reused by a solid prop is
   not leaned on the strength of what stood there before. The first refusal of a
   session names its shader in `ModernWoWRenderer.log`, which is what makes a
-  `solid` count answerable.
+  `solid` count answerable - and a refusal that could not read the texture at all
+  (nothing bound at stage 0, a resource that is not a texture, a level 0 that
+  will not lock, a format this reader cannot decode) says so instead, because
+  that is a different bug from a texture that was read and had no holes.
 - **A palette that is not where this reader looks for it.** `pal` counts a c31
   that is not a bone block, a palette that fails validation, a root block whose
   translation is not a placement point, and a pivot that does not survive the

@@ -1248,6 +1248,16 @@ static void TestConfigurationAndWiring()
           sway.find("HUD counts") != sway.npos &&
           sway.find("these as `solid`") != sway.npos,
         "a solid model draw names its shader once, so `solid` can be diagnosed");
+    // And the refusal that is NOT a verdict: a texture that could not be read at
+    // all is not the same bug as a texture that was read and had no holes in it,
+    // and the log has to say which one the gate row is counting.
+    Check(sway.find("g_reportedUnreadableTexture") != sway.npos &&
+          sway.find("no texture bound, not a texture, not level 0 ") != sway.npos &&
+          sway.find("the HUD counts") == sway.npos,
+        "a solid draw whose texture could not be read says that instead of claiming one without holes");
+    Check(sway.find("if (texture.verdict == renderer::TextureCutout::Opaque && !g_reportedSolidTexture)") != sway.npos &&
+          sway.find("else if (texture.verdict == renderer::TextureCutout::Unknown && !g_reportedUnreadableTexture)") != sway.npos,
+        "the two are told apart by the verdict the decoder returned, not by a guess");
     // And the register itself, once, when c31 is not a bone block: `pal` on the
     // HUD is otherwise a dead end from a player's machine - zeros mean the
     // client keeps its matrix elsewhere, a projection means the draw is not a

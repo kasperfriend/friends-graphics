@@ -253,6 +253,7 @@ inline PaletteCache g_palette;
 inline std::unordered_map<const void*, renderer::TextureAlphaProbe> g_textureCutouts;
 inline bool g_anySwaying = false;
 inline bool g_reportedSolidTexture = false;
+inline bool g_reportedUnreadableTexture = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
 inline bool g_reportedSolidModel = false;
@@ -303,6 +304,7 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_anySwaying = false;
     g_reportedUnreadableGeometry = false;
     g_reportedSolidTexture = false;
+    g_reportedUnreadableTexture = false;
     g_reportedUnidentifiedShader = false;
     g_reportedSolidModel = false;
     g_reportedRootBlock = false;
@@ -500,34 +502,35 @@ namespace detail
     // the device's texture is. Anything this cannot read is `Unknown`, which is
     // never evidence of a cut-out: a draw is refused only when its texture was
     // read AND has no transparency in it.
-    inline renderer::TextureCutout TextureIsCutout(IDirect3DDevice9* device) noexcept
+    inline renderer::TextureAlphaProbe TextureIsCutout(IDirect3DDevice9* device) noexcept
     {
         using Microsoft::WRL::ComPtr;
+        const renderer::TextureAlphaProbe unknown;
         ComPtr<IDirect3DBaseTexture9> base;
-        if (FAILED(device->GetTexture(0, base.GetAddressOf())) || !base) return renderer::TextureCutout::Unknown;
+        if (FAILED(device->GetTexture(0, base.GetAddressOf())) || !base) return unknown;
         const auto cached = g_textureCutouts.find(base.Get());
-        if (cached != g_textureCutouts.end()) return cached->second.verdict;
-        auto remember = [&base](const renderer::TextureAlphaProbe& probe)
+        if (cached != g_textureCutouts.end()) return cached->second;
+        const auto remember = [&base](const renderer::TextureAlphaProbe& probe)
         {
             if (g_textureCutouts.size() >= kMaxTextureProfiles) g_textureCutouts.clear();
             g_textureCutouts.emplace(base.Get(), probe);
-            return probe.verdict;
+            return probe;
         };
-        if (base->GetType() != D3DRTYPE_TEXTURE) return renderer::TextureCutout::Unknown;
+        if (base->GetType() != D3DRTYPE_TEXTURE) return remember(unknown);
 
         ComPtr<IDirect3DTexture9> texture;
         base.As(&texture);
-        if (!texture) return renderer::TextureCutout::Unknown;
+        if (!texture) return remember(unknown);
         D3DSURFACE_DESC desc{};
         D3DLOCKED_RECT locked{};
-        if (FAILED(texture->GetLevelDesc(0, &desc))) return renderer::TextureCutout::Unknown;
+        if (FAILED(texture->GetLevelDesc(0, &desc))) return remember(unknown);
         // D3DLOCK_READONLY is what makes this safe to do while the client has the
         // texture bound: no modification, so no flush and no re-upload.
         if (FAILED(texture->LockRect(0, &locked, nullptr, D3DLOCK_READONLY)) || !locked.pBits)
-            return renderer::TextureCutout::Unknown;
+            return remember(unknown);
         const renderer::TextureAlphaProbe probe = renderer::ClassifyTextureCutout(
             TextureFormatOf(desc.Format), static_cast<const uint8_t*>(locked.pBits),
-            size_t(locked.Pitch) < 0 ? 0 : size_t(locked.Pitch), desc.Width, desc.Height, ~size_t(0));
+            locked.Pitch > 0 ? size_t(locked.Pitch) : 0, desc.Width, desc.Height, ~size_t(0));
         texture->UnlockRect(0);
         return remember(probe);
     }
@@ -1085,24 +1088,41 @@ struct Scope
                 // the model, not to the batch.
                 instanceCutout = true;
             }
-            else if (detail::TextureIsCutout(device) == renderer::TextureCutout::Cutout)
-            {
-                instanceCutout = true;
-            }
             else
             {
-                ++Status().skippedMaterial;
-                if (!g_reportedSolidTexture)
+                const renderer::TextureAlphaProbe texture = detail::TextureIsCutout(device);
+                instanceCutout = texture.verdict == renderer::TextureCutout::Cutout;
+                if (!instanceCutout)
                 {
-                    g_reportedSolidTexture = true;
-                    char text[400]{};
-                    std::snprintf(text, sizeof(text),
-                        "Vegetation sway: a model draw has alpha test and alpha blend BOTH off and a stage 0 texture "
-                        "with no transparent texel in it, so it is a solid prop (shader hash=0x%016llx). The HUD counts "
-                        "these as `solid`. If foliage is being counted here, that foliage is drawn with neither state "
-                        "nor a cut-out texture, and the log line above this one names the shader to look at.",
-                        static_cast<unsigned long long>(shader.hash));
-                    Log(text);
+                    ++Status().skippedMaterial;
+                    // Two refusals, two messages, because they are two different
+                    // bugs: a texture that was READ and has no transparency is a
+                    // solid prop for certain, while a texture that could not be
+                    // read at all leaves the question open - and this is the line
+                    // that says which of the two is on the gate row.
+                    if (texture.verdict == renderer::TextureCutout::Opaque && !g_reportedSolidTexture)
+                    {
+                        g_reportedSolidTexture = true;
+                        char text[420]{};
+                        std::snprintf(text, sizeof(text),
+                            "Vegetation sway: a model draw has alpha test and alpha blend BOTH off and its stage 0 "
+                            "texture has no transparent texel in it (%u texels examined), so it is a solid prop and "
+                            "not foliage (shader hash=0x%016llx). The HUD counts these as `solid`.",
+                            texture.texels, static_cast<unsigned long long>(shader.hash));
+                        Log(text);
+                    }
+                    else if (texture.verdict == renderer::TextureCutout::Unknown && !g_reportedUnreadableTexture)
+                    {
+                        g_reportedUnreadableTexture = true;
+                        char text[420]{};
+                        std::snprintf(text, sizeof(text),
+                            "Vegetation sway: a model draw has alpha test and alpha blend BOTH off, and its stage 0 "
+                            "texture could not be read as a cut-out (no texture bound, not a texture, not level 0 "
+                            "lockable, or a format this reader cannot decode). The HUD counts these as `solid`; if "
+                            "foliage is among them, this is why it does not lean (shader hash=0x%016llx).",
+                            static_cast<unsigned long long>(shader.hash));
+                        Log(text);
+                    }
                 }
             }
         }
