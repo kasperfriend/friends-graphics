@@ -274,7 +274,13 @@ Those draws are bent in **the client's own vertex shader** instead:
    lighting, which a real session's 956 and 1048 byte shaders do - at the first
    run of six registers above them that the shader never mentions (`c34` for
    those two). The device writes each shader's rows at that shader's own base and
-   re-arms them when the client writes over that range.
+   re-arms them when the client writes over that range. The block's own **temps**
+   move the same way: it is written in `r2..r5` and renamed onto the first run of
+   four (`r3..r6`, `r4..r7`, ...) that the shader is not holding a value in across
+   the insertion point - a real client's blade shaders keep their normals and
+   their lighting in `r2`/`r3`, and a rule of "the block is written in `r2..r5`"
+   refused them, which is a field that does not move while the log says the path
+   ran.
 5. The draw's own vertices decide whether it is a card worth bending - and they
    are the *whole* admission: nothing is bent that did not measure as a blade. Its
    texture coordinate, its height and the base/tip pairs in it are measured from
@@ -313,10 +319,12 @@ Those draws are bent in **the client's own vertex shader** instead:
 6. Every refusal is structural and one-shot logged: an empty disassembly, a
    shader that is not `vs_2_0`/`vs_3_0`, a declaration that gives the block
    neither a texture coordinate nor a position to read a height from, a shader that never lands its vertex in `r0` before a
-   clip-space output reads it, a scratch register the shader still needs **across**
-   the insertion point (a register the shader redefines *after* the block is not a
-   conflict - three of the five foliage shaders of a real session keep their
-   normals and their lighting in `r2`/`r3`), a declaration whose texture coordinate
+   clip-space output reads it, a shader that holds a value across the insertion
+   point in **every** run of four temp registers the block could work in (a
+   register the shader redefines *after* the block is not a conflict at all, and
+   neither is a register it holds across the anchor in only some of the runs -
+   three of the five foliage shaders of a real session keep their normals and
+   their lighting in `r2`/`r3` and are bent in `r3..r6`), a declaration whose texture coordinate
    is not the register the shader reads - the coordinate on one ramp, the position
    on the other - a card that was read and lies flat, or an
    assembler that refuses the text. In that last case the shader's **whole
@@ -599,7 +607,7 @@ Linux and is wired into CI, and it pins:
 - the grass that has no bones: the shader model tokens, the injection point (after
   the world-to-view anchor, before the position output), the texture-coordinate
   register read from the declaration, every structural refusal (no texture
-  coordinate, occupied scratch registers, no anchor, no output, unknown model,
+  coordinate, every run of four temps occupied, no anchor, no output, unknown model,
   empty text), the register discipline of the injected block, and the packing of
   the constants it reads, including the calm frame;
 - strength, size classes, gains, range fade, flutter, and all three switches

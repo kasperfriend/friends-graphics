@@ -636,13 +636,21 @@ static void TestConfigurationAndWiring()
     // cost: a 2 s gap around a reload of sixty microseconds is the client's loader,
     // and the line says so in the report instead of leaving it to an argument.
     Check(main.find("frame stall: %.0f ms between presents") != main.npos &&
-          main.find("the last tuning reload cost %.2f ms, and this project's own work for the stalled frame is ") !=
+          main.find("the frame that took this gap drew %llu draw(s) against %llu frame(s) for the session") !=
               main.npos &&
+          main.find("const uint64_t frameDraws = sessionDraws - g_drawsAtLastPresent;") != main.npos &&
+          main.find("the last tuning reload cost %.2f ms, and this project's ") != main.npos &&
           main.find("the place changed \" + std::to_string(") != main.npos &&
           main.find("g_lastReloadMicros=micros(renderer::PerformanceCounter()-reloadBegan);") != main.npos &&
-          main.find("const bool stall = renderer::FrameGapIsAStall(gapMs, g_presentGapMs);") != main.npos,
+          main.find("const bool stall = renderer::FrameGapIsAStall(gapMs, g_presentGapMs);") != main.npos &&
+          Read("src/Diagnostics/RendererDiagnostics.h").find("uint64_t DrawCalls() const noexcept") !=
+              std::string::npos &&
+          Read("src/Diagnostics/RendererDiagnostics.cpp").find(
+              "m_drawCalls.fetch_add(1, std::memory_order_relaxed);") != std::string::npos,
           "a frame that stalls is written to the log with its own gap, the place it happened in, how long ago the "
-          "place changed and what this project's own reload cost - so the next report says who the stall belongs to");
+          "place changed, what this project's own reload cost AND the draw load of the frame itself - the one number "
+          "that says whether the frame that took the gap was drawing the place again, so the next report says who the "
+          "stall belongs to");
     Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
           main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
           main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&

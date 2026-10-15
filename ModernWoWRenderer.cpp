@@ -200,6 +200,10 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 // When the place last changed, when its tuning was last applied, and whether the
 // renderer has configured itself for a place at all yet. See HookedPresent.
 uint64_t g_placeChangedAt = 0;
+// What the client has drawn, as of the last Present: the frame that takes a gap
+// is the difference between this and the session total when the gap is measured
+// (see the stall line in HookedPresent).
+uint64_t g_drawsAtLastPresent = 0;
 uint64_t g_locationAppliedAt = 0;
 uint64_t g_staleLoggedAt = 0;
 unsigned g_placeSkipped = 0;
@@ -250,6 +254,17 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     {
         const std::int64_t tick = renderer::PerformanceCounter();
         const std::int64_t frequency = (std::max<std::int64_t>)(1, renderer::PerformanceFrequency());
+        // What the frame that just ended did, before the frame this Present begins
+        // is allowed to add to it: the draws since the previous Present, and the
+        // session's own rate to compare them against. A crossed border is drawn
+        // again from scratch - new terrain, new WMOs, new doodads - and that
+        // difference is the one number a stall line can carry that says whether
+        // the frame that took the gap was an ordinary one.
+        auto& diagnostics = renderer::RendererDiagnostics::Instance();
+        const uint64_t sessionDraws = diagnostics.DrawCalls();
+        const uint64_t frameDraws = sessionDraws - g_drawsAtLastPresent;
+        const uint64_t sessionFrames = diagnostics.Frames();
+        g_drawsAtLastPresent = sessionDraws;
         if (g_lastPresentTick)
         {
             const double gapMs = double(tick - g_lastPresentTick) * 1000.0 / double(frequency);
@@ -276,12 +291,18 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
                             static_cast<unsigned long long>(now - g_placeChangedAt)) + " ms before this frame";
                     else
                         place += ", and no place change had been seen yet";
-                    char line[420]{};
+                    char line[640]{};
                     std::snprintf(line, sizeof(line),
                         "frame stall: %.0f ms between presents (session average %.1f ms, worst %.0f ms, %u so far) - %s; "
-                        "the last tuning reload cost %.2f ms, and this project's own work for the stalled frame is "
-                        "what the line above the gap was",
+                        "the frame that took this gap drew %llu draw(s) against %llu frame(s) for the session (%.0f a "
+                        "frame, so this one was %.1fx that); the last tuning reload cost %.2f ms, and this project's "
+                        "own work for the stalled frame is what the line above the gap was",
                         gapMs, g_presentGapMs, g_worstGapMs, g_stalls, place.c_str(),
+                        static_cast<unsigned long long>(frameDraws),
+                        static_cast<unsigned long long>(sessionFrames),
+                        sessionFrames ? double(sessionDraws) / double(sessionFrames) : 0.0,
+                        sessionFrames && sessionDraws ? double(frameDraws) * double(sessionFrames) / double(sessionDraws)
+                            : 0.0,
                         double(g_lastReloadMicros) / 1000.0);
                     Log(line);
                 }
@@ -699,6 +720,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDraw(d,t,start,n);
     if(volume::internal||weathervisuals::internal)return originalDraw(d,t,start,n);
+    if(!g_drawingOverlay)renderer::RendererDiagnostics::Instance().RecordDrawCall();
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
@@ -737,6 +759,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(!g_drawingOverlay)renderer::RendererDiagnostics::Instance().RecordDrawCall();
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
@@ -785,6 +808,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawUP(d,t,n,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawUP(d,t,n,v,stride);
+    if(!g_drawingOverlay)renderer::RendererDiagnostics::Instance().RecordDrawCall();
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
@@ -824,6 +848,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(!g_drawingOverlay)renderer::RendererDiagnostics::Instance().RecordDrawCall();
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);

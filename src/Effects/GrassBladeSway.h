@@ -494,10 +494,12 @@ inline void BuildInjectedShader(IDirect3DDevice9* device, BladeShader& entry) no
         char text[560]{};
         std::snprintf(text, sizeof(text),
             "Grass blade sway: the client draws its grass with a vertex shader this build has now bent - %s, %u "
-            "bytes, texture coordinate v%u, motion constants c%u..c%u, blade upright %s (%.2f yd of it, %u pair(s) "
-            "voted), card %.0f%% green. Every draw of it now moves with the wind; the HUD counts them as `blades`.",
+            "bytes, texture coordinate v%u, motion constants c%u..c%u, temps r%u..r%u, blade upright %s (%.2f yd "
+            "of it, %u pair(s) voted), card %.0f%% green. Every draw of it now moves with the wind; the HUD counts "
+            "them as `blades`.",
             model, bytes, injection.texcoordRegister, injection.firstRegister,
             injection.firstRegister + renderer::kGrassBladeRows - 1,
+            injection.firstScratch, injection.firstScratch + renderer::kGrassBladeScratchCount - 1,
             entry.bladeVSign > 0 ? "the other way up" : "as the reference client has it",
             double(entry.bladeExtentYards), entry.bladePairs,
             double(entry.greenPercent < 0.f ? 0.f : entry.greenPercent * 100.f));

@@ -112,6 +112,16 @@ namespace renderer
     // whatever base it is given, so nothing else here has to know.
     inline constexpr unsigned kGrassBladeFirstRegister = 14;
     inline constexpr unsigned kGrassBladeRows = 6;
+    // The temp registers the motion block itself works in. It is WRITTEN against
+    // the reference module's own r2..r5 - r0 and r1 belong to the shader's
+    // projection and its lighting - and renamed onto the first run of four temps
+    // the shader does not hold across the insertion point (see
+    // GrassBladeScratchBase): a foliage shader that keeps its own normals in r2
+    // is bent in r3..r6 instead, where before it was refused outright.
+    inline constexpr unsigned kGrassBladeFirstScratch = 2;
+    inline constexpr unsigned kGrassBladeScratchCount = 4;
+    // r0..r11 is every temp register a vs_2_0/vs_3_0 shader has.
+    inline constexpr unsigned kGrassBladeTempCount = 12;
 
     // What one frame's constants are built from. Filled by the device half from
     // the frame's own wind and camera; separate so the packing below is a pure
@@ -523,9 +533,43 @@ namespace renderer
     // lane is a per-shader decision made from the shader's own declaration line and
     // the draw's own vertices; the arithmetic after the read is identical, because
     // both are the same 0..1 ramp along the blade.
+    // One family of registers renumbered in place: c14..c19 onto a shader's own
+    // free constants, r2..r5 onto the temps that shader is not holding. The match
+    // is a whole register name (`r2` is neither `r20` nor the `2` of `c12`), and
+    // the pass runs DOWNWARD so a register that has already been moved is never
+    // moved a second time (r5 leaves r5 before r4 is written into it).
+    inline void GrassBladeRenumber(std::string& block, char family, unsigned from, unsigned to,
+        unsigned count)
+    {
+        if (from == to) return;
+        for (unsigned i = count; i-- > 0; )
+        {
+            const std::string source = std::string(1, family) + std::to_string(from + i);
+            const std::string target = std::string(1, family) + std::to_string(to + i);
+            size_t at = 0;
+            while ((at = block.find(source, at)) != std::string::npos)
+            {
+                const size_t next = at + source.size();
+                const bool boundary = next >= block.size() || block[next] == '.' || block[next] == '\n' ||
+                    block[next] == '\r' || block[next] == ' ' || block[next] == ',';
+                const bool start = at == 0 || (!std::isalnum(static_cast<unsigned char>(block[at - 1])) &&
+                    block[at - 1] != '.');
+                if (boundary && start)
+                {
+                    block.replace(at, source.size(), target);
+                    at += target.size();
+                }
+                else
+                {
+                    at = next;
+                }
+            }
+        }
+    }
+
     inline std::string GrassBladeMotionBlock(const char* rampRegister, bool worldSpace,
         unsigned firstRegister = kGrassBladeFirstRegister, const char* translation = nullptr,
-        char rampComponent = 'y')
+        char rampComponent = 'y', unsigned scratchBase = kGrassBladeFirstScratch)
     {
         // Where the vertex is, as the two coordinates the wave field and the
         // per-blade hash are built from.
@@ -615,37 +659,17 @@ namespace renderer
             "%s",
             place, rampRegister ? rampRegister : "v3", rampComponent, shear);
         std::string block = text;
-        // And the rows move to wherever this shader's own constants are not: the
-        // text is written against c14..c19 (the reference module's own free block)
-        // and renumbered here, one register at a time, so the block a shader is
-        // given never lands on a register that shader reads.
+        // And the registers move to wherever this shader has room: the text is
+        // written against the reference module's own c14..c19 and r2..r5, and both
+        // families are renumbered here, one register at a time, so the block a
+        // shader is given never lands on a register that shader reads or holds.
+        // The temps are the half that decides whether a real field bends at all:
+        // three of the five foliage shaders in one session keep their normals in
+        // r2/r3 across the anchor, and those shaders are bent in r3..r6.
+        GrassBladeRenumber(block, 'r', kGrassBladeFirstScratch, scratchBase, kGrassBladeScratchCount);
         if (firstRegister != kGrassBladeFirstRegister)
         {
-            // Downwards, so a row that has already been moved is never moved
-            // again: c19 leaves c19 (to c24) before c14 is written INTO c19.
-            for (unsigned i = kGrassBladeRows; i-- > 0; )
-            {
-                const std::string from = "c" + std::to_string(kGrassBladeFirstRegister + i);
-                const std::string to = "c" + std::to_string(firstRegister + i);
-                size_t at = 0;
-                while ((at = block.find(from, at)) != std::string::npos)
-                {
-                    const size_t next = at + from.size();
-                    const bool boundary = next >= block.size() || block[next] == '.' || block[next] == '\n' ||
-                        block[next] == ' ';
-                    const bool start = at == 0 || (!std::isalnum(static_cast<unsigned char>(block[at - 1])) &&
-                        block[at - 1] != '.');
-                    if (boundary && start)
-                    {
-                        block.replace(at, from.size(), to);
-                        at += to.size();
-                    }
-                    else
-                    {
-                        at = next;
-                    }
-                }
-            }
+            GrassBladeRenumber(block, 'c', kGrassBladeFirstRegister, firstRegister, kGrassBladeRows);
         }
         return block;
     }
@@ -1019,8 +1043,7 @@ namespace renderer
         return false;
     }
 
-    // Is a register the block writes still needed by the shader once the block
-    // has run?
+    // Does the shader hold a value in this register ACROSS the insertion point?
     //
     // The rule is not "the shader never mentions r2..r5". A shader that redefines
     // one of them AFTER the insertion point cannot be harmed by the block - its
@@ -1029,44 +1052,89 @@ namespace renderer
     // r2/r3 read as "nothing sways" (three of the five foliage shaders in one
     // real session). What matters is whether a register holds a value ACROSS the
     // block: written at or before the anchor, and read again before anything
-    // writes it after the anchor. Only that register is refused.
-    inline bool GrassBladeScratchLive(const std::string& disassembly, size_t anchorLine) noexcept
+    // writes it after the anchor.
+    inline bool GrassBladeRegisterLive(const std::string& disassembly, size_t anchorLine, const char* name) noexcept
     {
-        static const char* const kScratch[] = { "r2", "r3", "r4", "r5" };
-        for (const char* name : kScratch)
+        bool writtenBefore = false;
+        size_t at = 0, lineNumber = 0;
+        // Everything up to and including the anchor: does this register hold a
+        // value there at all?
+        while (at <= disassembly.size() && lineNumber <= anchorLine)
         {
-            bool writtenBefore = false;
-            size_t at = 0, lineNumber = 0;
-            // Everything up to and including the anchor: does this register hold a
-            // value there at all?
-            while (at <= disassembly.size() && lineNumber <= anchorLine)
+            const size_t end = disassembly.find('\n', at);
+            const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
+                end == std::string::npos ? std::string::npos : end - at)));
+            if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) writtenBefore = true;
+            if (end == std::string::npos) break;
+            at = end + 1;
+            ++lineNumber;
+        }
+        if (!writtenBefore) return false;
+        // And after it: the first line that touches the register decides. A
+        // read (as a source, or as the destination's own operand, as in
+        // `add r2.x, r2.x, c5`) means the shader still needs the value the
+        // block would destroy; a write means the shader has redefined it
+        // before any use.
+        while (at <= disassembly.size())
+        {
+            const size_t end = disassembly.find('\n', at);
+            const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
+                end == std::string::npos ? std::string::npos : end - at)));
+            for (size_t i = 2; i < words.size(); ++i)
+                if (GrassBladeWordIsRegister(words[i], name)) return true;
+            if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) break;
+            if (end == std::string::npos) break;
+            at = end + 1;
+        }
+        return false;
+    }
+
+    // `r<n>`, the way the block and the parser spell a temp register.
+    inline const char* GrassBladeTempName(unsigned index) noexcept
+    {
+        static const char* const kNames[] = { "r0", "r1", "r2", "r3", "r4", "r5",
+            "r6", "r7", "r8", "r9", "r10", "r11" };
+        return index < kGrassBladeTempCount ? kNames[index] : "";
+    }
+
+    // Which four temp registers the block may work in: the first run of four, from
+    // the reference module's own r2 up, that the shader does not hold across the
+    // insertion point.
+    //
+    // This is the difference between bending a field and refusing it. Three of the
+    // five foliage shaders in one real session keep their normals and their
+    // lighting in r2/r3 - and a rule of "the block is written in r2..r5" refused
+    // them, which is a client whose grass simply does not move while the log says
+    // the path ran. A shader that needs one of those registers still has r3..r6
+    // (or r4..r7, and so on up to r8..r11) free, and the block is renamed onto
+    // whichever run is free. Only a shader that holds a value across the anchor in
+    // every one of those runs - which no real foliage shader has - is refused.
+    inline bool GrassBladeScratchBase(const std::string& disassembly, size_t anchorLine, unsigned& base) noexcept
+    {
+        for (unsigned candidate = kGrassBladeFirstScratch;
+            candidate + kGrassBladeScratchCount <= kGrassBladeTempCount; ++candidate)
+        {
+            bool free = true;
+            for (unsigned i = 0; i < kGrassBladeScratchCount && free; ++i)
+                free = !GrassBladeRegisterLive(disassembly, anchorLine, GrassBladeTempName(candidate + i));
+            if (free)
             {
-                const size_t end = disassembly.find('\n', at);
-                const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
-                    end == std::string::npos ? std::string::npos : end - at)));
-                if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) writtenBefore = true;
-                if (end == std::string::npos) break;
-                at = end + 1;
-                ++lineNumber;
-            }
-            if (!writtenBefore) continue;
-            // And after it: the first line that touches the register decides. A
-            // read (as a source, or as the destination's own operand, as in
-            // `add r2.x, r2.x, c5`) means the shader still needs the value the
-            // block would destroy; a write means the shader has redefined it
-            // before any use.
-            while (at <= disassembly.size())
-            {
-                const size_t end = disassembly.find('\n', at);
-                const std::vector<std::string> words = GrassBladeWords(GrassBladeTrimmed(disassembly.substr(at,
-                    end == std::string::npos ? std::string::npos : end - at)));
-                for (size_t i = 2; i < words.size(); ++i)
-                    if (GrassBladeWordIsRegister(words[i], name)) return true;
-                if (words.size() >= 2 && GrassBladeWordIsRegister(words[1], name)) break;
-                if (end == std::string::npos) break;
-                at = end + 1;
+                base = candidate;
+                return true;
             }
         }
+        base = kGrassBladeFirstScratch;
+        return false;
+    }
+
+    // And the reference rule itself, kept as one question because it is the one
+    // the block was written against: does this shader hold any of r2..r5 across
+    // the anchor?
+    inline bool GrassBladeScratchLive(const std::string& disassembly, size_t anchorLine) noexcept
+    {
+        for (unsigned i = 0; i < kGrassBladeScratchCount; ++i)
+            if (GrassBladeRegisterLive(disassembly, anchorLine, GrassBladeTempName(kGrassBladeFirstScratch + i)))
+                return true;
         return false;
     }
 
@@ -1092,6 +1160,13 @@ namespace renderer
         // one by packing the camera correction and the view-distance fade away,
         // neither of which a world position has (see BladeShader::worldSpace).
         bool worldSpace = false;
+        // Which run of four temp registers the block works in: the reference
+        // module's own r2..r5 when the shader does not hold them across the
+        // insertion point, otherwise the first run above that is free (see
+        // GrassBladeScratchBase). A shader that keeps its own normals in r2 - which
+        // three of the five foliage shaders of one real session do - is bent in
+        // r3..r6 rather than refused.
+        unsigned firstScratch = kGrassBladeFirstScratch;
         // Where the block's own rows live: c14..c19, or - for a shader that reads
         // them itself - the first run of six registers above them that it never
         // mentions (see GrassBladeFreeConstantRun).
@@ -1164,12 +1239,14 @@ namespace renderer
                 "has no position to bend and nowhere to be inserted";
             return out;
         }
-        if (GrassBladeScratchLive(disassembly, anchor))
+        unsigned scratchBase = kGrassBladeFirstScratch;
+        if (!GrassBladeScratchBase(disassembly, anchor, scratchBase))
         {
-            out.reason = "the shader still needs one of the scratch registers the motion block writes (r2..r5) across "
-                "the insertion point";
+            out.reason = "the shader holds a value across the insertion point in every run of four temp registers "
+                "the motion block could work in (r2..r11)";
             return out;
         }
+        out.firstScratch = scratchBase;
         // The vertex's own frame. The engine's model transform lives in c31..c33
         // for a draw this build can only see as unskinned scenery, and a shader
         // that reads them has placed its vertex in the world already: r0 IS the
@@ -1193,7 +1270,7 @@ namespace renderer
         std::snprintf(rampName, sizeof(rampName), "v%u", rampRegister);
         if (!out.worldSpace) out.viewTranslation = GrassBladeViewTranslation(disassembly, anchor);
         const std::string block = GrassBladeMotionBlock(rampName, out.worldSpace, out.firstRegister,
-            out.viewTranslation.c_str(), rampComponent);
+            out.viewTranslation.c_str(), rampComponent, out.firstScratch);
 
         // The assembled text: the shader's own lines, with the block after the line
         // that lands the vertex's position. The model token is prepended when the

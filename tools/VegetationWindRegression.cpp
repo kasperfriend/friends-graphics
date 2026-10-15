@@ -1658,7 +1658,21 @@ static void TestTextureCutoutDecode()
         Check(probe.verdict == TextureCutout::Cutout && probe.texels < big * big && probe.texels >= 256,
             "an image larger than the scan budget is sampled, not skipped");
         Check(probe.hash != 0 && probe.hash != kTextureAlphaHashOffset && probe.hash != 0xFFFFFFFFFFFFFFFFull,
-            "and the bytes that were read are hashed, so a texture can be named in the log");
+            "and the leading bytes that were read are hashed, so a texture can be named in the log");
+        // The fingerprint is BOUNDED, and that bound is the optimization: the
+        // probe used to hash every byte the scan read - up to a quarter of a
+        // megabyte, a multiply per byte, inside the same texture lock the
+        // client's own readback waits on - and no caller in this project reads
+        // the value. Row 4 of this image is scanned and lies past the window.
+        auto late = image;
+        late[4 * pitch] ^= 0x3F;
+        const auto lateProbe = ClassifyTextureCutout(TextureFormat::Dxt1, late.data(), pitch, big, big, late.size());
+        Check(lateProbe.hash == probe.hash && lateProbe.verdict == probe.verdict && lateProbe.texels == probe.texels,
+            "a difference past the hashed window changes nothing about the probe, however the image is read");
+        auto early = image;
+        early[0] ^= 0x3F;
+        Check(ClassifyTextureCutout(TextureFormat::Dxt1, early.data(), pitch, big, big, early.size()).hash != probe.hash,
+            "and a difference inside that window still fingerprints a different image");
     }
     // And the half of the material gate that the WXL tree module answers with a
     // model's file name: is this texture FOLIAGE? A plant's cut-out card is
@@ -1962,13 +1976,40 @@ static void TestGrassBlades()
             "a shader with no texture coordinate cannot be bent (a blade has no height to bend by)");
 
         // A scratch register the shader still NEEDS across the insertion point is
-        // refused: r2 is written before the block would run and read after it.
+        // not clobbered - and it is not a refusal either any more. r2 is written
+        // before the block would run and read after it, so the block moves up to
+        // r3..r6 and the shader's own value is still in r2 when it is read. This is
+        // the shape three of the five foliage shaders of one real session have
+        // (their normals and their lighting live in r2/r3 across the anchor), and
+        // refusing it is what "nothing sways" was while the log said the path ran.
         std::string live = grass;
         live.replace(live.find("    add r0, r0, c3\n"), 20, "    mul r2, v3, c13\n    add r0, r0, c3\n");
         live.replace(live.find("    mov oT0, v3\n"), 16, "    mov oT0, r2\n");
         const GrassBladeInjection used = BuildGrassBladeInjection(live, "vs_2_0");
-        Check(!used.ok && std::string(used.reason).find("scratch") != std::string::npos,
-            "a shader whose own value still lives in one of the block's scratch registers is refused, never clobbered");
+        Check(used.ok && used.firstScratch == 3 && used.text.find("    mul r2, v3, c13\n") != std::string::npos &&
+              used.text.find("    mov oT0, r2\n") != std::string::npos,
+            "a shader holding r2 across the anchor is bent in r3..r6, with its own value left in r2");
+        Check(used.text.find("    mul r2.x, c19.z\n") == std::string::npos &&
+              used.text.find("    mul r4.x, r3.x, c19.z\n") != std::string::npos &&
+              used.text.find("    mad r6.z, v3.y, c19.x, c19.y\n") != std::string::npos,
+            "and every register the block itself works in moved with it (r3..r6, not one of them left in r2..r5)");
+        unsigned probe = kGrassBladeFirstScratch;
+        Check(GrassBladeScratchLive(live, used.anchorLine) && GrassBladeScratchBase(live, used.anchorLine, probe) &&
+              probe == used.firstScratch && probe != kGrassBladeFirstScratch,
+            "the register that was live is the one the search skipped, and the run it landed on is the one the block was given");
+
+        // A shader that holds a value across the anchor in every run of four temps
+        // the block could work in - r2, r6 and r9 between them touch all seven runs
+        // (2..5, 3..6, ... 8..11) - has nowhere for the block to live, and is
+        // refused rather than clobbered.
+        std::string everywhere = grass;
+        everywhere.replace(everywhere.find("    add r0, r0, c3\n"), 20,
+            "    mov r2, v3\n    mov r6, v3\n    mov r9, v3\n    add r0, r0, c3\n");
+        everywhere.replace(everywhere.find("    mov oT0, v3\n"), 16,
+            "    add oT0.x, r2.x, r6.x\n    add oT0.y, r9.x, c13.x\n");
+        const GrassBladeInjection nowhere = BuildGrassBladeInjection(everywhere, "vs_2_0");
+        Check(!nowhere.ok && std::string(nowhere.reason).find("every run") != std::string::npos,
+            "a shader holding a value across the anchor in every run of four temps is refused, never clobbered");
 
         // And the same register redefined after the insertion point is fine: the
         // shader's own instruction lands after the block's, so nothing of its is

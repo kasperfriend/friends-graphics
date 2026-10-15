@@ -83,11 +83,16 @@ scope per level. That is the 46-78 ms the reload line showed for a crossing. A h
 it actually did - `answered <R> read(s) from memory with <P> whole-file parse(s)`, with
 `<P>` the number that decides whether a crossing costs anything - and a frame that stalls is
 written to the log by itself: `frame stall: <N> ms between presents (session average ...) -
-<place>, the place changed <N> ms ago, and the last tuning reload cost <N> ms`. The gap is
+<place>, the place changed <N> ms ago, the frame that took this gap drew <D> draw(s) against
+<A> a frame for the session, and the last tuning reload cost <N> ms`. The gap is
 measured on the performance counter before any of this project's work runs for the frame, so
 the line separates the two possible owners of a hitch: the client loading the place it just
 walked into, and this module's own work on the frame that noticed. A 2 s gap next to a 63 us
-reload is the client's loader, and the line says so instead of leaving it to an argument.
+reload is the client's loader, and the line says so instead of leaving it to an argument. The
+draw load is the second half of that answer: `<D>` is the difference between two reads of the
+session's own draw count (the one number every draw hook feeds), so a frame that drew the
+crossed border again - new terrain, new WMOs, new doodads, every one of them through these
+hooks - comes out as a multiple of `<A>` instead of as a mystery.
 
 ### 4. Wheel scrolling also reacts outside the settings pane (very low)
 

@@ -57,7 +57,13 @@ namespace renderer
     struct TextureAlphaProbe
     {
         TextureCutout verdict = TextureCutout::Unknown;
-        uint64_t hash = 0;        // FNV-1a over the bytes that were examined
+        // FNV-1a over the LEADING WINDOW of the bytes the scan read, not over
+        // every one of them: the whole scan is up to kTextureAlphaScanBytes per
+        // texture, and a fingerprint of it was a multiply per byte inside the
+        // same lock the client's own readback is waiting on - for a value no
+        // caller in this project reads. A bounded prefix still names the image a
+        // probe came from (see kTextureAlphaHashBytes).
+        uint64_t hash = 0;
         unsigned texels = 0;      // texels examined, never padding
         unsigned transparent = 0; // how many of those are transparent
         unsigned green = 0;       // opaque texels that are green-dominant
@@ -101,6 +107,14 @@ namespace renderer
     // and is read whole; anything larger is sampled across the whole image by
     // taking every k-th row, so a transparent corner is found wherever it is.
     inline constexpr size_t kTextureAlphaScanBytes = 256u * 1024u;
+    // And this many of those bytes are fingerprinted. The probe's `hash` is a
+    // prefix of the image, bounded here, because hashing the whole scan cost a
+    // multiply per byte - up to a quarter of a megabyte of them per texture -
+    // and every caller in this project decides from the probe's verdict, not
+    // from its hash. A prefix is still a name for "the image these bytes came
+    // from": enough for a log line, and 64 times cheaper than the scan it rides
+    // in on.
+    inline constexpr size_t kTextureAlphaHashBytes = 4u * 1024u;
     // What "green" means, in the same spirit as the cut-out share: the green
     // channel has to lead both others by a margin, and be bright enough to be a
     // plant and not a dark shadow of one.
@@ -332,6 +346,7 @@ namespace renderer
             step = static_cast<unsigned>((rowCount + budgetRows - 1) / budgetRows);
 
         uint64_t hash = kTextureAlphaHashOffset;
+        size_t hashed = 0;
         for (unsigned row = 0; row < rowCount; row += step)
         {
             const size_t offset = size_t(row) * pitch;
@@ -340,7 +355,7 @@ namespace renderer
             const size_t read = room < pitch ? room : pitch;
             const uint8_t* base = pixels + offset;
             if (read < rowBytes) break;
-            for (size_t i = 0; i < rowBytes; ++i)
+            for (size_t i = 0; i < rowBytes && hashed < kTextureAlphaHashBytes; ++i, ++hashed)
             {
                 hash ^= base[i];
                 hash *= kTextureAlphaHashPrime;

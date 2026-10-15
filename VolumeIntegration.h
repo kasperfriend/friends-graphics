@@ -442,7 +442,11 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     if (internal || (!(enabled && active) && !watereffect::NeedsScene())) return;
     if (!renderer::DepthCapture::Instance().BeforeClear(d, count, rects, flags, z)) return;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
-    renderer::RendererDiagnostics::Instance().OnFrameBegin();
+    // (The diagnostics' own OnFrameBegin was called here and had nothing to do
+    // that this pass could be trusted with: this hook runs only when the volume
+    // effect is on, so a per-frame number reset here is a number that is wrong
+    // whenever the effect is off. The draws the client made are counted as a
+    // session total and differenced at Present, which IS every frame.)
     depth = renderer::DepthCapture::Instance().GetDepthTexture();
     surface = renderer::DepthCapture::Instance().GetDepthSurface();
     originalDepth = renderer::DepthCapture::Instance().GetOriginalDepth();
