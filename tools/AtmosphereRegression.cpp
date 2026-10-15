@@ -105,7 +105,7 @@ int main() try {
  // The continuity layer is injected before a confirmed UI draw, so it cannot
  // disappear under F7 and cannot paint over WoW's interface.
  weathervisuals::Configure(L".\\");weathervisuals::enabled=weathervisuals::effectEnabled=weathervisuals::active=true;
- weathervisuals::mode=0;weathervisuals::nativeWeatherMode=1;weathervisuals::intensity=1;weathervisuals::lensDroplets=false;weathervisuals::composedThisFrame=false;
+ weathervisuals::nativeWeatherMode=1;weathervisuals::intensity=1;weathervisuals::lensDroplets=false;weathervisuals::composedThisFrame=false;
  g_trackedState.vsHash=0xd9e7756460af6296ull;g_trackedState.psHash=0;
  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff202020,1,0));
  Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());

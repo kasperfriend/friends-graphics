@@ -214,8 +214,10 @@ Cloud type now interpolates toward **pure stratus at -100** and **pure towers at
 
 Weather consumes the existing exact native rain/snow/sand draw signatures and
 five-second detection hold. Detection no longer depends on enabled precipitation
-replacement or successful effect-texture loading. WeatherVisuals' hint does not
-force clouds or weather. The verified signal is the **type/presence**, not server
+replacement or successful effect-texture loading. The old WeatherVisuals Mode
+hint has been removed: it could change continuity-layer snow into rain while
+clouds and native particles still saw snow. The verified signal is the
+**type/presence**, not server
 severity: no primitive count is used as an invented intensity measurement.
 `WeatherVisuals.IntensityPercent × WeatherIntensityMultiplier`, clamped to 0–1,
 scales the cloud response; the default reaches full overcast. Rain builds deeper

@@ -40,7 +40,6 @@ inline std::vector<Item> items={
  // === WEATHER VISUALS ===
  {KIND_HEADER,nullptr,nullptr,"--- WEATHER VISUALS ---",0,0,0,0},
  {KIND_TOGGLE,L"WeatherVisuals",L"Enabled","WEATHER RENDERING",0,1,1,1},
- {KIND_SLIDER,L"WeatherVisuals",L"Mode","WEATHER HINT (0=AUTO 1=RAIN 2=SNOW)",0,2,1,0},
  // Intensity is also the shared native-weather input for clouds, wind and
  // sea; turning off WEATHER RENDERING/F10 does not turn off detection.
  {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","STORM INTENSITY (AFFECTS WIND CLOUDS WAVES)",0,300,5,100},

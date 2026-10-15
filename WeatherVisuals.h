@@ -37,7 +37,6 @@ inline bool showStatus = false;
 inline bool internal = false;
 
 // Configuration
-inline int mode = 0; // 0=Auto/native, 1=Rain texture hint, 2=Snow texture hint
 inline float intensity = 1.0f;
 inline float speed = 1.2f;
 inline renderer::PrecipitationMotion precipitationMotion;
@@ -489,7 +488,6 @@ inline void LoadTextures(IDirect3DDevice9* device)
 inline void ReloadTuning()
 {
     effectEnabled = ReadTuningInt(L"Enabled", 1) != 0;
-    mode = std::clamp(ReadTuningInt(L"Mode", 0), 0, 2);
     intensity = std::clamp(ReadTuningInt(L"IntensityPercent", 100), 0, 300) * 0.01f;
     speed = std::clamp(ReadTuningInt(L"RainSpeedPercent", 120), 10, 400) * 0.01f;
     depthOcclusion = ReadTuningInt(L"DepthOcclusion", 1) != 0;
@@ -684,7 +682,10 @@ inline void BeforeDraw(IDirect3DDevice9* device)
                       renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull;
     if (!isUi || composedThisFrame || !enabled || !effectEnabled || !active || !device)
         return;
-    const int renderMode = nativeWeatherMode ? (mode ? mode : nativeWeatherMode) : 0;
+    // Only the native observation owns the type. The old "Mode" override
+    // changed this layer alone while clouds, waves, native particles and
+    // the status display kept reporting the real rain/snow/sand type.
+    const int renderMode = nativeWeatherMode;
     if (!renderMode) return;
     composedThisFrame = true;
 

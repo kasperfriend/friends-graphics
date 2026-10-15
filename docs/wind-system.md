@@ -74,8 +74,10 @@ to wind); Water's wave switch removes the waves entirely.
   F10 affect **rendering**, not detection or shared wind/cloud/wave response.
 
 Weather is the existing **held native observation**, including its F7/focus-gap
-protection. The native type and authored local intensity are known, not a
-verified server-side severity or forecast. `[WeatherVisuals] IntensityPercent`
+protection. Rain/snow/sand type is shared by the continuity layer, clouds,
+wind and sea; the old `[WeatherVisuals] Mode` override is ignored because it
+changed only the continuity layer. The native type and authored local intensity
+are known, not a verified server-side severity or forecast. `[WeatherVisuals] IntensityPercent`
 (the F7 storm-intensity slider) scales replacement particles **and** the shared
 weather response, even when replacement rendering is off. The zone intensity
 multiplier is applied once before the common [0,1] clamp used by clouds, wind

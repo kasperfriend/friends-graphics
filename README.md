@@ -78,7 +78,7 @@ of the cloud shader, at the shipped defaults.*
 
 - Native rain and snow receive replacement textures, intensity, speed and depth-occlusion controls; native particle direction stays with the game.
 - A depth-aware continuity layer keeps precipitation visible while moving quickly on a mount, drifting with the shared wind instead of a second weather angle/strength.
-- Weather state survives short native-particle gaps caused by opening the F7 menu or returning from Alt+Tab.
+- Weather state survives short native-particle gaps caused by opening F7 or returning from Alt+Tab. Clouds, wind, waves and the continuity layer all use the detected native rain/snow/sand type; the old visual-only weather hint is ignored.
 - Optional rain lens droplets and a subtle rain/snow mist within the continuity layer are available; this setting does not also retune the volumetric atmosphere.
 
 ### Shared wind

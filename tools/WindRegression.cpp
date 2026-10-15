@@ -452,8 +452,12 @@ static void TestConfigurationAndWiring()
           "cloud quality and resolution have one owner; legacy wind angle is not shipped while linked");
     const auto weatherIni = ini.substr(ini.find("[WeatherVisuals]"), ini.find("[DynamicLighting]") - ini.find("[WeatherVisuals]"));
     Check(weatherIni.find("\nWindStrengthPercent=") == weatherIni.npos &&
-          weatherIni.find("\nWindAngle=") == weatherIni.npos,
-          "weather continuity layer no longer ships a second direction or wind strength");
+          weatherIni.find("\nWindAngle=") == weatherIni.npos &&
+          weatherIni.find("\nMode=") == weatherIni.npos,
+          "weather continuity layer no longer ships duplicate wind or type overrides");
+    for (const auto& item : tuningoverlay::items)
+        Check(!item.section || std::wstring(item.section) != L"WeatherVisuals" ||
+              std::wstring(item.key) != L"Mode", "F7 cannot force rain over detected snow or vice versa");
     const auto cloudSource = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloudSource.find("read(L\"SampleCount\"") == cloudSource.npos &&
           cloudSource.find("read(L\"LightSampleCount\"") == cloudSource.npos &&
@@ -465,8 +469,10 @@ static void TestConfigurationAndWiring()
           weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
           weatherSource.find("float t = weatherParams.x;") != weatherSource.npos &&
           weatherSource.find("windParams.xy * layerSpeeds[i]") != weatherSource.npos &&
-          weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos,
-          "production weather shader consumes integrated fall/wind, not age times current settings");
+          weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos &&
+          weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
+          weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,
+          "production weather uses native type and integrated fall/wind, not separate clocks or overrides");
     const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
     Check(weatherResetStart != weatherSource.npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
