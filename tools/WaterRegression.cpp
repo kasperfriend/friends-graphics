@@ -334,7 +334,7 @@ int main() try
     // its own, interfere into a surface that does not repeat inside anything a player can see.
     // The band now runs down to a five yard wave, so the short trains cross the long ones at
     // the scale the chop lives at instead of leaving six crest families to regroup into lines.
-    // Two of the eight are displaced (the mesh pitch, below); six shade the crest.
+    // Two of the eight are displaced and forwarded to shading; six are evaluated only there.
     static_assert(kTrainCount==8,"the swell is eight trains: two the mesh can hold, six for the shading");
     static_assert(kGeometryTrainCount==2,"the vertex stage carries the two longest trains only");
     for (int train=0;train<kTrainCount;++train)
@@ -373,6 +373,72 @@ int main() try
     // triangle; 1 - that is how far the shading's .3 floor can be trusted to stay honest.
     Require(kGerstnerSigmaMax*kGeometryPinch*kGroupMax<1.f,"the Gerstner mesh cannot fold at the top of a set");
     Require(kGroupBase>0.f&&kGroupBase+kGroupDepth<=1.15f,"grouping only ever dims a patch, never doubles it");
+    {
+        // The optimized shader sends the two long trains' sin/cos pairs from the
+        // vertices and normalizes each interpolated pair in the pixel stage. Quantify
+        // that approximation on the client's roughly four-yard liquid grid, including
+        // the production domain warp: it must remain much closer to the analytic field
+        // than directly interpolating height/slope would be. Four outputs are height,
+        // x/y slope and Gerstner pinch, exactly the quantities shading reconstructs.
+        const WaveField fields[]={
+            BuildWaveField(3.25,1.f,.32f,100.f,4213.f,-7781.f,true,true),
+            BuildWaveField(117.0,.65f,.8f,100.f,-921.f,1537.f,true,true),
+            BuildWaveField(901.0,1.4f,.05f,100.f,11800.f,7600.f,true,true)};
+        const auto trigAt=[](const WaveField& field,float x,float y) {
+            const auto warped=WarpWavePlane(field,x,y);
+            std::array<float,4> trig{};
+            for(int train=0;train<kGeometryTrainCount;++train) {
+                const float theta=SwellTheta(train,warped.plane.x,warped.plane.y,field.swellPhase);
+                trig[train*2]=std::sin(theta);trig[train*2+1]=std::cos(theta);
+            }
+            return trig;
+        };
+        const auto assemble=[](std::array<float,4> trig) {
+            std::array<float,4> out{};
+            for(int train=0;train<kGeometryTrainCount;++train) {
+                const float length=std::sqrt(trig[train*2]*trig[train*2]
+                    +trig[train*2+1]*trig[train*2+1]);
+                const float sine=trig[train*2]/std::max(length,.01f);
+                const float cosine=trig[train*2+1]/std::max(length,.01f);
+                out[0]+=kTrainWeight[train]*sine;
+                out[1]+=kTrainWeight[train]*kTrainRadians[train]*cosine*kTrainDirX[train];
+                out[2]+=kTrainWeight[train]*kTrainRadians[train]*cosine*kTrainDirY[train];
+                out[3]+=kTrainWeight[train]*kTrainRadians[train]*sine;
+            }
+            return out;
+        };
+        constexpr float meshPitch=4.f/kRippleCellYards;
+        const std::array<std::array<float,2>,6> probes={{{.1f,.1f},{.25f,.2f},{.6f,.1f},
+            {.9f,.8f},{.4f,.8f},{.7f,.6f}}};
+        std::array<float,4> worst{};std::array<double,4> squared{};size_t sampleCount=0;
+        for(const auto& field:fields)for(int gy=-20;gy<20;++gy)for(int gx=-20;gx<20;++gx)
+        for(const auto& probe:probes) {
+            const float u=probe[0],v=probe[1];
+            std::array<std::array<float,2>,3> vertices{};float bary[3]{};
+            if(u+v<=1.f) {
+                vertices={{{0,0},{1,0},{0,1}}};bary[0]=1-u-v;bary[1]=u;bary[2]=v;
+            } else {
+                vertices={{{1,1},{0,1},{1,0}}};bary[0]=u+v-1;bary[1]=1-u;bary[2]=1-v;
+            }
+            std::array<float,4> interpolatedTrig{};
+            for(int corner=0;corner<3;++corner) {
+                const auto trig=trigAt(field,(gx+vertices[corner][0])*meshPitch,
+                    (gy+vertices[corner][1])*meshPitch);
+                for(int term=0;term<4;++term)interpolatedTrig[term]+=bary[corner]*trig[term];
+            }
+            const auto reconstructed=assemble(interpolatedTrig);
+            const auto exact=assemble(trigAt(field,(gx+u)*meshPitch,(gy+v)*meshPitch));
+            for(int term=0;term<4;++term) {
+                const float error=std::fabs(reconstructed[term]-exact[term]);
+                worst[term]=std::max(worst[term],error);squared[term]+=double(error)*error;
+            }
+            ++sampleCount;
+        }
+        Require(worst[0]<.03f&&worst[1]<.015f&&worst[2]<.008f&&worst[3]<.015f&&
+                std::sqrt(squared[0]/sampleCount)<.008&&std::sqrt(squared[1]/sampleCount)<.004&&
+                std::sqrt(squared[2]/sampleCount)<.003&&std::sqrt(squared[3]/sampleCount)<.0045,
+                "normalized interpolated long waves preserve the analytic field on the liquid grid");
+    }
     {
         // "Lines of waves going and going", measured instead of argued about. Walk along
         // where the dominant train's crest would run if it were alone (the lattice y axis
@@ -689,10 +755,11 @@ int main() try
                 "no wave coordinate is built by reading the draw's matrix across its rows");
         Require(vertex.find("float2 rel=float2(dot(axisX,p.xyz),dot(axisY,p.xyz));")!=std::string::npos,
                 "the lattice coordinate is the world offset from this draw's own camera");
-        Require(code.find("GetVertexShaderConstantF(5,&modelView[0][0],4)")!=std::string::npos&&
+        Require(code.find("GetVertexShaderConstantF(5,nativeVertexConstants[0],31)")!=std::string::npos&&
+                code.find("memcpy(modelView,nativeVertexConstants,sizeof(modelView))")!=std::string::npos&&
                 code.find("AnchorFromModelView(modelView)")!=std::string::npos&&
                 code.find("anchor.camera[0],anchor.camera[1],anchor.valid")!=std::string::npos,
-                "the wave field is anchored to the matrix of the draw being shaded");
+                "the wave field is anchored to the batched constants of the draw being shaded");
         Require(code.find("waveFrame.cameraPosition.x,waveFrame.cameraPosition.y")==std::string::npos,
                 "no water draw is anchored to a camera captured on some other draw");
         Require(code.find("controls[48]=anchor.up[0]")!=std::string::npos&&
@@ -745,7 +812,7 @@ int main() try
                 pixel.find("dot(worldRel.xy,waveLattice.xy)")!=std::string::npos&&
                 pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
                 pixel.find("noiseGradient(groupCoord)")==std::string::npos&&
-                code.find("SetPixelShaderConstantF(200,controls,19)")!=std::string::npos&&
+                code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos&&
                 code.find("SetVertexShaderConstantF(200,vertexControls,5)")!=std::string::npos,
                 "the vertex stage anchors the warp AND the set envelope and interpolates both to pixels without resampling");
         // The envelope has to ride the lanes the two stages already had. Interpolator counts
@@ -772,33 +839,74 @@ int main() try
         Require(vertex.find("TEXCOORD8")==std::string::npos&&pixel.find("TEXCOORD8")==std::string::npos&&
                 pixel.find("waveGroup")==std::string::npos&&vertex.find("o.waveGroup=")==std::string::npos,
                 "the envelope is packed into TEXCOORD4/TEXCOORD7 rather than appended as a twelfth");
-        // The save/restore window has to grow with the register block or a native water draw
-        // that runs after ours keeps OUR constants: 19 float4 of pixels (c200..c218) and 5 of
-        // vertices (c200..c204), which is also what the Get* calls must fetch.
-        for (const char* spelling : {"GetPixelShaderConstantF(200,old,19)","GetVertexShaderConstantF(200,oldVertexControls,5)",
-                                     "SetPixelShaderConstantF(200,old,19)","SetVertexShaderConstantF(200,oldVertexControls,5)",
-                                     "float controls[76]=","float vertexControls[20]=","float old[76]{},oldVertexControls[20]{}"})
+        // Save, upload and restore one contiguous c180..c218 pixel block. Besides retaining
+        // every touched register, this keeps the three untouched gap registers byte-for-byte
+        // while reducing six D3D9 constant calls per tile to three. The native vertex inputs
+        // are likewise fetched through one enclosing c5..c35 span rather than three calls.
+        for (const char* spelling : {"GetPixelShaderConstantF(180,oldPixelConstants,39)",
+                                     "GetVertexShaderConstantF(200,oldVertexControls,5)",
+                                     "GetVertexShaderConstantF(5,nativeVertexConstants[0],31)",
+                                     "SetPixelShaderConstantF(180,pixelConstants[0],39)",
+                                     "SetPixelShaderConstantF(180,oldPixelConstants,39)",
+                                     "SetVertexShaderConstantF(200,oldVertexControls,5)",
+                                     "float oldPixelConstants[156]{},oldVertexControls[20]{}",
+                                     "float pixelConstants[39][4]","float vertexControls[20]="})
             Require(code.find(spelling)!=std::string::npos,
-                    "the constant window is exactly as wide as the two stages declare");
+                    "water constants use the complete batched save/upload/restore windows");
+        Require(code.find("GetPixelShaderConstantF(200,")==std::string::npos&&
+                code.find("GetPixelShaderConstantF(180,oldLocalLights,17)")==std::string::npos&&
+                code.find("SetPixelShaderConstantF(200,controls,19)")==std::string::npos,
+                "no split pixel-constant driver calls remain in the per-tile path");
+        const auto occurrences=[](const std::string& text,const std::string& needle) {
+            size_t count=0;
+            for(size_t at=text.find(needle);at!=std::string::npos;at=text.find(needle,at+needle.size()))++count;
+            return count;
+        };
+        Require(occurrences(code,"HasScopedValue(L\"Water\",")==3&&
+                code.find("scopedWaterColour=renderer::locationtuning::HasScopedValue")!=std::string::npos&&
+                code.find("if(!scopedWaterColour)")!=std::string::npos&&
+                code.find("if(!scopedDeepColour)")!=std::string::npos&&
+                code.find("if(!scopedAbsorptionColour)")!=std::string::npos,
+                "location override lookups are cached on reload rather than repeated per water tile");
+        Require(code.find("cache.frameIndex!=frame.frameIndex")!=std::string::npos&&
+                code.find("cache.selectionSignature!=signature")!=std::string::npos&&
+                code.find("cache.values[i*4+axis]=light.position.x")!=std::string::npos&&
+                code.find("memcpy(pixelConstants,cache.values,sizeof(cache.values))")!=std::string::npos&&
+                occurrences(code,"localLightConstantCache.valid=false")==2,
+                "selected local lights are transformed once per immutable frame instead of once per tile");
+        Require(pixel.find("[branch] if(confidence>0)")!=std::string::npos&&
+                pixel.find("stepIndex<8 && hit<1.0")!=std::string::npos&&
+                pixel.find("lightStep<8 && lightVisibility>0")!=std::string::npos&&
+                pixel.find("[branch] if(distanceSquared>=radius*radius) continue;")!=std::string::npos,
+                "zero-contribution SSR, celestial and local-light work exits before expensive samples");
+        const std::string volumeCode=stripComments(ReadAlongside("../VolumeIntegration.h"));
+        Require(volumeCode.find("const bool volumeConsumesWaterBoundary = enabled && active && HasActiveEffects();")!=std::string::npos&&
+                volumeCode.find("if (volumeConsumesWaterBoundary && target && SUCCEEDED(target->GetDesc(&targetDesc)))")!=std::string::npos&&
+                volumeCode.find("else if (!volumeConsumesWaterBoundary && resources.waterMaskOwner)")!=std::string::npos,
+                "water-only scene capture skips and releases atmosphere-only full-resolution MRTs");
         Require(pixel.find("float2 tilt=-slopes*(controls.z/jacobian)*flip;")!=std::string::npos,
                 "a crest leans toward the light it catches: the normal is the negative gradient");
         Require(pixel.find("float jacobian=max(1.0-pinch,.3);")!=std::string::npos&&
                 pixel.find("float pinch=controls.x*gain*(dot(kWgt01*kRad01,sin01)+dot(kWgt4*kRad4,sin4)+dot(kWgt2*kRad2,sin2));")
                     !=std::string::npos,
-                "the shading sharpens by the Gerstner Jacobian, enveloped, and never divides by zero");
-        // One train table, three spellings: the vertex stage, the pixel stage, and the CPU
-        // header that builds the phases. A wavelength that moves in one and not the others
-        // slides a lit crest off a displaced one, so the spellings are held to each other.
-        // The two longest trains are spelled into both stages; the ten yard one is the pixel
-        // stage's alone, because the client's liquid grid is about four yards apart and
-        // lifting a wave that short on it is what facets. That split is deliberate, so it is
-        // pinned in both directions rather than left to a reader to notice.
-        // The two trains BOTH stages carry: 40 yards along the wind and 29 yards at -34
-        // degrees. Everything after them is shaded only, because the client's liquid grid is
-        // about four yards apart and displacing an eleven yard wave on it is what facets.
-        for (const char* spelling : {"0.39269908","0.54636394","0.8290376","-0.5591929","4.255"})
+                "the shading sharpens by the complete reconstructed Gerstner Jacobian and never divides by zero");
+        // The two longest trains are evaluated exactly once by the vertex stage, where they
+        // are already needed for displacement. Its four otherwise-unused UV lanes carry A/B's
+        // sin/cos pairs. Renormalizing each interpolated pair keeps it on the unit circle and
+        // reconstructs height, x/y slope and pinch without another projection or transcendental.
+        // The start belongs only where the angle is evaluated; weights/directions/radians remain
+        // in the pixel stage because they cheaply assemble the original analytic terms.
+        for (const char* spelling : {"0.39269908","0.54636394","0.8290376","-0.5591929"})
             Require(vertex.find(spelling)!=std::string::npos&&pixel.find(spelling)!=std::string::npos,
-                    "both shader stages carry the same swell train table");
+                    "both stages assemble the displaced long trains from the same coefficients");
+        Require(vertex.find("4.255")!=std::string::npos&&pixel.find("4.255")==std::string::npos&&
+                vertex.find("float longSwell=kWeightA*sinA+kWeightB*sinB;")!=std::string::npos&&
+                vertex.find("cosA,cosB")!=std::string::npos&&vertex.find("sinA,sinB")!=std::string::npos&&
+                pixel.find("float2 trigInv=rsqrt(max(uv0.zw*uv0.zw+uv1.zw*uv1.zw,1e-4));")!=std::string::npos&&
+                pixel.find("float2 sin01=uv0.zw*trigInv,cos01=uv1.zw*trigInv;")!=std::string::npos&&
+                pixel.find("float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);")!=std::string::npos&&
+                pixel.find("sincos(t01")==std::string::npos&&pixel.find("float2 t01=")==std::string::npos,
+                "spare UV lanes reconstruct the long waves without pixel-stage sin/cos work");
         // The six shading-only trains, and their starts: present in the pixel stage, absent
         // from the vertex stage. That split is the whole geometry/shading budget, so it is
         // pinned in both directions rather than left to a reader to notice.
@@ -811,7 +919,7 @@ int main() try
         Require(pixel.find("float4 waveSwell2:register(c218);")!=std::string::npos&&
                 pixel.find("float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);")!=std::string::npos&&
                 code.find("controls[72]=wave.swellPhase[6];controls[73]=wave.swellPhase[7];")!=std::string::npos,
-                "the two shortest trains arrive as a third batch on their own register");
+                "the two shortest trains remain a pixel batch on their own register");
         Require(pixel.find("rippleFine.yz*.30*filter*filter")!=std::string::npos,
                 "a finer counter-phased chop octave breaks the corduroy in the pixel stage");
         Require(header.find("kTrainCells[kTrainCount] = {16.f, 11.5f, 8.f, 5.8f, 4.4f, 3.4f, 2.55f, 1.95f}")

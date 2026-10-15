@@ -461,7 +461,12 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         watereffect::waterTargetDesc = {}; watereffect::waterTargetDescValid = false;
         frameCtx.waterMaskTexture = frameCtx.waterDepthTexture = nullptr;
         D3DSURFACE_DESC targetDesc{};
-        if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
+        // Water still needs scene/depth capture for SSR and refraction when
+        // the volume renderer is disabled, but no pass then consumes its
+        // atmosphere-only mask or surface-depth MRTs. Avoid allocating and
+        // clearing two full-resolution targets on that independent path.
+        const bool volumeConsumesWaterBoundary = enabled && active && HasActiveEffects();
+        if (volumeConsumesWaterBoundary && target && SUCCEEDED(target->GetDesc(&targetDesc))) {
             const bool sizeChanged = resources.waterMaskOwner != d ||
                 !renderer::water::TargetsMatch(targetDesc.Width, targetDesc.Height,
                                                resources.waterMaskWidth, resources.waterMaskHeight);
@@ -502,6 +507,13 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
                 frameCtx.waterMaskTexture = resources.waterMask.Get();
                 frameCtx.waterDepthTexture = resources.waterDepth.Get();
             }
+        } else if (!volumeConsumesWaterBoundary && resources.waterMaskOwner) {
+            // Release once on disable as well as skipping the per-frame clears;
+            // at 4K this pair otherwise strands 64 MiB of default-pool VRAM.
+            resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+            resources.waterDepthSurface.Reset(); resources.waterDepth.Reset();
+            resources.waterMaskOwner = nullptr;
+            resources.waterMaskWidth = resources.waterMaskHeight = 0;
         }
     }
 }
