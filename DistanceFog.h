@@ -1,5 +1,7 @@
 #pragma once
 #include "src/Environment/LocationTuning.h"
+#include <fstream>
+#include <sstream>
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
@@ -15,7 +17,21 @@ std::wstring mainIni,tuningIni;
 // and this fallback for clients without a usable atmosphere pass. The old
 // startup-file Enabled gate silently disagreed with the live F7 switch.
 int ReadTuning(const wchar_t* key,int fallback){return int(renderer::locationtuning::ReadInt(L"DistanceFog",key,fallback,tuningIni.c_str()));}
-void ReloadTuning(){effectEnabled=ReadTuning(L"Enabled",1)!=0;distanceScale=std::clamp(ReadTuning(L"DistancePercent",100),10,300)*.01f;powerScale=std::clamp(ReadTuning(L"PowerPercent",100),10,300)*.01f;if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"tuning enabled="<<effectEnabled<<" distance="<<distanceScale<<" power="<<powerScale<<'\n';}
+void ReloadTuning(){
+    effectEnabled=ReadTuning(L"Enabled",1)!=0;
+    distanceScale=std::clamp(ReadTuning(L"DistancePercent",100),10,300)*.01f;
+    powerScale=std::clamp(ReadTuning(L"PowerPercent",100),10,300)*.01f;
+    // One line per CHANGE, not one per reload: the reload chain runs on every
+    // settled crossing, and an open-plus-write per reload is a cost on exactly the
+    // path a player is walking a border on (see the chain's timing line in
+    // ModernWoWRenderer.cpp).
+    if(!logPath.empty()){
+        std::ostringstream row;
+        row<<"tuning enabled="<<effectEnabled<<" distance="<<distanceScale<<" power="<<powerScale;
+        static std::string lastRow;
+        if(lastRow!=row.str()){lastRow=row.str();std::ofstream(std::filesystem::path(logPath),std::ios::app)<<lastRow<<'\n';}
+    }
+}
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
     showStatus=renderer::locationtuning::ReadInt(L"DistanceFog",L"ShowStatus",0,mainIni.c_str())!=0;
