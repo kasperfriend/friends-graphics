@@ -84,7 +84,7 @@ of the cloud shader, at the shipped defaults.*
 ### Shared wind
 
 - One invisible, world-space wind drives wave direction/sea strength and cloud drift/shear.
-- Eight compass targets (N, NE, E, SE, S, SW, W, NW), smooth turns, time-varying gusts and native-weather response. Strength rises during rain, snow and sandstorms and eases as weather clears.
+- Eight meteorological compass bearings (the direction wind comes from), smooth turns, time-varying gusts and native-weather response. Strength rises during rain, snow and sandstorms and eases as weather clears.
 - **F7 → WIND** controls direction, strength, gusts, timing, weather response and each effect link, with an optional diagnostic HUD. No visible wind effect is added.
 - Motion phases survive tuning reloads and device resets. The shared state is ready for future vegetation consumers; plants, trees and grass are not connected yet.
 - See [wind controls, conventions and validation](docs/wind-system.md).

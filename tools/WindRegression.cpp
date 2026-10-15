@@ -64,15 +64,16 @@ static void SamePhases(const WaveField& a, const WaveField& b, double epsilon)
 }
 static void TestDirectionsAndTime()
 {
-    const WindVector expected[] = {{1,0},{.70710678f,-.70710678f},{0,-1},{-.70710678f,-.70710678f},
-                                  {-1,0},{-.70710678f,.70710678f},{0,1},{.70710678f,.70710678f}};
+    const WindVector expected[] = {{-1,0},{-.70710678f,.70710678f},{0,1},{.70710678f,.70710678f},
+                                  {1,0},{.70710678f,-.70710678f},{0,-1},{-.70710678f,-.70710678f}};
     for (unsigned i = 0; i < 8; ++i)
     {
         const auto state = Air(static_cast<WindDirection>(i), 1.25f);
         FiniteState(state);
         Check(state.targetDirection == static_cast<WindDirection>(i), "all eight targets selectable");
-        Check(Near(state.direction.x, expected[i].x) && Near(state.direction.y, expected[i].y), "WoW compass axes/sign");
-        Check(Near(state.headingDegrees, i * 45.f), "compass degrees clockwise from north");
+        Check(Near(state.direction.x, expected[i].x) && Near(state.direction.y, expected[i].y), "downwind travel is opposite the selected source bearing");
+        Check(Near(-state.direction.x, kWindFromDirections[i].x) && Near(-state.direction.y, kWindFromDirections[i].y), "source bearings use WoW map axes (+X north, +Y west)");
+        Check(Near(state.headingDegrees, i * 45.f), "source bearing degrees clockwise from map north");
         Check(NearestWindDirection(state.headingDegrees) == state.targetDirection, "debug compass matches state");
         Check(Near(state.strength, 1.25), "authored strength");
     }
@@ -84,7 +85,7 @@ static void TestDirectionsAndTime()
     WindSystem reverse; reverse.Configure(Steady(WindDirection::North)); reverse.Update({}, 0);
     reverse.Configure(Steady(WindDirection::NorthWest));
     Check(reverse.Update({}, .1f).headingDegrees > 359.f, "N to NW turns backwards across seam");
-    Pass("eight compass targets, correct world axes, normalized travel and shortest-arc turns");
+    Pass("eight map-referenced wind-from bearings, downwind vectors, normalized travel and shortest-arc turns");
 
     WindSystem system;
     unsigned visited = 0;
@@ -266,7 +267,7 @@ static void TestWaveMotion()
         motion.Advance(dt, 1, 0, 100, wind, 42000, -38000, true, true);
         const auto after = motion.Build(42000, -38000, true, true);
         Check(Near(-before.lattice[0] * kRippleCellYards, wind.direction.x) &&
-              Near(-before.lattice[1] * kRippleCellYards, wind.direction.y), "dominant wave travels toward selected compass direction");
+              Near(-before.lattice[1] * kRippleCellYards, wind.direction.y), "dominant wave travels downwind, away from selected source bearing");
         const double yards = PhaseSpeedYards(kTrainCells[0] * kRippleCellYards) * double(dt);
         const double moved = (wind.direction.x * before.lattice[0] + wind.direction.y * before.lattice[1]) * yards;
         Check(PeriodDistance(before.swellPhase[0], after.swellPhase[0] + moved, kTrainCells[0]) < 2e-5,
@@ -280,7 +281,7 @@ static void TestWaveMotion()
         const auto legacy = BuildWaveField(double(.05f) * 2000, .7f, .43f, scale, 12000, -9000, true, true);
         SamePhases(integrated, legacy, .003);
     }
-    Pass("waves physically travel toward all eight directions; constant unlinked motion matches legacy field");
+    Pass("waves travel downwind from all eight source bearings; constant unlinked motion matches legacy field");
 
     const auto startWind = Air(WindDirection::NorthEast), turnedWind = Air(WindDirection::SouthWest);
     for (float pivot : {-50000.f, 0.f, 51000.f})
@@ -409,7 +410,7 @@ static void TestConfigurationAndWiring()
           "device reset invalidates only the camera anchor, not CPU wind/sea phase history");
     auto debug = Air(WindDirection::East, 1.25f);
     const auto lines = WindDebugLines(debug);
-    Check(lines[1].find("E 90.0") != std::string::npos && lines[2].find("125.0%") != std::string::npos &&
+    Check(lines[1].find("From E 90.0") != std::string::npos && lines[2].find("125.0%") != std::string::npos &&
           lines[4].find("not connected") != std::string::npos, "debug reports actual internal state and unwired vegetation honestly");
     Pass("all 12 INI/F7 defaults/ranges, compass value labels, reload wiring, shared frame ordering and debug text");
 

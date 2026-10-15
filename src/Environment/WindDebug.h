@@ -11,10 +11,10 @@ inline std::array<std::string, 5> WindDebugLines(const WindState& wind)
 {
     std::array<std::string, 5> lines;
     char text[192]{};
-    std::snprintf(text, sizeof(text), "WIND %s | %s | travel toward (N=+X, E=-Y)",
+    std::snprintf(text, sizeof(text), "WIND %s | %s | compass bearing is FROM (N=+X, E=-Y)",
         wind.enabled ? "ON" : "OFF / legacy motion", wind.dynamic ? "dynamic" : "fixed direction");
     lines[0] = text;
-    std::snprintf(text, sizeof(text), "Now %s %.1f deg | target %s | next turn %.1f s",
+    std::snprintf(text, sizeof(text), "From %s %.1f deg | target from %s | next turn %.1f s",
         WindDirectionName(NearestWindDirection(wind.headingDegrees)), double(wind.headingDegrees),
         WindDirectionName(wind.targetDirection), double(wind.secondsToChange));
     lines[1] = text;
