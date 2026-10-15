@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
 #include "../D3D9/ScopedRenderState.h"
@@ -522,13 +523,24 @@ bool LoadFields(const std::wstring& path,cloudnoise::Volume3D& shape,cloudnoise:
 void SaveFields(const std::wstring& path,const cloudnoise::Volume3D& shape,const cloudnoise::Volume3D& detail,const cloudnoise::Image2D& weather)
 {
  if(path.empty())return;
- std::ofstream out(std::filesystem::path(path),std::ios::binary|std::ios::trunc);
+ // Write to a temp file and rename over the cache: on NTFS the rename is
+ // atomic, so a reader can only ever see one complete generation. This is
+ // what makes the startup generator (Configure) and the first-frame
+ // fallback (EnsureFields) safe to run against the same file. The unique
+ // temp name keeps even a pathological concurrent save from sharing a file.
+ const std::wstring tmp=path+L".tmp"+std::to_wstring(GetTickCount64());
+ std::ofstream out(std::filesystem::path(tmp),std::ios::binary|std::ios::trunc);
  if(!out)return;
  const CacheHeader header{kCacheMagic,kCacheVersion,kShapeSize,kDetailSize,kWeatherSize};
  out.write(reinterpret_cast<const char*>(&header),sizeof(header));
  out.write(reinterpret_cast<const char*>(shape.rgba.data()),std::streamsize(shape.rgba.size()));
  out.write(reinterpret_cast<const char*>(detail.rgba.data()),std::streamsize(detail.rgba.size()));
  out.write(reinterpret_cast<const char*>(weather.rgba.data()),std::streamsize(weather.rgba.size()));
+ out.close();
+ if(!out)return;
+ std::error_code ec;
+ std::filesystem::rename(tmp,path,ec);
+ if(ec)std::filesystem::remove(tmp,ec);
 }
 
 // The generators produce RGBA bytes; D3DFMT_A8R8G8B8 is BGRA in memory.
@@ -659,6 +671,26 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.weatherClouds=read(L"WeatherClouds",1)!=0;
  m_settings.evolutionSpeed=std::clamp(read(L"EvolutionPercent",100),0,400)*.01f;
  m_settings.transitionSeconds=float(std::clamp(read(L"TransitionSeconds",12),0,60));
+ // Cold-start field generation is roughly a second of CPU. It used to run on
+ // the first frame that would draw clouds - hidden under a loading screen on
+ // slow machines, but in-game on a fast one. When the cache is missing, start
+ // it on a worker thread at load time instead: same work, started under the
+ // game's own loading, and EnsureFields waits for it (or falls back to the
+ // old inline generation if it is still not done). The generators are
+ // deterministic (fixed seeds), so the two paths can never disagree.
+ if(m_settings.enabled&&!m_cachePath.empty()) {
+  std::error_code ec;
+  if(!std::filesystem::exists(m_cachePath,ec)) {
+   m_fieldsGenerating=true;
+   std::thread([this]{
+    auto shape=cloudnoise::GenerateShape(int(kShapeSize));
+    auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
+    auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+    SaveFields(m_cachePath,shape,detail,weather);
+    m_fieldsGenerating=false;
+   }).detach();
+  }
+ }
 }
 
 void VolumetricClouds::Reset(IDirect3DDevice9* device)
@@ -717,11 +749,20 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
  cloudnoise::Volume3D shape,detail;
  cloudnoise::Image2D weather;
  // Roughly a second of work on a cold start, so it is written next to the
- // DLL and read back on every later launch. Generation happens on the
- // first frame that would draw clouds, which in practice is a loading
- // screen rather than live gameplay.
+ // DLL and read back on every later launch. The first launch generates it
+ // on a worker thread at load time (see Configure). If the cache is still
+ // missing when the first cloud frame arrives, skip this frame and retry
+ // next - the worker started seconds ago and the render thread must not
+ // block on it. Past a five-second bound the worker is pathologically slow
+ // or dead, and the legacy inline generation runs (its atomic save and
+ // deterministic content keep a late worker write harmless).
  if(!LoadFields(m_cachePath,shape,detail,weather))
  {
+  if(m_fieldsGenerating.load(std::memory_order_acquire)) {
+   const auto now=GetTickCount64();
+   if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
+   if(now-m_fieldsWaitStart<5000)return false;
+  }
   shape=cloudnoise::GenerateShape(int(kShapeSize));
   detail=cloudnoise::GenerateDetail(int(kDetailSize));
   weather=cloudnoise::GenerateWeather(int(kWeatherSize));

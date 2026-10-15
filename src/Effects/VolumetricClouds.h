@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include "../Core/FrameClock.h"
@@ -148,6 +149,12 @@ namespace renderer
         bool m_shadersFailed = false;
         bool m_fieldsReady = false;
         bool m_fieldsFailed = false;
+        // Set by the load-time field-generation worker (see Configure) until
+        // it publishes the cache. The render thread only ever reads it
+        // (EnsureFields), so an atomic with no other synchronization is
+        // sufficient.
+        std::atomic<bool> m_fieldsGenerating{false};
+        uint64_t m_fieldsWaitStart = 0; // first frame that skipped for the worker
         bool m_shadowValid = false;
         Vec4 m_shadowArea;
         Vec4 m_lightProjection;
