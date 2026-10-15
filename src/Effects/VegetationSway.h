@@ -21,11 +21,7 @@
 //      and the interface declare no bone indices at all. This is the structural
 //      proof the sway rests on, and a declaration it cannot read is written to
 //      the renderer's log in D3D's own terms once;
-//   3. it is transparent (alpha tested or blended). A solid draw cannot be
-//      foliage and never reveals an instance, though it is leaned once its own
-//      model is known - that is what keeps a tree's opaque trunk welded to the
-//      canopy above it;
-//   4. it writes colour: a depth-only pass - the client's native shadow map, an
+//   3. it writes colour: a depth-only pass - the client's native shadow map, an
 //      occlusion fill, a depth prepass - cannot be the foliage the player is
 //      asking about, and the shadow map skins in the light's space. This test
 //      runs before the shader is judged, so the shadow map is counted `depth`
@@ -60,13 +56,26 @@
 //      nothing past it is ever read, analysed or written;
 //   8. the palette at c31 looks like object -> view matrices (finite,
 //      orthogonal up to scale, plausible translation) up to that bound. This is
-//      also what clears a world-shaped constant binding from step 5;
-//   9. the model is plant-shaped: at most kVegetationMaxBones bones, and a size
+//      also what clears a world-shaped constant binding from step 5, and it runs
+//      before the material test because it is cheaper than one and because it is
+//      the model's identity - which is what lets a solid batch lean once its own
+//      model is known;
+//   9. it is a cut-out. Either the device has alpha testing or alpha blending on
+//      for the draw, or the draw's own stage 0 texture has transparent texels in
+//      it, or the model it belongs to was already proved a cut-out this session
+//      (a tree's opaque trunk follows its canopy, whichever is drawn first). The
+//      SECOND witness is the one that matters on a client whose shader system
+//      compiles its alpha test into the pixel shader: there the states are off
+//      while grass is drawn, and a state-only test reads a whole field of it as
+//      solid props. A draw is refused only when the state says solid AND its
+//      texture was read AND that texture has no transparency in it - a crate, a
+//      boulder, a piece of armour;
+//  10. the model is plant-shaped: at most kVegetationMaxBones bones, and a size
 //      measured from its own vertices - not from its bone pivots, which span no
 //      height at all for a one-bone tuft;
-//  10. it is inside DistanceYards of the camera, with the sway fading to
+//  11. it is inside DistanceYards of the camera, with the sway fading to
 //      nothing before the limit so a tree never pops between leaning and still;
-//  11. the client is NOT moving it: the pose read this frame has to equal the
+//  12. the client is NOT moving it: the pose read this frame has to equal the
 //      pose read last frame AND the model's own vertices have to be in the same
 //      world positions. A static doodad repeats both exactly; an animated
 //      neighbour, a character, a creature, an effect or a particle batch (which
@@ -95,6 +104,7 @@
 #include <wrl/client.h>
 #include "../Core/FrameContext.h"
 #include "../Core/M2DrawGeometry.h"
+#include "../Core/TextureCutout.h"
 #include "../Core/M2ShaderProbe.h"
 #include "../Core/MathTypes.h"
 #include "../Core/ShaderCache.h"
@@ -137,6 +147,10 @@ inline constexpr unsigned kMaxShaderProfiles = 512;
 // `waiting` count exists to make readable. The frame sweep in BeginFrame is what
 // keeps these maps small in practice; the caps are only the floor under a flood.
 inline constexpr unsigned kMaxGeometryProfiles = 2048;
+// One entry per stage 0 texture a foliage candidate used. A client draws its
+// world with a few thousand textures; the cap is only the floor under a flood,
+// and a cleared map simply re-reads what it still needs.
+inline constexpr unsigned kMaxTextureProfiles = 2048;
 inline constexpr unsigned kMaxInstances = 2048;
 // How many of a batch's sampled vertices the mesh-move test watches. Eight is
 // enough to see a re-uploaded particle batch and costs eight matrix multiplies.
@@ -204,6 +218,15 @@ struct Instance
     unsigned poseBound = 0;   // the bound the stored pose was taken with
     unsigned stable = 0;
     bool swaying = false;
+    // The material proof that does not come from the render state: this model is
+    // drawn with a texture that has transparent texels in it, which is what a
+    // leaf, a blade of grass and a canopy are drawn with and what a crate, a
+    // boulder or a piece of armour is not. The state that used to decide this is
+    // absent on a client whose shader system compiles its alpha test into the
+    // pixel shader, and there the state test alone reads a whole field of grass
+    // as 238 solid props. Learned per model, beside the pose, and cleared when a
+    // model stops leaning.
+    bool cutout = false;
 };
 
 // The last palette read, reused by every further batch of the same instance in
@@ -223,7 +246,13 @@ inline std::unordered_map<uint64_t, ShaderProfile> g_shaders;
 inline std::unordered_map<uint64_t, GeometryProfile> g_geometry;
 inline std::unordered_map<uint64_t, Instance> g_instances;
 inline PaletteCache g_palette;
+// One texture examined per stage-0 texture, ever: the read is a level 0 lock, so
+// it is paid once for the handful of textures a client draws foliage with. The
+// key is the texture pointer; the device reset clears the map, which is what
+// keeps a recycled pointer from answering for a different texture.
+inline std::unordered_map<const void*, renderer::TextureAlphaProbe> g_textureCutouts;
 inline bool g_anySwaying = false;
+inline bool g_reportedSolidTexture = false;
 inline bool g_reportedUnreadableGeometry = false;
 inline bool g_reportedUnidentifiedShader = false;
 inline bool g_reportedSolidModel = false;
@@ -270,8 +299,10 @@ inline void Reset(IDirect3DDevice9*) noexcept
     g_geometry.clear();
     g_instances.clear();
     g_palette = {};
+    g_textureCutouts.clear();
     g_anySwaying = false;
     g_reportedUnreadableGeometry = false;
+    g_reportedSolidTexture = false;
     g_reportedUnidentifiedShader = false;
     g_reportedSolidModel = false;
     g_reportedRootBlock = false;
@@ -434,6 +465,71 @@ namespace detail
         if (!blendRead && !testRead)
             return renderer::g_trackedState.alphaBlend || renderer::g_trackedState.alphaTest;
         return blend != 0 || test != 0;
+    }
+
+    // The D3D format of a texture, as the decoder's own vocabulary.
+    inline renderer::TextureFormat TextureFormatOf(D3DFORMAT format) noexcept
+    {
+        switch (format)
+        {
+        case D3DFMT_DXT1: return renderer::TextureFormat::Dxt1;
+        case D3DFMT_DXT2: return renderer::TextureFormat::Dxt2;
+        case D3DFMT_DXT3: return renderer::TextureFormat::Dxt3;
+        case D3DFMT_DXT4: return renderer::TextureFormat::Dxt4;
+        case D3DFMT_DXT5: return renderer::TextureFormat::Dxt5;
+        case D3DFMT_A8R8G8B8: return renderer::TextureFormat::A8R8G8B8;
+        case D3DFMT_X8R8G8B8: return renderer::TextureFormat::X8R8G8B8;
+        case D3DFMT_A4R4G4B4: return renderer::TextureFormat::A4R4G4B4;
+        case D3DFMT_A1R5G5B5: return renderer::TextureFormat::A1R5G5B5;
+        case D3DFMT_A8: return renderer::TextureFormat::A8;
+        case D3DFMT_L8: return renderer::TextureFormat::L8;
+        default: return renderer::TextureFormat::Unknown;
+        }
+    }
+
+    // The material test that does not depend on render state. Two GetRenderState
+    // calls answer "is alpha blending on, is alpha testing on" - and on a client
+    // whose shader system compiles the alpha test into the pixel shader (a
+    // discard on the sampled alpha) BOTH are off while grass is being drawn, so
+    // a whole field arrives as "solid" and nothing leans. This asks the texture
+    // the draw itself is using instead: a plant is a card cut out of a
+    // transparent image, a prop is not. Read from the DEVICE (GetTexture), then
+    // from the texture's own level 0.
+    //
+    // Only stage 0 - a client draws its base texture there - and only the layer
+    // the device's texture is. Anything this cannot read is `Unknown`, which is
+    // never evidence of a cut-out: a draw is refused only when its texture was
+    // read AND has no transparency in it.
+    inline renderer::TextureCutout TextureIsCutout(IDirect3DDevice9* device) noexcept
+    {
+        using Microsoft::WRL::ComPtr;
+        ComPtr<IDirect3DBaseTexture9> base;
+        if (FAILED(device->GetTexture(0, base.GetAddressOf())) || !base) return renderer::TextureCutout::Unknown;
+        const auto cached = g_textureCutouts.find(base.Get());
+        if (cached != g_textureCutouts.end()) return cached->second.verdict;
+        auto remember = [&base](const renderer::TextureAlphaProbe& probe)
+        {
+            if (g_textureCutouts.size() >= kMaxTextureProfiles) g_textureCutouts.clear();
+            g_textureCutouts.emplace(base.Get(), probe);
+            return probe.verdict;
+        };
+        if (base->GetType() != D3DRTYPE_TEXTURE) return renderer::TextureCutout::Unknown;
+
+        ComPtr<IDirect3DTexture9> texture;
+        base.As(&texture);
+        if (!texture) return renderer::TextureCutout::Unknown;
+        D3DSURFACE_DESC desc{};
+        D3DLOCKED_RECT locked{};
+        if (FAILED(texture->GetLevelDesc(0, &desc))) return renderer::TextureCutout::Unknown;
+        // D3DLOCK_READONLY is what makes this safe to do while the client has the
+        // texture bound: no modification, so no flush and no re-upload.
+        if (FAILED(texture->LockRect(0, &locked, nullptr, D3DLOCK_READONLY)) || !locked.pBits)
+            return renderer::TextureCutout::Unknown;
+        const renderer::TextureAlphaProbe probe = renderer::ClassifyTextureCutout(
+            TextureFormatOf(desc.Format), static_cast<const uint8_t*>(locked.pBits),
+            size_t(locked.Pitch) < 0 ? 0 : size_t(locked.Pitch), desc.Width, desc.Height, ~size_t(0));
+        texture->UnlockRect(0);
+        return remember(probe);
     }
 
     // Does this draw write colour at all? The client's depth-only passes - its
@@ -855,39 +951,6 @@ struct Scope
         // arrived as model draws at all.
         ++Status().modelDraws;
 
-        // A model drawn with a transparent material is a cutout: the leaves, the
-        // grass, the cloth. WoW draws its foliage either alpha tested or alpha
-        // blended, so BOTH count, and this is where an INSTANCE comes from - a
-        // solid draw cannot be a plant and never reveals one. Solid draws are
-        // still carried by a model that is already leaning (a tree's own opaque
-        // trunk, drawn before or after its canopy), which is why they continue
-        // past this point while that shortcut holds.
-        const bool foliageMaterial = detail::TransparentMaterial(device);
-        if (!foliageMaterial)
-        {
-            ++Status().skippedMaterial;
-            // One line, once, naming the shader of the first model draw whose
-            // material is neither alpha tested nor alpha blended. This is the
-            // only gate that can refuse the whole field quietly: a client that
-            // implements its cutouts inside the pixel shader (no alpha test and
-            // no alpha blend state at all) draws its grass exactly like this, and
-            // the HUD can only count them as `solid`. If the row says `solid` and
-            // the plants do not move, this hash is the one to look at.
-            if (!g_reportedSolidModel)
-            {
-                g_reportedSolidModel = true;
-                char text[320]{};
-                std::snprintf(text, sizeof(text),
-                    "Vegetation sway: a model draw arrived with a material that is neither alpha tested nor alpha "
-                    "blended, so it cannot reveal a plant (hash=0x%016llx). The HUD counts these as `solid`. If "
-                    "foliage stays still while the row shows `solid`, this is the material to look at - the client "
-                    "may be cutting its leaves out inside the pixel shader.",
-                    static_cast<unsigned long long>(shader.hash));
-                Log(text);
-            }
-            if (!g_anySwaying) return;
-        }
-
         // A pass that writes no colour is a depth-only pass: the client's native
         // shadow map, an occlusion fill, a depth prepass. Nothing visible is
         // being drawn, and the shadow map's palette is in the light's space, so
@@ -926,30 +989,15 @@ struct Scope
         // acted on here.
         const bool worldSuspect = admission == detail::Admission::World;
 
-        if (!frame.cameraValid || !frame.viewRawValid)
-        {
-            if (foliageMaterial) ++Status().skippedCamera;
-            return;
-        }
-        // The frame camera's own viewport, so the palette this draw binds is in
-        // the space the lean is built in. A draw into another viewport (the F7
-        // menu's own passes are scoped out already, the client's portrait and
-        // reflection views are not) is left alone.
-        if (!detail::MatchesFrameViewport(device, frame))
-        {
-            if (foliageMaterial) ++Status().skippedViewport;
-            return;
-        }
-
-        // The root block is every model's first bone, and it is also the palette
-        // cache key and the placement point: read once and reused. Both ways it
-        // can fail here are palette refusals - a register that will not read,
-        // and a c31 that is not a bone block - and a palette refusal that
-        // counted nothing is exactly the report this feature has been burned by:
-        // `pal` also means "this client does not keep its bones at c31", which
-        // is a different bug from "no plant arrived at the gate".
+        // The root block comes next, ahead of every material test, for two
+        // reasons. It is the cheapest thing that can still prove the draw is a
+        // model - an object -> view block at c31 - so the expensive material read
+        // is only paid where it can matter; and it is the model's identity, which
+        // is what lets a batch that is NOT a cutout still be leaned once its own
+        // model is known: a tree's opaque trunk follows the canopy that revealed
+        // it, whichever of the two the client draws first.
         //
-        // This is also where a world-shaped constant binding is settled. The
+        // It is also where a world-shaped constant binding is settled. The
         // constants are a guess about a shader variant; a c31 that holds an
         // object -> view bone block is proof that the draw is a model, and a
         // model drawn through the world path is a plant that must lean, not a
@@ -963,6 +1011,11 @@ struct Scope
             renderer::kM2RegistersPerBone));
         if (!rootRead || !renderer::M2BoneBlockValid(root[0], root[1], root[2]))
         {
+            // Both ways this can fail are palette refusals - a register that will
+            // not read, and a c31 that is not a bone block - and a palette refusal
+            // that counted nothing is exactly the report this feature has been
+            // burned by: `pal` also means "this client does not keep its bones at
+            // c31", which is a different bug from "no plant arrived at the gate".
             if (worldSuspect) ++Status().skippedWorld;
             else ++Status().skippedPalette;
             // Once per session, the register itself. "The palette did not look
@@ -996,9 +1049,94 @@ struct Scope
         }
         const uint64_t rootKey = detail::RootKey(root);
 
-        if (!foliageMaterial)
+        // A model drawn with a transparent material is a cutout: the leaves, the
+        // grass, the cloth. WoW draws its foliage either alpha tested or alpha
+        // blended, so BOTH count, and this is where an INSTANCE comes from - a
+        // solid draw cannot be a plant and never reveals one.
+        //
+        // The render state is not the only witness, and on some clients it is not
+        // a witness at all: a client whose shader system compiles the alpha test
+        // into the pixel shader (a discard on the sampled alpha) sets NEITHER
+        // state while it draws grass, and every plant then arrives looking like a
+        // solid prop - which is exactly how a field of grass reads as "238 solid"
+        // with nothing leaning. So the draw's own texture is asked as well, and
+        // the two answers are combined per model: the state OR the texture. A
+        // draw is refused here only when the state says solid AND its texture was
+        // read AND that texture has no transparency in it - which is what a
+        // crate, a boulder and a piece of armour look like.
+        const bool foliageMaterial = detail::TransparentMaterial(device);
+        bool instanceCutout = false;
+        Instance* known = nullptr;
+        if (foliageMaterial)
         {
-            Instance* known = detail::SwayingByRoot(rootKey, frame.frameIndex);
+            instanceCutout = true;
+        }
+        else
+        {
+            // The instance lookup is paid for the draws that need it, not for
+            // every model in the frame: the shortcut it feeds is about solid
+            // batches of a model that is already leaning (a tree's own trunk),
+            // which is exactly this branch.
+            known = detail::SwayingByRoot(rootKey, frame.frameIndex);
+            if (known && known->cutout)
+            {
+                // A batch of a model this frame has already proved is a cutout.
+                // It costs nothing and it cannot be wrong: the proof belongs to
+                // the model, not to the batch.
+                instanceCutout = true;
+            }
+            else if (detail::TextureIsCutout(device) == renderer::TextureCutout::Cutout)
+            {
+                instanceCutout = true;
+            }
+            else
+            {
+                ++Status().skippedMaterial;
+                if (!g_reportedSolidTexture)
+                {
+                    g_reportedSolidTexture = true;
+                    char text[400]{};
+                    std::snprintf(text, sizeof(text),
+                        "Vegetation sway: a model draw has alpha test and alpha blend BOTH off and a stage 0 texture "
+                        "with no transparent texel in it, so it is a solid prop (shader hash=0x%016llx). The HUD counts "
+                        "these as `solid`. If foliage is being counted here, that foliage is drawn with neither state "
+                        "nor a cut-out texture, and the log line above this one names the shader to look at.",
+                        static_cast<unsigned long long>(shader.hash));
+                    Log(text);
+                }
+            }
+        }
+        // A solid batch of a model that is already leaning continues from here
+        // (its own trunk follows its canopy); anything else that is not a cutout
+        // is exactly what it looks like: a solid prop, and never a plant.
+        if (!instanceCutout && !g_anySwaying) return;
+
+        if (!frame.cameraValid || !frame.viewRawValid)
+        {
+            if (instanceCutout) ++Status().skippedCamera;
+            return;
+        }
+        // The frame camera's own viewport, so the palette this draw binds is in
+        // the space the lean is built in. A draw into another viewport (the F7
+        // menu's own passes are scoped out already, the client's portrait and
+        // reflection views are not) is left alone.
+        if (!detail::MatchesFrameViewport(device, frame))
+        {
+            if (instanceCutout) ++Status().skippedViewport;
+            return;
+        }
+
+        // The root block, the palette of this model, was read above every
+        // material test: it is what proved the draw is a model in the first
+        // place. A batch that is not a cutout and whose model is not already
+        // leaning is the one case left with nothing to do here.
+        if (!instanceCutout)
+        {
+            // A solid batch of a model that is already leaning (a tree's own
+            // trunk, drawn before or after its canopy): it is leaned from the
+            // palette alone, exactly as before - its vertices would have to be
+            // re-read to measure it and its shape was already decided by the
+            // batch that revealed the model.
             if (!known) return;
             float registers[renderer::kM2MaxBones * renderer::kM2RegistersPerBone][4]{};
             const unsigned bound = std::max(known->boneBound, 1u);
@@ -1196,6 +1334,11 @@ struct Scope
         }
 
         instance->swaying = true;
+        // The model is a cutout, and the proof is recorded on the INSTANCE: the
+        // texture was examined once, for this model, and its other batches (the
+        // trunk, the lower leaves) then need no state and no texture read to be
+        // recognised as the same plant.
+        instance->cutout = true;
         g_anySwaying = true;
         Lean(frame, *instance, bones, registers, bones.bones);
     }
@@ -1218,6 +1361,11 @@ private:
     void StopLeaning(Instance& instance) noexcept
     {
         instance.stable = 0;
+        // The material proof goes with it. A model that has stopped leaning is no
+        // longer the same model: another object can be placed on the same spot
+        // with the same root block and the same vertex buffer, and a stale
+        // "this is a cutout" would then put a solid prop in the wind.
+        instance.cutout = false;
         if (!instance.swaying) return;
         instance.swaying = false;
         g_anySwaying = false;

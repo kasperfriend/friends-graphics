@@ -155,18 +155,27 @@ single byte is written:
   a fence and a wall are not plants.
 - **Anything beyond `SWAY DISTANCE`.** The sway reaches full strength at 75% of
   that range and fades to nothing at the range itself, so nothing pops.
-- **Solid materials.** A draw with an opaque material never reveals an instance,
-  and neither does any draw outside the shared wind's snapshot, so the whole
-  discovery path is limited to the client's own transparent model materials. The
-  material verdict is read from the device, so a pass that arrives through a
-  cached state block is judged by what the device is actually doing. It is read
-  right behind the declaration and before every other gate, so the solid trunk
-  and the depth pass are settled before a shader hash is looked at. This is also
-  the one refusal that could swallow a whole field while the HUD only says
-  `solid` - a client that cuts its leaves out inside the pixel shader sets
-  neither alpha test nor alpha blend state - so the first solid model draw of a
-  session is named in `ModernWoWRenderer.log` by shader hash, which is what makes
-  that report answerable.
+- **Solid materials - with two witnesses, because one of them is not always
+  there.** A draw with an opaque material never reveals an instance, and neither
+  does any draw outside the shared wind's snapshot, so the whole discovery path
+  is limited to the client's own cut-out model materials. The first witness is
+  the render state, read from the device (so a pass that arrives through a
+  cached state block is judged by what the device is actually doing): alpha
+  testing or alpha blending on means a cut-out. The second is the draw's own
+  stage 0 texture, read once per texture and remembered: a plant is a card cut
+  out of a transparent image, so a texture with transparent texels in it is a
+  cut-out whatever the render state says. The second witness is what the first
+  one cannot replace on a client whose shader system compiles its alpha test
+  into the pixel shader - a `discard` on the sampled alpha - where both states
+  are off while grass is being drawn and a state-only test reads a whole field
+  of grass as solid props. A draw is refused here only when the state says solid
+  **and** its texture was read **and** that texture has no transparency in it: a
+  crate, a boulder, a piece of armour. The proof is recorded on the *instance*,
+  so a model's other batches (the trunk under the canopy) cost nothing, and it is
+  dropped the moment the model stops leaning - a spot reused by a solid prop is
+  not leaned on the strength of what stood there before. The first refusal of a
+  session names its shader in `ModernWoWRenderer.log`, which is what makes a
+  `solid` count answerable.
 - **A palette that is not where this reader looks for it.** `pal` counts a c31
   that is not a bone block, a palette that fails validation, a root block whose
   translation is not a placement point, and a pivot that does not survive the
@@ -188,7 +197,9 @@ single byte is written:
 - **Anything that is not the client's skinned model path.** Terrain, WMOs,
   particles, ribbons, effects, the interface and every fixed-function or
   up-front batch declare no bone indices (or no vertex buffer at all), so they
-  are left alone before a palette is even read. A fixed-function pass is counted
+  are left alone before a palette is even read. Terrain-bound grass is terrain:
+  it is not a model, it is part of the ground mesh, and no amount of wind in this
+  module will move it. A fixed-function pass is counted
   `flat` and a draw with no readable declaration `decl`.
 - **The passes this project has already identified as never-a-model** - the
   native shadow casters, UI, precipitation and water - are refused by hash
@@ -318,21 +329,34 @@ Linux and is wired into CI, and it pins:
   recognized while a terrain/WMO-style or transposed one is not, the world's own
   `c4..c7` projection is refused, and a declaration without bone indices is not
   a model draw whatever its shader is;
-- the four proofs the gates read from the device rather than from the state
-  mirror: the declaration a draw is judged through (`GetVertexDeclaration`), the
-  material (alpha test or alpha blend), the colour-write mask, and the shader it
-  is judged by (`GetVertexShader`, then the shader's own bytecode) - with the
-  mirror left to the free early counters, the palette read kept above every
-  device call it can be, and the gate order pinned as declaration -> material ->
-  colour writes -> shader -> camera, so the declaration is what proves the draw
-  is a model before anything else is asked and the depth passes are named before
-  a hash is read;
+- the proofs the gates read from the device rather than from the state mirror:
+  the declaration a draw is judged through (`GetVertexDeclaration`), the
+  colour-write mask, the shader it is judged by (`GetVertexShader`, then the
+  shader's own bytecode), the stage 0 texture, and the material (alpha test or
+  alpha blend) - with the mirror left to the free early counters, the palette
+  read kept above every device call it can be, and the gate order pinned as
+  declaration -> colour writes -> shader -> palette -> material -> camera: the
+  declaration proves the draw is a model, the depth pass is named before a hash
+  or a texture is touched, the palette proves it is a model at all, and the
+  material read is paid for the draws that can still become a plant;
+- the cut-out decoder, over every format a client uploads: DXT1 in both of its
+  modes (the 1-bit alpha one and the opaque one), DXT2/DXT3 explicit alpha,
+  DXT4/DXT5 interpolated alpha in both of its modes, and the unpacked
+  A8R8G8B8 / X8R8G8B8 / A4R4G4B4 / A1R5G5B5 / A8 / L8 - each one checked on both
+  sides of the halfway mark, with padding outside the image never counted as a
+  texel (an odd-sized opaque texture is not foliage), a partial lock read exactly
+  as far as it goes, and an undecodable format, a texture that is too small to
+  take a share over or no texture at all classified as *unknown* rather than
+  guessed - because a false cut-out now puts a solid prop in the wind;
 - the identity fallback: a shader the runtime will not hash is judged by the
   constants it binds and never cached under hash 0, and a shader-gate refusal of
   a model draw is counted whatever the mirror believes about its material;
 - the one-shot data dumps a refusal cannot carry as a number: the shader hash of
   the first solid model draw of a session, and the twelve values read at c31 when
   it did not hold a bone block;
+- the material proof of a model outliving the batch that paid for it, and the
+  moment it is dropped: a model that stops leaning loses it, so a solid prop
+  placed on a spot a plant used to occupy is never leaned for it;
 - the model's own vertices: the palette bound comes from the bone indices the
   draw's vertices reference (never from the constant file), the size gate
   measures the vertices themselves - a one-bone tuft with a 1.6 yd mesh measures
@@ -366,12 +390,13 @@ Linux and is wired into CI, and it pins:
 
 In-client acceptance checks (Windows and the Ascension client):
 
-0. The third row names the build (`ModernWoWRenderer 2026-10-15 18:32`). Check
+0. The last row names the build (`ModernWoWRenderer 2026-10-15 18:32`). Check
    it against the `d3d9.dll` in the client folder - Explorer, right click,
    Properties, Modified - **before** reading anything else: a client that never
    restarted, or a DLL that was not replaced, shows the previous build's
    counters, and they read exactly like the fixed build's.
-1. Stand in a forest at day and at night, with the F7 WIND tab open on
+1. Stand in a grass field with trees beside you, day and night, with the F7
+   WIND tab open on
    `VEGETATION DEBUG VIEW`. Grass, bushes and tree canopies lean downwind and
    shimmer; `leaning` rises with the number of visible plants, and if it does not,
    the second row names the gate that refused them, in the order they run:

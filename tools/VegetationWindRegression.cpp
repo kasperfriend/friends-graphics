@@ -5,13 +5,16 @@
 // The same file is built by tools/Test-VegetationWind.cmd on the Windows
 // runner, so the settings parity checked here is also checked where the real
 // location-scoped INI read/save/reload path lives.
+#include "../src/Core/TextureCutout.h"
 #include "../src/Environment/VegetationWind.h"
 #include "../src/Environment/WindTuning.h"
 #include "../src/Environment/WindDebug.h"
 #include "../src/Environment/OverlayLayout.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -1083,18 +1086,6 @@ static void TestConfigurationAndWiring()
         "an unproven shader is reported by hash, accepted or refused");
     Check(main.find("vegetation::logLine=Log;") != main.npos,
         "and those reports reach the renderer's own log");
-    // The one refusal that can swallow a whole field while the HUD only says
-    // `solid`: a client whose leaves are cut out inside the pixel shader sets
-    // neither alpha test nor alpha blend state. The first such model draw names
-    // its shader in the log, because `solid` on its own cannot be acted on.
-    Check(sway.find("g_reportedSolidModel") != sway.npos &&
-          sway.find("hash=0x%016llx). The HUD counts these as `solid`") != sway.npos &&
-          sway.find("inside the pixel shader") != sway.npos,
-        "a solid model draw names its shader once, so `solid` can be diagnosed");
-    // And the register itself, once, when c31 is not a bone block: `pal` on the
-    // HUD is otherwise a dead end from a player's machine - zeros mean the
-    // client keeps its matrix elsewhere, a projection means the draw is not a
-    // model, and a different stride shows up in the numbers.
     Check(sway.find("g_reportedRootBlock") != sway.npos &&
           sway.find("did not hold a bone block for a model draw: %.3f %.3f %.3f %.3f") != sway.npos &&
           sway.find("unsigned(renderer::kM2BoneBaseRegister)") != sway.npos,
@@ -1188,9 +1179,11 @@ static void TestConfigurationAndWiring()
     Check(sway.find("renderer::g_trackedState.alphaBlend || renderer::g_trackedState.alphaTest") != sway.npos,
         "and the mirror only answers when the device cannot be asked at all");
     const auto materialGate = sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);");
-    Check(materialGate != sway.npos && materialGate > layoutGate && materialGate < shaderGate,
-        "and it is asked once, right behind the declaration, so the device call is paid for models only - and "
-        "the solid trunk and the depth pass are settled before a shader hash is read");
+    const auto cameraGate = sway.find("if (!frame.cameraValid || !frame.viewRawValid)");
+    Check(materialGate != sway.npos && materialGate > layoutGate && materialGate > shaderGate &&
+          materialGate < cameraGate,
+        "and it is asked once per model draw that got past the declaration, the depth test, the shader verdict and "
+        "the palette, so the read is paid for the draws that can still become a plant");
     Check(sway.find("const bool mirrorMaterial =") != sway.npos,
         "with the free state mirror left to the early counters");
     // Colour writes. The client's native shadow map skins in the LIGHT's space,
@@ -1206,8 +1199,59 @@ static void TestConfigurationAndWiring()
         "the colour-write proof is read from the device, not from the state mirror");
     Check(sway.find("colorWrite") == sway.npos,
         "and nothing keeps a mirror of it that could go stale");
-    Check(colourGate != sway.npos && colourGate < firstLean && colourGate > sway.find("if (!foliageMaterial)"),
-        "no draw is leaned before its colour writes are known, and the free state-mirror gate runs first");
+    Check(colourGate != sway.npos && colourGate < firstLean && colourGate > layoutGate,
+        "no draw is leaned before its colour writes are known - and the depth pass is settled before any shader, "
+        "palette or texture is read");
+    // The refusal that swallowed a whole field. On the client this was reported
+    // from, grass arrives with alpha test and alpha blend BOTH off - its alpha
+    // test is compiled into the pixel shader - so the state test alone called 238
+    // model draws "solid" while the player stood in a field of it. The draw's own
+    // stage 0 texture is the witness that cannot be turned off that way, and the
+    // two answers are combined per model: state OR texture.
+    Check(sway.find("detail::TextureIsCutout(device)") != sway.npos &&
+          sway.find("renderer::TextureCutout::Cutout") != sway.npos,
+        "a draw the state calls solid is asked about its own texture");
+    Check(sway.find("device->GetTexture(0, base.GetAddressOf())") != sway.npos &&
+          sway.find("D3DLOCK_READONLY") != sway.npos,
+        "read as the device has it bound, read-only, so the client's texture is never disturbed");
+    Check(sway.find("ClassifyTextureCutout(") != sway.npos,
+        "and decoded by the portable classifier, which is what the suite above tests");
+    Check(sway.find("const bool foliageMaterial = detail::TransparentMaterial(device);") <
+          sway.find("detail::TextureIsCutout(device)") &&
+          sway.find("if (foliageMaterial)") != sway.npos,
+        "the state is asked first: a cutout material is the common case and costs no lock");
+    Check(sway.find("bool cutout = false;") != sway.npos && sway.find("instance->cutout = true;") != sway.npos &&
+          sway.find("instance.cutout = false;") != sway.npos,
+        "the proof belongs to the instance, so a tree's other batches need no texture read - and a model that "
+        "stops leaning loses it rather than lending it to whatever is placed there next");
+    Check(sway.find("known = detail::SwayingByRoot(rootKey, frame.frameIndex);") != sway.npos &&
+          sway.find("if (known && known->cutout)") != sway.npos,
+        "and a batch of a model this frame already proved is a cutout is admitted on that alone, from the "
+        "instance that proves it - with the lookup paid only where it can matter");
+    // The order the gates run in, which is what makes the row readable: a pass
+    // that writes no colour is settled before a texture is locked, the root block
+    // proves the draw is a model before the material read is paid for, and the
+    // texture is only examined where nothing else could answer.
+    const auto rootGate = sway.find("GetVertexShaderConstantF(renderer::kM2BoneBaseRegister", scopeStart);
+    const auto textureGate = sway.find("detail::TextureIsCutout(device)");
+    const auto neverVerdict = sway.find("++Status().skippedNeverModel;");
+    Check(colourGate != sway.npos && colourGate < textureGate,
+        "the colour-write test runs before any texture is locked: the shadow map is never examined");
+    Check(rootGate != sway.npos && rootGate < textureGate && rootGate > neverVerdict,
+        "the root block - the proof the draw is a model at all - runs before the material read");
+    Check(sway.find("g_textureCutouts") != sway.npos && sway.find("g_textureCutouts.clear();") != sway.npos,
+        "one texture is examined once, and a device reset drops what was learned about it");
+    // The other side of the same coin: a model draw that is neither transparent
+    // by state nor cut out by texture names its shader once, so `solid` on the
+    // HUD is still answerable from a player's log.
+    Check(sway.find("g_reportedSolidTexture") != sway.npos &&
+          sway.find("HUD counts") != sway.npos &&
+          sway.find("these as `solid`") != sway.npos,
+        "a solid model draw names its shader once, so `solid` can be diagnosed");
+    // And the register itself, once, when c31 is not a bone block: `pal` on the
+    // HUD is otherwise a dead end from a player's machine - zeros mean the
+    // client keeps its matrix elsewhere, a projection means the draw is not a
+    // model, and a different stride shows up in the numbers.
     Check(sway.find("kVegetationFootprintToHeight * height") != sway.npos,
         "the shape gate is the plant one: a fence is long and low, a bush is not");
     // The reader itself: the two facts the whole fix rests on are read from the
@@ -1234,6 +1278,242 @@ static void TestConfigurationAndWiring()
     Pass("INI uniqueness, F7 defaults/ranges, the link switch and the production wiring");
 }
 
+
+// ---------------------------------------------------------------------------
+// The cut-out decoder
+// ---------------------------------------------------------------------------
+// A client whose shader system compiles the alpha test into the pixel shader
+// (a `discard` on the sampled alpha) draws its grass with alpha blending and
+// alpha testing BOTH off, so the render state cannot tell a leaf from a crate.
+// The texture can: a plant is drawn as a card cut out of a transparent image,
+// while a prop is drawn with an image that has no transparent texel at all.
+// The device half locks the texture once and hands the bytes here; every
+// decode below is a pure function, and every one of them is checked - because a
+// decoder that invents a transparent texel now puts a solid prop in the wind.
+static void WriteDxt1Block(uint8_t* block, bool transparent, uint32_t indices = 0xFFFFFFFFu)
+{
+    // colour0 <= colour1 is the mode that carries 1-bit alpha; above it a block
+    // is opaque by definition whatever the indices say.
+    const uint16_t colour0 = transparent ? 0x0000 : 0xFFFF;
+    const uint16_t colour1 = transparent ? 0xFFFF : 0x0000;
+    block[0] = uint8_t(colour0 & 0xFF); block[1] = uint8_t(colour0 >> 8);
+    block[2] = uint8_t(colour1 & 0xFF); block[3] = uint8_t(colour1 >> 8);
+    for (int i = 0; i < 4; ++i) block[4 + i] = uint8_t((indices >> (8 * i)) & 0xFF);
+}
+
+static std::vector<uint8_t> DxtImage(unsigned width, unsigned height, unsigned blockBytes,
+    const std::function<void(uint8_t*, unsigned, unsigned)>& fill)
+{
+    const unsigned blocksPerRow = (width + 3) / 4, blockRows = (height + 3) / 4;
+    const size_t pitch = size_t(blocksPerRow) * blockBytes;
+    std::vector<uint8_t> image(pitch * blockRows, 0);
+    for (unsigned by = 0; by < blockRows; ++by)
+        for (unsigned bx = 0; bx < blocksPerRow; ++bx)
+            fill(image.data() + by * pitch + bx * blockBytes, bx, by);
+    return image;
+}
+
+static void TestTextureCutoutDecode()
+{
+    const unsigned size = 32; // 64 DXT blocks, 1024 texels
+    const size_t dxt1Pitch = size_t(size / 4) * 8;
+
+    // DXT1, the format WoW draws most of its foliage with. Every index three in
+    // the alpha mode is a hole; a block in the opaque mode has none.
+    {
+        auto image = DxtImage(size, size, 8, [](uint8_t* block, unsigned, unsigned) { WriteDxt1Block(block, false); });
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), dxt1Pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque && probe.transparent == 0 && probe.texels == size * size,
+            "an all-opaque DXT1 texture is not a cut-out");
+    }
+    {
+        auto image = DxtImage(size, size, 8, [](uint8_t* block, unsigned, unsigned) { WriteDxt1Block(block, true); });
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), dxt1Pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.transparent == size * size && Near(probe.fraction, 1.0),
+            "every texel of index three is a hole: the texture is a cut-out");
+    }
+    // The share matters: one transparent block of sixty-four is an edge
+    // artefact, not a leaf.
+    {
+        auto image = DxtImage(size, size, 8, [](uint8_t* block, unsigned bx, unsigned by)
+            { WriteDxt1Block(block, bx == 0 && by == 0); });
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), dxt1Pitch, size, size, image.size());
+        Check(probe.transparent == 16 && probe.verdict == TextureCutout::Opaque,
+            "one transparent block in sixty-four is below the share a cut-out needs");
+    }
+    {
+        // Half the blocks in the alpha mode with every index a hole: half the
+        // texels, which is the share a leaf texture has.
+        auto image = DxtImage(size, size, 8, [](uint8_t* block, unsigned, unsigned by)
+            { WriteDxt1Block(block, by < 4); });
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), dxt1Pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.transparent == 512,
+            "a texture that is a quarter of the way to half holes is a cut-out");
+    }
+    // Padding is not texels. A 17x17 image is carried by twenty-five blocks, so
+    // most of what a naive decoder would examine does not exist - and if those
+    // phantom texels counted as transparent, every odd-sized opaque texture in
+    // the world would read as foliage.
+    {
+        const unsigned odd = 17;
+        const size_t oddPitch = size_t((odd + 3) / 4) * 8;
+        auto image = DxtImage(odd, odd, 8, [](uint8_t* block, unsigned, unsigned) { WriteDxt1Block(block, false); });
+        // Every block's three-in-four padding slots are holes; the real texels
+        // are not.
+        const unsigned blocksPerRow = (odd + 3) / 4;
+        for (unsigned by = 0; by < (odd + 3) / 4; ++by)
+            for (unsigned bx = 0; bx < blocksPerRow; ++bx)
+            {
+                uint8_t* block = image.data() + by * oddPitch + bx * 8;
+                block[0] = 0x00; block[1] = 0x00; block[2] = 0xFF; block[3] = 0xFF;
+                uint32_t indices = 0;
+                for (unsigned j = 0; j < 4; ++j)
+                    for (unsigned i = 0; i < 4; ++i)
+                        if (bx * 4 + i >= odd || by * 4 + j >= odd) indices |= 3u << (2 * (j * 4 + i));
+                for (int i = 0; i < 4; ++i) block[4 + i] = uint8_t((indices >> (8 * i)) & 0xFF);
+            }
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), oddPitch, odd, odd, image.size());
+        Check(probe.texels == odd * odd && probe.transparent == 0 && probe.verdict == TextureCutout::Opaque,
+            "texels outside the image are padding, never holes");
+    }
+
+    // DXT3: explicit four-bit alpha, two texels per byte. The threshold is the
+    // same 128 every other format is compared to.
+    {
+        const size_t pitch = size_t(size / 4) * 16;
+        auto image = DxtImage(size, size, 16, [](uint8_t* block, unsigned, unsigned)
+            { for (int i = 0; i < 8; ++i) block[i] = 0xFF; });
+        auto probe = ClassifyTextureCutout(TextureFormat::Dxt3, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque, "nibble fifteen is opaque DXT3");
+        auto clear = DxtImage(size, size, 16, [](uint8_t* block, unsigned, unsigned)
+            { for (int i = 0; i < 8; ++i) block[i] = 0x00; });
+        probe = ClassifyTextureCutout(TextureFormat::Dxt3, clear.data(), pitch, size, size, clear.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.transparent == size * size,
+            "nibble zero is a hole in DXT3");
+        auto seven = DxtImage(size, size, 16, [](uint8_t* block, unsigned, unsigned)
+            { for (int i = 0; i < 8; ++i) block[i] = 0x77; });
+        probe = ClassifyTextureCutout(TextureFormat::Dxt3, seven.data(), pitch, size, size, seven.size());
+        Check(probe.verdict == TextureCutout::Cutout, "seven of fifteen is below the halfway mark");
+        auto eight = DxtImage(size, size, 16, [](uint8_t* block, unsigned, unsigned)
+            { for (int i = 0; i < 8; ++i) block[i] = 0x88; });
+        probe = ClassifyTextureCutout(TextureFormat::Dxt3, eight.data(), pitch, size, size, eight.size());
+        Check(probe.verdict == TextureCutout::Opaque, "and eight of fifteen is above it");
+        // DXT2 carries the same alpha, premultiplied.
+        probe = ClassifyTextureCutout(TextureFormat::Dxt2, clear.data(), pitch, size, size, clear.size());
+        Check(probe.verdict == TextureCutout::Cutout, "DXT2 alpha is DXT3 alpha");
+    }
+
+    // DXT5: two endpoints and sixteen three-bit indices, in both of the
+    // format's modes - the mode decides whether index six is a hole or white.
+    {
+        const size_t pitch = size_t(size / 4) * 16;
+        const auto build = [&](uint8_t a0, uint8_t a1, uint8_t index) {
+            return DxtImage(size, size, 16, [a0, a1, index](uint8_t* block, unsigned, unsigned)
+            {
+                block[0] = a0; block[1] = a1;
+                uint64_t indices = 0;
+                for (int i = 0; i < 16; ++i) indices |= uint64_t(index) << (3 * i);
+                for (int i = 0; i < 6; ++i) block[2 + i] = uint8_t((indices >> (8 * i)) & 0xFF);
+            });
+        };
+        auto image = build(255, 0, 0);
+        auto probe = ClassifyTextureCutout(TextureFormat::Dxt5, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque, "index zero of a white-to-black DXT5 block is white");
+        image = build(255, 0, 1);
+        probe = ClassifyTextureCutout(TextureFormat::Dxt5, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.transparent == size * size,
+            "index one is the other endpoint, and it is black");
+        image = build(255, 0, 2);
+        probe = ClassifyTextureCutout(TextureFormat::Dxt5, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque, "index two interpolates towards white, not black");
+        image = build(0, 255, 6);
+        probe = ClassifyTextureCutout(TextureFormat::Dxt5, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Cutout, "in the other mode index six is a hole");
+        image = build(0, 255, 7);
+        probe = ClassifyTextureCutout(TextureFormat::Dxt5, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque, "and index seven is white");
+    }
+
+    // The unpacked formats, and the row pitch that is not the row width: the
+    // padding D3D puts at the end of a row must never be read as texels.
+    {
+        const size_t rowBytes = size_t(size) * 4;
+        const size_t pitch = rowBytes + 16; // padded rows, zero filled
+        std::vector<uint8_t> image(pitch * size, 0);
+        for (unsigned y = 0; y < size; ++y)
+            for (unsigned x = 0; x < size; ++x)
+                image[y * pitch + x * 4 + 3] = 255;
+        auto probe = ClassifyTextureCutout(TextureFormat::A8R8G8B8, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Opaque && probe.transparent == 0,
+            "a row's padding is not a transparent texel of an A8R8G8B8 texture");
+        for (unsigned y = 0; y < size; ++y)
+            for (unsigned x = 0; x < size; ++x)
+                image[y * pitch + x * 4 + 3] = 0;
+        probe = ClassifyTextureCutout(TextureFormat::A8R8G8B8, image.data(), pitch, size, size, image.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.transparent == size * size,
+            "and an A8R8G8B8 texture with a zero alpha channel is a cut-out");
+        std::fill(image.begin(), image.end(), 0);
+        const size_t partial = rowBytes * 4; // a lock that handed over only four rows
+        probe = ClassifyTextureCutout(TextureFormat::A8R8G8B8, image.data(), pitch, size, size, partial);
+        Check(probe.texels == 3 * size && probe.verdict == TextureCutout::Unknown,
+            "a lock that hands over part of an image is read whole rows at a time and never past what it gave - "
+            "and too little of it proves nothing");
+    }
+    {
+        const auto unpacked = [&](TextureFormat format, uint16_t value, size_t bytesPerTexel) {
+            const size_t pitch = size_t(size) * bytesPerTexel;
+            std::vector<uint8_t> image(pitch * size, 0);
+            for (size_t i = 0; i + bytesPerTexel <= image.size(); i += bytesPerTexel)
+                for (size_t b = 0; b < bytesPerTexel; ++b) image[i + b] = uint8_t((value >> (8 * b)) & 0xFF);
+            return ClassifyTextureCutout(format, image.data(), pitch, size, size, image.size());
+        };
+        Check(unpacked(TextureFormat::X8R8G8B8, 0x0000, 4).verdict == TextureCutout::Opaque,
+            "X8R8G8B8 has no alpha channel to be transparent with");
+        Check(unpacked(TextureFormat::L8, 0x00, 1).verdict == TextureCutout::Opaque,
+            "and neither has L8: black in it is not a hole");
+        Check(unpacked(TextureFormat::A8, 0x00, 1).verdict == TextureCutout::Cutout &&
+              unpacked(TextureFormat::A8, 0xFF, 1).verdict == TextureCutout::Opaque,
+            "A8 is the alpha channel itself");
+        Check(unpacked(TextureFormat::A1R5G5B5, 0x8000, 2).verdict == TextureCutout::Opaque &&
+              unpacked(TextureFormat::A1R5G5B5, 0x0000, 2).verdict == TextureCutout::Cutout,
+            "A1R5G5B5's one bit decides");
+        Check(unpacked(TextureFormat::A4R4G4B4, 0xF000, 2).verdict == TextureCutout::Opaque &&
+              unpacked(TextureFormat::A4R4G4B4, 0x7000, 2).verdict == TextureCutout::Cutout &&
+              unpacked(TextureFormat::A4R4G4B4, 0x8000, 2).verdict == TextureCutout::Opaque,
+            "A4R4G4B4's high nibble decides, either side of halfway");
+    }
+
+    // What a reader must never do: claim a verdict it did not read. An unknown
+    // format, a texture too small to take a share over, and no texture at all
+    // are all Unknown - and Unknown is not evidence of anything.
+    {
+        std::vector<uint8_t> bytes(4096, 0);
+        Check(ClassifyTextureCutout(TextureFormat::Unknown, bytes.data(), 128, 32, 32, bytes.size()).verdict ==
+            TextureCutout::Unknown, "a format this reader cannot decode proves nothing");
+        const auto small = ClassifyTextureCutout(TextureFormat::A8R8G8B8, bytes.data(), 32, 8, 8, bytes.size());
+        Check(small.verdict == TextureCutout::Unknown && small.texels == 64 && small.fraction == 1.f,
+            "a texture too small to take a share over is classified as nothing at all");
+        Check(ClassifyTextureCutout(TextureFormat::Dxt1, nullptr, 64, 32, 32, 0).verdict == TextureCutout::Unknown &&
+              ClassifyTextureCutout(TextureFormat::Dxt1, bytes.data(), 0, 32, 32, bytes.size()).verdict == TextureCutout::Unknown &&
+              ClassifyTextureCutout(TextureFormat::Dxt1, bytes.data(), 64, 0, 0, bytes.size()).verdict == TextureCutout::Unknown,
+            "and neither is a texture that is not there");
+    }
+
+    // Bigger than the budget: the image is sampled across its whole height, so a
+    // cut-out is still a cut-out, and the hash still names the bytes read.
+    {
+        const unsigned big = 1024;
+        const size_t pitch = size_t(big / 4) * 8;
+        auto image = DxtImage(big, big, 8, [](uint8_t* block, unsigned, unsigned) { WriteDxt1Block(block, true); });
+        const auto probe = ClassifyTextureCutout(TextureFormat::Dxt1, image.data(), pitch, big, big, image.size());
+        Check(probe.verdict == TextureCutout::Cutout && probe.texels < big * big && probe.texels >= 256,
+            "an image larger than the scan budget is sampled, not skipped");
+        Check(probe.hash != 0 && probe.hash != kTextureAlphaHashOffset && probe.hash != 0xFFFFFFFFFFFFFFFFull,
+            "and the bytes that were read are hashed, so a texture can be named in the log");
+    }
+    Pass("texture cut-out decode: every format a client uploads, and never a hole it did not have");
+}
+
 int main() try
 {
     TestLeanGeometry();
@@ -1245,6 +1525,7 @@ int main() try
     TestWindDebugLine();
     TestGeometryMeasurement();
     TestShaderAdmission();
+    TestTextureCutoutDecode();
     TestConfigurationAndWiring();
     std::puts("Vegetation wind regressions passed");
     return 0;
