@@ -977,6 +977,7 @@ void Configure(const std::wstring& base) {
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     compiling=true;
     std::thread([cacheDir=renderer::shaderbytecode::Dir(base),logPath,strength,normalStrength,specularStrength,effectEnabled]{
+        try {
         ComPtr<ID3DBlob> blob,error;
         std::vector<DWORD> ps,vs;
         bool ok=false,fromCache=false;
@@ -1023,6 +1024,15 @@ void Configure(const std::wstring& base) {
         codeFromCache=fromCache;
         enabled=ok;
         compiling=false;
+        } catch (...) {
+        // An exception escaping this std::thread calls std::terminate and
+        // kills the whole game (an allocation, the log file, or a cache
+        // write). Publish the same state a failed compile would, so the
+        // backend stays dormant instead of taking the client down.
+        std::lock_guard lk(waterCompileMutex);
+        code.clear();vertexCode.clear();codeFromCache=false;
+        enabled=false;compiling=false;
+        }
     }).detach();
 }
 // Once per frame, from the same weather observation the cloud deck reads (see the call site in

@@ -187,33 +187,35 @@ namespace renderer
             indexFormat=id.Format;UINT size=indexFormat==D3DFMT_INDEX16?2:4;
             if((uint64_t(start)+count)*size>id.Size)return;
             if(FAILED(ib->Lock(start*size,count*size,&lockedIndices,D3DLOCK_READONLY)))return;indices=lockedIndices;}
-        std::vector<UINT> selected;UINT lo=~0u,hi=0;bool valid=true;
+        // count is bounded to 768 above, so the index list and the emitter
+        // clusters are stack-resident: no heap traffic on a matched draw.
+        UINT selected[768];size_t selCount=0;UINT lo=~0u,hi=0;bool valid=true;
         for(UINT i=0;i<count;++i){int64_t v=int64_t(base)+(indexed?(indexFormat==D3DFMT_INDEX16?static_cast<const WORD*>(indices)[i]:static_cast<const DWORD*>(indices)[i]):start+i);
             if(v<0||(!verticesUP&&uint64_t(offset)+(uint64_t(v)+1)*stride>vd.Size)||(verticesUP&&vertexCountUP&&uint64_t(v)>=vertexCountUP)){valid=false;break;}
-            selected.push_back(UINT(v));lo=std::min(lo,UINT(v));hi=std::max(hi,UINT(v));}
-        if(lockedIndices)ib->Unlock();if(!valid||selected.empty()||uint64_t(hi-lo+1)*stride>1024*1024)return;
+            selected[selCount++]=UINT(v);lo=std::min(lo,UINT(v));hi=std::max(hi,UINT(v));}
+        if(lockedIndices)ib->Unlock();if(!valid||selCount==0||uint64_t(hi-lo+1)*stride>1024*1024)return;
         void* lockedVertices=nullptr;const BYTE* vertices=static_cast<const BYTE*>(verticesUP);
         if(!verticesUP){if(FAILED(vb->Lock(offset+lo*stride,(hi-lo+1)*stride,&lockedVertices,D3DLOCK_READONLY))){static bool logged=false;if(!logged){Log("Torch draw matched but vertex buffer is not readable");logged=true;}return;}
             vertices=static_cast<const BYTE*>(lockedVertices);}
         float matrices[225][4]{};HRESULT constants=d->GetVertexShaderConstantF(31,matrices[0],rigid?225:3);
-        std::vector<Vec3> centers;std::vector<UINT> centerCounts;
-        if(SUCCEEDED(constants))for(UINT index:selected){const BYTE* vertex=vertices+(index-(verticesUP?0:lo))*stride;
+        Vec3 centers[32];UINT centerCounts[32];size_t centerCount=0;
+        if(SUCCEEDED(constants))for(size_t s=0;s<selCount;++s){const UINT index=selected[s];const BYTE* vertex=vertices+(index-(verticesUP?0:lo))*stride;
             UINT bi=rigid?vertex[bone]:0;if(bi>=75)continue;float v[3];memcpy(v,vertex+position,sizeof(v));
             Vec3 p;float* components=&p.x;for(UINT j=0;j<3;++j){const float* row=matrices[bi*3+j];components[j]=row[0]*v[0]+row[1]*v[1]+row[2]*v[2]+row[3];}
             if(!std::isfinite(Length(p)))continue;
-            size_t cluster=0;while(cluster<centers.size()&&Length(centers[cluster]-p)>1.5f)++cluster;
-            if(cluster==centers.size()){if(centers.size()>=32)continue;centers.push_back(p);centerCounts.push_back(1);}
+            size_t cluster=0;while(cluster<centerCount&&Length(centers[cluster]-p)>1.5f)++cluster;
+            if(cluster==centerCount){if(centerCount>=32)continue;centers[centerCount]=p;centerCounts[centerCount++]=1;}
             else {UINT n=++centerCounts[cluster];centers[cluster]=centers[cluster]+(p-centers[cluster])*(1.f/n);}}
         if(lockedVertices)vb->Unlock();
         // Particle batches can contain several torches. Never average the
         // whole batch into a phantom emitter halfway between real flames.
         const float camera[3]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z};
-        for(const Vec3& view:centers){
+        ULONGLONG now=GetTickCount64();
+        for(size_t c=0;c<centerCount;++c){const Vec3& view=centers[c];
         const float viewPosition[3]={view.x,view.y,view.z};float worldPosition[3]{};
         ViewPositionToWorld(&f.viewRaw.m[0][0],camera,viewPosition,worldPosition);
         Vec3 world{worldPosition[0],worldPosition[1],worldPosition[2]};
         if(!std::isfinite(Length(world))||Length(world-f.cameraPosition)>120)continue;
-        ULONGLONG now=GetTickCount64();
         auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){return now-e.seen<kAttachedLifetimeMs&&Length(e.light.position-world)<1.5f;});
         if(found!=m_attached.end()){found->light.position=world;found->seen=now;continue;}
         if(m_attached.size()>=64)return;
@@ -228,10 +230,18 @@ namespace renderer
     {
         ++m_selectionFrame;
         m_selected.clear();
+        // Slot reuse gives every generation a fresh stableId, so the
+        // smoothing map would otherwise grow without bound over a long
+        // session (and cost more per frame as it did). A bounded flush
+        // costs at most one unsmoothed frame, which is invisible.
+        if (m_smoothed.size() > 128) m_smoothed.clear();
         if (!m_enabled || m_intensityScale <= 0.0f) return;
 
-        std::vector<LocalLightSource> candidates;
-        candidates.reserve(m_nativeLights.size() + m_manifestLights.size());
+        auto& candidates = m_candidates;
+        if (candidates.capacity() < m_nativeLights.size() + m_manifestLights.size() + 16u)
+            candidates.reserve(m_nativeLights.size() + m_manifestLights.size() + 16u);
+        candidates.clear();
+        const ULONGLONG now = GetTickCount64();
         for (auto& pair : m_nativeLights)
         {
             const DWORD index = pair.first;
@@ -241,7 +251,6 @@ namespace renderer
             // end-of-world composite.  Treat a recently enabled, repeatedly
             // observed slot as alive for a short grace window instead of
             // sampling only the final (usually disabled) state.
-            const ULONGLONG now = GetTickCount64();
             const bool recentlyEnabled = slot.enabled ||
                 (slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= 180);
             const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= 350;
@@ -315,7 +324,7 @@ namespace renderer
         });
         const size_t limit = m_quality == 0 ? 4u : 8u;
         if (candidates.size() > limit) candidates.resize(limit);
-        m_selected = std::move(candidates);
+        m_selected.swap(candidates);
 
         // The selection is a SET: the integrate shader sums over the lights,
         // so the order they were picked in cannot change a single pixel.

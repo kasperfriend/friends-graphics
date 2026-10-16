@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -253,24 +254,37 @@ namespace renderer::cloudnoise
     // --- Resource generation ----------------------------------------------
     namespace detail
     {
+        // Returns false if any body(i) threw. An exception escaping a
+        // worker thread calls std::terminate and kills the whole game;
+        // generation must fail loudly instead.
         template <typename Fn>
-        void ParallelFor(int begin, int end, Fn&& body)
+        bool ParallelFor(int begin, int end, Fn&& body)
         {
             const int span = end - begin;
-            if (span <= 0) return;
+            if (span <= 0) return true;
             unsigned hw = std::thread::hardware_concurrency();
             if (hw == 0) hw = 2;
             const int workers = std::min<int>(int(hw), span);
-            if (workers <= 1) { for (int i = begin; i < end; ++i) body(i); return; }
+            if (workers <= 1) {
+                try { for (int i = begin; i < end; ++i) body(i); }
+                catch (...) { return false; }
+                return true;
+            }
+            std::atomic<bool> failed{ false };
             std::vector<std::thread> pool;
             pool.reserve(size_t(workers));
             for (int w = 0; w < workers; ++w)
             {
-                pool.emplace_back([=, &body] {
-                    for (int i = begin + w; i < end; i += workers) body(i);
+                pool.emplace_back([&, w] {
+                    for (int i = begin + w; i < end; i += workers)
+                    {
+                        try { body(i); }
+                        catch (...) { failed = true; return; }
+                    }
                 });
             }
             for (auto& t : pool) t.join();
+            return !failed.load();
         }
 
         inline uint8_t ToByte(float v) { return uint8_t(Saturate(v) * 255.f + .5f); }
@@ -322,7 +336,7 @@ namespace renderer::cloudnoise
         s1.Build(4, 2203U);
         s2.Build(8, 3307U);
         s3.Build(16, 4409U);
-        detail::ParallelFor(0, size, [&](int z) {
+        if (!detail::ParallelFor(0, size, [&](int z) {
             const float fz = (float(z) + .5f) / float(size);
             for (int y = 0; y < size; ++y)
             {
@@ -341,7 +355,7 @@ namespace renderer::cloudnoise
                     texel[3] = detail::ToByte(s3.Sample(fx, fy, fz));
                 }
             }
-        });
+        })) { v.size = 0; v.rgba.clear(); return v; }
         detail::StretchChannel(v.rgba, 0);
         detail::StretchChannel(v.rgba, 1);
         return v;
@@ -357,7 +371,7 @@ namespace renderer::cloudnoise
         d1.Build(4, 5501U);
         d2.Build(8, 6607U);
         d3.Build(16, 7703U);
-        detail::ParallelFor(0, size, [&](int z) {
+        if (!detail::ParallelFor(0, size, [&](int z) {
             const float fz = (float(z) + .5f) / float(size);
             for (int y = 0; y < size; ++y)
             {
@@ -372,7 +386,7 @@ namespace renderer::cloudnoise
                     texel[3] = 255;
                 }
             }
-        });
+        })) { v.size = 0; v.rgba.clear(); return v; }
         return v;
     }
 
@@ -384,7 +398,7 @@ namespace renderer::cloudnoise
         Image2D image;
         image.width = image.height = size;
         image.rgba.assign(size_t(size) * size * 4, 0);
-        detail::ParallelFor(0, size, [&](int y) {
+        if (!detail::ParallelFor(0, size, [&](int y) {
             const float fy = (float(y) + .5f) / float(size);
             for (int x = 0; x < size; ++x)
             {
@@ -425,7 +439,7 @@ namespace renderer::cloudnoise
                 texel[1] = detail::ToByte(type);
                 texel[2] = detail::ToByte(variation);
             }
-        });
+        })) { image.width = image.height = 0; image.rgba.clear(); return image; }
         detail::StretchChannel(image.rgba, 0, .02f, .98f);
         detail::StretchChannel(image.rgba, 1, .02f, .98f);
         detail::StretchChannel(image.rgba, 2, .05f, .95f);
@@ -435,7 +449,7 @@ namespace renderer::cloudnoise
         // after the stretch - computed from the raw fields it never reached
         // the top of its range at all, which is how it spent its first
         // version as a channel of zeroes.
-        detail::ParallelFor(0, size, [&](int y) {
+        if (!detail::ParallelFor(0, size, [&](int y) {
             for (int x = 0; x < size; ++x)
             {
                 uint8_t* texel = &image.rgba[(size_t(y) * size + x) * 4];
@@ -443,7 +457,7 @@ namespace renderer::cloudnoise
                 const float type = float(texel[1]) * (1.f / 255.f);
                 texel[3] = detail::ToByte(Saturate(Remap(cover * type, .34f, .72f, 0.f, 1.f)));
             }
-        });
+        })) { image.width = image.height = 0; image.rgba.clear(); return image; }
         return image;
     }
 }

@@ -688,10 +688,20 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
   if(!std::filesystem::exists(m_cachePath,ec)) {
    m_fieldsGenerating=true;
    std::thread([this]{
+    try {
     auto shape=cloudnoise::GenerateShape(int(kShapeSize));
     auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
     auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
-    SaveFields(m_cachePath,shape,detail,weather);
+    if(shape.size>0&&detail.size>0&&weather.width>0)
+     SaveFields(m_cachePath,shape,detail,weather);
+    else
+     m_fieldsFailed=true;
+    } catch (...) {
+    // An exception escaping a std::thread calls std::terminate and kills
+    // the game. A failed generation must only cost this launch's clouds -
+    // the file cache from a healthy launch covers the next one.
+    m_fieldsFailed=true;
+    }
     m_fieldsGenerating=false;
    }).detach();
   }
@@ -771,6 +781,7 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
   shape=cloudnoise::GenerateShape(int(kShapeSize));
   detail=cloudnoise::GenerateDetail(int(kDetailSize));
   weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldsFailed=true;return false;}
   SaveFields(m_cachePath,shape,detail,weather);
  }
  if(!UploadVolume(d,shape,m_shapeTexture.ReleaseAndGetAddressOf())||

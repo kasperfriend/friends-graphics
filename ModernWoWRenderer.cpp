@@ -348,7 +348,11 @@ HRESULT WINAPI HookedSetLight(IDirect3DDevice9* d, DWORD index, const D3DLIGHT9*
     const HRESULT hr = originalSetLight(d, index, light);
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
         !renderer::MaterialCacheManager::Instance().IsInternalPass())
-        renderer::LocalLightManager::Instance().OnSetLight(index, light);
+    {
+        // The observer grows an unordered_map: an allocation throw must not
+        // escape the hook (see the draw-entry guards).
+        try { renderer::LocalLightManager::Instance().OnSetLight(index, light); } catch (...) {}
+    }
     return hr;
 }
 
@@ -357,7 +361,9 @@ HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
     const HRESULT hr = originalLightEnable(d, index, enabled);
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
         !renderer::MaterialCacheManager::Instance().IsInternalPass())
-        renderer::LocalLightManager::Instance().OnLightEnable(index, enabled);
+    {
+        try { renderer::LocalLightManager::Instance().OnLightEnable(index, enabled); } catch (...) {}
+    }
     return hr;
 }
 

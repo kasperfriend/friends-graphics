@@ -20,6 +20,12 @@ namespace
 {
 const char* kSurfaceSource = R"HLSL(
 sampler2D depthMap:register(s0);
+// s1 is read through a LINEAR filter: the water gate must not inherit the
+// 1-2 px jag of a point-sampled low-res tap (the edge of the excluded
+// region follows the mask's .25 iso-line instead of a texel grid). s0 stays
+// POINT - the stored alpha is the receiver's own depth and the composite's
+// silhouette mask depends on it being exact; INTZ also must not be linear-
+// filtered, which is driver-dependent.
 sampler2D waterMask:register(s1);
 float4 cameraPos:register(c0);
 float4 projection:register(c1); // x=A,y=B,z=P00,w=P11
@@ -89,13 +95,21 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float tolerance=max(max(.12,receiverZ*.008),slope*max(texel.x/fullTexel.x,texel.y/fullTexel.y)*1.5);
  float2 size=1/texel.xy; float2 pixel=uv*size-.5; float2 base=floor(pixel); float2 f=frac(pixel);
  float2 o[4]={float2(0,0),float2(1,0),float2(0,1),float2(1,1)};
- float3 light=0; float sum=0; float best=1e9; float3 nearest=0;
+ float3 light=0; float sum=0;
  [unroll]for(int i=0;i<4;++i){
   float2 q=(base+o[i]+.5)*texel.xy; float4 s=tex2D(lightMap,q);
-  float d=abs(s.a-receiverZ); float2 aw=1-abs(o[i]-f); float w=max(aw.x*aw.y,.001)*exp(-d/max(tolerance,.01)*3);
-  light+=s.rgb*w;sum+=w;if(d<best){best=d;nearest=s.rgb;}
+  // The depth mask must keep a bilinear floor: without it a tap window that
+  // straddles a depth edge goes winner-takes-all and the pool snaps in
+  // 1-2 px steps along the light-map grid (the "lines" at sub-1.0 quality).
+  // The floor keeps the blend continuous everywhere; the masked-out side of
+  // a silhouette still only contributes its (tiny) bilinear share.
+  float d=abs(s.a-receiverZ); float2 aw=1-abs(o[i]-f);
+  float w=max(aw.x*aw.y*exp(-d/max(tolerance,.01)*3),aw.x*aw.y*0.02);
+  light+=s.rgb*w;sum+=w;
  }
- light=sum>.02?light/sum:(best<tolerance?nearest:float3(0,0,0));
+ // sum is >= .02 by construction of the floor, so this is always a bounded
+ // weighted blend - no argmin fallback, hence no hard switch line anywhere.
+ light=light/max(sum,.02);
  if(tuning.x>.5)return float4(light,1);
  // Half a level of fixed dither on the way into the 8-bit scene: a lamp
  // pool's smooth falloff otherwise quantizes into concentric rings on the
@@ -238,6 +252,11 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
         device->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         device->SetSamplerState(s, D3DSAMP_SRGBTEXTURE, FALSE);
     }
+    // The surface pass reads the water gate through a LINEAR filter so its
+    // edge is not a 0.75x texel grid; the composite pass below needs s1 back
+    // on POINT.
+    device->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    device->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 
     D3DVIEWPORT9 low{ 0,0,m_lightWidth,m_lightHeight,0,1 };
     device->SetViewport(&low); device->SetRenderTarget(0, m_lightSurface.Get());
@@ -269,6 +288,8 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     device->SetPixelShaderConstantF(8, pos[0], 8); device->SetPixelShaderConstantF(16, color[0], 8); device->SetPixelShaderConstantF(24, direction[0], 8);
     DrawQuad(device, m_lightWidth, m_lightHeight);
     device->SetTexture(0, nullptr); device->SetTexture(1, nullptr);
+    device->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    device->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 
     D3DVIEWPORT9 full{ 0,0,desc.Width,desc.Height,0,1 };
     device->SetViewport(&full); device->SetRenderTarget(0, m_litSurface.Get()); device->SetPixelShader(m_compositeShader.Get());
