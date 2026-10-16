@@ -48,27 +48,40 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 p=World(uv,raw);
  float dl=tex2D(depthMap,uv-float2(texel.x,0)).r,dr=tex2D(depthMap,uv+float2(texel.x,0)).r;
  float du=tex2D(depthMap,uv-float2(0,texel.y)).r,dd=tex2D(depthMap,uv+float2(0,texel.y)).r;
- float3 px=abs(Linear(dl)-Linear(raw))<abs(Linear(dr)-Linear(raw))?World(uv-float2(texel.x,0),dl):World(uv+float2(texel.x,0),dr);
- float3 py=abs(Linear(du)-Linear(raw))<abs(Linear(dd)-Linear(raw))?World(uv-float2(0,texel.y),du):World(uv+float2(0,texel.y),dd);
+ float3 x0=World(uv-float2(texel.x,0),dl),x1=World(uv+float2(texel.x,0),dr);
+ float3 y0=World(uv-float2(0,texel.y),du),y1=World(uv+float2(0,texel.y),dd);
+ // Central differences average both sides of the tap, so the pool no longer
+ // dapples and shimmers on textured ground the way a one-sided gradient
+ // does. A tap window that straddles a depth edge must fall back to the
+ // near side or the cliff face lights up from the wrong direction. The
+ // fallback kicks in only once one side is already a clear step away, so
+ // it fires at the cliff line itself - where the geometry actually turns
+ // - instead of mid-pool, where the old dL==dR switch landed.
+ float z=Linear(raw);
+ float edge=max(.12,z*.008);
+ float dL=abs(Linear(dl)-z),dR=abs(Linear(dr)-z);
+ float3 px=max(dL,dR)<edge?(x0+x1)*.5:(dL<dR?x0:x1);
+ float dU=abs(Linear(du)-z),dD=abs(Linear(dd)-z);
+ float3 py=max(dU,dD)<edge?(y0+y1)*.5:(dU<dD?y0:y1);
  float3 n=normalize(cross(px-p,py-p));
  float3 toEye=normalize(cameraPos.xyz-p); if(dot(n,toEye)<0)n=-n;
  float3 sum=0,sourceDebug=0; float visibilityDebug=0; int count=(int)texel.z; int occ=(int)texel.w;
  [loop] for(int i=0;i<8;++i) {
   if(i>=count) break;
   float3 toL=lightPosRadius[i].xyz-p; float dist=length(toL); float radius=lightPosRadius[i].w;
-  float3 l=toL/max(dist,.001); float edge=saturate(1-dist/max(radius,.01));
-  float attenuation=edge*edge/(1+dist*dist*.035);
+  float3 l=toL/max(dist,.001); float fall=saturate(1-dist/max(radius,.01));
+  float attenuation=fall*fall/(1+dist*dist*.035);
   float cone=lightDirectionCone[i].w;
   if(cone>-0.5) attenuation*=smoothstep(cone,min(1.0,cone+.12),dot(-l,normalize(lightDirectionCone[i].xyz)));
   float diffuse=saturate(dot(n,l));
   float spec=pow(saturate(dot(reflect(-l,n),toEye)),24)*.055;
   float visibility=1; // Preserve native shadows; no duplicate screen-depth shadows.
   sum+=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation*visibility;
-  sourceDebug+=lightColorPower[i].rgb*lightColorPower[i].w*edge*edge;
+  sourceDebug+=lightColorPower[i].rgb*lightColorPower[i].w*fall*fall;
   visibilityDebug+=attenuation*(1-visibility);
  }
  sum*=tuning.x;
- if(tuning.y>.5&&tuning.y<1.5) return float4(sum,Linear(raw));
+ if(tuning.y>.5&&tuning.y<1.5) return float4(sourceDebug,Linear(raw));
  if(tuning.y>1.5&&tuning.y<2.5) return float4(sum,Linear(raw));
  if(tuning.y>2.5&&tuning.y<3.5) return float4(saturate(visibilityDebug).xxx,Linear(raw));
  return float4(min(sum,3.0),Linear(raw));
@@ -269,13 +282,15 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const int occluded = std::min(count, manager.Quality() <= 0 ? 2 : 4);
     const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,float(count),float(occluded) };
     const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(manager.DebugMode()),0,0 };
-    float pos[8][4]{}, color[8][4]{}, direction[8][4]{};
+    // c8..c31 are contiguous in the shader (pos c8, color c16, direction
+    // c24), so the whole light table is one constant call, not three.
+    float lightData[24][4]{};
     for (int i = 0; i < count; ++i)
     {
-        pos[i][0] = lights[i].position.x; pos[i][1] = lights[i].position.y; pos[i][2] = lights[i].position.z; pos[i][3] = lights[i].radius;
-        color[i][0] = lights[i].color.x; color[i][1] = lights[i].color.y; color[i][2] = lights[i].color.z; color[i][3] = lights[i].intensity;
-        direction[i][0] = lights[i].direction.x; direction[i][1] = lights[i].direction.y; direction[i][2] = lights[i].direction.z;
-        direction[i][3] = (lights[i].flags & LocalLightSpot) ? lights[i].outerCone : -1.f;
+        lightData[i][0] = lights[i].position.x; lightData[i][1] = lights[i].position.y; lightData[i][2] = lights[i].position.z; lightData[i][3] = lights[i].radius;
+        lightData[8+i][0] = lights[i].color.x; lightData[8+i][1] = lights[i].color.y; lightData[8+i][2] = lights[i].color.z; lightData[8+i][3] = lights[i].intensity;
+        lightData[16+i][0] = lights[i].direction.x; lightData[16+i][1] = lights[i].direction.y; lightData[16+i][2] = lights[i].direction.z;
+        lightData[16+i][3] = (lights[i].flags & LocalLightSpot) ? lights[i].outerCone : -1.f;
     }
     // This pass samples raw INTZ, unlike atmosphere's normalized boundary.
     // Fold the viewport transform into A/B so both World and Visibility use
@@ -285,7 +300,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
         f.projUnpack[1] * depthRange, f.projUnpack[2], f.projUnpack[3] };
     device->SetPixelShaderConstantF(0, camera, 1); device->SetPixelShaderConstantF(1, projection, 1);
     device->SetPixelShaderConstantF(2, inv[0], 3); device->SetPixelShaderConstantF(5, texel, 1); device->SetPixelShaderConstantF(6, tuning, 1);
-    device->SetPixelShaderConstantF(8, pos[0], 8); device->SetPixelShaderConstantF(16, color[0], 8); device->SetPixelShaderConstantF(24, direction[0], 8);
+    device->SetPixelShaderConstantF(8, lightData[0], 24);
     DrawQuad(device, m_lightWidth, m_lightHeight);
     device->SetTexture(0, nullptr); device->SetTexture(1, nullptr);
     device->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
@@ -294,10 +309,12 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     D3DVIEWPORT9 full{ 0,0,desc.Width,desc.Height,0,1 };
     device->SetViewport(&full); device->SetRenderTarget(0, m_litSurface.Get()); device->SetPixelShader(m_compositeShader.Get());
     device->SetTexture(0, f.sceneColor); device->SetTexture(1, m_lightTexture.Get()); device->SetTexture(2, f.depthTexture); device->SetTexture(3, f.waterMaskTexture);
-    const float lightTexel[4] = { 1.f / m_lightWidth,1.f / m_lightHeight,1.f / m_width,1.f / m_height };
-    const float debug[4] = { (manager.DebugMode() >= 1 && manager.DebugMode() <= 3) ? 1.f : 0.f,0,0,0 };
-    device->SetPixelShaderConstantF(0, lightTexel, 1); device->SetPixelShaderConstantF(1, debug, 1);
-    device->SetPixelShaderConstantF(2, projection, 1);
+    // c0..c2 contiguous: one call.
+    const float compositeData[3][4] = {
+        { 1.f / m_lightWidth,1.f / m_lightHeight,1.f / m_width,1.f / m_height },
+        { (manager.DebugMode() >= 1 && manager.DebugMode() <= 3) ? 1.f : 0.f,0,0,0 },
+        { projection[0], projection[1], projection[2], projection[3] } };
+    device->SetPixelShaderConstantF(0, compositeData[0], 3);
     DrawQuad(device, desc.Width, desc.Height);
     for (DWORD s = 0; s < 4; ++s) device->SetTexture(s, nullptr);
     f.sceneColor = m_litTexture.Get(); f.sceneSurface = m_litSurface.Get();
