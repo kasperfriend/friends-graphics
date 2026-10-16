@@ -10,6 +10,7 @@
 #include <atomic>
 #include "src/Environment/OverlayFont.h"
 #include "src/Environment/EnvironmentProfileManager.h"
+#include "src/Core/FrameContext.h"
 #include "src/Environment/MenuDiagnostics.h"
 #include "src/Environment/OverlayLayout.h"
 #include "src/D3D9/ScopedStateBlock.h"
@@ -170,9 +171,11 @@ inline bool SelectScope(int scope){
  return true;
 }
 inline bool Update(){
- DWORD pid=0;HWND foreground=GetForegroundWindow();GetWindowThreadProcessId(foreground,&pid);
- HWND window=gameWindow&&IsWindow(gameWindow)?gameWindow:foreground;
- const bool focused=pid==GetCurrentProcessId()&&!IsIconic(window);
+ // The window the focus decision was sampled from this frame: measuring a
+ // different one would lay the menu out against the wrong client rect if a
+ // focus change landed between the two calls.
+ HWND window=gameWindow&&IsWindow(gameWindow)?gameWindow:renderer::FrameContext::Current().wowForeground;
+ const bool focused=renderer::FrameContext::Current().wowFocused&&!IsIconic(window);
  const bool down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
  const bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;
  if(focused&&f7&&!f7Down){

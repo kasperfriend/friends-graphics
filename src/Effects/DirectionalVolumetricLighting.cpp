@@ -6,7 +6,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
 #include "GroundSurfaceCapture.h"
@@ -528,11 +529,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(result,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
+bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir,IDirect3DPixelShader9** shader)
 {
- ComPtr<ID3DBlob> blob,errors;
- if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),errors.GetAddressOf()))||!blob)return false;
- return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(blob->GetBufferPointer()),shader));
+ // On-disk bytecode cache first (renderer::shaderbytecode): a repeat launch
+ // skips fxc, and a cached blob the driver refuses falls back to one
+ // recompile, exactly as a fresh compile would.
+ ComPtr<ID3DBlob> blob;
+ return renderer::shaderbytecode::GetShader(cacheDir,source,"main","ps_3_0",blob,
+  [d,shader](ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
 }
 }
 
@@ -542,7 +546,14 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
 {
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Atmosphere.log";
- auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));};
+ m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
+ // Fingerprint the raw inputs (all three sections this reads): a crossing
+ // that resolves them to the values already applied re-derives identical
+ // settings, and the re-apply below - including dropping the temporal
+ // history (m_historyValid) - is a hitch and a one-frame shimmer on the
+ // frame the player crosses.
+ renderer::locationtuning::SettingsFingerprint fp;
+ auto read=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.enabled=read(L"DirectionalVolumetricEnabled",1)!=0;
  m_settings.quality=static_cast<uint32_t>(std::clamp(read(L"AtmosphereQuality",1),0,2));
  static constexpr uint32_t samples[]={12,16,24}; static constexpr float scales[]={.25f,.25f,.5f};
@@ -583,7 +594,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // more zones. The toggle in the overlay still works for testing it.
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
- const auto readLocal=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));};
+ const auto readLocal=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.localFogEnabled=readLocal(L"Enabled",1)!=0;
  m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",12),0,100)*.003f;
  // Height is now a real thickness in world units: higher means taller.
@@ -592,9 +603,16 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.localFogWakeStrength=std::clamp(readLocal(L"WakeStrengthPercent",85),0,150)*.01f;
  m_settings.localFogWakeRadius=float(std::clamp(readLocal(L"WakeRadius",5),2,14));
  m_settings.localFogTrailLength=float(std::clamp(readLocal(L"TrailLength",18),4,40));
- m_settings.edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str())!=0;
- m_settings.edgeFogDistance=float(std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",100,ini.c_str())),10,300));
- m_settings.edgeFogPower=std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",100,ini.c_str())),10,300)*.01f;
+ const int edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str());
+ const int edgeFogDistance=renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",100,ini.c_str());
+ const int edgeFogPower=renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",100,ini.c_str());
+ renderer::locationtuning::MixInt(fp,edgeFogEnabled);
+ renderer::locationtuning::MixInt(fp,edgeFogDistance);
+ renderer::locationtuning::MixInt(fp,edgeFogPower);
+ if(renderer::locationtuning::SameSettings(m_settingsFingerprint,fp))return;
+ m_settings.edgeFogEnabled=edgeFogEnabled!=0;
+ m_settings.edgeFogDistance=float(std::clamp(edgeFogDistance,10,300));
+ m_settings.edgeFogPower=std::clamp(edgeFogPower,10,300)*.01f;
  m_historyValid=false;
 }
 
@@ -614,7 +632,7 @@ void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
 bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* d)
 {
  if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader&&m_boundaryDebugShader&&m_groundHeightShader&&m_localFogFieldShader)return true;
- return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_boundaryDebugShader.GetAddressOf())&&Compile(d,kGroundHeightSource,m_groundHeightShader.GetAddressOf())&&Compile(d,kLocalFogFieldSource,m_localFogFieldShader.GetAddressOf());
+ return Compile(d,kDepthSource,m_shaderCacheDir,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_shaderCacheDir,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_shaderCacheDir,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_shaderCacheDir,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_shaderCacheDir,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_shaderCacheDir,m_boundaryDebugShader.GetAddressOf())&&Compile(d,kGroundHeightSource,m_shaderCacheDir,m_groundHeightShader.GetAddressOf())&&Compile(d,kLocalFogFieldSource,m_shaderCacheDir,m_localFogFieldShader.GetAddressOf());
 }
 
 bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h,D3DFORMAT format)
@@ -692,7 +710,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
      <<" groundAtlas="<<(GroundSurfaceCapture::Instance().Texture()?1:0)<<" fogTime="<<m_fogElapsed
      <<" wash="<<settings.fogWash<<" selectedLights="<<LocalLightManager::Instance().Selected().size()<<'\n';
  }
- ScopedRenderState state(d);
+ ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
  for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,D3DRS_ALPHABLENDENABLE})d->SetRenderState(s,FALSE);
  d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,0xF);d->SetVertexShader(nullptr);

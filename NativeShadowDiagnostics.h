@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ScopedPassState.h"
 
 namespace nativeshadowdiag
 {
@@ -484,6 +484,55 @@ public:
         if (!enhancementEnabled || !device || (!needSoftness && !needStrength) || currentRtTexture)
             return;
 
+        // The exact receiver hashes were verified from dumped shader bytecode,
+        // and this scope runs on EVERY back-buffer draw - so the whitelist is
+        // checked in memory first. A non-receiver pixel shader then costs a
+        // dozen comparisons and returns, instead of crossing the D3D9 driver
+        // for the GetPixelShader check, the cascade texture probe (several
+        // GetTexture/GetLevelDesc/Release calls) and a render-state query on
+        // every single draw. The whitelist is the authoritative safety gate;
+        // the cascade probe's result is diagnostic only.
+        UINT startRegister = 0, registerCount = 0;
+        bool oddRegistersOnly = false;
+        const bool isSoftnessReceiver = needSoftness &&
+            FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly);
+        const bool isStrengthReceiver = needStrength && IsStrengthConfirmedHash(psHash);
+        if (!isSoftnessReceiver && !isStrengthReceiver)
+        {
+            // New-receiver discovery survives the pre-gate: a hash the game
+            // draws with the native cascades bound is exactly the variant the
+            // whitelist wants to grow for (OnDraw's candidate log does not
+            // see back-buffer receiver draws). Each unknown pixel shader is
+            // probed ONCE per session - on its first draw - then cached;
+            // distinct pixel shaders are bounded, so discovery costs a few
+            // dozen probes when a new zone's materials first appear, never
+            // per draw. A first draw seen without cascades bound is assumed
+            // not to be a receiver (the game binds the four cascade textures
+            // on every draw of a shadow-sampling material).
+            if (needSoftness)
+            {
+                static std::unordered_set<uint64_t> probedUnknown;
+                if (probedUnknown.size() < 1024 && probedUnknown.insert(psHash).second)
+                {
+                    const int stage = HasFourNativeCascades(device, 4) ? 4 :
+                        (HasFourNativeCascades(device, 5) ? 5 : -1);
+                    if (stage >= 0)
+                    {
+                        static std::unordered_set<uint64_t> loggedVariants;
+                        if (loggedVariants.insert(psHash).second)
+                        {
+                            std::ostringstream s;
+                            s << "[SOFTNESS] cascades bound at stage " << stage
+                              << " but psHash=0x" << std::hex << psHash << std::dec
+                              << " is not in the receiver whitelist\n";
+                            Append(s.str());
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         IDirect3DPixelShader9* actualShader = nullptr;
         if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
         {
@@ -492,20 +541,18 @@ public:
         }
         if (actualShader) actualShader->Release();
 
-        // The exact receiver hashes below were verified from dumped shader
-        // bytecode. Requiring GetLevelDesc to report four D24X8 textures was
-        // not portable across D3D9 wrappers: this client exposes its native
+        // Requiring GetLevelDesc to report four D24X8 textures was not
+        // portable across D3D9 wrappers: this client exposes its native
         // cascade resources with a driver-specific depth FourCC, so valid
-        // receivers were rejected before either slider could run. The shader
-        // whitelist is the authoritative safety gate; the stage probe is now
-        // diagnostic only.
+        // receivers were rejected before either slider could run. Hence the
+        // probe stays diagnostic only.
         firstStage = HasFourNativeCascades(device, 4) ? 4 : (HasFourNativeCascades(device, 5) ? 5 : -1);
 
         DWORD colorWrite = 0;
         if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
 
-        if (needSoftness) ApplySoftness(psHash);
-        if (needStrength) ApplyStrength(psHash);
+        if (isSoftnessReceiver) ApplySoftness(psHash);
+        if (isStrengthReceiver) ApplyStrength(psHash);
     }
 
     ~SoftnessScope()
@@ -711,7 +758,7 @@ inline void DrawPreview(IDirect3DDevice9* d)
     }
     if (firstStage < 0) return;
 
-    renderer::ScopedRenderState state(d);
+    renderer::ScopedPassState state(d);
     D3DVIEWPORT9 viewport{};
     if (FAILED(d->GetViewport(&viewport))) return;
     struct Vertex { float x, y, z, rhw, u, v; };
@@ -758,8 +805,12 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     if (!enabled || !d) return;
     ++drawOrdinal;
 
+    // Only the state that gates candidacy or enters the dedupe signature is
+    // read here. The rest (cull/stencil/viewport/stage textures) feeds the
+    // first-sighting log only and is collected where that log is built, so a
+    // repeated candidate draw costs three render-state reads instead of the
+    // ~37 driver calls the full dump would take.
     DWORD colorWrite = 0xf;
-    DWORD srcBlend = 0, dstBlend = 0, cull = 0, stencil = 0;
     d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
     const bool offscreen = currentRtValid && currentRtTexture &&
         (currentRtDesc.Width < std::max(1u, backBufferWidth) || currentRtDesc.Height < std::max(1u, backBufferHeight));
@@ -769,18 +820,9 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     const bool candidate = offscreen || depthOnly || projectedBlend || samplesPriorRt;
     if (!candidate) return;
 
+    DWORD srcBlend = 0, dstBlend = 0;
     d->GetRenderState(D3DRS_SRCBLEND, &srcBlend);
     d->GetRenderState(D3DRS_DESTBLEND, &dstBlend);
-    d->GetRenderState(D3DRS_CULLMODE, &cull);
-    d->GetRenderState(D3DRS_STENCILENABLE, &stencil);
-    D3DVIEWPORT9 viewport{};
-    d->GetViewport(&viewport);
-
-    std::array<IDirect3DBaseTexture9*, 16> rawTextures{};
-    for (DWORD stage = 0; stage < rawTextures.size(); ++stage)
-    {
-        d->GetTexture(stage, &rawTextures[stage]);
-    }
 
     ++candidateDrawsThisFrame;
     uint64_t signature = 0xcbf29ce484222325ull;
@@ -817,6 +859,19 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     const bool first = loggedSignatures.size() < maxUniqueCandidates && loggedSignatures.insert(signature).second;
     if (first)
     {
+        // First sighting of this signature: the full state dump. Everything
+        // here - stage textures, sampler states, constants, shader dumps -
+        // runs once per unique candidate, never per draw.
+        DWORD cull = 0, stencil = 0;
+        d->GetRenderState(D3DRS_CULLMODE, &cull);
+        d->GetRenderState(D3DRS_STENCILENABLE, &stencil);
+        D3DVIEWPORT9 viewport{};
+        d->GetViewport(&viewport);
+
+        std::array<IDirect3DBaseTexture9*, 16> rawTextures{};
+        for (DWORD stage = 0; stage < rawTextures.size(); ++stage)
+            d->GetTexture(stage, &rawTextures[stage]);
+
         IDirect3DSurface9* depth = nullptr;
         D3DSURFACE_DESC depthDesc{};
         if (SUCCEEDED(d->GetDepthStencilSurface(&depth)) && depth)
@@ -890,9 +945,9 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
         }
         s << '\n';
         Append(s.str());
-    }
 
-    for (auto* texture : rawTextures) if (texture) texture->Release();
+        for (auto* texture : rawTextures) if (texture) texture->Release();
+    }
 }
 
 inline void OnPresent(IDirect3DDevice9* d)

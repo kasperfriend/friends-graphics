@@ -42,6 +42,10 @@ namespace renderer
         void NoteFailure(const std::string& reason);
 
         ambientocclusion::Settings m_settings;
+        // Fingerprint of the last settings Configure() fully applied; a
+        // crossing that resolves the same values skips the re-apply and its
+        // log write. 0 = never applied.
+        uint64_t m_settingsFingerprint = 0;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_width = 0, m_height = 0;
         ComPtr<IDirect3DTexture9> m_aoTexture;
@@ -56,5 +60,6 @@ namespace renderer
         bool m_shaderErrorLogged = false;
         bool m_resourceErrorLogged = false;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
     };
 }

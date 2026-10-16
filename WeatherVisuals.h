@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
+#include "src/D3D9/ShaderBytecodeCache.h"
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
@@ -19,7 +20,7 @@
 #include "src/Materials/WicTextureLoader.h"
 #include "src/Materials/TextureHashLookup.h"
 #include "src/D3D9/CelestialTracker.h"
-#include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ScopedPassState.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/Core/FrameContext.h"
 
@@ -389,36 +390,35 @@ inline void EnsureShaders(IDirect3DDevice9* device)
     if (!device) return;
     if (precipitationPS && lensDropletsPS && nativeParticlePS) return;
 
-    ComPtr<ID3DBlob> codeBlob, errBlob;
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips all three fxc passes, and a cached blob the driver
+    // refuses falls back to one recompile, keeping the error log as before.
+    const std::wstring cacheDir = renderer::shaderbytecode::Dir(basePath);
+    ComPtr<ID3DBlob> codeBlob;
     if (!precipitationPS)
     {
-        HRESULT hr = D3DCompile(precipitationHLSL, strlen(precipitationHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), precipitationPS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, precipitationHLSL, "main", "ps_3_0", codeBlob,
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), precipitationPS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 
     if (!lensDropletsPS)
     {
-        codeBlob.Reset(); errBlob.Reset();
-        HRESULT hr = D3DCompile(lensDropletsHLSL, strlen(lensDropletsHLSL), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), lensDropletsPS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        codeBlob.Reset();
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, lensDropletsHLSL, "main", "ps_3_0", codeBlob,
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), lensDropletsPS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 
     if (!nativeParticlePS)
     {
-        codeBlob.Reset(); errBlob.Reset();
-        HRESULT hr = D3DCompile(nativeParticleHLSL, strlen(nativeParticleHLSL),
-            nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0,
-            codeBlob.GetAddressOf(), errBlob.GetAddressOf());
-        if (SUCCEEDED(hr) && codeBlob)
-            device->CreatePixelShader(static_cast<DWORD*>(codeBlob->GetBufferPointer()), nativeParticlePS.GetAddressOf());
-        else if (errBlob)
-            Log(static_cast<const char*>(errBlob->GetBufferPointer()));
+        codeBlob.Reset();
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, nativeParticleHLSL, "main", "ps_2_0", codeBlob,
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), nativeParticlePS.GetAddressOf())); }, &error))
+            Log(error.c_str());
     }
 }
 
@@ -574,24 +574,40 @@ public:
         if (FAILED(texture->GetLevelDesc(0, &desc)) || (desc.Usage & D3DUSAGE_RENDERTARGET))
             return;
 
-        const uint64_t textureHash = renderer::TextureHashLookup::Instance().GetTextureHash(base);
         // Captured directly from this Ascension 3.3.5 client. Dimensions alone
         // also matched UI atlases and spell particles, so they are not safe.
-        const bool exactRain = desc.Width == 16 && desc.Height == 128 &&
-            primitiveCount >= 6000 && textureHash == 0xde9331cb560b9814ull &&
-            renderer::g_trackedState.vsHash == 0x8832bcc5ed4ff2a6ull &&
-            renderer::g_trackedState.psHash == 0;
-        const bool exactSnow = desc.Width == 64 && desc.Height == 64 &&
-            primitiveCount >= 6000 && textureHash == 0x50aa504baa78b237ull &&
-            renderer::g_trackedState.vsHash == 0xec9ee827b8bf5afaull &&
-            renderer::g_trackedState.psHash == 0;
+        const bool countOk = primitiveCount >= 6000;
+        const bool dimRain = desc.Width == 16 && desc.Height == 128;
+        const bool dimSmall = desc.Width == 64 && desc.Height == 64;
+        // GetTextureHash LOCKS THE TEXTURE AND HASHES ITS ENTIRE CONTENT on
+        // first sight of a pointer - a multi-millisecond stall for the large
+        // UI/spell atlases that spell effects bind to this stage. Hash only
+        // when it can change an outcome: every other match condition holds
+        // (then the dimensions above already bound the texture to a tiny
+        // precipitation size), or for the bounded candidate log, where only
+        // the two particle-sized textures are worth identifying.
+        const uint64_t trackedVs = renderer::g_trackedState.vsHash;
+        const uint64_t trackedPs = renderer::g_trackedState.psHash;
+        const bool matchPossible = countOk &&
+            ((dimRain && trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0) ||
+             (dimSmall && (trackedVs == 0xec9ee827b8bf5afaull || trackedVs == 0x8832bcc5ed4ff2a6ull) && trackedPs == 0));
+        const bool logWorthIt = loggedParticleCandidateCount < 128 && (dimRain || dimSmall) && !matchPossible;
+        uint64_t textureHash = 0;
+        if (matchPossible || logWorthIt)
+            textureHash = renderer::TextureHashLookup::Instance().GetTextureHash(base);
+
+        const bool exactRain = dimRain && countOk &&
+            textureHash == 0xde9331cb560b9814ull &&
+            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
+        const bool exactSnow = dimSmall && countOk &&
+            textureHash == 0x50aa504baa78b237ull &&
+            trackedVs == 0xec9ee827b8bf5afaull && trackedPs == 0;
         // Type 3 (sandstorm) reuses the 64x64 precipitation atlas but selects
         // the rain-family vertex shader. This exact pairing was captured from
         // the client's native draw and is distinct from snow above.
-        const bool exactSand = desc.Width == 64 && desc.Height == 64 &&
-            primitiveCount >= 6000 && textureHash == 0x50aa504baa78b237ull &&
-            renderer::g_trackedState.vsHash == 0x8832bcc5ed4ff2a6ull &&
-            renderer::g_trackedState.psHash == 0;
+        const bool exactSand = dimSmall && countOk &&
+            textureHash == 0x50aa504baa78b237ull &&
+            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
 
         const int detected = exactRain ? 1 : (exactSnow ? 2 : (exactSand ? 3 : 0));
 
@@ -749,7 +765,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     const auto trackedState = renderer::g_trackedState;
     internal = true;
     {
-    renderer::ScopedRenderState savedState(device);
+    renderer::ScopedPassState savedState(device);
 
     device->SetRenderState(D3DRS_ZENABLE, FALSE);
     device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
@@ -879,9 +895,7 @@ inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
     // F9 belongs to celestial diagnostics. Weather uses F10 so the two
     // independent modules cannot toggle each other in the same key press.
     bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    DWORD foregroundPid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
-    const bool focused = foregroundPid == GetCurrentProcessId();
+    const bool focused = renderer::FrameContext::Current().wowFocused;
     if (hotkey && down && !keyDown && focused)
     {
         active = !active;

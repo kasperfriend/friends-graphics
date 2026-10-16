@@ -25,6 +25,16 @@
 
 using namespace renderer;
 using namespace renderer::water;
+// A hand edit (the profile API called directly, as an editor or a hand edit
+// would) is detected by the cached read's file-identity check: write time plus
+// size. In a live session such an edit settles long before the next stat; a
+// value of the same length written microseconds before a stat is the one
+// combination the identity check cannot see, so a hand edit in this test lets
+// the file settle before the renderer looks at it again - the timing a real
+// player's edit has, not a same-length rewrite inside one instruction.
+#if defined(_WIN32)
+static void SettleHandEdit() { Sleep(25); }
+#endif
 static void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 static void Pass(const char* message) { std::printf("PASS %s\n", message); }
 static bool Near(double a, double b, double e = 1e-5) { return std::abs(a - b) <= e; }
@@ -586,7 +596,9 @@ static void TestConfigurationAndWiring()
     // The chain is one reload per subsystem, each one timed by the line a
     // player's log carries, and it runs on an F7 edit or a settled place - never
     // on a place whose tuning is already in force, which is the crossing this
-    // client's `Area=0`/`Area=223` flap produces on every other sample.
+    // client's `Area=0`/`Area=223` flap produces on every other sample. F12
+    // reads the per-frame focus sample (one GetForegroundWindow per frame,
+    // shared by every hotkey - FrameContext::wowFocused), not a fresh sample.
     Check(main.find("if(f7Edited||(locationTuningChanged&&placeTuningStale)){") != main.npos &&
           main.find("ReloadWindTuning();stage(tWind);") != main.npos &&
           main.find("watereffect::ReloadTuning();stage(tWater);") != main.npos &&
@@ -594,7 +606,7 @@ static void TestConfigurationAndWiring()
           main.find("weathervisuals::ReloadTuning();stage(tWeather);") != main.npos &&
           main.find("AppliedTuningStillInForce(") != main.npos &&
           main.find("the place that settled is the one already in force") != main.npos &&
-          main.find("if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
+          main.find("if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
           "F7/location/F12 all reload wind, F12 drops the scoped read cache so a hand-edited file is picked up, and a "
           "crossing that settles on the place already in force reloads nothing");
     // A crossing must not stall the frame. This client's place flaps across a
@@ -728,8 +740,7 @@ static void TestConfigurationAndWiring()
           "the skip is decided on what the FILE holds, never on what a previous read cached: the section list and "
           "the per-suffix answers are read from the profile file itself, so a scope written by hand - or by the "
           "editor - in a section no read has touched still refuses the skip instead of quietly never applying, and a "
-          "listing the API truncated refuses to skip at all rather than assume the file holds no more sections");
-    const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
+          "listing the API truncated refuses to skip at all rather than assume the file holds no more sections");    const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");
     Check(water.find("frame.wind.DrivesWaves(),frame.wind.strength") != water.npos &&
@@ -778,6 +789,7 @@ static void TestConfigurationAndWiring()
     locationtuning::Sync(base, {}, false);
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
+    SettleHandEdit();
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
     // The crossing gate, against the real profile API: a settle of a place whose own
     // scoped settings already resolve to what the nine subsystems are running must be
@@ -799,6 +811,7 @@ static void TestConfigurationAndWiring()
           "into it is skipped without re-reading nine subsystems");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
           "a scope written for one area, as the editor or a hand edit would");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
     locationtuning::Sync(base, saved, true);
@@ -809,6 +822,7 @@ static void TestConfigurationAndWiring()
     Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
           "a scope written into a section no read in this session has touched");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
     locationtuning::Sync(base, saved, true);
@@ -821,6 +835,7 @@ static void TestConfigurationAndWiring()
     Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
           "the area's wind is edited");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
     locationtuning::Sync(base, saved, true);

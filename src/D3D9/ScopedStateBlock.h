@@ -14,6 +14,7 @@ namespace renderer
         explicit ScopedStateBlock(IDirect3DDevice9* device)
         {
             if (!device) return;
+            m_tracked.Save();
             m_captureResult = device->CreateStateBlock(D3DSBT_ALL, m_block.GetAddressOf());
             if (SUCCEEDED(m_captureResult)) m_captureResult = m_block->Capture();
         }

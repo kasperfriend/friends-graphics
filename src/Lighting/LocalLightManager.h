@@ -83,6 +83,10 @@ namespace renderer
         struct AttachedEmitter { LocalLightSource light; ULONGLONG seen; };
         std::vector<AttachedEmitter> m_attached;
         uint64_t m_nextAttachedId = 1;
+        // Both buffers persist across frames: SelectForFrame sorts the
+        // candidates in place and swaps them into m_selected, so the heap
+        // allocation happens once, not once per frame on the render thread.
+        std::vector<LocalLightSource> m_candidates;
         std::vector<LocalLightSource> m_selected;
         bool m_enabled = true;
         float m_intensityScale = 1.0f;

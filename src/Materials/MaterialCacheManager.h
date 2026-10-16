@@ -88,6 +88,7 @@ namespace renderer
         std::wstring m_logPath;
 
         std::unordered_map<uint64_t, GeneratedMaterial> m_entries;
+        bool m_manifestsLoaded=false; // set once the JSON manifests have been parsed (only when the feature is on)
         IDirect3DBaseTexture9* m_boundTextures[16]{};
 
         // Shader and helper resources

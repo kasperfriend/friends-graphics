@@ -1,11 +1,11 @@
 #pragma once
 #include <d3d9.h>
 #include <initializer_list>
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 namespace renderer {
 inline HRESULT ApplyImagePostProcess(IDirect3DDevice9* d,IDirect3DSurface9* target,IDirect3DTexture9* scene,IDirect3DSurface9* scratch,IDirect3DPixelShader9* shader,const float* parameters) {
  if(!d||!target||!scene||!scratch||!shader||!parameters)return E_INVALIDARG;
- ScopedRenderState saved(d);HRESULT hr=S_OK;
+ ScopedPassState saved(d);HRESULT hr=S_OK;
  auto set=[&](HRESULT result){if(SUCCEEDED(hr)&&FAILED(result))hr=result;};
  D3DSURFACE_DESC desc{};set(target->GetDesc(&desc));
  for(DWORD slot=0;slot<6;++slot)set(d->SetTexture(slot,nullptr));

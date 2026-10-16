@@ -1,6 +1,8 @@
 #include "WoWLocationProvider.h"
+#include "../Environment/LocationTuning.h"
 #include "../Environment/EnvironmentDatabase.h"
 #include <cstring>
+#include <filesystem>
 #include <limits>
 namespace renderer {
 namespace {
@@ -15,10 +17,13 @@ bool HasVerified12340CodeSignature(const WoWClientContext& client) {
            client.Read(0x1204E4,buf,sizeof(writeSig))&&std::memcmp(buf,writeSig,sizeof(writeSig))==0;
 }
 bool IsKnownVerified12340Client(const WoWClientContext& client) {
-    return client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6"||
+    // The code signature is three small reads; the hash comparisons are free
+    // only once the hash exists, and computing it is the expensive step.
+    // Answer from the signature whenever it can.
+    return HasVerified12340CodeSignature(client)||
+           client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6"||
            client.sha256=="f4b9f6fce448194638c5b1c751483090a48c597c6272237f31b3d151b50d3114"||
-           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da"||
-           HasVerified12340CodeSignature(client);
+           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da";
 }
 // Stock 3.3.5a (build 12340) parent zones for areas that Ascension promoted to
 // standalone starter roots (10138..10146) or unparented caves in data/areas.txt.
@@ -52,9 +57,21 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // Values are trimmed because the Win32 profile API returns them space-for-space as
     // written: a byte-exact compare against a hash carrying one trailing space fails,
     // and a failed compare means no location in any zone, forever, with no typo in sight.
-    auto iniValue=[&](const wchar_t* key) {wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"",value,128,path.c_str());return std::wstring(value);};
+    auto iniValue=[&](const wchar_t* key) {std::wstring value;renderer::locationtuning::ReadCachedString(path.c_str(),L"LocationProvider",key,value);return value;};
     std::string fingerprint=TrimIniValue(iniValue(L"ExeSHA256"));
     for(char& c:fingerprint)if(c>='A'&&c<='F')c=char(c-'A'+'a');
+    // Hashing the whole executable (hundreds of MB) is the most expensive
+    // startup step, and most configurations never need the hash: a verified
+    // 12340 code signature identifies the stock client with three small
+    // reads, and a blank fingerprint has nothing to compare a hash against.
+    // When the hash IS needed (modded client or explicit fingerprint) it is
+    // cached on disk keyed by the module's PE identity, so a repeat launch of
+    // the same client reads a few dozen bytes instead of re-hashing.
+    if(!HasVerified12340CodeSignature(client)) {
+        std::filesystem::path dir = std::filesystem::path{path}.parent_path();
+        if(dir.empty())dir=L".";
+        client.EnsureSha256((dir/L"ClientSha256.cache").wstring());
+    }
     // A blank shipped configuration trusts the verified Ascension and stock 3.3.5a
     // (build 12340) executables. Explicit custom configurations keep their rules.
     const bool knownClient=IsKnownVerified12340Client(client);
@@ -67,7 +84,7 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     uint32_t probe=0;
     if(!offsets.map||!offsets.zone||!offsets.area||offsets.map==offsets.zone||offsets.map==offsets.area||offsets.zone==offsets.area||!client.Read(offsets.map,&probe,4)||!client.Read(offsets.zone,&probe,4)||!client.Read(offsets.area,&probe,4)) {status="Invalid/unreadable location RVAs; Default environment";failure=configureFailure=LocationFailure::UnreadableRvas;return;}
     const bool knownVerifiedOffsets=knownClient&&offsets.map==0x7D088C&&offsets.zone==0x7D080C&&offsets.area==0x7D0810;
-    available=true;verified=bundled||knownVerifiedOffsets||GetPrivateProfileIntW(L"LocationProvider",L"VerifiedInWorld",0,path.c_str())!=0;
+    available=true;verified=bundled||knownVerifiedOffsets||renderer::locationtuning::ReadCachedInt(path.c_str(),L"LocationProvider",L"VerifiedInWorld",0)!=0;
     status=bundled?"Supported 3.3.5a build; bundled verified RVAs":verified?"Fingerprint matched; in-world verified RVAs":"Fingerprint matched; diagnostic RVAs (effects locked)";
     // Configured and readable: the only thing missing is a frame that proves the
     // world is on screen. Saying "not configured" here - the value this function

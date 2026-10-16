@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include "../Core/FrameClock.h"
@@ -131,6 +132,10 @@ namespace renderer
         void DrawScreenQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
 
         VolumetricCloudSettings m_settings;
+        // Fingerprint of the last settings Configure() fully applied. A
+        // crossing that resolves this section to the same values skips the
+        // re-apply (see Configure). 0 = never applied.
+        uint64_t m_settingsFingerprint = 0;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_fullWidth = 0, m_fullHeight = 0, m_lowWidth = 0, m_lowHeight = 0;
         ComPtr<IDirect3DTexture9> m_cloudTexture;
@@ -144,10 +149,17 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_shadowShader;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
         bool m_shadersFailed = false;
         bool m_fieldsReady = false;
         bool m_fieldsFailed = false;
+        // Set by the load-time field-generation worker (see Configure) until
+        // it publishes the cache. The render thread only ever reads it
+        // (EnsureFields), so an atomic with no other synchronization is
+        // sufficient.
+        std::atomic<bool> m_fieldsGenerating{false};
+        uint64_t m_fieldsWaitStart = 0; // first frame that skipped for the worker
         bool m_shadowValid = false;
         Vec4 m_shadowArea;
         Vec4 m_lightProjection;

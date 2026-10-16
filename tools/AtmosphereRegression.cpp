@@ -20,6 +20,7 @@
 #include "../src/Lighting/LocalLightManager.h"
 #include "../src/D3D9/DepthCapture.h"
 #include "../src/D3D9/DepthCapturePolicy.h"
+#include "../src/D3D9/ScopedRenderState.h"
 #include "../src/D3D9/CelestialStability.h"
 #include "../WeatherVisuals.h"
 using Microsoft::WRL::ComPtr;

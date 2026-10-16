@@ -7,7 +7,8 @@
 #include <filesystem>
 #include <fstream>
 #include "../D3D9/DepthCapture.h"
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "../Environment/LocationTuning.h"
 #include "../Lighting/LocalLightManager.h"
@@ -177,22 +178,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(scene.rgb+gi+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* device, const char* source, IDirect3DPixelShader9** shader, std::string& error)
+bool Compile(IDirect3DDevice9* device, const char* source, const std::wstring& cacheDir, IDirect3DPixelShader9** shader, std::string& error)
 {
-    ComPtr<ID3DBlob> blob, errors;
-    const HRESULT hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, "main", "ps_3_0",
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(hr) || !blob)
-    {
-        if (errors) error.assign(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
-        return false;
-    }
-    if (FAILED(device->CreatePixelShader(static_cast<const DWORD*>(blob->GetBufferPointer()), shader)))
-    {
-        error = "CreatePixelShader failed";
-        return false;
-    }
-    return true;
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips fxc entirely, and a cached blob the driver refuses
+    // falls back to one recompile, keeping the error text as before.
+    ComPtr<ID3DBlob> blob;
+    return renderer::shaderbytecode::GetShader(cacheDir, source, "main", "ps_3_0", blob,
+        [device, shader](ID3DBlob* b)
+        { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), shader)); },
+        &error);
 }
 }
 
@@ -206,6 +201,7 @@ void GlobalIllumination::Configure(const std::wstring& basePath)
 {
     m_iniPath = basePath + L"GraphicsEffects.ini";
     m_logPath = basePath + L"GlobalIllumination.log";
+    m_shaderCacheDir = renderer::shaderbytecode::Dir(basePath);
     m_retry = RetryGate{};
     ReloadTuning();
 }
@@ -251,8 +247,8 @@ bool GlobalIllumination::EnsureShaders(IDirect3DDevice9* device)
 {
     if (m_integrateShader && m_compositeShader) return true;
     std::string error;
-    if (!Compile(device, kGlobalIlluminationIntegrateSource, m_integrateShader.GetAddressOf(), error) ||
-        !Compile(device, kGlobalIlluminationCompositeSource, m_compositeShader.GetAddressOf(), error))
+    if (!Compile(device, kGlobalIlluminationIntegrateSource, m_shaderCacheDir, m_integrateShader.GetAddressOf(), error) ||
+        !Compile(device, kGlobalIlluminationCompositeSource, m_shaderCacheDir, m_compositeShader.GetAddressOf(), error))
     {
         m_integrateShader.Reset(); m_compositeShader.Reset();
         if (!m_shaderErrorLogged) {
@@ -341,7 +337,7 @@ bool GlobalIllumination::Render(IDirect3DDevice9* device, FrameContext& f)
 
     ScopedCpuTimer cpuTimer(PerfStage::GlobalIllumination);
     ScopedGpuTimer gpuTimer(device, GpuPerfStage::GlobalIllumination);
-    ScopedRenderState state(device);
+    ScopedPassState state(device);
     DepthCapture::Instance().RawSetDepth(device, nullptr);
     device->SetVertexShader(nullptr);
     for (auto rs : { D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,D3DRS_ALPHABLENDENABLE })

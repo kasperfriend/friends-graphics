@@ -6,6 +6,7 @@
 #include "../D3D9/CameraContinuity.h"
 #include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../D3D9/TrackedRenderState.h"
 
 #include <d3dcompiler.h>
@@ -79,14 +80,13 @@ namespace renderer
         // Initialize COM for WIC texture loader
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+        // ReloadTuning loads the manifests when (and only when) the feature
+        // is enabled - see there.
         ReloadTuning(basePath);
 
-        std::wstring manifestPath = m_cacheDir + L"manifest.json";
-        LoadManifest(manifestPath);
-        LoadManifest(m_cacheDir + L"object_manifest.json");
-        LoadManifest(m_cacheDir + L"foliage_manifest.json");
-
-        LogMessage(m_logPath, "MaterialCacheManager configured. Total loaded material entries: " + std::to_string(m_entries.size()));
+        LogMessage(m_logPath, m_enabled
+            ? "MaterialCacheManager configured. Total loaded material entries: " + std::to_string(m_entries.size())
+            : "MaterialCacheManager configured. AI materials disabled; manifests load on first enable");
     }
 
     void MaterialCacheManager::ReloadTuning(const std::wstring& basePath)
@@ -118,6 +118,19 @@ namespace renderer
         {
             lastTuningLine = line;
             LogMessage(m_logPath, line);
+        }
+
+        // The manifests are several MB of JSON (object_manifest.json alone is
+        // over 3 MB). Parsing them at startup for a feature that is off by
+        // default would slow every load, so they load once, on first enable -
+        // startup when the player has already turned the feature on, or a
+        // live F7/F12 enable later.
+        if (m_enabled && !m_manifestsLoaded) {
+            LoadManifest(m_cacheDir + L"manifest.json");
+            LoadManifest(m_cacheDir + L"object_manifest.json");
+            LoadManifest(m_cacheDir + L"foliage_manifest.json");
+            m_manifestsLoaded = true;
+            LogMessage(m_logPath, "Manifests loaded. Total material entries: " + std::to_string(m_entries.size()));
         }
     }
 
@@ -249,9 +262,7 @@ namespace renderer
 
         // F8 hotkey toggle
         bool down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-        DWORD pid = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-        if (pid == GetCurrentProcessId())
+        if (renderer::FrameContext::Current().wowFocused)
         {
             if (down && !m_toggleKeyDown)
             {
@@ -528,29 +539,24 @@ namespace renderer
 
         const std::string source = ss.str();
 
+        // On-disk bytecode cache: the source is a pure function of
+        // layerCount, so each layer count compiles at most once per
+        // machine. The driver stays authoritative: a cached blob it
+        // refuses is recompiled once and retried (GetShader).
         Microsoft::WRL::ComPtr<ID3DBlob> code;
-        Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        HRESULT hr = D3DCompile(
-            source.data(), source.size(), nullptr, nullptr, nullptr,
-            "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-            code.GetAddressOf(), errors.GetAddressOf());
-
-        if (FAILED(hr) || !code)
+        std::string error;
+        const bool created = renderer::shaderbytecode::GetShader(
+            renderer::shaderbytecode::Dir(m_basePath), source.c_str(), "main", "ps_3_0", code,
+            [this, device, layerCount](ID3DBlob* b)
+            { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_materialPS[layerCount].GetAddressOf())); },
+            &error);
+        if (!created)
         {
-            if (errors)
-            {
-                LogMessage(m_logPath, "Shader compilation error: " + std::string(static_cast<const char*>(errors->GetBufferPointer())));
-            }
+            LogMessage(m_logPath, "Shader compilation error: " + error);
             return false;
         }
-
-        hr = device->CreatePixelShader(
-            static_cast<const DWORD*>(code->GetBufferPointer()),
-            m_materialPS[layerCount].GetAddressOf());
-
-        if (SUCCEEDED(hr))
-            LogMessage(m_logPath, "Compiled layered terrain material shader: layers=" + std::to_string(layerCount));
-        return SUCCEEDED(hr);
+        LogMessage(m_logPath, "Compiled layered terrain material shader: layers=" + std::to_string(layerCount));
+        return true;
     }
 
     bool MaterialCacheManager::EnsureObjectShader(IDirect3DDevice9* device)
@@ -639,17 +645,21 @@ float4 main(PS_IN input) : COLOR0
     return float4(factor,1.0);
 })HLSL";
 
+        // On-disk bytecode cache, as in EnsureMaterialShader: the static
+        // source compiles at most once per machine; a cached blob the
+        // driver refuses is recompiled once and retried (GetShader).
         Microsoft::WRL::ComPtr<ID3DBlob> code;
-        Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",
-            D3DCOMPILE_OPTIMIZATION_LEVEL3,0,code.GetAddressOf(),errors.GetAddressOf());
-        if(FAILED(hr)||!code){
-            if(errors)LogMessage(m_logPath,"Object material shader compilation error: "+
-                std::string(static_cast<const char*>(errors->GetBufferPointer())));
+        std::string error;
+        const bool created = renderer::shaderbytecode::GetShader(
+            renderer::shaderbytecode::Dir(m_basePath), source, "main", "ps_3_0", code,
+            [this, device](ID3DBlob* b)
+            { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_objectPS.GetAddressOf())); },
+            &error);
+        if(!created){
+            LogMessage(m_logPath,"Object material shader compilation error: "+error);
             return false;}
-        hr=device->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()),m_objectPS.GetAddressOf());
-        if(SUCCEEDED(hr))LogMessage(m_logPath,"Compiled orientation-aware WMO/M2 object material shader");
-        return SUCCEEDED(hr);
+        LogMessage(m_logPath,"Compiled orientation-aware WMO/M2 object material shader");
+        return true;
     }
 
     struct ObjectProfileSettings
@@ -952,7 +962,7 @@ float4 main(PS_IN input) : COLOR0
                         if (SUCCEEDED(D3DDisassemble(func.data(), funcSize, 0, nullptr, disasm.GetAddressOf())))
                         {
                             char hBuf[32];
-                            sprintf_s(hBuf, "0x%llx", currentPSHash);
+                            sprintf_s(hBuf, sizeof(hBuf), "0x%llx", currentPSHash);
                             LogMessage(m_logPath, "--- WOW TERRAIN PIXEL SHADER DISASSEMBLY (Hash: " + std::string(hBuf) + ") ---");
                             LogMessage(m_logPath, static_cast<const char*>(disasm->GetBufferPointer()));
                             LogMessage(m_logPath, "--------------------------------------------------------");

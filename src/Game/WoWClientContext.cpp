@@ -22,20 +22,41 @@ bool WoWClientContext::Detect() {
     IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS32 nt{};
     if(!Read(0,&dos,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<0||!Read(dos.e_lfanew,&nt,sizeof(nt))||nt.Signature!=IMAGE_NT_SIGNATURE||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_I386||nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR32_MAGIC) {base=0;return false;}
     imageSize=nt.OptionalHeader.SizeOfImage;timestamp=nt.FileHeader.TimeDateStamp;
-    wchar_t path[32768]{};if(!GetModuleFileNameW(nullptr,path,32768))return true;
-    std::ifstream file{std::filesystem::path(path),std::ios::binary};
+    wchar_t path[32768]{};
+    if(GetModuleFileNameW(nullptr,path,32768))modulePath=path;
+    return true;
+}
+void WoWClientContext::EnsureSha256(const std::wstring& cachePath) {
+    if(!base||sha256State==Sha256State::Computed)return;
+    // The key changes with any client swap: a rebuild moves the timestamp,
+    // a different build changes the image size, a different install the path.
+    const std::wstring key=std::to_wstring(timestamp)+L"|"+std::to_wstring(imageSize)+L"|"+modulePath;
+    if(!cachePath.empty()) {
+        std::wifstream in{std::filesystem::path(cachePath)};
+        std::wstring cachedKey,cachedHash;
+        if(std::getline(in,cachedKey)&&std::getline(in,cachedHash)&&cachedKey==key&&cachedHash.size()==64) {
+            sha256=std::string(cachedHash.begin(),cachedHash.end());
+            sha256State=Sha256State::Computed;
+            return;
+        }
+    }
+    std::ifstream file{std::filesystem::path(modulePath),std::ios::binary};
     BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
-    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return true;
+    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0) {sha256State=Sha256State::Failed;return;}
     if(BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)>=0) {
         std::array<char,65536> buffer;bool ok=bool(file);
         while(file.read(buffer.data(),buffer.size())||file.gcount()) if(BCryptHashData(hash,reinterpret_cast<PUCHAR>(buffer.data()),static_cast<ULONG>(file.gcount()),0)<0)ok=false;
         if(file.bad())ok=false;
         std::array<unsigned char,32> digest{};
         if(ok&&BCryptFinishHash(hash,digest.data(),static_cast<ULONG>(digest.size()),0)>=0) {
-            std::ostringstream result;result<<std::hex<<std::setfill('0');for(auto b:digest)result<<std::setw(2)<<unsigned(b);sha256=result.str();
-        }
+            std::ostringstream result;result<<std::hex<<std::setfill('0');for(auto b:digest)result<<std::setw(2)<<unsigned(b);
+            sha256=result.str();
+            sha256State=Sha256State::Computed;
+            std::wofstream out{std::filesystem::path(cachePath),std::ios::trunc};
+            out<<key<<L'\n'<<std::wstring(sha256.begin(),sha256.end())<<L'\n';
+        } else sha256State=Sha256State::Failed;
         BCryptDestroyHash(hash);
-    }
-    BCryptCloseAlgorithmProvider(algorithm,0);return true;
+    } else sha256State=Sha256State::Failed;
+    BCryptCloseAlgorithmProvider(algorithm,0);
 }
 }

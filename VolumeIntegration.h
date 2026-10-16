@@ -13,7 +13,8 @@
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
 #include "src/D3D9/TrackedRenderState.h"
-#include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ScopedPassState.h"
+#include "src/D3D9/ShaderBytecodeCache.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Effects/VolumetricClouds.h"
@@ -171,33 +172,33 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     owner = d;
     if (!d) return false;
 
-    ComPtr<ID3DBlob> errors;
-    if (!bytecode) D3DCompile(volumePixelSource, strlen(volumePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, bytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!blurBytecode) D3DCompile(volumeBlurPixelSource, strlen(volumeBlurPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blurBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!copyBytecode) D3DCompile(volumeCopyPixelSource, strlen(volumeCopyPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, copyBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!temporalBytecode) D3DCompile(volumeTemporalPixelSource, strlen(volumeTemporalPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, temporalBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!radialBytecode) D3DCompile(solarRadialPixelSource, strlen(solarRadialPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, radialBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!contactShadowBytecode) D3DCompile(contactShadowPixelSource, strlen(contactShadowPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, contactShadowBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!postProcessBytecode) D3DCompile(postProcessPixelSource, strlen(postProcessPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, postProcessBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!rayCompositeBytecode) D3DCompile(rayCompositePixelSource, strlen(rayCompositePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, rayCompositeBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!localLightBytecode) D3DCompile(localLightPixelSource, strlen(localLightPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, localLightBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
-    if (!celestialMarkerBytecode) D3DCompile(celestialMarkerPixelSource, strlen(celestialMarkerPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, celestialMarkerBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
+    // Each shader reads the on-disk bytecode cache first (renderer::
+    // shaderbytecode::GetShader) and only compiles - and stores the result -
+    // on a miss, so a repeat launch skips all ten fxc passes. GetShader
+    // also recompiles once and retries if the driver refuses a cached blob.
+    const std::wstring cacheDir = renderer::shaderbytecode::Dir(savedBasePath);
+    auto createPS = [&](ID3DBlob* b, ComPtr<IDirect3DPixelShader9>& out)
+    { return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out.GetAddressOf())); };
 
-    if (!bytecode || !blurBytecode || !copyBytecode || !temporalBytecode || !radialBytecode || !contactShadowBytecode)
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumePixelSource, "main", "ps_3_0", bytecode, [&](ID3DBlob* b) { return createPS(b, volume); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeBlurPixelSource, "main", "ps_3_0", blurBytecode, [&](ID3DBlob* b) { return createPS(b, blur); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeCopyPixelSource, "main", "ps_3_0", copyBytecode, [&](ID3DBlob* b) { return createPS(b, copy); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeTemporalPixelSource, "main", "ps_3_0", temporalBytecode, [&](ID3DBlob* b) { return createPS(b, temporal); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, solarRadialPixelSource, "main", "ps_3_0", radialBytecode, [&](ID3DBlob* b) { return createPS(b, radial); }))
+        return false;
+    if (!renderer::shaderbytecode::GetShader(cacheDir, contactShadowPixelSource, "main", "ps_3_0", contactShadowBytecode, [&](ID3DBlob* b) { return createPS(b, contactShadow); }))
         return false;
 
-    if (FAILED(d->CreatePixelShader(static_cast<DWORD*>(bytecode->GetBufferPointer()), volume.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(blurBytecode->GetBufferPointer()), blur.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(copyBytecode->GetBufferPointer()), copy.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(temporalBytecode->GetBufferPointer()), temporal.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(radialBytecode->GetBufferPointer()), radial.GetAddressOf())) ||
-        FAILED(d->CreatePixelShader(static_cast<DWORD*>(contactShadowBytecode->GetBufferPointer()), contactShadow.GetAddressOf())))
-        return false;
-
-    if (postProcessBytecode) d->CreatePixelShader(static_cast<DWORD*>(postProcessBytecode->GetBufferPointer()), postProcess.GetAddressOf());
-    if (rayCompositeBytecode) d->CreatePixelShader(static_cast<DWORD*>(rayCompositeBytecode->GetBufferPointer()), rayComposite.GetAddressOf());
-    if (localLightBytecode) d->CreatePixelShader(static_cast<DWORD*>(localLightBytecode->GetBufferPointer()), localLight.GetAddressOf());
-    if (celestialMarkerBytecode) d->CreatePixelShader(static_cast<DWORD*>(celestialMarkerBytecode->GetBufferPointer()), celestialMarker.GetAddressOf());
+    // These four are optional: a compile/create failure only disables their
+    // feature, it must not abort the rest of the pass (as before).
+    renderer::shaderbytecode::GetShader(cacheDir, postProcessPixelSource, "main", "ps_3_0", postProcessBytecode, [&](ID3DBlob* b) { return createPS(b, postProcess); });
+    renderer::shaderbytecode::GetShader(cacheDir, rayCompositePixelSource, "main", "ps_3_0", rayCompositeBytecode, [&](ID3DBlob* b) { return createPS(b, rayComposite); });
+    renderer::shaderbytecode::GetShader(cacheDir, localLightPixelSource, "main", "ps_3_0", localLightBytecode, [&](ID3DBlob* b) { return createPS(b, localLight); });
+    renderer::shaderbytecode::GetShader(cacheDir, celestialMarkerPixelSource, "main", "ps_3_0", celestialMarkerBytecode, [&](ID3DBlob* b) { return createPS(b, celestialMarker); });
 
     return true;
 }
@@ -327,7 +328,7 @@ void ReloadTuning() {
     // unchanged, so an existing log still reads the same way.
     {
         char message[160];
-        sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
+        sprintf_s(message, sizeof(message), "PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
             postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);
         static std::string lastPostProcessLine;
         if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}
@@ -517,9 +518,17 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
             }
             // A mask without matching, freshly cleared depth would stop air at
             // stale water. Expose both or neither, and fail without disabling water.
+            auto clearWaterSurface = [&](IDirect3DSurface9* surface) -> bool {
+                IDirect3DSurface9* previous = nullptr;
+                if (FAILED(d->GetRenderTarget(0, &previous))) return false;
+                const bool ok = SUCCEEDED(d->SetRenderTarget(0, surface)) &&
+                                SUCCEEDED(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0));
+                if (previous) { d->SetRenderTarget(0, previous); previous->Release(); }
+                return ok;
+            };
             if (resources.waterMaskSurface && resources.waterDepthSurface &&
-                SUCCEEDED(d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0)) &&
-                SUCCEEDED(d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0))) {
+                clearWaterSurface(resources.waterMaskSurface.Get()) &&
+                clearWaterSurface(resources.waterDepthSurface.Get())) {
                 watereffect::waterTargetSurface = target.Get();
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
                 watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
@@ -743,101 +752,132 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 
     if (!EnsureShadowResources(d)) return;
     if (!shadowFrameStarted) {
-        BuildShadowCamera();
         shadowFrameStarted = true;
         internal = true;
-        setDepth(d, nullptr);
-        d->SetRenderTarget(0, resources.shadowColorSurface.Get());
-        setDepth(d, resources.shadowDepthSurface.Get());
-        D3DVIEWPORT9 vp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
-        d->SetViewport(&vp);
-        d->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xffffffff, 1.0f, 0);
-        setDepth(d, nullptr);
-        d->SetRenderTarget(0, target.Get());
-        setDepth(d, surface.Get());
-        D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
-        d->SetViewport(&mainVp);
+        try {
+            BuildShadowCamera();
+            setDepth(d, nullptr);
+            d->SetRenderTarget(0, resources.shadowColorSurface.Get());
+            setDepth(d, resources.shadowDepthSurface.Get());
+            D3DVIEWPORT9 vp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
+            d->SetViewport(&vp);
+            d->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xffffffff, 1.0f, 0);
+            setDepth(d, nullptr);
+            d->SetRenderTarget(0, target.Get());
+            setDepth(d, surface.Get());
+            D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
+            d->SetViewport(&mainVp);
+            shadowFrameValid = true;
+        } catch (...) {
+            // A half-built shadow frame is unusable (shadowFrameValid stays
+            // false, so this frame skips shadows) but the framebuffer must be
+            // back on the main target or every later draw of the frame would
+            // land in the shadow map.
+            d->SetRenderTarget(0, target.Get());
+            setDepth(d, surface.Get());
+            D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
+            d->SetViewport(&mainVp);
+        }
         internal = false;
-        shadowFrameValid = true;
     }
     if (!shadowFrameValid) return;
 
-    D3DVIEWPORT9 oldVp{}; d->GetViewport(&oldVp);
-    DWORD colorWrite = 0, zEnable = 0, zWrite = 0, zFunc = 0, fog = 0;
-    DWORD alphaBlend = 0, alphaTest = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
-    d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
-    d->GetRenderState(D3DRS_ZENABLE, &zEnable);
-    d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
-    d->GetRenderState(D3DRS_ZFUNC, &zFunc);
-    d->GetRenderState(D3DRS_FOGENABLE, &fog);
-    d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
+    // The block holds the render states, the pixel shader and the vertex
+    // constants at once; only the framebuffer attachments (which a block
+    // cannot hold) are saved manually. The framebuffer restore runs no
+    // matter what - a throw mid-pass must not leave the shadow map bound
+    // as RT0, which would silently swallow every later draw of the frame.
+    ComPtr<IDirect3DSurface9> rt0, depth0;
+    D3DVIEWPORT9 oldVp{};
+    if (FAILED(d->GetRenderTarget(0, rt0.GetAddressOf()))) return;
+    renderer::DepthCapture::Instance().RawGetDepth(d, depth0.GetAddressOf());
+    if (FAILED(d->GetViewport(&oldVp))) return;
+    DWORD alphaTest = 0;
     d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-    d->GetRenderState(D3DRS_DEPTHBIAS, &oldDepthBias);
-    d->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &oldSlopeBias);
-    d->GetRenderState(D3DRS_CULLMODE, &oldCull);
-
+    DWORD colorWrite = 0, zEnable = 0, zWrite = 0, zFunc = 0, fog = 0;
+    DWORD alphaBlend = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
     ComPtr<IDirect3DPixelShader9> originalPixelShader;
-    d->GetPixelShader(originalPixelShader.GetAddressOf());
-
     float originalConsts[8][4]{};
-    d->GetVertexShaderConstantF(0, originalConsts[0], 8);
-
+    const bool block = renderer::detail::BeginPassState(d);
+    if (!block) {
+        d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
+        d->GetRenderState(D3DRS_ZENABLE, &zEnable);
+        d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
+        d->GetRenderState(D3DRS_ZFUNC, &zFunc);
+        d->GetRenderState(D3DRS_FOGENABLE, &fog);
+        d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
+        d->GetRenderState(D3DRS_DEPTHBIAS, &oldDepthBias);
+        d->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &oldSlopeBias);
+        d->GetRenderState(D3DRS_CULLMODE, &oldCull);
+        d->GetPixelShader(originalPixelShader.GetAddressOf());
+        d->GetVertexShaderConstantF(0, originalConsts[0], 8);
+    }
+    auto restoreFramebuffer = [&] {
+        d->SetRenderTarget(0, rt0.Get());
+        renderer::DepthCapture::Instance().RawSetDepth(d, depth0.Get());
+        d->SetViewport(&oldVp);
+    };
     internal = true;
-    setDepth(d, nullptr);
-    d->SetRenderTarget(0, resources.shadowColorSurface.Get());
-    setDepth(d, resources.shadowDepthSurface.Get());
-    D3DVIEWPORT9 shadowVp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
-    d->SetViewport(&shadowVp);
+    try {
+        setDepth(d, nullptr);
+        d->SetRenderTarget(0, resources.shadowColorSurface.Get());
+        setDepth(d, resources.shadowDepthSurface.Get());
+        D3DVIEWPORT9 shadowVp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
+        d->SetViewport(&shadowVp);
 
-    bool isWmo = (dc.material == renderer::MaterialType::WMO);
-    if (isWmo) {
-        d->SetVertexShaderConstantF(4, viewToShadowMatrix[0], 4);
+        bool isWmo = (dc.material == renderer::MaterialType::WMO);
+        if (isWmo) {
+            d->SetVertexShaderConstantF(4, viewToShadowMatrix[0], 4);
+        }
+        else {
+            float shadowRows[4][4]{};
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                    shadowRows[row][col] = viewToShadowMatrix[col][row];
+            d->SetVertexShaderConstantF(2, shadowRows[0], 4);
+        }
+
+        float rasterBias = .00045f, slopeBias = 2.25f;
+        DWORD rasterBiasBits = 0, slopeBiasBits = 0;
+        memcpy(&rasterBiasBits, &rasterBias, sizeof(DWORD));
+        memcpy(&slopeBiasBits, &slopeBias, sizeof(DWORD));
+        d->SetRenderState(D3DRS_DEPTHBIAS, rasterBiasBits);
+        d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, slopeBiasBits);
+        d->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+        d->SetRenderState(D3DRS_ZENABLE, TRUE);
+        d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+        d->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        d->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        if (!alphaTest) d->SetPixelShader(nullptr);
+
+        HRESULT shadowHr = draw();
+        if (SUCCEEDED(shadowHr)) {
+            ++shadowFrameDraws;
+            if (++shadowDraws == 1) Log("uncapped depth-only light-space shadows active");
+        }
+    } catch (...) {
+        // The pass state and framebuffer are restored below regardless; the
+        // throw only costs this one shadow draw.
     }
-    else {
-        float shadowRows[4][4]{};
-        for (int row = 0; row < 4; ++row)
-            for (int col = 0; col < 4; ++col)
-                shadowRows[row][col] = viewToShadowMatrix[col][row];
-        d->SetVertexShaderConstantF(2, shadowRows[0], 4);
+    if (block) {
+        renderer::detail::EndPassState();
+    } else {
+        d->SetPixelShader(originalPixelShader.Get());
+        d->SetVertexShaderConstantF(0, originalConsts[0], 8);
+        d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
+        d->SetRenderState(D3DRS_ZENABLE, zEnable);
+        d->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
+        d->SetRenderState(D3DRS_ZFUNC, zFunc);
+        d->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend);
+        d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
+        d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
+        d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
+        d->SetRenderState(D3DRS_CULLMODE, oldCull);
+        d->SetRenderState(D3DRS_FOGENABLE, fog);
     }
-
-    float rasterBias = .00045f, slopeBias = 2.25f;
-    DWORD rasterBiasBits = 0, slopeBiasBits = 0;
-    memcpy(&rasterBiasBits, &rasterBias, sizeof(DWORD));
-    memcpy(&slopeBiasBits, &slopeBias, sizeof(DWORD));
-    d->SetRenderState(D3DRS_DEPTHBIAS, rasterBiasBits);
-    d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, slopeBiasBits);
-    d->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
-    d->SetRenderState(D3DRS_ZENABLE, TRUE);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-    d->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
-    d->SetRenderState(D3DRS_FOGENABLE, FALSE);
-    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-    if (!alphaTest) d->SetPixelShader(nullptr);
-
-    HRESULT shadowHr = draw();
-    if (SUCCEEDED(shadowHr)) {
-        ++shadowFrameDraws;
-        if (++shadowDraws == 1) Log("uncapped depth-only light-space shadows active");
-    }
-
-    d->SetPixelShader(originalPixelShader.Get());
-    d->SetVertexShaderConstantF(0, originalConsts[0], 8);
-    setDepth(d, nullptr);
-    d->SetRenderTarget(0, target.Get());
-    setDepth(d, surface.Get());
-    d->SetViewport(&oldVp);
-    d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
-    d->SetRenderState(D3DRS_ZENABLE, zEnable);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
-    d->SetRenderState(D3DRS_ZFUNC, zFunc);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend);
-    d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
-    d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
-    d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
-    d->SetRenderState(D3DRS_CULLMODE, oldCull);
-    d->SetRenderState(D3DRS_FOGENABLE, fog);
+    restoreFramebuffer();
     internal = false;
 }
 
@@ -1004,8 +1044,11 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.sceneSurface = legacyTargets.sceneSurface.Get();
     frameCtx.atmosphereNoise = resources.noise.Get();
 
-    // Lightweight scoped render state backup (NO D3DSBT_ALL)
-    renderer::ScopedRenderState scopedState(d);
+    // One Capture on the shared D3DSBT_ALL stack replaces the ~170-call
+    // manual save; the passes nested inside (AO, clouds, local lights)
+    // run on their own stack levels, so all of them stay on the fast path.
+    // A device without state blocks gets the exact legacy save.
+    renderer::ScopedPassState scopedState(d);
 
     internal = true;
     bool ok = true;
@@ -1013,7 +1056,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (FAILED(hr) && ok) {
             ok = false;
             char msg[96];
-            sprintf_s(msg, "composite:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
+            sprintf_s(msg, sizeof(msg), "composite:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
             Log(msg);
         }
     };
@@ -1068,8 +1111,9 @@ bool Composite(IDirect3DDevice9* d) {
         renderer::AmbientOcclusion::Instance().Render(d, renderer::FrameContext::Current(),
                                                       target.Get(), depth.Get())) {
         check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
-        // AmbientOcclusion restores the state it found (ScopedRenderState);
-        // the legacy passes below expect their own bindings to be live again.
+        // AmbientOcclusion restores the state it found (its own block
+        // stack level); the legacy passes below expect their own
+        // bindings to be live again.
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(0, nullptr));
         check(d->SetTexture(1, depth.Get()));
@@ -1357,7 +1401,7 @@ bool Composite(IDirect3DDevice9* d) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
         const float postParams[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
         const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams);
-        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg,"PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
+        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg, sizeof(msg), "PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
     }
 
     // Debug: crosshair(s) at the screen position(s) various sun/moon source
@@ -1420,11 +1464,11 @@ bool Composite(IDirect3DDevice9* d) {
                 celestialProbeLogCounter = 0;
                 char msg[512];
                 if (!probe.addressesReadable) {
-                    sprintf_s(msg, "celestial-probe: addresses not readable (module layout may not match)");
+                    sprintf_s(msg, sizeof(msg), "celestial-probe: addresses not readable (module layout may not match)");
                 } else if (!probe.valuesPlausible) {
-                    sprintf_s(msg, "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
+                    sprintf_s(msg, sizeof(msg), "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
                 } else {
-                    sprintf_s(msg,
+                    sprintf_s(msg, sizeof(msg),
                         "celestial-probe: day=%.4f sunRaw=(%.2f %.2f %.2f) moonRaw=(%.2f %.2f %.2f) ref=(%.2f %.2f %.2f) "
                         "sunToLight=(%.3f %.3f %.3f) valid=%d moonToLight=(%.3f %.3f %.3f) valid=%d legacy_v24_screen=(%.3f %.3f)",
                         probe.day,
@@ -1459,14 +1503,14 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
         FAILED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE)))
         return false;
 
-    renderer::ScopedRenderState scopedState(d);
+    renderer::ScopedPassState scopedState(d);
     internal = true;
     bool ok = true;
     auto check = [&](HRESULT hr, int line = __LINE__) {
         if (FAILED(hr) && ok) {
             ok = false;
             char msg[96];
-            sprintf_s(msg, "localLights:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
+            sprintf_s(msg, sizeof(msg), "localLights:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
             Log(msg);
         }
     };

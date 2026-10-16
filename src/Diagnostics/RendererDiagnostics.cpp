@@ -27,6 +27,23 @@ namespace renderer
 
     void RendererDiagnostics::OnFrameEnd()
     {
+        // The render thread's whole-frame batch is committed under the lock
+        // exactly once here; between frames the Record* paths never touch
+        // m_mutex at all.
+        if (m_frameBatch.drawCalls || m_frameBatch.cameraCaptures ||
+            m_frameBatch.depthCaptures || m_frameBatch.compositedFrames)
+        {
+            std::lock_guard lock(m_mutex);
+            m_counters.classifiedDrawCalls += m_frameBatch.classifiedDrawCalls;
+            m_counters.unknownDrawCalls += m_frameBatch.unknownDrawCalls;
+            m_counters.shadowCasterDraws += m_frameBatch.shadowCasterDraws;
+            m_counters.waterDraws += m_frameBatch.waterDraws;
+            m_counters.uiDraws += m_frameBatch.uiDraws;
+            m_counters.cameraCaptures += m_frameBatch.cameraCaptures;
+            m_counters.depthCaptures += m_frameBatch.depthCaptures;
+            m_counters.compositedFrames += m_frameBatch.compositedFrames;
+            m_frameBatch = FrameBatch{};
+        }
         std::lock_guard lock(m_mutex);
         ++m_counters.totalFrames;
 
@@ -54,19 +71,23 @@ namespace renderer
 
     void RendererDiagnostics::RecordDrawCall(bool classified, bool isWater, bool isShadowCaster, bool isUI)
     {
-        std::lock_guard lock(m_mutex);
+        // Render-thread-only: lock-free batch, committed in OnFrameEnd.
+        // The session total is NOT counted here: it is fed by the no-arg
+        // RecordDrawCall from every draw hook into the atomic m_drawCalls,
+        // which is what DrawCalls() (the stall line) reads.
+        ++m_frameBatch.drawCalls;
 
         if (classified)
-            ++m_counters.classifiedDrawCalls;
+            ++m_frameBatch.classifiedDrawCalls;
         else
-            ++m_counters.unknownDrawCalls;
+            ++m_frameBatch.unknownDrawCalls;
 
         if (isWater)
-            ++m_counters.waterDraws;
+            ++m_frameBatch.waterDraws;
         if (isShadowCaster)
-            ++m_counters.shadowCasterDraws;
+            ++m_frameBatch.shadowCasterDraws;
         if (isUI)
-            ++m_counters.uiDraws;
+            ++m_frameBatch.uiDraws;
     }
 
     void RendererDiagnostics::RecordDrawCall(const DrawClassification& dc)
@@ -77,20 +98,17 @@ namespace renderer
 
     void RendererDiagnostics::RecordCameraCapture()
     {
-        std::lock_guard lock(m_mutex);
-        ++m_counters.cameraCaptures;
+        ++m_frameBatch.cameraCaptures;
     }
 
     void RendererDiagnostics::RecordDepthCapture()
     {
-        std::lock_guard lock(m_mutex);
-        ++m_counters.depthCaptures;
+        ++m_frameBatch.depthCaptures;
     }
 
     void RendererDiagnostics::RecordComposite()
     {
-        std::lock_guard lock(m_mutex);
-        ++m_counters.compositedFrames;
+        ++m_frameBatch.compositedFrames;
     }
 
     void RendererDiagnostics::Log(const std::string& category, const std::string& message)

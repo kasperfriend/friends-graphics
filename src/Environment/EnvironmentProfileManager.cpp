@@ -1,4 +1,5 @@
 #include "EnvironmentProfileManager.h"
+#include "LocationTuning.h"
 #include "MenuDiagnostics.h"
 #include <algorithm>
 #include <cmath>
@@ -7,13 +8,19 @@
 #include <sstream>
 namespace renderer {
 EnvironmentProfileManager& EnvironmentProfileManager::Instance() {static EnvironmentProfileManager manager;return manager;}
-void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty())std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}
+void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty()){renderer::locationtuning::RotateLogIfLarge(basePath+L"ModernWoWRenderer.log");std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}}
 void EnvironmentProfileManager::Configure(const std::wstring& base) {
     basePath=base;std::string error;
     menudiagnostics::Configure(base);
     if(!database.Load(base+L"data\\areas.txt",error))Log(error+"; location validation unavailable");
     else Log("Area database loaded: "+std::to_string(database.AreaCount()));
-    Reload();Log("Client SHA256="+provider.Client().sha256+" timestamp="+std::to_string(provider.Client().timestamp));
+    Reload();
+    const auto& client=provider.Client();
+    const std::string clientIdentity=
+        client.sha256State==WoWClientContext::Sha256State::Computed?"SHA256="+client.sha256:
+        client.sha256State==WoWClientContext::Sha256State::Failed?"SHA256 unavailable (hash computation failed)":
+        "SHA256 not computed (identified by code signature)";
+    Log("Client "+clientIdentity+" timestamp="+std::to_string(client.timestamp));
     WriteMenuReport("configured");
 }
 void EnvironmentProfileManager::Reload() {
@@ -115,8 +122,12 @@ std::string EnvironmentProfileManager::TuningBlockedReason() const {
     return {};
 }
 void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const {
-    menudiagnostics::Write("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
-    menudiagnostics::Write("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
+    // The whole report goes out in one file open: this runs on every zone
+    // change, and a dozen open/write/close cycles per border crossing is I/O
+    // the player pays for with frame time.
+    std::vector<std::string> lines;
+    lines.push_back("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
+    lines.push_back("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
     const auto path=basePath+L"EnvironmentProfiles.ini";
     auto utf8=[](const wchar_t* text) {
         const int size=WideCharToMultiByte(CP_UTF8,0,text,int(wcslen(text)),nullptr,0,nullptr,nullptr);
@@ -125,10 +136,11 @@ void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const 
         return result;
     };
     for(const wchar_t* key:{L"ExeSHA256",L"MapRva",L"ZoneRva",L"AreaRva",L"VerifiedInWorld"}) {
-        wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"<missing>",value,128,path.c_str());
-        menudiagnostics::Write("CONFIG "+utf8(key)+"="+utf8(value));
+        std::wstring value; if(!renderer::locationtuning::ReadCachedString(path.c_str(),L"LocationProvider",key,value)||value.empty()) value=L"<missing>";
+        lines.push_back("CONFIG "+utf8(key)+"="+utf8(value.c_str()));
     }
-    for(const auto& line:CompactDebugLines())menudiagnostics::Write(line);
+    for(const auto& line:CompactDebugLines())lines.push_back(line);
+    menudiagnostics::WriteBatch(lines);
 }
 bool EnvironmentProfileManager::CreateOverride(bool area) {
     if(!location.valid)return false;

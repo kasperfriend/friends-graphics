@@ -7,9 +7,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
 
@@ -478,11 +480,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(composited,scene.a);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* d,const char* source,IDirect3DPixelShader9** shader)
+bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir,IDirect3DPixelShader9** shader)
 {
- ComPtr<ID3DBlob> blob,errors;
- if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),errors.GetAddressOf()))||!blob)return false;
- return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(blob->GetBufferPointer()),shader));
+ // On-disk bytecode cache first (renderer::shaderbytecode): a repeat launch
+ // skips fxc, and a cached blob the driver refuses falls back to one
+ // recompile, exactly as a fresh compile would.
+ ComPtr<ID3DBlob> blob;
+ return renderer::shaderbytecode::GetShader(cacheDir,source,"main","ps_3_0",blob,
+  [d,shader](ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
 }
 
 // Extinction of fully dense cloud material per world unit. DensityPercent
@@ -522,13 +527,24 @@ bool LoadFields(const std::wstring& path,cloudnoise::Volume3D& shape,cloudnoise:
 void SaveFields(const std::wstring& path,const cloudnoise::Volume3D& shape,const cloudnoise::Volume3D& detail,const cloudnoise::Image2D& weather)
 {
  if(path.empty())return;
- std::ofstream out(std::filesystem::path(path),std::ios::binary|std::ios::trunc);
+ // Write to a temp file and rename over the cache: on NTFS the rename is
+ // atomic, so a reader can only ever see one complete generation. This is
+ // what makes the startup generator (Configure) and the first-frame
+ // fallback (EnsureFields) safe to run against the same file. The unique
+ // temp name keeps even a pathological concurrent save from sharing a file.
+ const std::wstring tmp=path+L".tmp"+std::to_wstring(GetTickCount64());
+ std::ofstream out(std::filesystem::path(tmp),std::ios::binary|std::ios::trunc);
  if(!out)return;
  const CacheHeader header{kCacheMagic,kCacheVersion,kShapeSize,kDetailSize,kWeatherSize};
  out.write(reinterpret_cast<const char*>(&header),sizeof(header));
  out.write(reinterpret_cast<const char*>(shape.rgba.data()),std::streamsize(shape.rgba.size()));
  out.write(reinterpret_cast<const char*>(detail.rgba.data()),std::streamsize(detail.rgba.size()));
  out.write(reinterpret_cast<const char*>(weather.rgba.data()),std::streamsize(weather.rgba.size()));
+ out.close();
+ if(!out)return;
+ std::error_code ec;
+ std::filesystem::rename(tmp,path,ec);
+ if(ec)std::filesystem::remove(tmp,ec);
 }
 
 // The generators produce RGBA bytes; D3DFMT_A8R8G8B8 is BGRA in memory.
@@ -608,8 +624,14 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
 {
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Clouds.log";
+ m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
  m_cachePath=basePath+L"CloudFields.cache";
- auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));};
+ // Fingerprint the raw inputs: a crossing whose place resolves this section
+ // to the values already applied re-derives identical settings, and the
+ // re-apply below (quality preset, log, field-cache probe, generation thread)
+ // is the hitch on the frame the player crosses.
+ renderer::locationtuning::SettingsFingerprint fp;
+ auto read=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.enabled=read(L"Enabled",1)!=0;
  ApplyQualityPreset(static_cast<uint32_t>(std::clamp(read(L"Quality",2),0,3)));
  // Older INIs shipped explicit SampleCount/LightSampleCount/BaseStep values
@@ -659,6 +681,40 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.weatherClouds=read(L"WeatherClouds",1)!=0;
  m_settings.evolutionSpeed=std::clamp(read(L"EvolutionPercent",100),0,400)*.01f;
  m_settings.transitionSeconds=float(std::clamp(read(L"TransitionSeconds",12),0,60));
+ if(renderer::locationtuning::SameSettings(m_settingsFingerprint,fp))return;
+ // Cold-start field generation is roughly a second of CPU. It used to run on
+ // the first frame that would draw clouds - hidden under a loading screen on
+ // slow machines, but in-game on a fast one. When the cache is missing, start
+ // it on a worker thread at load time instead: same work, started under the
+ // game's own loading, and EnsureFields waits for it (or falls back to the
+ // old inline generation if it is still not done). The generators are
+ // deterministic (fixed seeds), so the two paths can never disagree.
+ if(m_settings.enabled&&!m_cachePath.empty()) {
+  std::error_code ec;
+  // Not exists alone: a settings change can re-enter this block while the
+  // first worker is still generating, and two workers writing the same
+  // cache is wasted CPU on the crossing's frame.
+  if(!std::filesystem::exists(m_cachePath,ec)&&!m_fieldsGenerating) {
+   m_fieldsGenerating=true;
+   std::thread([this]{
+    try {
+    auto shape=cloudnoise::GenerateShape(int(kShapeSize));
+    auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
+    auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+    if(shape.size>0&&detail.size>0&&weather.width>0)
+     SaveFields(m_cachePath,shape,detail,weather);
+    else
+     m_fieldsFailed=true;
+    } catch (...) {
+    // An exception escaping a std::thread calls std::terminate and kills
+    // the game. A failed generation must only cost this launch's clouds -
+    // the file cache from a healthy launch covers the next one.
+    m_fieldsFailed=true;
+    }
+    m_fieldsGenerating=false;
+   }).detach();
+  }
+ }
 }
 
 void VolumetricClouds::Reset(IDirect3DDevice9* device)
@@ -690,9 +746,9 @@ bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
  // clouds" into "this machine has no frames". The fields cache their own
  // failure for the same reason.
  if(m_shadersFailed)return false;
- if(Compile(d,kCloudMarchSource,m_marchShader.GetAddressOf())&&
-    Compile(d,kCloudCompositeSource,m_compositeShader.GetAddressOf())&&
-    Compile(d,kCloudShadowSource,m_shadowShader.GetAddressOf()))return true;
+ if(Compile(d,kCloudMarchSource,m_shaderCacheDir,m_marchShader.GetAddressOf())&&
+    Compile(d,kCloudCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&
+    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))return true;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  m_shadersFailed=true;
  if(!m_logPath.empty())
@@ -717,14 +773,24 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
  cloudnoise::Volume3D shape,detail;
  cloudnoise::Image2D weather;
  // Roughly a second of work on a cold start, so it is written next to the
- // DLL and read back on every later launch. Generation happens on the
- // first frame that would draw clouds, which in practice is a loading
- // screen rather than live gameplay.
+ // DLL and read back on every later launch. The first launch generates it
+ // on a worker thread at load time (see Configure). If the cache is still
+ // missing when the first cloud frame arrives, skip this frame and retry
+ // next - the worker started seconds ago and the render thread must not
+ // block on it. Past a five-second bound the worker is pathologically slow
+ // or dead, and the legacy inline generation runs (its atomic save and
+ // deterministic content keep a late worker write harmless).
  if(!LoadFields(m_cachePath,shape,detail,weather))
  {
+  if(m_fieldsGenerating.load(std::memory_order_acquire)) {
+   const auto now=GetTickCount64();
+   if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
+   if(now-m_fieldsWaitStart<5000)return false;
+  }
   shape=cloudnoise::GenerateShape(int(kShapeSize));
   detail=cloudnoise::GenerateDetail(int(kDetailSize));
   weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldsFailed=true;return false;}
   SaveFields(m_cachePath,shape,detail,weather);
  }
  if(!UploadVolume(d,shape,m_shapeTexture.ReleaseAndGetAddressOf())||
@@ -923,7 +989,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
 
- ScopedRenderState state(d);
+ ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
  for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,
              D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,

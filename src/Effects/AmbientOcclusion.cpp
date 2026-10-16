@@ -6,7 +6,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
+#include "../D3D9/ShaderBytecodeCache.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -147,15 +148,16 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     return float4(ao,ao,ao,1);
 })HLSL";
 
-bool Compile(IDirect3DDevice9* device, const char* source, IDirect3DPixelShader9** out, std::string& error)
+bool Compile(IDirect3DDevice9* device, const char* source, const std::wstring& cacheDir, IDirect3DPixelShader9** out, std::string& error)
 {
-    Microsoft::WRL::ComPtr<ID3DBlob> shader, errors;
-    const HRESULT hr = D3DCompile(source, strlen(source), nullptr, nullptr, nullptr, "main", "ps_3_0",
-                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.GetAddressOf(), errors.GetAddressOf());
-    if (errors && errors->GetBufferPointer())
-        error.assign(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
-    if (FAILED(hr) || !shader) return false;
-    return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(shader->GetBufferPointer()), out));
+    // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
+    // launch skips fxc entirely, and a cached blob the driver refuses
+    // falls back to one recompile, keeping the error text as before.
+    Microsoft::WRL::ComPtr<ID3DBlob> shader;
+    return renderer::shaderbytecode::GetShader(cacheDir, source, "main", "ps_3_0", shader,
+        [device, out](ID3DBlob* b)
+        { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out)); },
+        &error);
 }
 } // namespace
 
@@ -169,8 +171,16 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
 {
     const std::wstring ini = basePath + L"GraphicsEffects.ini";
     m_logPath = basePath + L"AmbientOcclusion.log";
+    m_shaderCacheDir = renderer::shaderbytecode::Dir(basePath);
+    // Fingerprint the raw inputs: a crossing that resolves them to the values
+    // already applied re-derives identical settings, and the re-apply below -
+    // above all the log open-plus-write in the game folder - is the hitch the
+    // player feels on the crossing.
+    renderer::locationtuning::SettingsFingerprint fp;
     auto read = [&](const wchar_t* key, int fallback) -> int {
-        return static_cast<int>(renderer::locationtuning::ReadInt(L"AmbientOcclusion", key, fallback, ini.c_str()));
+        const int v = static_cast<int>(renderer::locationtuning::ReadInt(L"AmbientOcclusion", key, fallback, ini.c_str()));
+        renderer::locationtuning::MixInt(fp, v);
+        return v;
     };
     m_settings.enabled = read(L"Enabled", 1) != 0;
     // 60 % of full darkening by default: enough to seat objects on the ground
@@ -182,8 +192,13 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
     m_settings.radius = float(std::clamp(read(L"RadiusUnits", 1), 1, 6));
     m_settings.fadeDistance = float(std::clamp(read(L"DistanceFadeUnits", 250), 20, 600));
     m_settings.debug = read(L"DebugMask", 0) != 0;
+    // Nothing changed since the last apply: the settings (and therefore the
+    // log line and any resource the draw loop keys off them) are exactly what
+    // they are, so the re-apply - and its log write in the game folder - buys
+    // nothing but a hitch on the crossing's frame.
+    if (renderer::locationtuning::SameSettings(m_settingsFingerprint, fp)) return;
     char message[160];
-    sprintf_s(message, "tuning enabled=%d strength=%.2f radius=%.1f fade=%.0f debug=%d",
+    sprintf_s(message, sizeof(message), "tuning enabled=%d strength=%.2f radius=%.1f fade=%.0f debug=%d",
               m_settings.enabled ? 1 : 0, m_settings.strength, m_settings.radius, m_settings.fadeDistance,
               m_settings.debug ? 1 : 0);
     Log(m_logPath, message);
@@ -213,8 +228,8 @@ bool AmbientOcclusion::EnsureShaders(IDirect3DDevice9* device)
 {
     if (m_generateShader && m_applyShader) return true;
     std::string error;
-    if (!Compile(device, kAmbientOcclusionSource, m_generateShader.GetAddressOf(), error) ||
-        !Compile(device, kAmbientOcclusionApplySource, m_applyShader.GetAddressOf(), error))
+    if (!Compile(device, kAmbientOcclusionSource, m_shaderCacheDir, m_generateShader.GetAddressOf(), error) ||
+        !Compile(device, kAmbientOcclusionApplySource, m_shaderCacheDir, m_applyShader.GetAddressOf(), error))
     {
         m_generateShader.Reset();
         m_applyShader.Reset();
@@ -324,7 +339,7 @@ bool AmbientOcclusion::Render(IDirect3DDevice9* device, const FrameContext& fram
 
     // Captures and restores every state this pass touches, including the
     // render target, viewport, pixel-shader constants and sampler states.
-    renderer::ScopedRenderState saved(device);
+    renderer::ScopedPassState saved(device);
     bool ok = true;
     auto check = [&](HRESULT hr) { if (FAILED(hr)) ok = false; };
 

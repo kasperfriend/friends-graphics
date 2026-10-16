@@ -2,6 +2,8 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
+#include "src/Core/FrameContext.h"
+#include "src/D3D9/ShaderBytecodeCache.h"
 #pragma comment(lib,"d3dcompiler.lib")
 
 namespace waterhighlight {
@@ -23,16 +25,17 @@ void Configure(const std::wstring& base) {
     wchar_t hash[32]{};GetPrivateProfileStringW(L"Highlight",L"Group1PixelShader",L"ebecd65635a1a75e",hash,32,ini.c_str());
     firstHash=wcstoull(hash,nullptr,16);
     const char* source="float4 color:register(c0);float4 main():COLOR{return color;}";
-    ComPtr<ID3DBlob> blob,error;
-    if(FAILED(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_2_0",0,0,blob.GetAddressOf(),error.GetAddressOf()))) { enabled=false;return; }
+    ComPtr<ID3DBlob> blob;
+    // Bytecode-only consumer: the driver creates the shader later at draw
+    // time, so "create" just accepts the (validated) cached or compiled blob.
+    if(!renderer::shaderbytecode::GetShader(renderer::shaderbytecode::Dir(base),source,"main","ps_2_0",blob,[](const ID3DBlob*){return true;})) { enabled=false;return; }
     code.resize(blob->GetBufferSize()/sizeof(DWORD));memcpy(code.data(),blob->GetBufferPointer(),blob->GetBufferSize());
     Status();
 }
 void Present() {
     if(!enabled)return;
     bool next=(GetAsyncKeyState(VK_F6)&0x8000)!=0,toggle=(GetAsyncKeyState(VK_F7)&0x8000)!=0;
-    DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    if(pid==GetCurrentProcessId()) {
+    if(renderer::FrameContext::Current().wowFocused) {
         if(next&&!nextDown) {group=(group+1)%4;Status();}
         if(toggle&&!toggleDown) {visible=!visible;Status();}
     }

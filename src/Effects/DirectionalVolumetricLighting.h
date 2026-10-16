@@ -111,6 +111,11 @@ namespace renderer
         bool ValidateHistory(const FrameContext& frameContext);
 
         VolumetricSettings m_settings;
+        // Fingerprint of the last settings Configure() fully applied; a
+        // crossing that resolves the same values skips the re-apply (which
+        // also keeps the temporal history valid instead of shimmering a
+        // frame). 0 = never applied.
+        uint64_t m_settingsFingerprint = 0;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_fullWidth = 0, m_fullHeight = 0, m_lowWidth = 0, m_lowHeight = 0;
         D3DFORMAT m_targetFormat = D3DFMT_UNKNOWN;
@@ -155,6 +160,7 @@ namespace renderer
         Matrix4 m_previousView{};
         bool m_previousViewValid = false;
         std::wstring m_logPath;
+        std::wstring m_shaderCacheDir;
         uint64_t m_renderFrames = 0;
         FrameClock m_fogClock;
         float m_fogElapsed = 0;

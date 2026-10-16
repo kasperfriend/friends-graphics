@@ -78,12 +78,12 @@ namespace renderer
         const UINT bufferSize0 = stride0 * height;
         if (static_cast<UINT>(lr0.Pitch) == stride0)
         {
-            hr = converter->CopyPixels(nullptr, lr0.Pitch, bufferSize0, static_cast<BYTE*>(lr0.pBits));
+            hr = converter->CopyPixels(nullptr, 0, stride0, static_cast<BYTE*>(lr0.pBits));
         }
         else
         {
             std::vector<BYTE> temp(bufferSize0);
-            hr = converter->CopyPixels(nullptr, stride0, bufferSize0, temp.data());
+            hr = converter->CopyPixels(nullptr, 0, stride0, temp.data());
             if (SUCCEEDED(hr))
             {
                 for (UINT y = 0; y < height; ++y)
