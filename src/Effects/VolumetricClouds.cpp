@@ -676,6 +676,7 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",24000),2000,80000));
  m_settings.sunRays=read(L"SunRaysEnabled",1)!=0;
  m_settings.sunRayStrength=std::clamp(read(L"SunRayPercent",80),0,200)*.01f;
+ m_settings.opacity=std::clamp(read(L"OpacityPercent",100),0,300)*.01f;
  m_settings.debugMode=static_cast<CloudDebugMode>(std::clamp(read(L"DebugMode",0),0,4));
  m_settings.zoneClouds=read(L"ZoneClouds",1)!=0;
  m_settings.weatherClouds=read(L"WeatherClouds",1)!=0;
@@ -985,7 +986,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                               std::max(.75f,f.moonDiscViewDepth*.04f),
                               f.moonDiscValid?1.f:0.f,
                               f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f)};
- const float c14[4]={kBaseExtinction*settings.density,settings.lightAbsorption,
+ const float c14[4]={kBaseExtinction*settings.density*settings.opacity,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
 

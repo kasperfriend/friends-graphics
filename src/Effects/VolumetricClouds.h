@@ -91,6 +91,10 @@ namespace renderer
         float groundShadowExtent = 24000.f;
         bool sunRays = true;
         float sunRayStrength = .8f;
+        // Overall opacity of the cloud material (0..3). Multiplies the
+        // base extinction so the deck can be made more opaque without
+        // changing its lighting response.
+        float opacity = 1.f;
 
         CloudDebugMode debugMode = CloudDebugMode::None;
     };
