@@ -173,3 +173,24 @@ the tools, the preview screenshot and the documentation. The menu is 107 control
 on the same tabs; the wind's own rows and `WIND DEBUG VIEW` are untouched,
 because the wind still drives the waves, the clouds and the precipitation drift.
 No world geometry moves with it any more.
+
+## Follow-up (2026-10-16, global illumination is gone)
+
+The screen-space bounce pass was removed from the renderer outright: the
+`[GlobalIllumination]` section of `GraphicsEffects.ini` (eleven keys), the tab
+and the eleven menu rows that belonged to it (`GI BOUNCE & AMBIENT`, `GI
+INTENSITY`, `GI SKY LIGHT`, `GI BOUNCE`, `GI SHADOW POCKETS`, `GI LAMP BLEED`,
+`GI RADIUS`, `GI CLOUD SHADOWS`, `GI STORM DIMMING`, `GI QUALITY` and `GI
+DEBUG`) and the code behind all of it - `src/Effects/GlobalIllumination.{h,cpp}`,
+its two embedded shader strings and their `tools/ValidateShaders.ps1` entries and
+instruction budget, the `PerfStage::GlobalIllumination` /
+`GpuPerfStage::GlobalIllumination` profile rows, the `GlobalIllumination.log`
+sink, the project file entries, the
+`tools/LocationTuningCrossingRegression.cpp` section list and the documentation.
+`VolumetricClouds::OvercastFactor()` went with it, as the one cloud accessor only
+this pass read. The menu is 96 controls on eleven tabs, and
+`tools/OverlayLayoutRegression.cpp` pins that tab count; the sweep below it still
+reaches every remaining control. The cloud shadow map, the dynamic light
+selection, the location `LightingMultiplier` and the atmosphere are untouched,
+because each of them serves other passes as well. Nothing in the world picks up
+bounced sky or lamp light any more.

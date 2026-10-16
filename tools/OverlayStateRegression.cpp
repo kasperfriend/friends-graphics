@@ -124,7 +124,7 @@ void TestResetDefaults() {
         Require(!ResetActiveTab(), "Reset Defaults was not idempotent");
     }
     layout.SelectTab(0);
-    std::printf("PASS F7 Reset Defaults restores and persists all settings in all ten tabs, without changing other tabs\n");
+    std::printf("PASS F7 Reset Defaults restores and persists all settings in every tab, without changing other tabs\n");
 }
 void TestGlobalScope() {
     using namespace tuningoverlay;

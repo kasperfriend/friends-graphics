@@ -1,9 +1,9 @@
 #pragma once
 // State-block-based pass scope for the per-frame compositor passes.
 //
-// Every compositor pass (atmosphere, ambient occlusion, global
-// illumination, dynamic lights, the cloud deck, the weather scene copy and
-// the post-process composite) used to wrap its work in ScopedRenderState,
+// Every compositor pass (atmosphere, ambient occlusion, dynamic lights, the
+// cloud deck, the weather scene copy and the post-process composite) used to
+// wrap its work in ScopedRenderState,
 // which saves and restores the full device state with ~170 individual
 // Get/SetRenderState/Get/SetSamplerState/Get/SetTexture calls per pass -
 // about a thousand driver calls per frame across the passes.

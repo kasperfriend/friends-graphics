@@ -60,7 +60,7 @@ static void Require(bool ok, const std::string& message)
 }
 
 // ---------------------------------------------------------------------------
-// The workload. GraphicsEffects.ini ships 14 sections and 201 keys; a full
+// The workload. GraphicsEffects.ini ships 13 sections and 191 keys; a full
 // re-apply reads them through three different doors - the runtime read
 // (ReadInt/ReadString), the F7 editor read (ReadEditorInt, which walks the
 // location levels) and the presence probe the water colours use
@@ -83,8 +83,8 @@ static const std::vector<std::pair<const wchar_t*, int>>& ShippedSections()
     // Section name and key count, as shipped in GraphicsEffects.ini.
     static const std::vector<std::pair<const wchar_t*, int>> sections = {
         {L"Atmosphere", 46}, {L"Water", 43}, {L"VolumetricClouds", 43}, {L"Wind", 12},
-        {L"GlobalIllumination", 11}, {L"WeatherVisuals", 8}, {L"LocalFog", 7},
-        {L"ShadowDiagnostics", 5}, {L"PostProcess", 5}, {L"DynamicLighting", 5},
+        {L"WeatherVisuals", 8}, {L"LocalFog", 7}, {L"DynamicLighting", 6},
+        {L"ShadowDiagnostics", 5}, {L"PostProcess", 5},
         {L"AmbientOcclusion", 5}, {L"AIMaterials", 5}, {L"NativeShadows", 3},
         {L"DistanceFog", 3},
     };
@@ -120,7 +120,7 @@ static void BuildScopedIni(const fs::path& dir, int zones, int areasPerZone,
                            int sectionsPerArea, int keysPerSection)
 {
     static const wchar_t* suffixes[] = {L"Water", L"Atmosphere", L"VolumetricClouds",
-                                        L"Wind", L"GlobalIllumination", L"WeatherVisuals",
+                                        L"Wind", L"WeatherVisuals",
                                         L"LocalFog", L"AmbientOcclusion"};
     std::ostringstream ini;
     ini << "[Global.Water]\nFoamEnabled=0\n";

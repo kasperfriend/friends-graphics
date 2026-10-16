@@ -435,9 +435,8 @@ inline float CompositeDepthWeight(float tapDepth, float receiverDepth, float slo
 // Depth slope across one full-resolution texel, for the tolerance above: the
 // SMALLER one-sided difference on each axis, so a silhouette (where one side
 // is a different surface entirely) does not inflate the slope and open the
-// blend across itself. Shared verbatim by the two passes that upsample a
-// low-resolution light field - the direct lamp composite and the global
-// illumination composite.
+// blend across itself. Used by the direct lamp composite, which upsamples a
+// low-resolution light field.
 inline float CombineSlope(float left, float right, float up, float down, float centre)
 {
     return std::min(std::abs(left - centre), std::abs(right - centre)) +
