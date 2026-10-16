@@ -1,7 +1,7 @@
 # F7 menu audit
 
 A full review of the F7 tuning menu: `TuningOverlay.h` (input, drawing),
-`src/Environment/OverlayItems.h` (the 106 controls), `OverlayLayout.h` (geometry and
+`src/Environment/OverlayItems.h` (the 107 controls), `OverlayLayout.h` (geometry and
 gestures), `OverlayFont.h`, `MenuDiagnostics.h`, `LocationTuning.h` (where a value is
 written) and the call sites in `ModernWoWRenderer.cpp`. Every finding below was checked
 against the code that consumes the same setting, so a control's range, default and target
@@ -122,7 +122,7 @@ extended to the scrollbar strip if the comment is the intent.
 
 Checked in the same pass, no defect found:
 
-* Every one of the 106 controls is reachable by mouse at every tab, every scroll offset and
+* Every one of the 107 controls is reachable by mouse at every tab, every scroll offset and
   twelve resolution/DPI combinations (portable test, ASan/UBSan clean); each widget stays
   inside its own row, and the panel fits both the logical screen and the real backbuffer.
   The same sweep now runs against the real overlay on a D3D9 device in the Windows CI job
@@ -169,7 +169,7 @@ GAIN`, `SWAY DISTANCE`, `SWAY ANIMATED MODELS`, `VEGETATION DEBUG VIEW` and
 the whole `VegetationDebugLine` block, which on this branch had grown the
 `Plants gate:`, `Blades:` and `Blades gate:` rows) and the code behind all of it
 - the sway and blade-wind headers, the vertex-shader constant hook, the tests,
-the tools, the preview screenshot and the documentation. The menu is 106 controls
+the tools, the preview screenshot and the documentation. The menu is 107 controls
 on the same tabs; the wind's own rows and `WIND DEBUG VIEW` are untouched,
 because the wind still drives the waves, the clouds and the precipitation drift.
 No world geometry moves with it any more.

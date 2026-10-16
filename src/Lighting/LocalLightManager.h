@@ -53,6 +53,10 @@ namespace renderer
         float IntensityScale() const { return m_intensityScale; }
         float RayScale() const { return m_rayScale; }
         int Quality() const { return m_quality; }
+        // World size of the window the pool's receiver normal is fitted over,
+        // as a scale on the shipped value (1.0 = shipped). See
+        // src/Effects/LocalLightingCore.h for what it trades.
+        float NormalSpread() const { return m_normalSpread; }
         int DebugMode() const { return m_debugMode; }
         const std::vector<LocalLightSource>& Selected() const { return m_selected; }
         uint64_t SelectionSignature() const { return m_selectionSignature; }
@@ -91,6 +95,7 @@ namespace renderer
         bool m_enabled = true;
         float m_intensityScale = 1.0f;
         float m_rayScale = 0.75f;
+        float m_normalSpread = 1.0f;
         int m_quality = 1;
         int m_debugMode = 0;
         uint64_t m_selectionSignature = 0;
