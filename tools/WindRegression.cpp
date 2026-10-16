@@ -25,6 +25,16 @@
 
 using namespace renderer;
 using namespace renderer::water;
+// A hand edit (the profile API called directly, as an editor or a hand edit
+// would) is detected by the cached read's file-identity check: write time plus
+// size. In a live session such an edit settles long before the next stat; a
+// value of the same length written microseconds before a stat is the one
+// combination the identity check cannot see, so a hand edit in this test lets
+// the file settle before the renderer looks at it again - the timing a real
+// player's edit has, not a same-length rewrite inside one instruction.
+#if defined(_WIN32)
+static void SettleHandEdit() { Sleep(25); }
+#endif
 static void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 static void Pass(const char* message) { std::printf("PASS %s\n", message); }
 static bool Near(double a, double b, double e = 1e-5) { return std::abs(a - b) <= e; }
@@ -779,6 +789,7 @@ static void TestConfigurationAndWiring()
     locationtuning::Sync(base, {}, false);
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
+    SettleHandEdit();
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
     // The crossing gate, against the real profile API: a settle of a place whose own
     // scoped settings already resolve to what the nine subsystems are running must be
@@ -800,6 +811,7 @@ static void TestConfigurationAndWiring()
           "into it is skipped without re-reading nine subsystems");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
           "a scope written for one area, as the editor or a hand edit would");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
     locationtuning::Sync(base, saved, true);
@@ -810,6 +822,7 @@ static void TestConfigurationAndWiring()
     Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
           "a scope written into a section no read in this session has touched");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
     locationtuning::Sync(base, saved, true);
@@ -822,6 +835,7 @@ static void TestConfigurationAndWiring()
     Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
           "the area's wind is edited");
+    SettleHandEdit();
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
     locationtuning::Sync(base, saved, true);
