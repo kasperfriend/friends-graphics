@@ -952,17 +952,14 @@ float4 main(PS_IN input) : COLOR0
             if (m_disassembledShaders.find(currentPSHash) == m_disassembledShaders.end())
             {
                 m_disassembledShaders[currentPSHash] = true;
-                ID3DBlob* funcBlob = nullptr;
-                if (SUCCEEDED(origPS->GetFunction(&funcBlob)) && funcBlob)
+                UINT funcSize = 0;
+                if (SUCCEEDED(origPS->GetFunction(nullptr, &funcSize)) && funcSize > 0)
                 {
-                    const UINT funcSize = static_cast<UINT>(funcBlob->GetBufferSize());
-                    if (funcSize > 0)
+                    std::vector<BYTE> func(funcSize);
+                    if (SUCCEEDED(origPS->GetFunction(func.data(), &funcSize)))
                     {
-                        std::vector<BYTE> func(funcSize);
-                        memcpy(func.data(), funcBlob->GetBufferPointer(), funcSize);
-                        funcBlob->Release();
                         Microsoft::WRL::ComPtr<ID3DBlob> disasm;
-                        if (SUCCEEDED(D3DDisassemble(func.data(), funcSize, 0, nullptr, disasm.GetAddressOf(), nullptr)))
+                        if (SUCCEEDED(D3DDisassemble(func.data(), funcSize, 0, nullptr, disasm.GetAddressOf())))
                         {
                             char hBuf[32];
                             sprintf_s(hBuf, sizeof(hBuf), "0x%llx", currentPSHash);

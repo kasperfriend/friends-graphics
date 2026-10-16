@@ -1,5 +1,4 @@
 #include "ShaderCache.h"
-#include <d3dcompiler.h>
 #include "../Water/WaterPolicy.h"
 
 namespace renderer
@@ -28,25 +27,21 @@ namespace renderer
             return &it->second.info;
         }
 
-        ID3DBlob* blob = nullptr;
-        if (FAILED(shader->GetFunction(&blob)) || !blob)
+        UINT size = 0;
+        if (FAILED(shader->GetFunction(nullptr, &size)) || size == 0 || size > 65536)
         {
-            // A transient GetFunction failure must not poison this identity.
-            ++m_misses;
-            return nullptr;
-        }
-        const UINT size = static_cast<UINT>(blob->GetBufferSize());
-        if (size == 0 || size > 65536)
-        {
-            blob->Release();
             // A transient GetFunction failure must not poison this identity.
             ++m_misses;
             return nullptr;
         }
 
         std::vector<BYTE> bytes(size);
-        memcpy(bytes.data(), blob->GetBufferPointer(), size);
-        blob->Release();
+        if (FAILED(shader->GetFunction(bytes.data(), &size)))
+        {
+            // A transient GetFunction failure must not poison this identity.
+            ++m_misses;
+            return nullptr;
+        }
 
         uint64_t hash = 14695981039346656037ull;
         for (BYTE b : bytes)
