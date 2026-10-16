@@ -33,7 +33,46 @@ using namespace renderer::water;
 // the file settle before the renderer looks at it again - the timing a real
 // player's edit has, not a same-length rewrite inside one instruction.
 #if defined(_WIN32)
-static void SettleHandEdit() { Sleep(25); }
+// The two halves of the identity the cached read compares.
+struct HandEditStamp { ULONGLONG written = 0; DWORD bytes = 0; };
+static HandEditStamp StampOf(const std::wstring& path) {
+    HandEditStamp stamp{};
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) {
+        stamp.written = (static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                        info.ftLastWriteTime.dwLowDateTime;
+        stamp.bytes = info.nFileSizeLow;
+    }
+    return stamp;
+}
+// Wait until the edit is actually visible in the file's identity, rather than for
+// a fixed interval that assumes it will be by then.
+//
+// Two of the edits below change a value without changing its length - "3" to "7"
+// is one byte either way - so only the timestamp can reveal them, and NTFS writes
+// that back lazily rather than before the write returns. A busy runner can still
+// be showing the old one 25 ms later, which made those two checks flake instead of
+// failing: the same commit passed and failed on identical code. Waiting for the
+// timestamp to move is what "let the file settle" meant, and it is the only
+// version of it that does not depend on how loaded the machine is.
+//
+// The 25 ms floor stays. The cache re-measures a file at most every 10 ms, so an
+// edit landing inside that window is not looked for yet whichever way the
+// timestamp behaves, and the checks below are about the read answering the edit
+// rather than about the stat race.
+//
+// The ceiling is what turns a never-published timestamp into a failure of the
+// check that depends on it, after long enough that it cannot be a busy runner.
+static void SettleHandEdit(const std::wstring& path, const HandEditStamp& before) {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        const HandEditStamp now = StampOf(path);
+        const bool moved = now.written != before.written || now.bytes != before.bytes;
+        const ULONGLONG elapsed = GetTickCount64() - start;
+        if ((moved && elapsed >= 25) || elapsed >= 5000) return;
+        Sleep(5);
+    }
+}
 #endif
 static void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 static void Pass(const char* message) { std::printf("PASS %s\n", message); }
@@ -817,8 +856,9 @@ static void TestConfigurationAndWiring()
     Check(load().direction == WindDirection::West && load().debugView, "leaving subarea restores zone/global wind");
     locationtuning::Sync(base, {}, false);
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
+    const auto beforeGlobalEdit = StampOf(file);
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
-    SettleHandEdit();
+    SettleHandEdit(file, beforeGlobalEdit);
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
     // The crossing gate, against the real profile API: a settle of a place whose own
     // scoped settings already resolve to what the nine subsystems are running must be
@@ -838,9 +878,10 @@ static void TestConfigurationAndWiring()
     Check(locationtuning::AppliedTuningStillInForce(neighbour, true),
           "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
           "into it is skipped without re-reading nine subsystems");
+    const auto beforeScopeEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
           "a scope written for one area, as the editor or a hand edit would");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeScopeEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
     locationtuning::Sync(base, saved, true);
@@ -849,9 +890,10 @@ static void TestConfigurationAndWiring()
     Check(!locationtuning::AppliedTuningStillInForce(fresh, true),
           "walking back is not skipped once the two areas resolve to different values");
     Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
+    const auto beforeSectionEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
           "a scope written into a section no read in this session has touched");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeSectionEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
     locationtuning::Sync(base, saved, true);
@@ -862,9 +904,10 @@ static void TestConfigurationAndWiring()
           "never skipped past the value it holds");
     locationtuning::MarkTuningApplied(saved, true);
     Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
+    const auto beforeValueEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
           "the area's wind is edited");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeValueEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
     locationtuning::Sync(base, saved, true);
