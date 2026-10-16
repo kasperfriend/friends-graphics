@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d9.h>
+#include <d3dcompiler.h>
 #include <algorithm>
 #include <atomic>
 #include <fstream>

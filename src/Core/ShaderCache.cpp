@@ -1,4 +1,5 @@
 #include "ShaderCache.h"
+#include <d3dcompiler.h>
 #include "../Water/WaterPolicy.h"
 
 namespace renderer
