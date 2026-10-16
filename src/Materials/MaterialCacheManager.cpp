@@ -104,10 +104,21 @@ namespace renderer
         int shadowInt = renderer::locationtuning::ReadInt(L"AIMaterials", L"SelfShadowStrength", 90, ini.c_str());
         m_shadowStrength = std::clamp(static_cast<float>(shadowInt) * 0.01f, 0.0f, 1.5f);
 
-        LogMessage(m_logPath, "Tuning reloaded: enabled=" + std::to_string(m_enabled) +
+        // One line per CHANGE, not one per reload: this runs on every settled
+        // crossing as well as at startup, and the line is an open, a write and a
+        // close of a file in the game folder - a cost on exactly the path a player
+        // walks a border on, for a line that says the same thing every time. The
+        // text is unchanged, so an existing log still reads the same way.
+        const std::string line = "Tuning reloaded: enabled=" + std::to_string(m_enabled) +
                               " strength=" + std::to_string(m_globalNormalStrength) +
                               " parallax=" + std::to_string(m_parallaxScale) +
-                              " shadow=" + std::to_string(m_shadowStrength));
+                              " shadow=" + std::to_string(m_shadowStrength);
+        static std::string lastTuningLine;
+        if (lastTuningLine != line)
+        {
+            lastTuningLine = line;
+            LogMessage(m_logPath, line);
+        }
 
         // The manifests are several MB of JSON (object_manifest.json alone is
         // over 3 MB). Parsing them at startup for a feature that is off by

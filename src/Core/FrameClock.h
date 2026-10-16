@@ -65,6 +65,24 @@ namespace renderer
         bool m_primed = false;
     };
 
+    // Is a frame gap worth a line in the log? The rule is deliberately about the
+    // SESSION's own frame and not a fixed frame rate: a machine that plays at
+    // 30 Hz and one that plays at 240 Hz both report the same stalls, and a frame
+    // that is merely slower than the last one is not a stall. A quarter of a
+    // second outright always is - that is longer than any frame a client produces
+    // while it is rendering - and anything an order of magnitude off the running
+    // average is too. Tooling runs this rule directly (FrameClockRegression); the
+    // present hook calls it once per frame, where a false positive costs one log
+    // line and a miss costs a report.
+    inline constexpr double kFrameStallFloorMs = 250.0;
+    inline constexpr double kFrameStallRatio = 10.0;
+    inline bool FrameGapIsAStall(double gapMs, double averageMs) noexcept
+    {
+        if (!(gapMs > 0.0)) return false;
+        if (gapMs >= kFrameStallFloorMs) return true;
+        return averageMs > 0.0 && gapMs >= averageMs * kFrameStallRatio;
+    }
+
 #if defined(_WIN32)
 }
 

@@ -136,15 +136,21 @@ jobs:
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
-          & cmd.exe /c tools\Test-Wind.cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Vegetation wind sway regressions
-        if: matrix.configuration == 'Release'
-        shell: pwsh
-        run: |
-          & cmd.exe /c tools\Test-VegetationWind.cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = & cmd.exe /c tools\Test-Wind.cmd 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            # The suite's own last lines are the diagnosis, and stderr does not
+            # survive into a runner's job log tail: say them as annotations too.
+            $failed = ($output | Select-Object -Last 6) -join ' | '
+            $failed = $failed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error title=Wind regressions failed::$failed"
+            $output | Write-Output
+            exit $LASTEXITCODE
+          }
+          # The suite's own PASS lines are the evidence a report is read for: the
+          # crossing gate's real-file checks run nowhere else.
+          $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '
+          $passed = $passed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Wind regressions::$passed"
 
       - name: F7 overlay state regressions
         if: matrix.configuration == 'Release'
@@ -266,8 +272,6 @@ jobs:
           ./build/cloud-layer-test
           g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/WindRegression.cpp -o build/wind-test
           ./build/wind-test
-          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/VegetationWindRegression.cpp -o build/vegetation-test
-          ./build/vegetation-test
           g++ -O2 -std=c++20 tools/FrameClockRegression.cpp -o build/frame-clock-test
           ./build/frame-clock-test
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/WaterRegression.cpp -o build/water-test

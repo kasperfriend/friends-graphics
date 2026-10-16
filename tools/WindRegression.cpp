@@ -406,10 +406,11 @@ static std::map<std::wstring, int> SettingValues(const WindSettings& s)
         {L"StrengthPercent",int(std::lround(s.strength * 100))},{L"GustPercent",int(std::lround(s.gustAmount * 100))},
         {L"GustSeconds",int(s.gustSeconds)},{L"DirectionChangeSeconds",int(s.directionSeconds)},
         {L"TransitionSeconds",int(s.transitionSeconds)},{L"WeatherResponsePercent",int(std::lround(s.weatherResponse * 100))},
-        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},
-        // The vegetation link is part of this section: one switch per consumer,
-        // each one restoring that consumer's legacy behaviour on its own.
-        {L"AffectVegetation",s.affectVegetation},{L"DebugView",s.debugView}};
+        // One switch per consumer, each one restoring that consumer's legacy
+        // behaviour on its own. There is no vegetation consumer any more: the
+        // wind reaches the waves, the clouds and the precipitation drift, and
+        // nothing that is drawn.
+        {L"AffectWaves",s.affectWaves},{L"AffectClouds",s.affectClouds},{L"DebugView",s.debugView}};
 }
 static void TestConfigurationAndWiring()
 {
@@ -510,6 +511,55 @@ static void TestConfigurationAndWiring()
     }
     Check(count == defaults.size(), "every supported wind option has an F7 control");
     const auto main = Read("ModernWoWRenderer.cpp");
+
+    // The vegetation sway is GONE, and it is gone in every place a feature can be
+    // switched on from. Each of these is a way for it to come back without
+    // anybody noticing: a file restored by a merge, a section still read from the
+    // INI, a toggle still drawn in F7, a HUD row still printed, a library still
+    // compiled. What it must never be is an off-by-default switch - a player
+    // would still be paying for it, and a later edit would turn it back on.
+    {
+        for (const char* path : {"src/Effects/VegetationSway.h", "src/Effects/GrassBladeSway.h",
+                "src/Environment/GrassShaderWind.h", "src/Environment/VegetationWind.h",
+                "src/Core/M2DrawGeometry.h", "src/Core/M2ShaderProbe.h", "src/Core/TextureCutout.h",
+                "docs/vegetation-wind.md", "tools/VegetationWindRegression.cpp",
+                "tools/Test-VegetationWind.cmd", "tools/VegetationPreview.cpp"})
+            Check(!std::filesystem::exists(path), "the sway's own file is deleted, not disabled");
+        Check(ini.find("[Vegetation]") == ini.npos && ini.find("AffectVegetation") == ini.npos &&
+              ini.find("GrassBlades") == ini.npos && ini.find("SwayModels") == ini.npos,
+              "no sway section, no plant link and no sway key is shipped");
+        for (const auto& item : tuningoverlay::items)
+        {
+            const std::wstring section(item.section ? item.section : L"");
+            const std::wstring key(item.key ? item.key : L"");
+            Check(section != L"Vegetation" && key != L"AffectVegetation" && key != L"SwayModels" &&
+                  key != L"GrassBlades" && key != L"SwayAnimatedModels" && key != L"TreePercent" &&
+                  key != L"GrassLimitYards",
+                  "F7 has no sway control left, not even a hidden one");
+        }
+        const auto windSystem = Read("src/Environment/WindSystem.h");
+        const auto windTuning = Read("src/Environment/WindTuning.h");
+        const auto windDebug = Read("src/Environment/WindDebug.h");
+        Check(windSystem.find("affectVegetation") == windSystem.npos &&
+              windSystem.find("DrivesVegetation") == windSystem.npos &&
+              windTuning.find("ReadVegetationSettings") == windTuning.npos,
+              "the shared wind has no vegetation consumer to drive");
+        Check(windDebug.find("Plants") == windDebug.npos && windDebug.find("Blades") == windDebug.npos &&
+              windDebug.find("Waves: ") != windDebug.npos && windDebug.find("Rain drift: ") != windDebug.npos,
+              "the wind HUD keeps its own rows and none of the sway rows");
+        Check(main.find("vegetation::") == main.npos && main.find("grassblade::") == main.npos &&
+              main.find("ReloadVegetationTuning") == main.npos &&
+              main.find("SetVertexShaderConstantF") == main.npos,
+              "the renderer has no sway path, no sway reload and no blade-constant hook left");
+        const auto project = Read("ModernWoWRenderer.vcxproj");
+        const auto workflow = Read(".github/workflows/build.yml");
+        Check(project.find("Vegetation") == project.npos && project.find("GrassBlade") == project.npos &&
+              project.find("TextureCutout") == project.npos,
+              "the project file does not compile the sway");
+        Check(workflow.find("VegetationWindRegression") == workflow.npos &&
+              workflow.find("Test-VegetationWind") == workflow.npos,
+              "no CI job builds the sway suite");
+    }
     Check(Read("ModernWoWRenderer.ini").find("\n[Atmosphere]\n") == std::string::npos &&
           main.find("DrawAtmosphere") == main.npos && main.find("ReloadSettings()") == main.npos,
           "dead flat Atmosphere controls no longer compete with the live volume settings");
@@ -533,12 +583,154 @@ static void TestConfigurationAndWiring()
     const auto snapshot = main.find("nextFrame.wind=g_windSystem.Update", present);
     const auto sea = main.find("    watereffect::Present();", present);
     Check(fallback < weather && weather < snapshot && snapshot < sea, "one next-frame snapshot after all composites and weather detection, before sea advance");
-    // The F12 gate reads the per-frame focus sample (one GetForegroundWindow
-    // per frame shared by all hotkeys) instead of sampling the foreground
-    // window itself - see FrameContext::wowFocused.
-    Check(main.find("if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();") != main.npos &&
-          main.find("if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){ReloadWindTuning();") != main.npos, "F7/location/F12 all reload wind");
-    const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
+    // The chain is one reload per subsystem, each one timed by the line a
+    // player's log carries, and it runs on an F7 edit or a settled place - never
+    // on a place whose tuning is already in force, which is the crossing this
+    // client's `Area=0`/`Area=223` flap produces on every other sample. F12
+    // reads the per-frame focus sample (one GetForegroundWindow per frame,
+    // shared by every hotkey - FrameContext::wowFocused), not a fresh sample.
+    Check(main.find("if(f7Edited||(locationTuningChanged&&placeTuningStale)){") != main.npos &&
+          main.find("ReloadWindTuning();stage(tWind);") != main.npos &&
+          main.find("watereffect::ReloadTuning();stage(tWater);") != main.npos &&
+          main.find("volume::ReloadTuning();stage(tVolume);") != main.npos &&
+          main.find("weathervisuals::ReloadTuning();stage(tWeather);") != main.npos &&
+          main.find("AppliedTuningStillInForce(") != main.npos &&
+          main.find("the place that settled is the one already in force") != main.npos &&
+          main.find("if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos,
+          "F7/location/F12 all reload wind, F12 drops the scoped read cache so a hand-edited file is picked up, and a "
+          "crossing that settles on the place already in force reloads nothing");
+    // A crossing must not stall the frame. This client's place flaps across a
+    // boundary while the player walks it, and a change used to re-read every
+    // scoped key of GraphicsEffects.ini (per-key probes) AND every row of the
+    // F7 menu on the spot. All three pieces are pinned here: the change is
+    // applied once the place has settled, the scoped key sets are read once per
+    // scope, and the chain itself is untouched.
+    const auto tuning = Read("src/Environment/LocationTuning.h");
+    Check(tuning.find("GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str())") != tuning.npos &&
+          tuning.find("const std::wstring wanted=LowerKeyName(key);") != tuning.npos &&
+          tuning.find("if(values->find(wanted)==values->end())continue;") != tuning.npos &&
+          tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { InvalidateProfileValues(); }") != tuning.npos &&
+          tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos &&
+          // There is no second, key-only memo left to fall out of step with the
+          // value cache or to overflow in the middle of an apply.
+          tuning.find("RememberScopedFile") == tuning.npos && tuning.find("memoWritten") == tuning.npos,
+          "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
+    Check(tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
+          tuning.find("inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
+          tuning.find("file.sections.clear();") != tuning.npos &&
+          tuning.find("GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)") != tuning.npos &&
+          tuning.find("ProfileValues& file=ProfileCache()[std::wstring(path)];") != tuning.npos,
+          "and the values behind those reads come from a section read once per file identity: a crossing's hundred "
+          "reads are map lookups and a stat each, not a hundred parses of the whole file (measured at 125-200 ms per "
+          "crossing before this)");
+    // And nothing behind those reads may be stale: a write of this module's own
+    // drops the values, because a file's own last-write time is not a signal right
+    // after a write (NTFS updates it lazily, and a value of the same length does
+    // not change the size either). A Save followed by the read-back that reports
+    // the new state went stale exactly that way, which the water device
+    // regression caught; every write path in Save now goes through WriteProfile.
+    Check(main.find("renderer::locationtuning::InvalidateProfileValues();") == main.npos &&
+          main.find("renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();") != main.npos &&
+          tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
+          tuning.find("inline bool WriteProfile(LPCWSTR path,LPCWSTR section,LPCWSTR key,int value)") != tuning.npos &&
+          tuning.find("if(written)InvalidateProfileValues();") != tuning.npos &&
+          tuning.find("inline void InvalidateScopedKeys() { InvalidateProfileValues(); }") != tuning.npos &&
+          tuning.find("if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
+          tuning.find("if(!editable)return WriteProfile(baseFile.c_str(),section,key,value);") != tuning.npos &&
+          tuning.find("const bool written=WriteProfile(localFile.c_str(),scope.c_str(),key,value);") != tuning.npos,
+          "and every write it makes drops the cached values, so a saved toggle is what the next read answers");
+    // ONE cache, and that is a correctness fact rather than a tidying: until this
+    // sweep the key sets of a scope lived in a second cache with a ceiling of 96
+    // scopes, and a real apply - nine tuning reloads plus the F7 menu's hundred-odd
+    // rows, each read at every level of its own section - asks about more scopes
+    // than that. The ceiling was reached in the middle of the apply, the whole key
+    // cache was dropped, and every read after it paid a GetPrivateProfileSectionW:
+    // a whole-file parse per scope per level, dozens of them in a session's log,
+    // while the place kept flapping. A crossing's cost must not depend on how many
+    // scopes the apply happens to walk.
+    Check(tuning.find("inline const std::unordered_map<std::wstring,std::wstring>* ScopedValuesFor(") != tuning.npos &&
+          tuning.find("inline bool ScopedValuePresent(") != tuning.npos &&
+          tuning.find("return values&&values->find(LowerKeyName(key))!=values->end();") != tuning.npos &&
+          tuning.find("ScopedKeysFor") == tuning.npos &&
+          tuning.find("RememberScopedFile") == tuning.npos &&
+          tuning.find(">=4096") != tuning.npos,
+          "one identity-checked cache answers both presence and value for a scope, so the read path, HasScopedValue "
+          "and the water colours see one file view - and no second key-only memo is left to overflow in the middle "
+          "of an apply");
+    Check(tuning.find("if(nextLocal!=localFile||!ScopedFileUnchanged())InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("if(written)InvalidateScopedKeys();") != tuning.npos &&
+          tuning.find("inline bool ScopedFileUnchanged() {") != tuning.npos &&
+          tuning.find("return ProfileIdentity(file,localFile);") != tuning.npos &&
+          tuning.find("++profileReads;") != tuning.npos &&
+          tuning.find("++profileParses;") != tuning.npos,
+          "a different base directory, a file changed underneath the memo and an editor save all drop what was read "
+          "out of the scoped file - and a PLACE change does not, which is what a crossing used to spend its second "
+          "re-reading section by section");
+    // And a crossing must not WRITE for the sake of writing. Three stages appended a
+    // line about their own tuning on every settled place, and in the game folder a
+    // line is an open, a write and a close - milliseconds each on a machine whose
+    // antivirus watches that folder, on exactly the path a player walks a border on.
+    // Each of them now writes only when its numbers change, which is the only time
+    // the line says anything new.
+    Check(Read("WaterEffect.h").find("if(lastRow!=row.str()){lastRow=row.str();") != std::string::npos &&
+          Read("VolumeIntegration.h").find(
+              "if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}") !=
+              std::string::npos &&
+          Read("src/Materials/MaterialCacheManager.cpp").find("if (lastTuningLine != line)") != std::string::npos,
+        "the per-crossing log lines are written when their numbers change, not once per settled place");
+    // And the stall itself, measured rather than described. "Still very hard lag
+    // on area change" has two possible owners - the client loading the place, or
+    // this project's own work on the frame that noticed - and this module cannot
+    // see inside the client's loader. It CAN see the gap between presents, on the
+    // same performance counter the reload line uses, next to what its own work
+    // cost: a 2 s gap around a reload of sixty microseconds is the client's loader,
+    // and the line says so in the report instead of leaving it to an argument.
+    Check(main.find("frame stall: %.0f ms between presents") != main.npos &&
+          main.find("the frame that took this gap drew %llu draw(s) against %llu frame(s) for the session") !=
+              main.npos &&
+          main.find("const uint64_t frameDraws = sessionDraws - g_drawsAtLastPresent;") != main.npos &&
+          main.find("the last tuning reload cost %.2f ms, and this project's ") != main.npos &&
+          main.find("the place changed \" + std::to_string(") != main.npos &&
+          main.find("g_lastReloadMicros=micros(renderer::PerformanceCounter()-reloadBegan);") != main.npos &&
+          main.find("const bool stall = renderer::FrameGapIsAStall(gapMs, g_presentGapMs);") != main.npos &&
+          Read("src/Diagnostics/RendererDiagnostics.h").find("uint64_t DrawCalls() const noexcept") !=
+              std::string::npos &&
+          Read("src/Diagnostics/RendererDiagnostics.cpp").find(
+              "m_drawCalls.fetch_add(1, std::memory_order_relaxed);") != std::string::npos,
+          "a frame that stalls is written to the log with its own gap, the place it happened in, how long ago the "
+          "place changed, what this project's own reload cost AND the draw load of the frame itself - the one number "
+          "that says whether the frame that took the gap was drawing the place again, so the next report says who the "
+          "stall belongs to");
+    Check(main.find("const bool settled=g_placePending&&now-g_placeChangedAt>=kLocationSettleMs&&") != main.npos &&
+          main.find("const bool locationTuningChanged=settled||(placeChanged&&!g_locationConfigured);") != main.npos &&
+          main.find("if(placeChanged){g_placeChangedAt=now;g_placePending=true;}") != main.npos &&
+          main.find("if(locationTuningChanged){\n        g_placePending=false;g_locationConfigured=true;") != main.npos &&
+          main.find("if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}") != main.npos &&
+          main.find("if(now-g_staleLoggedAt>=1000){") != main.npos &&
+          main.find("++g_placeSkipped;") != main.npos &&
+          main.find("answered %llu read(s) from memory with %llu whole-file parse(s)") != main.npos,
+          "a location change is applied once the place has held still, one reload per gap, and the first one at once so "
+          "startup configures itself - while a place whose tuning is already in force is skipped without spending the "
+          "gap, and a walk along a border does not write a log line per sample about it: the line says how many reads "
+          "the apply answered from memory and how many whole-file parses it paid");
+    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(") != tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") != tuning.npos &&
+          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") != tuning.npos &&
+          tuning.find("const std::vector<std::wstring>* names=SectionNamesOf(path,written,bytes);") != tuning.npos &&
+          tuning.find("if(path==localFile)localNames=names; else baseNames=names;") != tuning.npos &&
+          tuning.find("std::wstring suffix=SectionSuffixOf(name);") != tuning.npos &&
+          tuning.find("effective.try_emplace(key,value);") != tuning.npos &&
+          tuning.find("present.insert(key);") != tuning.npos &&
+          tuning.find("FingerprintMix(hash,L\"scoped\");") != tuning.npos &&
+          tuning.find("FingerprintMix(hash,suffix);") != tuning.npos &&
+          tuning.find("return current!=0&&current==appliedFingerprint;") != tuning.npos &&
+          tuning.find("return provable?hash:0;") != tuning.npos,
+          "the skip is decided on what the FILE holds, never on what a previous read cached: the section list and "
+          "the per-suffix answers are read from the profile file itself, so a scope written by hand - or by the "
+          "editor - in a section no read has touched still refuses the skip instead of quietly never applying, and a "
+          "listing the API truncated refuses to skip at all rather than assume the file holds no more sections");    const auto cloud = Read("src/Effects/VolumetricClouds.cpp");
     Check(cloud.find("dt,f.wind)") != cloud.npos && cloud.find("f.wind.sequence!=m_windSequence") != cloud.npos, "clouds consume snapshot once per frame");
     const auto water = Read("WaterEffect.h");
     Check(water.find("frame.wind.DrivesWaves(),frame.wind.strength") != water.npos &&
@@ -588,7 +780,86 @@ static void TestConfigurationAndWiring()
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
-    Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence and manual reload");
+    // The crossing gate, against the real profile API: a settle of a place whose own
+    // scoped settings already resolve to what the nine subsystems are running must be
+    // skippable, and a place whose scope holds anything a read would pick up must
+    // NEVER be skipped. The second half is what keeps this from trading a stall for a
+    // setting that quietly stops working: a skip decided from what was cached instead
+    // of from what the file holds leaves a scope written by the editor, or by hand,
+    // unread - and its value dead - until something else happens to change.
+    const auto saved = LocationContext{0,12,88,true};    // the area that gets a scope of its own
+    const auto fresh = LocationContext{0,12,90,true};    // two areas that override nothing
+    const auto neighbour = LocationContext{0,12,91,true};
+    const auto scoped = base + L"LocationGraphics.ini";
+    locationtuning::Sync(base, fresh, true);
+    locationtuning::MarkTuningApplied(fresh, true);
+    Check(locationtuning::AppliedTuningStillInForce(fresh, true), "the place that was just applied is still in force");
+    locationtuning::Sync(base, neighbour, true);
+    Check(locationtuning::AppliedTuningStillInForce(neighbour, true),
+          "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
+          "into it is skipped without re-reading nine subsystems");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
+          "a scope written for one area, as the editor or a hand edit would");
+    locationtuning::Sync(base, saved, true);
+    Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
+    locationtuning::Sync(base, saved, true);
+    locationtuning::MarkTuningApplied(saved, true);
+    Check(locationtuning::AppliedTuningStillInForce(saved, true), "the area is in force once its own tuning was applied");
+    Check(!locationtuning::AppliedTuningStillInForce(fresh, true),
+          "walking back is not skipped once the two areas resolve to different values");
+    Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
+          "a scope written into a section no read in this session has touched");
+    locationtuning::Sync(base, saved, true);
+    Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
+    locationtuning::Sync(base, saved, true);
+    Check(locationtuning::HasScopedValue(L"Water", L"WaterColour"),
+          "what the water colours ask - does this scope hold the key at all - is answered by the hand-written scope");
+    Check(!locationtuning::AppliedTuningStillInForce(saved, true),
+          "a scope no read in this session ever touched still changes the place's fingerprint, so a crossing is "
+          "never skipped past the value it holds");
+    locationtuning::MarkTuningApplied(saved, true);
+    Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
+    Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
+          "the area's wind is edited");
+    locationtuning::Sync(base, saved, true);
+    Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
+    locationtuning::Sync(base, saved, true);
+    Check(!locationtuning::AppliedTuningStillInForce(saved, true),
+          "an edited value refuses the skip with nothing else changed");
+    // And what a crossing COSTS, counted rather than argued: a walk that walks more
+    // scopes than the old key memo could hold - nine tuning reloads and the F7
+    // menu's hundred-odd rows, every level of every section - must be answered out
+    // of the sections already in memory, with no whole-file parse behind it however
+    // many samples the place flaps across. This is the assertion that fails if a
+    // crossing ever re-reads the file again: whether the memo comes back with a
+    // ceiling, or the values are dropped because the PLACE changed rather than
+    // because the FILE did.
+    // One crossing, exactly as the chain reads one: the nine tuning reloads' own
+    // keys, the water colours' "does this scope hold it" question, and a row of the
+    // F7 menu - against a place that flaps between two areas.
+    const auto crossing = [&](int sample) {
+        const auto place = (sample % 2) ? saved : neighbour;   // the flap this client's Area=0/Area=223 produces
+        locationtuning::Sync(base, place, true);
+        (void)load();
+        (void)locationtuning::HasScopedValue(L"Water", L"WaterColour");
+        (void)locationtuning::ReadEditorInt(L"Wind", L"Direction", 0, file.c_str());
+    };
+    locationtuning::MarkTuningApplied(saved, true);
+    // Warm-up first, and the counters are taken after it: the FIRST read of a
+    // section is a whole-file parse by definition, and that is the one parse a
+    // crossing is allowed to pay. What this asserts is that it pays no more.
+    for (int sample = 0; sample < 16; ++sample) crossing(sample);
+    const uint64_t parsesBefore = locationtuning::profileParses;
+    const uint64_t readsBefore = locationtuning::profileReads;
+    for (int sample = 0; sample < 400; ++sample) crossing(sample);
+    Check(locationtuning::profileParses == parsesBefore &&
+          locationtuning::profileReads > readsBefore,
+          "400 crossings over a real INI - more scopes than the old key memo could hold - answer every settings read "
+          "out of memory and pay zero whole-file parses: the cost of a crossing does not depend on how many scopes "
+          "the apply walks, and does not come back when the place changes");
+    Pass("real Windows INI: global fallback, zone/subarea precedence, debug persistence, manual reload and the "
+         "crossing gate over real files");
 #endif
 }
 int main() try

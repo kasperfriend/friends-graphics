@@ -32,12 +32,10 @@ __pycache__/
 DiagnosticSmokeTest.*
 WaterDiagnostics.ini
 *Probe*
-# CelestialMemoryProbe and M2ShaderProbe are shipped source (compiled into the
-# DLL via the .vcxproj), not throwaway local diagnostic scripts - keep them
-# tracked.
+# CelestialMemoryProbe is shipped source (compiled into the DLL via the
+# .vcxproj), not a throwaway local diagnostic script - keep it tracked.
 !src/Diagnostics/CelestialMemoryProbe.h
 !src/Diagnostics/CelestialMemoryProbe.cpp
-!src/Core/M2ShaderProbe.h
 Test*.ini
 INSTALL-RU.txt
 WATER-*.md
