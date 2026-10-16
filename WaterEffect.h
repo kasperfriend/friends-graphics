@@ -1459,7 +1459,7 @@ struct Scope {
                 // of the legacy save and every restore-side write: the
                 // block holds the original pixel and vertex shader, both
                 // textures and all six sampler states per slot.
-                blockState=renderer::detail::EnsurePassStateBlock(d);
+                blockState=renderer::detail::BeginPassState(d);
                 if(!blockState) {
                     if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
                        FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
@@ -1528,7 +1528,7 @@ struct Scope {
             // else in a single call.
             if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
             device->SetVertexShaderConstantF(200,oldVertexControls,5);
-            renderer::detail::SharedPassStateBlock().block->Apply();
+            renderer::detail::EndPassState();
             blockState=false;
         } else {
             device->SetPixelShader(original.Get());

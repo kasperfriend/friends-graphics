@@ -29,30 +29,54 @@
 #include <wrl/client.h>
 #include "DepthCapture.h"
 #include "ScopedRenderState.h"
+#include "TrackedRenderState.h"
 
 namespace renderer
 {
     namespace detail
     {
-        // The shared D3DSBT_ALL block. A state block belongs to the device
-        // that created it: a different device pointer recreates it, and a
-        // capture failure (e.g. a block orphaned by a device reset) is
-        // reported so the caller falls back to the legacy save.
+        using ScopedTrackedRenderState = renderer::ScopedTrackedRenderState;
+
+        // The shared D3DSBT_ALL blocks, one per nesting level. A state
+        // block belongs to the device that created it: a different device
+        // pointer recreates the set, and a capture failure (e.g. a block
+        // orphaned by a device reset) is replaced so the caller falls back
+        // to the legacy save for that one scope.
+        //
+        // Scopes are synchronous C++ RAII on the render thread, so they
+        // nest strictly LIFO. A single shared slot would let a nested scope
+        // overwrite the outer scope's snapshot (the outer Apply would then
+        // restore the inner scope's "original" state - mid-pass bindings
+        // would leak into the game's next draw), so each level owns its own
+        // block object. The levels are created lazily and reused for the
+        // lifetime of the device, so steady state costs one Capture per
+        // scope entry and one Apply per exit, at every nesting depth.
         struct PassStateBlock
         {
-            // Pins the device that created `block`. A raw pointer cannot
+            static constexpr int kMaxDepth = 4;
+
+            // The hook-maintained state mirror at each level. Apply()
+            // restores the GPU state without running the Set* hooks, so
+            // without this the next world draw would classify against the
+            // pass's shaders and blend/depth flags instead of the world's
+            // (the same invariant ScopedStateBlock documents for UI
+            // drawing). Saved on Capture, restored on Apply.
+            TrackedRenderState tracked[kMaxDepth];
+
+            // Pins the device that created the blocks. A raw pointer cannot
             // tell "the same device" from "a new device allocated at the
             // address of a destroyed one": the allocator reuses freed
             // memory, and a stale block captured through a dangling pointer
             // would then pass Capture() and Apply() to the wrong device.
             // Holding a reference keeps the old device alive until the
-            // block is replaced, so a fresh device can never land on the
+            // blocks are replaced, so a fresh device can never land on the
             // pinned address and pointer identity is trustworthy. The old
             // device is released at most one scope later (every pass opens
             // a scope each frame), which is the standard D3D9 overlay
             // lifetime pattern.
             Microsoft::WRL::ComPtr<IDirect3DDevice9> deviceRef;
-            Microsoft::WRL::ComPtr<IDirect3DStateBlock9> block;
+            Microsoft::WRL::ComPtr<IDirect3DStateBlock9> block[kMaxDepth];
+            int depth = 0;
         };
         inline PassStateBlock& SharedPassStateBlock()
         {
@@ -60,29 +84,57 @@ namespace renderer
             return shared;
         }
 
-        // True when a shared D3DSBT_ALL block captured by `d` is ready.
-        // A device other than the pinned one recreates the block; a capture
-        // failure (a block orphaned by a device reset) recreates it once so
-        // the fast path recovers instead of degrading to the legacy save
-        // forever.
-        inline bool EnsurePassStateBlock(IDirect3DDevice9* d)
+        // Acquires the block at the current nesting level, captures the
+        // current state, and returns true when the caller now holds it -
+        // the matching release is EndPassState() (Apply + level release).
+        // A device other than the pinned one recreates the set; a capture
+        // failure (a block orphaned by a device reset) recreates the level
+        // once so the fast path recovers instead of degrading to the
+        // legacy save forever. Beyond kMaxDepth nesting the caller gets
+        // false and runs its legacy save, which is self-contained.
+        inline bool BeginPassState(IDirect3DDevice9* d)
         {
             if (!d) return false;
             auto& shared = SharedPassStateBlock();
+            if (shared.depth >= PassStateBlock::kMaxDepth) return false;
             if (shared.deviceRef.Get() != d)
             {
-                shared.block.Reset();
+                for (auto& b : shared.block) b.Reset();
                 shared.deviceRef.Reset();
                 shared.deviceRef = d; // AddRef: the pin owns a reference
-                d->CreateStateBlock(D3DSBT_ALL, shared.block.GetAddressOf());
+                shared.depth = 0;
             }
-            if (shared.block && SUCCEEDED(shared.block->Capture()))
+            auto& b = shared.block[shared.depth];
+            if (!b) (void)d->CreateStateBlock(D3DSBT_ALL, b.GetAddressOf());
+            if (b && SUCCEEDED(b->Capture()))
+            {
+                shared.tracked[shared.depth] = g_trackedState;
+                ++shared.depth;
                 return true;
-            shared.block.Reset();
-            d->CreateStateBlock(D3DSBT_ALL, shared.block.GetAddressOf());
-            if (shared.block && SUCCEEDED(shared.block->Capture()))
+            }
+            b.Reset();
+            (void)d->CreateStateBlock(D3DSBT_ALL, b.GetAddressOf());
+            if (b && SUCCEEDED(b->Capture()))
+            {
+                shared.tracked[shared.depth] = g_trackedState;
+                ++shared.depth;
                 return true;
+            }
             return false;
+        }
+
+        // Applies the block held by the most recent unmatched BeginPassState
+        // and releases its level. Every scope exits in the reverse order it
+        // entered (RAII on one thread), so the top of the stack is always
+        // the caller's own block. The mirror is restored AFTER the Apply,
+        // the same transaction ScopedStateBlock uses for UI drawing.
+        inline void EndPassState()
+        {
+            auto& shared = SharedPassStateBlock();
+            if (shared.depth <= 0) return;
+            if (auto& b = shared.block[shared.depth - 1]; b) (void)b->Apply();
+            g_trackedState = shared.tracked[shared.depth - 1];
+            --shared.depth;
         }
     }
 
@@ -94,7 +146,8 @@ namespace renderer
         {
             if (!m_device) return;
 
-            if (detail::EnsurePassStateBlock(m_device))
+            m_tracked.Save();
+            if (detail::BeginPassState(m_device))
             {
                 m_usedBlock = true;
                 m_device->GetRenderTarget(0, m_rt.GetAddressOf());
@@ -131,14 +184,20 @@ namespace renderer
                 // and streams), then the framebuffer the block cannot hold,
                 // viewport last.
                 m_device->SetPixelShaderConstantF(0, m_psConstants[0], 64);
-                detail::SharedPassStateBlock().block->Apply();
+                detail::EndPassState();
+                m_tracked.Restore();
                 m_device->SetRenderTarget(0, m_rt.Get());
                 DepthCapture::Instance().RawSetDepth(m_device, m_depth.Get());
                 m_device->SetViewport(&m_vp);
             }
             else if (m_legacy)
             {
+                // The legacy save restores through the Set* hooks, which
+                // re-sync the mirror - except the conditional vdecl/FVF
+                // writes it skips when the original pass used neither, so
+                // the snapshot is restored explicitly to be exact.
                 m_legacy->Restore();
+                m_tracked.Restore();
             }
         }
 
@@ -146,6 +205,7 @@ namespace renderer
         IDirect3DDevice9* m_device = nullptr;
         bool m_usedBlock = false;
         bool m_restored = false;
+        detail::ScopedTrackedRenderState m_tracked;
         std::unique_ptr<ScopedRenderState> m_legacy;
         Microsoft::WRL::ComPtr<IDirect3DSurface9> m_rt;
         Microsoft::WRL::ComPtr<IDirect3DSurface9> m_depth;

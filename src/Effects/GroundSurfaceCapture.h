@@ -103,7 +103,7 @@ public:
         // One Capture holds textures 0..3, both shaders and all 16 render
         // states at once; the legacy manual save runs only when the device
         // has no state blocks.
-        const bool block=detail::EnsurePassStateBlock(d);
+        const bool block=detail::BeginPassState(d);
         ComPtr<IDirect3DSurface9> rt0,depth0;
         d->GetRenderTarget(0,rt0.GetAddressOf());
         DepthCapture::Instance().RawGetDepth(d,depth0.GetAddressOf());
@@ -142,7 +142,7 @@ public:
         float camera[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};
         d->SetVertexShaderConstantF(4,inv[0],3);d->SetVertexShaderConstantF(7,camera,1);d->SetVertexShaderConstantF(8,origin,1);
         draw();if(matrixRegister==0)terrainReady=true;d->SetVertexShaderConstantF(0,saved[0],9);
-        if(block)detail::SharedPassStateBlock().block->Apply();
+        if(block)detail::EndPassState();
         else {
             for(UINT i=0;i<16;++i)d->SetRenderState(kStates[i],st[i]);
             for(UINT i=0;i<4;++i)d->SetTexture(i,tex[i].Get());

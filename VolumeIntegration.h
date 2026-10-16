@@ -13,7 +13,7 @@
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
 #include "src/D3D9/TrackedRenderState.h"
-#include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ScopedPassState.h"
 #include "src/D3D9/ShaderBytecodeCache.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
@@ -990,8 +990,11 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.sceneSurface = legacyTargets.sceneSurface.Get();
     frameCtx.atmosphereNoise = resources.noise.Get();
 
-    // Lightweight scoped render state backup (NO D3DSBT_ALL)
-    renderer::ScopedRenderState scopedState(d);
+    // One Capture on the shared D3DSBT_ALL stack replaces the ~170-call
+    // manual save; the passes nested inside (AO, clouds, local lights)
+    // run on their own stack levels, so all of them stay on the fast path.
+    // A device without state blocks gets the exact legacy save.
+    renderer::ScopedPassState scopedState(d);
 
     internal = true;
     bool ok = true;
@@ -1054,8 +1057,9 @@ bool Composite(IDirect3DDevice9* d) {
         renderer::AmbientOcclusion::Instance().Render(d, renderer::FrameContext::Current(),
                                                       target.Get(), depth.Get())) {
         check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
-        // AmbientOcclusion restores the state it found (ScopedRenderState);
-        // the legacy passes below expect their own bindings to be live again.
+        // AmbientOcclusion restores the state it found (its own block
+        // stack level); the legacy passes below expect their own
+        // bindings to be live again.
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(0, nullptr));
         check(d->SetTexture(1, depth.Get()));
@@ -1445,7 +1449,7 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
         FAILED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE)))
         return false;
 
-    renderer::ScopedRenderState scopedState(d);
+    renderer::ScopedPassState scopedState(d);
     internal = true;
     bool ok = true;
     auto check = [&](HRESULT hr, int line = __LINE__) {

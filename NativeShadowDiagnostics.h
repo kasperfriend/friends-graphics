@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include "src/D3D9/ScopedRenderState.h"
+#include "src/D3D9/ScopedPassState.h"
 
 namespace nativeshadowdiag
 {
@@ -758,7 +758,7 @@ inline void DrawPreview(IDirect3DDevice9* d)
     }
     if (firstStage < 0) return;
 
-    renderer::ScopedRenderState state(d);
+    renderer::ScopedPassState state(d);
     D3DVIEWPORT9 viewport{};
     if (FAILED(d->GetViewport(&viewport))) return;
     struct Vertex { float x, y, z, rhw, u, v; };

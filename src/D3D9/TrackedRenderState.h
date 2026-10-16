@@ -31,8 +31,19 @@ namespace renderer
     class ScopedTrackedRenderState
     {
     public:
-        ScopedTrackedRenderState() noexcept : m_saved(g_trackedState) {}
+        ScopedTrackedRenderState() noexcept { Save(); }
         ~ScopedTrackedRenderState() { Restore(); }
+        // Saves the current mirror for a later Restore. The constructor
+        // already saved, so an explicit Save right after construction is a
+        // no-op; it documents the save point at call sites.
+        void Save() noexcept
+        {
+            if (!m_savedYet)
+            {
+                m_saved = g_trackedState;
+                m_savedYet = true;
+            }
+        }
         void Restore() noexcept
         {
             if (m_restored) return;
@@ -42,7 +53,8 @@ namespace renderer
         ScopedTrackedRenderState(const ScopedTrackedRenderState&) = delete;
         ScopedTrackedRenderState& operator=(const ScopedTrackedRenderState&) = delete;
     private:
-        TrackedRenderState m_saved;
+        TrackedRenderState m_saved{};
         bool m_restored = false;
+        bool m_savedYet = false;
     };
 }
