@@ -39,6 +39,13 @@
 // two-megabyte cap, being up to a second late about turning the file over is
 // nothing.
 //
+// A reader outside the frame loop has to ask for the flush itself. Present is
+// what makes one, so anything that drives a subsystem directly - a regression
+// that checks what a supporter would be sent, say - sees an unwritten file
+// unless it flushes first. That is a contract, not a caveat: a buffered file is
+// complete on disk at the end of every frame and at no point in the middle of
+// one. menudiagnostics::Flush() is that ask, named for the file it completes.
+//
 // THE OWNERSHIP RULE, which is what decides whether a writer may be moved here:
 // the sink may buffer a file only if it is that file's SOLE writer. If anything
 // else appends to the same path directly, its line can land before an older line

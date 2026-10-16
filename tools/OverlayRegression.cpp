@@ -19,6 +19,11 @@ int main() try {
  renderer::locationtuning::Sync(L"build\\overlay-preview\\missing\\",{571,65,4164,true},true);
  auto& failedItem=tuningoverlay::items[1];const int originalValue=failedItem.value;failedItem.value=!originalValue;
  if(tuningoverlay::Save(failedItem))throw std::runtime_error("Save succeeded into missing directory");
+ // The report is buffered and goes out on the flush Present makes each frame.
+ // This harness drives the overlay directly and never calls Present, so it has to
+ // ask for that flush before reading the file back - otherwise it would report
+ // the support log as missing the failure when the failure is only unwritten.
+ renderer::menudiagnostics::Flush();
  std::ifstream diagnostic("build/overlay-preview/MenuDiagnostics.log");std::string diagnosticText((std::istreambuf_iterator<char>(diagnostic)),{});
  if(diagnosticText.find("SAVE FAILED")==std::string::npos||diagnosticText.find("win32=")==std::string::npos)throw std::runtime_error("Save failure missing from support log");
  // Unverified client (a stock 3.3.5 build): the menu must still work, as

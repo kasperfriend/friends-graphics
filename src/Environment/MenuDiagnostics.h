@@ -33,6 +33,17 @@ inline void WriteBatch(const std::vector<std::string>& messages) {
     for(const auto& message:messages){batch+=stamp;batch+=message;batch+='\n';}
     renderer::filesink::Append(file,batch);
 }
+// Put the report on disk now.
+//
+// The report is buffered into the shared sink and goes out on the flush Present
+// makes at the end of every frame, so inside the renderer it is on disk within
+// the frame that produced it and a supporter still gets every line. A reader
+// OUTSIDE the frame loop has to ask for that flush itself, because nothing else
+// is going to make one: a regression that checks what a supporter would be sent
+// never calls Present, and reading the file straight after writing to it would
+// otherwise see nothing and report the support log as broken when it is only
+// unwritten. See the ownership rule in src/Diagnostics/FileSink.h.
+inline void Flush() { renderer::filesink::FlushFile(file); }
 inline void Configure(const std::wstring& base) {
     file=base+L"MenuDiagnostics.log";
     // The README tells a supporter this file rotates at 1 MiB, and that the

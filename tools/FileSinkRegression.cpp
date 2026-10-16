@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -68,9 +69,59 @@ static size_t Size(const fs::path& path)
     return ec ? 0 : static_cast<size_t>(bytes);
 }
 
+static std::string ReadFile(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + path.generic_string());
+    std::string text;
+    char buffer[8192];
+    while (in.read(buffer, sizeof buffer) || in.gcount())
+        text.append(buffer, static_cast<size_t>(in.gcount()));
+    return text;
+}
+
+// The test is run from the repository root by CI and from wherever a developer
+// happens to be, so the root is the directory that carries the solution.
+static fs::path FindRoot()
+{
+    std::error_code error;
+    for (const fs::path& candidate : {fs::path("."), fs::path(".."), fs::path("../..")})
+        if (fs::exists(candidate / "ModernWoWRenderer.sln", error)) return candidate;
+    throw std::runtime_error("cannot locate the repository root (looked for ModernWoWRenderer.sln in ., .. and ../..)");
+}
+
+// The two ways a buffered report can silently stop being what a supporter is
+// sent: the module stops offering a way to complete the file, or a harness reads
+// the file back without asking. Neither is a compile error and neither shows up
+// in the log - the log is simply missing the lines that were still buffered when
+// somebody looked. So the contract is checked as text, the way the shader-source
+// and wind suites check theirs.
+static void CheckReaderContract(const fs::path& root)
+{
+    const std::string report = ReadFile(root / "src/Environment/MenuDiagnostics.h");
+    Require(report.find("inline void Flush()") != std::string::npos,
+            "the menu report offers a flush, so a reader outside the frame loop can complete the file");
+
+    std::error_code error;
+    for (fs::directory_iterator it(root / "tools", error), end; it != end; it.increment(error)) {
+        const fs::path& path = it->path();
+        if (path.extension() != ".cpp") continue;
+        if (path.filename() == "FileSinkRegression.cpp") continue;
+        const std::string source = ReadFile(path);
+        // Only a harness that reads the report back can be wrong about it.
+        if (source.find("MenuDiagnostics.log") == std::string::npos) continue;
+        if (source.find("std::ifstream") == std::string::npos) continue;
+        const bool asks = source.find("menudiagnostics::Flush()") != std::string::npos ||
+                          source.find("filesink::Flush") != std::string::npos;
+        Require(asks, ("a harness that reads the report back asks for the flush first: " +
+                       path.filename().string()).c_str());
+    }
+}
+
 int main()
 {
     const fs::path dir = MakeSandbox();
+    CheckReaderContract(FindRoot());
     // The sink's state is process-wide and keyed by path, so every check gets its
     // own file: one check's rotation limit or pending bytes cannot leak into the
     // next one's.
