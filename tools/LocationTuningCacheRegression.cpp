@@ -306,26 +306,26 @@ int main()
     Require(differential, firstDiff.empty() ? "cached reads match reference chain semantics" : ("first mismatch: " + firstDiff).c_str());
 
     // ---- external edit is picked up on the next read (mtime/size invalidation) ----
-    // The edit deliberately changes the file size as well as the value: coarse-
-    // timestamp filesystems can serve a same-size rewrite with an unchanged
-    // mtime, and the size is the second half of the freshness check. (NTFS, the
-    // deployment target, moves its timestamp on every write either way.)
+    // The edit goes through the profile API rather than through Save, so the
+    // module is not told about it and the only thing that can reveal the change is
+    // the file's own identity. That identity is the last-write time plus the size,
+    // and the stamp a write gets comes from the system's cached idea of the
+    // current time, which moves in ticks of roughly 15 ms - so two writes inside
+    // one tick are stamped identically. Writing "146" over "44" moves the SIZE as
+    // well, which makes the edit visible whichever way the timestamp lands. The
+    // renderer's own writes never depend on this: WriteProfile drops the cache
+    // outright instead of asking the identity.
+    //
+    // It used to byte-patch the file, looking for the line spelled
+    // "RipplePermille = 44". That spelling is the Linux fixture's, not the API's -
+    // the real API writes "RipplePermille=44" - so the needle was never found on a
+    // Windows runner and this check and the three after it failed there while
+    // passing here. Asking the API to make the edit removes the guess.
     Sync(base, {571, 65, 4164, true}, true);
     Require(ReadInt(L"Water", L"RipplePermille", 0, graphicsW.c_str()) == 44, "pre-edit read");
-    {
-        std::ifstream in(location, std::ios::binary);
-        std::string bytes;
-        char buffer[8192];
-        while (in.read(buffer, sizeof buffer) || in.gcount()) bytes.append(buffer, static_cast<size_t>(in.gcount()));
-        const std::string needle = "RipplePermille = 44";
-        size_t pos = bytes.find(needle);
-        Require(pos != std::string::npos, "external edit: original line found");
-        if (pos != std::string::npos) {
-            std::string patched = bytes.substr(0, pos) + "RipplePermille = 146" + bytes.substr(pos + needle.size());
-            std::ofstream out(location, std::ios::binary | std::ios::trunc);
-            out << patched;
-        }
-    }
+    Require(WritePrivateProfileStringW(L"Map.571.Zone.65.Area.4164.Water", L"RipplePermille", L"146",
+                                       locationW.c_str()) != 0,
+            "external edit made through the profile API, not through the module");
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     Require(ReadInt(L"Water", L"RipplePermille", 0, graphicsW.c_str()) == 146, "external edit visible on the next read");
 

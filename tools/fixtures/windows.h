@@ -138,6 +138,11 @@ inline ApiStats& Stats() { static ApiStats s; return s; }
 
 // Functional stand-in for WritePrivateProfileStringW: upserts or deletes one
 // key in one section and rewrites the file, preserving every other line.
+//
+// It writes `key=value` with no padding, because that is what the real API
+// writes. Getting this wrong is not cosmetic: a test that looks for a line it
+// expects the API to have written will pass here and fail on a Windows runner,
+// which is the one comparison this fixture exists to make possible.
 inline UINT WritePrivateProfileStringW(LPCWSTR section, LPCWSTR key, LPCWSTR value, LPCWSTR fileName)
 {
     if (!section || !key || !fileName) return 0;
@@ -172,7 +177,7 @@ inline UINT WritePrivateProfileStringW(LPCWSTR section, LPCWSTR key, LPCWSTR val
         if (first != std::wstring::npos && eq != std::wstring::npos && !currentSection.empty()) {
             std::wstring k = shiminix::trim(line.substr(first, eq - first));
             if (hadSection && _wcsicmp(k.c_str(), key) == 0) {
-                if (value) out.push_back(std::wstring(key) + L" = " + std::wstring(value));
+                if (value) out.push_back(std::wstring(key) + L"=" + std::wstring(value));
                 found = true;
                 continue; // drop the old line when deleting
             }
@@ -181,7 +186,7 @@ inline UINT WritePrivateProfileStringW(LPCWSTR section, LPCWSTR key, LPCWSTR val
     }
     if (!found && value) {
         if (!hadSection) out.push_back(std::wstring(L"[") + section + L"]");
-        out.push_back(std::wstring(key) + L" = " + std::wstring(value));
+        out.push_back(std::wstring(key) + L"=" + std::wstring(value));
     }
     // Write narrow bytes on purpose: Linux wide file streams are unreliable
     // under a POSIX locale, and the test content is ASCII anyway.
