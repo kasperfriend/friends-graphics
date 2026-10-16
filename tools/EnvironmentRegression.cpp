@@ -140,8 +140,8 @@ int main() try {
  Require(provider.ValidationStatus().find("Unrecognized executable")!=std::string::npos,
         "the validation line names the real provider status after a refused sample");
  const auto providerFile=std::filesystem::temp_directory_path()/"modern-wow-location-regression.ini";
- auto writeProvider=[&](uintptr_t mapRva) {std::ofstream ini(providerFile);ini<<"[LocationProvider]\nExeSHA256="<<client.sha256<<"\nMapRva="<<mapRva<<"\nZoneRva="<<(reinterpret_cast<uintptr_t>(&testZone)-client.base)<<"\nAreaRva="<<(reinterpret_cast<uintptr_t>(&testArea)-client.base)<<"\nVerifiedInWorld=1\n";};
- writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
+ auto writeProvider=[&](const std::filesystem::path& file,uintptr_t mapRva) {std::ofstream ini(file);ini<<"[LocationProvider]\nExeSHA256="<<client.sha256<<"\nMapRva="<<mapRva<<"\nZoneRva="<<(reinterpret_cast<uintptr_t>(&testZone)-client.base)<<"\nAreaRva="<<(reinterpret_cast<uintptr_t>(&testArea)-client.base)<<"\nVerifiedInWorld=1\n";};
+ writeProvider(providerFile,reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
  Require(provider.Failure()==LocationFailure::NoWorldContext,
         "a configured provider waiting on a world frame says so instead of not configured");
  Require(provider.Verified()&&provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==87,"exact-hash provider reads validated live test-process image globals");
@@ -151,8 +151,14 @@ int main() try {
  Require(!ShouldHoldLocation(HasWorldContext(false,true),true),"a known-draw waves-only frame re-enables verified location sampling");
  testArea=12345;Require(provider.Sample(db,true).valid,"provider accepts unknown custom area with known zone and map");testArea=87;
  testArea=0;Require(provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==0,"zero subarea preserves validated zone/map without inventing AreaID");testArea=87;
- writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");
- Require(provider.Failure()==LocationFailure::UnreadableRvas,"unreadable RVAs keep their own cause through a refused sample");std::filesystem::remove(providerFile);
+ // Each re-configure below uses a fresh path: the test's rewrites are external
+ // (std::ofstream) and same-length, and the file system's write-time update can
+ // lag a rewrite, so the (write-time, size) identity a section cache keys on can
+ // be unchanged - the next read would be answered from what Configure read
+ // before. A path no read ever touched has no cache entry in any layer.
+ const auto providerFileBad=std::filesystem::temp_directory_path()/L"modern-wow-location-regression-bad.ini";
+ writeProvider(providerFileBad,client.imageSize+4);provider.Configure(providerFileBad.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");
+ Require(provider.Failure()==LocationFailure::UnreadableRvas,"unreadable RVAs keep their own cause through a refused sample");std::filesystem::remove(providerFile);std::filesystem::remove(providerFileBad);
  // Exercise the actual manager gate, not only the ShouldHoldLocation helper:
  // focused frames with neither captured depth nor recognized world draws must
  // never feed the provider's deliberate invalid no-world sample into debounce.
@@ -192,7 +198,8 @@ int main() try {
  // Point the real provider reader at this test process's known globals and
  // sweep every authoritative root tuple. This proves every profile key is
  // representable as a coherent Map/Zone/Area sample, not just parseable text.
- writeProvider(reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFile.wstring());
+ const auto providerFileSweep=std::filesystem::temp_directory_path()/L"modern-wow-location-regression-sweep.ini";
+ writeProvider(providerFileSweep,reinterpret_cast<uintptr_t>(&testMap)-client.base);provider.Configure(providerFileSweep.wstring());
  Require(provider.Verified(),"the synthetic exact-hash provider is enabled for the root-zone read sweep");
  size_t readableRootZones=0;
  for(const auto& [id,area]:bundled.Areas())if(!area.parentId) {
@@ -207,7 +214,7 @@ int main() try {
  Require(provider.Sample(bundled,true).valid,"stock 3.3.5a Northshire Valley (area 9) under Elwynn Forest (zone 12) passes hierarchy validation");
  testMap=1;testZone=14;testArea=363;
  Require(provider.Sample(bundled,true).valid,"stock 3.3.5a Valley of Trials (area 363) under Durotar (zone 14) passes hierarchy validation");
- testMap=0;testZone=12;testArea=87;std::filesystem::remove(providerFile);
+ testMap=0;testZone=12;testArea=87;std::filesystem::remove(providerFile);std::filesystem::remove(providerFileSweep);
  const auto actual=std::filesystem::path("build/client-research/areas.txt");
  if(std::filesystem::exists(actual)) {EnvironmentDatabase exported;Require(exported.Load(actual.wstring(),error)&&exported.AreaCount()==2849&&!exported.Authoritative(),"real Ascension custom database loads with diagnostic-only gate");}
  std::cout<<"Environment regression passed\n";return 0;
