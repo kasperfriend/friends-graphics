@@ -17,6 +17,7 @@
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/ShaderBytecodeCache.h"
+#include "src/D3D9/ScopedPassState.h"
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
@@ -1123,13 +1124,22 @@ struct Scope {
     D3DVIEWPORT9 oldViewport{};
     DWORD oldColorWrite[2]{};
     bool targetState=false;
+    // True while the shared D3DSBT_ALL block holds this scope's original
+    // pixel/vertex shader, texture and sampler state (everything the block
+    // covers), leaving only the framebuffer attachments and the shader
+    // constants to be saved and restored manually.
+    bool blockState=false;
 
     void RestoreTargets() noexcept {
         if(!device||!targetState)return;
         if(maskBound)device->SetRenderTarget(1,oldMaskRT.Get());
         if(depthBound)device->SetRenderTarget(2,oldDepthRT.Get());
-        device->SetRenderState(D3DRS_COLORWRITEENABLE1,oldColorWrite[0]);
-        device->SetRenderState(D3DRS_COLORWRITEENABLE2,oldColorWrite[1]);
+        // The color-write render states are block state: Apply restores
+        // them, so only the legacy path writes them back manually.
+        if(!blockState) {
+            device->SetRenderState(D3DRS_COLORWRITEENABLE1,oldColorWrite[0]);
+            device->SetRenderState(D3DRS_COLORWRITEENABLE2,oldColorWrite[1]);
+        }
         device->SetViewport(&oldViewport);
         maskBound=depthBound=targetState=false;
     }
@@ -1151,10 +1161,12 @@ struct Scope {
         // NOTFOUND means an unbound slot; other query failures cannot be safely restored.
         HRESULT maskHR=d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
         HRESULT depthHR=d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
+        // The color-write reads only serve the manual restore; the block
+        // path recovers those render states through Apply.
         if((FAILED(maskHR)&&maskHR!=D3DERR_NOTFOUND)||(FAILED(depthHR)&&depthHR!=D3DERR_NOTFOUND)||
            FAILED(d->GetViewport(&oldViewport))||
-           FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE1,&oldColorWrite[0]))||
-           FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE2,&oldColorWrite[1])))return;
+           (!blockState&&(FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE1,&oldColorWrite[0]))||
+                          FAILED(d->GetRenderState(D3DRS_COLORWRITEENABLE2,&oldColorWrite[1])))))return;
         targetState=true;
         HRESULT hr=d->SetRenderTarget(1,waterMaskSurface);
         maskBound=SUCCEEDED(hr);
@@ -1199,9 +1211,9 @@ struct Scope {
                 return;
             }
             ++frameCandidates;
-            if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
-               FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
-            if(!original || !originalVertex)return;
+            // The original pixel/vertex shader is either the block's or the
+            // legacy save's to restore, so it is fetched only once the
+            // capture path is known (below, after the constant reads).
             if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,39)))return;
             pixelConstantsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
@@ -1443,8 +1455,18 @@ struct Scope {
             if(FAILED(d->GetRenderState(D3DRS_SRGBWRITEENABLE,&sceneSrgb)))return;
             const D3DSAMPLERSTATETYPE samplerStates[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
             {
-                for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}
-                device=d;extraState=true;
+                // One Capture replaces the ~16 shader/texture/sampler reads
+                // of the legacy save and every restore-side write: the
+                // block holds the original pixel and vertex shader, both
+                // textures and all six sampler states per slot.
+                blockState=renderer::detail::EnsurePassStateBlock(d);
+                if(!blockState) {
+                    if(FAILED(d->GetPixelShader(original.GetAddressOf())) ||
+                       FAILED(d->GetVertexShader(originalVertex.GetAddressOf())))return;
+                    if(!original || !originalVertex)return;
+                    for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}
+                }
+                device=d;extraState=!blockState;
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
                 for(unsigned slot=0;slot<2;++slot) {
                     const DWORD values[]={DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),
@@ -1500,17 +1522,27 @@ struct Scope {
     void Restore() noexcept {
         if(!device)return;
         RestoreTargets();
-        device->SetPixelShader(original.Get());
-        device->SetVertexShader(originalVertex.Get());
-        if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
-        device->SetVertexShaderConstantF(200,oldVertexControls,5);
-        if(extraState) {
-            const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
-                D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
-            for(unsigned slot=0;slot<2;++slot) {
-                device->SetTexture(2+slot,oldExtraTextures[slot].Get());
-                for(unsigned state=0;state<6;++state)
-                    device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
+        if(blockState) {
+            // The block holds the shader/texture/sampler state: write back
+            // only the two constant spans, then let Apply return everything
+            // else in a single call.
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
+            device->SetVertexShaderConstantF(200,oldVertexControls,5);
+            renderer::detail::SharedPassStateBlock().block->Apply();
+            blockState=false;
+        } else {
+            device->SetPixelShader(original.Get());
+            device->SetVertexShader(originalVertex.Get());
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
+            device->SetVertexShaderConstantF(200,oldVertexControls,5);
+            if(extraState) {
+                const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
+                    D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
+                for(unsigned slot=0;slot<2;++slot) {
+                    device->SetTexture(2+slot,oldExtraTextures[slot].Get());
+                    for(unsigned state=0;state<6;++state)
+                        device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
+                }
             }
         }
         device=nullptr;extraState=pixelConstantsSaved=false;

@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -327,7 +327,7 @@ bool AmbientOcclusion::Render(IDirect3DDevice9* device, const FrameContext& fram
 
     // Captures and restores every state this pass touches, including the
     // render target, viewport, pixel-shader constants and sampler states.
-    renderer::ScopedRenderState saved(device);
+    renderer::ScopedPassState saved(device);
     bool ok = true;
     auto check = [&](HRESULT hr) { if (FAILED(hr)) ok = false; };
 

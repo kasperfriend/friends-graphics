@@ -6,7 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include "../D3D9/DepthCapture.h"
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Lighting/LocalLightManager.h"
 
@@ -222,7 +222,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     m_retry.Succeed();
     m_resourceErrorLogged = false;
 
-    ScopedRenderState state(device);
+    ScopedPassState state(device);
     DepthCapture::Instance().RawSetDepth(device, nullptr);
     device->SetVertexShader(nullptr);
     for (auto rs : { D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,D3DRS_ALPHABLENDENABLE })

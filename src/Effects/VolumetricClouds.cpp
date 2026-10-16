@@ -10,7 +10,7 @@
 #include <thread>
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
@@ -969,7 +969,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
 
- ScopedRenderState state(d);
+ ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
  for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,
              D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,

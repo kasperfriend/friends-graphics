@@ -6,6 +6,7 @@
 #include "../Core/DeviceHealth.h"
 #include "../Core/FrameContext.h"
 #include "../D3D9/TrackedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 
 namespace renderer {
 // A persistent, world-aligned height field of actual terrain/liquid geometry.
@@ -84,9 +85,12 @@ public:
     // Runs before EVERY world terrain/water draw. Capture mutates only:
     // RT0/depth/viewport, RT1..3, textures 0..3, both shaders, VS constants
     // c0..c8, and the 16 render states set below - and the original draw
-    // callback mutates nothing (Draw* calls are stateless). Saving exactly
-    // that here replaces the full ~170-call ScopedRenderState, which would
-    // otherwise run on every world draw.
+    // callback mutates nothing (Draw* calls are stateless). Everything the
+    // state block covers (textures, both shaders, render states) is held by
+    // one shared D3DSBT_ALL block, so only the VS constants and the
+    // framebuffer attachments need manual saves - roughly a third of the
+    // driver calls the hand-cut manual scope needed, and a fraction of the
+    // full ~170-call ScopedRenderState.
     static constexpr D3DRENDERSTATE kStates[16]={
         D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ZFUNC,D3DRS_ALPHABLENDENABLE,D3DRS_ALPHATESTENABLE,
         D3DRS_CULLMODE,D3DRS_COLORWRITEENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_STENCILENABLE,
@@ -96,16 +100,22 @@ public:
         if(!Ensure(d))return;
         float saved[9][4]{},mv[4][4]{};
         if(FAILED(d->GetVertexShaderConstantF(0,saved[0],9))||FAILED(d->GetVertexShaderConstantF(matrixRegister,mv[0],4)))return;
+        // One Capture holds textures 0..3, both shaders and all 16 render
+        // states at once; the legacy manual save runs only when the device
+        // has no state blocks.
+        const bool block=detail::EnsurePassStateBlock(d);
         ComPtr<IDirect3DSurface9> rt0,depth0;
         d->GetRenderTarget(0,rt0.GetAddressOf());
         DepthCapture::Instance().RawGetDepth(d,depth0.GetAddressOf());
         D3DVIEWPORT9 vp{};d->GetViewport(&vp);
         ComPtr<IDirect3DBaseTexture9> tex[4];
-        for(UINT i=0;i<4;++i)d->GetTexture(i,tex[i].GetAddressOf());
         IDirect3DVertexShader9* vs0=nullptr;IDirect3DPixelShader9* ps0=nullptr;
-        d->GetVertexShader(&vs0);d->GetPixelShader(&ps0);
         DWORD st[16];
-        for(UINT i=0;i<16;++i)d->GetRenderState(kStates[i],&st[i]);
+        if(!block) {
+            for(UINT i=0;i<4;++i)d->GetTexture(i,tex[i].GetAddressOf());
+            d->GetVertexShader(&vs0);d->GetPixelShader(&ps0);
+            for(UINT i=0;i<16;++i)d->GetRenderState(kStates[i],&st[i]);
+        }
         ComPtr<IDirect3DSurface9> extra[3];
         for(UINT i=1;i<4;++i){d->GetRenderTarget(i,extra[i-1].GetAddressOf());d->SetRenderTarget(i,nullptr);}
         for(UINT i=0;i<4;++i)d->SetTexture(i,nullptr);
@@ -132,9 +142,12 @@ public:
         float camera[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};
         d->SetVertexShaderConstantF(4,inv[0],3);d->SetVertexShaderConstantF(7,camera,1);d->SetVertexShaderConstantF(8,origin,1);
         draw();if(matrixRegister==0)terrainReady=true;d->SetVertexShaderConstantF(0,saved[0],9);
-        for(UINT i=0;i<16;++i)d->SetRenderState(kStates[i],st[i]);
-        for(UINT i=0;i<4;++i)d->SetTexture(i,tex[i].Get());
-        d->SetVertexShader(vs0);d->SetPixelShader(ps0);
+        if(block)detail::SharedPassStateBlock().block->Apply();
+        else {
+            for(UINT i=0;i<16;++i)d->SetRenderState(kStates[i],st[i]);
+            for(UINT i=0;i<4;++i)d->SetTexture(i,tex[i].Get());
+            d->SetVertexShader(vs0);d->SetPixelShader(ps0);
+        }
         // SetRenderTarget can reset the viewport (notably MinZ/MaxZ), so the
         // viewport is restored only after the framebuffer attachments.
         d->SetRenderTarget(0,rt0.Get());

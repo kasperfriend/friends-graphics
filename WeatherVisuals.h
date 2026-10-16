@@ -20,7 +20,7 @@
 #include "src/Materials/WicTextureLoader.h"
 #include "src/Materials/TextureHashLookup.h"
 #include "src/D3D9/CelestialTracker.h"
-#include "src/D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/Core/FrameContext.h"
 
@@ -765,7 +765,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     const auto trackedState = renderer::g_trackedState;
     internal = true;
     {
-    renderer::ScopedRenderState savedState(device);
+    renderer::ScopedPassState savedState(device);
 
     device->SetRenderState(D3DRS_ZENABLE, FALSE);
     device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);

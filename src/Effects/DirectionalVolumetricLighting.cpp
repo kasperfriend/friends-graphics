@@ -6,7 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include "../D3D9/ScopedRenderState.h"
+#include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
 #include "EnvironmentFogCapture.h"
@@ -697,7 +697,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
      <<" groundAtlas="<<(GroundSurfaceCapture::Instance().Texture()?1:0)<<" fogTime="<<m_fogElapsed
      <<" wash="<<settings.fogWash<<" selectedLights="<<LocalLightManager::Instance().Selected().size()<<'\n';
  }
- ScopedRenderState state(d);
+ ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
  for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,D3DRS_ALPHABLENDENABLE})d->SetRenderState(s,FALSE);
  d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,0xF);d->SetVertexShader(nullptr);
