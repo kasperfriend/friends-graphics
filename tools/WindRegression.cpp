@@ -33,7 +33,56 @@ using namespace renderer::water;
 // the file settle before the renderer looks at it again - the timing a real
 // player's edit has, not a same-length rewrite inside one instruction.
 #if defined(_WIN32)
-static void SettleHandEdit() { Sleep(25); }
+// The two halves of the identity the cached read compares.
+struct HandEditStamp { ULONGLONG written = 0; DWORD bytes = 0; };
+static HandEditStamp StampOf(const std::wstring& path) {
+    HandEditStamp stamp{};
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) {
+        stamp.written = (static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                        info.ftLastWriteTime.dwLowDateTime;
+        stamp.bytes = info.nFileSizeLow;
+    }
+    return stamp;
+}
+// Two of the edits below change a value without changing its length - "2" to "7"
+// is one byte either way - so the size half of the identity cannot reveal them
+// and the timestamp is the only signal left. That signal is weaker than it looks:
+// the stamp a write gets comes from the system's cached idea of the current time,
+// which moves in ticks of roughly 15 ms, so a write made microseconds after an
+// earlier one to the same file can be stamped identically to it. The sequence
+// below is exactly that - a save, some reads, then a hand edit, all inside one
+// tick - and the result is a file whose identity has not moved at all, which the
+// cache answers from what it already holds. That is the one combination the
+// identity check cannot see, and it is why these checks flaked rather than failed.
+//
+// So age the file out of the tick it is currently in before editing it. Two ticks
+// is enough to be sure the edit's own stamp differs from the one already recorded,
+// whatever the platform's granularity turns out to be.
+static void SettleBeforeHandEdit() { Sleep(40); }
+
+// Then wait until the edit is actually visible in the file's identity, rather than
+// for a fixed interval that assumes it will be by then.
+//
+// The 25 ms floor stays. The cache re-measures a file at most every 10 ms, so an
+// edit landing inside that window is not looked for yet whichever way the
+// timestamp behaves, and the checks below are about the read answering the edit
+// rather than about the stat race.
+//
+// The ceiling is what turns an edit that never becomes visible into a failure of
+// the check that depends on it, after long enough that it cannot be a busy
+// machine - and the failure then says something true about the identity check
+// rather than about the runner.
+static void SettleHandEdit(const std::wstring& path, const HandEditStamp& before) {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        const HandEditStamp now = StampOf(path);
+        const bool moved = now.written != before.written || now.bytes != before.bytes;
+        const ULONGLONG elapsed = GetTickCount64() - start;
+        if ((moved && elapsed >= 25) || elapsed >= 5000) return;
+        Sleep(5);
+    }
+}
 #endif
 static void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 static void Pass(const char* message) { std::printf("PASS %s\n", message); }
@@ -616,7 +665,22 @@ static void TestConfigurationAndWiring()
     // applied once the place has settled, the scoped key sets are read once per
     // scope, and the chain itself is untouched.
     const auto tuning = Read("src/Environment/LocationTuning.h");
-    Check(tuning.find("GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str())") != tuning.npos &&
+    // Caching the VALUES was only half of it: an entry still had to be FILLED, and
+    // filling one asked the profile API for a single section - which opens and
+    // parses the whole file to find it. A crossing touches ~66 sections, so its
+    // cost was the size of the settings file times 66: measured at 1.4 ms for a
+    // fresh install, 66 ms for an 84 KB LocationGraphics.ini, 691 ms for 587 KB
+    // and 2653 ms for 2.1 MB, and every F7 save invalidates the cache so the next
+    // crossing pays the table again. The file is now read and indexed ONCE per
+    // identity and a section is parsed out of that text, which is what makes the
+    // cost of a crossing independent of how much the player has authored.
+    Check(tuning.find("inline void EnsureProfileLoaded(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
+          tuning.find("IndexProfileText(file);") != tuning.npos &&
+          tuning.find("ParseSectionSpan(file.text,file.spans[at],values);") != tuning.npos &&
+          // No per-section profile-API call is left to re-read the whole file.
+          tuning.find("GetPrivateProfileSectionW(") == tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") == tuning.npos &&
+          tuning.find("std::vector<wchar_t> buffer(32768)") == tuning.npos &&
           tuning.find("const std::wstring wanted=LowerKeyName(key);") != tuning.npos &&
           tuning.find("if(values->find(wanted)==values->end())continue;") != tuning.npos &&
           tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
@@ -626,7 +690,8 @@ static void TestConfigurationAndWiring()
           // There is no second, key-only memo left to fall out of step with the
           // value cache or to overflow in the middle of an apply.
           tuning.find("RememberScopedFile") == tuning.npos && tuning.find("memoWritten") == tuning.npos,
-          "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
+          "a scoped read answers from one whole-file load per identity, so filling a section costs that section and "
+          "not another parse of the whole file");
     Check(tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
           tuning.find("inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
           tuning.find("file.sections.clear();") != tuning.npos &&
@@ -725,18 +790,31 @@ static void TestConfigurationAndWiring()
           "startup configures itself - while a place whose tuning is already in force is skipped without spending the "
           "gap, and a walk along a border does not write a log line per sample about it: the line says how many reads "
           "the apply answered from memory and how many whole-file parses it paid");
-    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(") != tuning.npos &&
-          tuning.find("GetPrivateProfileSectionNamesW(") != tuning.npos &&
-          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") != tuning.npos &&
-          tuning.find("const std::vector<std::wstring>* names=SectionNamesOf(path,written,bytes);") != tuning.npos &&
-          tuning.find("if(path==localFile)localNames=names; else baseNames=names;") != tuning.npos &&
+    // And the skip has to survive a heavy settings file. The listing it is decided
+    // on came from GetPrivateProfileSectionNamesW into a fixed 32768-character
+    // buffer, which about a thousand authored scopes overflow: the overflow made
+    // the fingerprint unprovable, unprovable turned the skip OFF, and an
+    // unprovable listing is not cached either - so the whole file was re-listed on
+    // every ask, twice per crossing, forever. Measured at 84 KB: 1.4 ms per
+    // listing and no skip at all; at 2.1 MB, 46 ms. The listing now comes off the
+    // index the load builds, so it has no ceiling, and both the suffix walk and
+    // the fingerprint are kept against the identities they were derived from.
+    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(const std::wstring& path)") != tuning.npos &&
+          tuning.find("for(const auto& entry:file.firstSpanOf)file.listing.push_back(entry.first);") != tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") == tuning.npos &&
+          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") == tuning.npos &&
+          tuning.find("ScopedSuffixList(localWritten,localBytes,baseWritten,baseBytes)") != tuning.npos &&
           tuning.find("std::wstring suffix=SectionSuffixOf(name);") != tuning.npos &&
-          tuning.find("effective.try_emplace(key,value);") != tuning.npos &&
-          tuning.find("present.insert(key);") != tuning.npos &&
+          // Deepest level wins, by a stable sort of pointers rather than a
+          // std::map and a std::set of copied strings per suffix.
+          tuning.find("std::stable_sort(resolved.begin(),resolved.end(),") != tuning.npos &&
           tuning.find("FingerprintMix(hash,L\"scoped\");") != tuning.npos &&
           tuning.find("FingerprintMix(hash,suffix);") != tuning.npos &&
           tuning.find("return current!=0&&current==appliedFingerprint;") != tuning.npos &&
-          tuning.find("return provable?hash:0;") != tuning.npos,
+          tuning.find("if(!provable) {active=previous;return 0;}") != tuning.npos &&
+          // The answers are remembered, and a write drops them with the values.
+          tuning.find("for(const FingerprintMemo& memo:FingerprintMemos())") != tuning.npos &&
+          tuning.find("ForgetScopedAnswers();") != tuning.npos,
           "the skip is decided on what the FILE holds, never on what a previous read cached: the section list and "
           "the per-suffix answers are read from the profile file itself, so a scope written by hand - or by the "
           "editor - in a section no read has touched still refuses the skip instead of quietly never applying, and a "
@@ -788,8 +866,10 @@ static void TestConfigurationAndWiring()
     Check(load().direction == WindDirection::West && load().debugView, "leaving subarea restores zone/global wind");
     locationtuning::Sync(base, {}, false);
     Check(load().direction == WindDirection::East, "unverified client reads/writes global wind");
+    SettleBeforeHandEdit();
+    const auto beforeGlobalEdit = StampOf(file);
     Check(WritePrivateProfileStringW(L"Wind", L"Direction", L"7", file.c_str()) != 0, "manual INI edit");
-    SettleHandEdit();
+    SettleHandEdit(file, beforeGlobalEdit);
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
     // The crossing gate, against the real profile API: a settle of a place whose own
     // scoped settings already resolve to what the nine subsystems are running must be
@@ -809,9 +889,11 @@ static void TestConfigurationAndWiring()
     Check(locationtuning::AppliedTuningStillInForce(neighbour, true),
           "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
           "into it is skipped without re-reading nine subsystems");
+    SettleBeforeHandEdit();
+    const auto beforeScopeEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
           "a scope written for one area, as the editor or a hand edit would");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeScopeEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's own scope is what a read answers now");
     locationtuning::Sync(base, saved, true);
@@ -820,9 +902,11 @@ static void TestConfigurationAndWiring()
     Check(!locationtuning::AppliedTuningStillInForce(fresh, true),
           "walking back is not skipped once the two areas resolve to different values");
     Check(!locationtuning::HasScopedValue(L"Water", L"WaterColour"), "no scoped colour for this area yet");
+    SettleBeforeHandEdit();
+    const auto beforeSectionEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Water", L"WaterColour", L"1", scoped.c_str()) != 0,
           "a scope written into a section no read in this session has touched");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeSectionEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::South, "the area's other scopes are untouched by the new section");
     locationtuning::Sync(base, saved, true);
@@ -833,9 +917,11 @@ static void TestConfigurationAndWiring()
           "never skipped past the value it holds");
     locationtuning::MarkTuningApplied(saved, true);
     Check(locationtuning::AppliedTuningStillInForce(saved, true), "and once that was applied the place is skipped again");
+    SettleBeforeHandEdit();
+    const auto beforeValueEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"5", scoped.c_str()) != 0,
           "the area's wind is edited");
-    SettleHandEdit();
+    SettleHandEdit(scoped, beforeValueEdit);
     locationtuning::Sync(base, saved, true);
     Check(load().direction == WindDirection::SouthWest, "the edit is what a read answers");
     locationtuning::Sync(base, saved, true);

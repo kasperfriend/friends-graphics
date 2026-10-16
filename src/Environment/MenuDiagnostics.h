@@ -1,10 +1,9 @@
 #pragma once
 #include <windows.h>
-#include <filesystem>
-#include <fstream>
-#include <vector>
 #include <cstdio>
 #include <string>
+#include <vector>
+#include "../Diagnostics/FileSink.h"
 namespace renderer::menudiagnostics {
 inline std::wstring file;
 inline std::string TimeStamp() {
@@ -13,32 +12,45 @@ inline std::string TimeStamp() {
     snprintf(prefix,sizeof prefix,"%04d-%02d-%02d %02d:%02d:%02d UTC ",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);
     return prefix;
 }
-inline void RotateIfNeeded() {
-    std::error_code error;
-    if(std::filesystem::file_size(file,error)>1024*1024&&!error) {
-        auto previous=file+L".previous";
-        std::filesystem::remove(previous,error);
-        std::filesystem::rename(file,previous,error);
-    }
-}
+// This report is written on EVERY confirmed place, and a confirmed place is not a
+// settled one: walking a border flaps this client's idea of where the player is,
+// and most of those alternations re-apply nothing at all. It used to stat the file
+// for rotation and then open, write and close it on every one of them - a dozen
+// lines' worth of I/O in the game folder, on the frame the player is walking on,
+// for a crossing that changed nothing. It now buffers into the shared sink, so the
+// report still lands in full and in order, in the one open Present already makes.
 inline void Write(const std::string& message) {
     if(file.empty())return;
-    RotateIfNeeded();
-    std::ofstream out{std::filesystem::path(file),std::ios::app};
-    out<<TimeStamp()<<message<<'\n';
+    renderer::filesink::AppendLine(file,TimeStamp()+message);
 }
-// One open for a whole report: the menu report is a dozen lines written in a
-// single burst on every zone change, and one file open per line turned that
-// burst into a dozen open/close round trips.
+// One buffer for a whole report: the menu report is a dozen lines written in a
+// single burst on every zone change, and one file open per line turned that burst
+// into a dozen open/close round trips.
 inline void WriteBatch(const std::vector<std::string>& messages) {
     if(file.empty()||messages.empty())return;
-    RotateIfNeeded();
-    std::ofstream out{std::filesystem::path(file),std::ios::app};
     const std::string stamp=TimeStamp();
-    for(const auto& message:messages)out<<stamp<<message<<'\n';
+    std::string batch;
+    for(const auto& message:messages){batch+=stamp;batch+=message;batch+='\n';}
+    renderer::filesink::Append(file,batch);
 }
+// Put the report on disk now.
+//
+// The report is buffered into the shared sink and goes out on the flush Present
+// makes at the end of every frame, so inside the renderer it is on disk within
+// the frame that produced it and a supporter still gets every line. A reader
+// OUTSIDE the frame loop has to ask for that flush itself, because nothing else
+// is going to make one: a regression that checks what a supporter would be sent
+// never calls Present, and reading the file straight after writing to it would
+// otherwise see nothing and report the support log as broken when it is only
+// unwritten. See the ownership rule in src/Diagnostics/FileSink.h.
+inline void Flush() { renderer::filesink::FlushFile(file); }
 inline void Configure(const std::wstring& base) {
     file=base+L"MenuDiagnostics.log";
+    // The README tells a supporter this file rotates at 1 MiB, and that the
+    // rotated half is called MenuDiagnostics.log.previous - both are the sink's
+    // business now, so both are declared here rather than left to its defaults.
+    renderer::filesink::SetRotationLimit(file,1024*1024);
+    renderer::filesink::SetRotationSuffix(file,L".previous");
     Write("SESSION menu-fix-v2-cloud-light-v1 build=" __DATE__ " " __TIME__);
 }
 }

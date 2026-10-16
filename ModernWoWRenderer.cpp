@@ -25,6 +25,7 @@
 #include "src/Core/FrameContext.h"
 #include "src/Core/DeviceHealth.h"
 #include "src/Diagnostics/RendererDiagnostics.h"
+#include "src/Diagnostics/FileSink.h"
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
 #include "src/D3D9/TrackedRenderState.h"
@@ -88,41 +89,35 @@ std::wstring g_basePath;
 // a scanner watching a game folder turns into milliseconds each. That is what the
 // "Location tuning reloaded in 47 ms" line in a player's log was made of, and it
 // was still true after the settings themselves had been made to read from memory.
-// Lines are buffered here and written once per frame (Present flushes; so does a
-// device-loss transition), so a hundred lines cost what one did and a frame with
-// nothing to say touches no file at all. The file is NOT held open between
-// flushes: a player can still move or delete it while the game runs, which is how
-// this log gets looked at in the first place.
-std::string g_logPending;
-void FlushLog() noexcept
-{
-    try
-    {
-        if(g_logPending.empty())return;
-        // A long session grows this log into the megabytes, and a big file in
-        // the game folder is what a scanner keeps re-scanning - the stall a
-        // player finds by deleting the log mid-session. Rotate it past two
-        // megabytes: the recent lines (what anyone reading it cares about)
-        // survive, the oldest are discarded, and the file never outgrows the
-        // scanner's patience.
-        renderer::locationtuning::RotateLogIfLarge(g_basePath + L"ModernWoWRenderer.log");
-        std::ofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
-        out << g_logPending;
-        out.flush();
-    }
-    catch (...) {}
-    g_logPending.clear();
-}
+//
+// Buffering this one file was not enough, because it was not the only file a
+// crossing writes: the environment manager wrote the location line here AND the
+// whole menu report to its own file straight to disk on every confirmed place,
+// and a crossing that did re-apply wrote the material tuning row to a third. So
+// the buffer lives in renderer::filesink and is shared by the diagnostic files it
+// is the sole writer of, and one flush is one open per file - see FileSink.h for
+// the whole argument, including why the water, edge-fog and post-process logs are
+// deliberately left out of it. Present flushes, as does a device-availability
+// transition, so a hundred lines cost what one did, a frame with nothing to say
+// touches no file at all, and no file is held open between flushes: a player can
+// still move or delete a log while the game runs, which is how these get looked
+// at.
+// Built once, where the base path is worked out, rather than concatenated per
+// line: Log is called from the frame path and the sink does not need an
+// allocation per call. Before the base path is known this is the same relative
+// name the concatenation of an empty base produced, so early lines land where
+// they always did.
+std::wstring g_logPath = L"ModernWoWRenderer.log";
+void FlushLog() noexcept { renderer::filesink::Flush(); }
 void Log(char const* text) noexcept
 {
     try
     {
         if(!text)return;
-        g_logPending += text;
-        g_logPending += '\n';
-        // A burst goes out on the spot past a few kilobytes, so a crash can never take
-        // more than one frame's worth of lines with it.
-        if(g_logPending.size() >= 8192)FlushLog();
+        // The sink holds the burst rule (a few kilobytes goes out on the spot,
+        // so a crash cannot take more than one frame's lines with it) and the
+        // rotation, and shares both with the other diagnostic files it owns.
+        renderer::filesink::AppendLine(g_logPath,text);
     }
     catch (...) {}
 }
@@ -1165,6 +1160,7 @@ void Initialize()
     GetModuleFileNameW(nullptr, path, std::size(path));
     std::wstring exe(path);
     g_basePath = exe.substr(0, exe.find_last_of(L"\\/") + 1);
+    g_logPath = g_basePath + L"ModernWoWRenderer.log";
     PublishBuildStamp();
     wchar_t systemDirectory[MAX_PATH]{};
     if (!GetSystemDirectoryW(systemDirectory, std::size(systemDirectory)))
