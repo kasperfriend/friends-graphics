@@ -120,7 +120,12 @@ jobs:
           $text = ($output | Out-String).Trim()
           Write-Output $text
           # Preserve compiler/GPU diagnostics in API-readable annotations too.
-          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          # GitHub truncates annotation messages at 4096 characters. Sending the full output
+          # makes the compile banner the entire annotation and hides the failing check,
+          # so annotations carry the tail - where the failure lives - while the complete
+          # output stays in the step log above.
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
           if ($result -ne 0) {
             Write-Output "::error title=Water regression failed::$flat"
             exit $result
@@ -167,7 +172,12 @@ jobs:
           $result = $LASTEXITCODE
           $text = ($output | Out-String).Trim()
           Write-Output $text
-          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          # GitHub truncates annotation messages at 4096 characters. Sending the full output
+          # makes the compile banner the entire annotation and hides the failing check,
+          # so annotations carry the tail - where the failure lives - while the complete
+          # output stays in the step log above.
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
           if ($result -ne 0) {
             Write-Output "::error title=F7 overlay device regression failed::$flat"
             exit $result
@@ -182,7 +192,12 @@ jobs:
           $result = $LASTEXITCODE
           $text = ($output | Out-String).Trim()
           Write-Output $text
-          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          # GitHub truncates annotation messages at 4096 characters. Sending the full output
+          # makes the compile banner the entire annotation and hides the failing check,
+          # so annotations carry the tail - where the failure lives - while the complete
+          # output stays in the step log above.
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
           if ($result -ne 0) {
             Write-Output "::error title=Environment regression failed::$flat"
             exit $result
@@ -198,7 +213,12 @@ jobs:
           $text = ($output | Out-String).Trim()
           Write-Output $text
           # Preserve compiler/GPU diagnostics in API-readable annotations too.
-          $flat = ($text -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          # GitHub truncates annotation messages at 4096 characters. Sending the full output
+          # makes the compile banner the entire annotation and hides the failing check,
+          # so annotations carry the tail - where the failure lives - while the complete
+          # output stays in the step log above.
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
           if ($result -ne 0) {
             Write-Output "::error title=Weather regression failed::$flat"
             exit $result
