@@ -13,6 +13,9 @@ volatile uint32_t mapId=571,zoneId=65,areaId=4164;
 int main() {
     renderer::WoWClientContext client;
     if(!client.Detect())return 2;
+    // Detect never hashes (fast load); the provider does in Configure, so the
+    // config this test writes must reference an explicitly computed hash.
+    client.EnsureSha256(L"");
     std::ofstream config("EnvironmentProfiles.ini");
     config<<"[EnvironmentSystem]\nEnabled=1\nDebug=1\nAreaDebounceMs=300\n[LocationProvider]\nExeSHA256="<<client.sha256
         <<"\nMapRva="<<(uintptr_t(&mapId)-client.base)<<"\nZoneRva="<<(uintptr_t(&zoneId)-client.base)

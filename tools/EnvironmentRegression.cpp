@@ -127,7 +127,12 @@ int main() try {
  EnvironmentDatabase db;Require(db.Load(file.wstring(),error)&&db.AreaCount()==2&&db.Area(87)->parentId==12,"database parser and hierarchy");
  {std::ofstream f(file);f<<"EnvironmentDatabase 1\nM 0 \"Map\"\nA 12 0 87 0 \"Cycle\"\nA 87 0 12 0 \"Cycle\"\n";}
  Require(!db.Load(file.wstring(),error)&&db.Area(87)->name=="Goldshire","database rejects cycles and preserves previous state");std::filesystem::remove(file);
- WoWClientContext client;Require(client.Detect(),"detect x86 test executable");uint32_t value=0;
+ WoWClientContext client;Require(client.Detect(),"detect x86 test executable");
+ // Detect is header-only and never hashes the image (fast load); the provider
+ // computes the fingerprint in Configure, so the test asks for it explicitly
+ // before writing an INI that references client.sha256.
+ client.EnsureSha256(L"");
+ uint32_t value=0;
  Require(!client.Read(client.imageSize,&value,4)&&!client.Read(UINTPTR_MAX,&value,4),"bad RVAs fail without crash");
  WoWLocationProvider provider;provider.Configure(L"nonexistent-environment.ini");Require(!provider.Verified()&&!provider.Sample(db,true).valid,"unrecognized build never reads reference offsets");
  Require(provider.Failure()==LocationFailure::FingerprintMismatch&&!provider.Sampled(),
