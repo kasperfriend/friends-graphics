@@ -1,6 +1,6 @@
 ---
 area: renderer
-type: fix
+type: fixed
 audience: players
 title: Shader cache entries now match the format the reader validates
 ---

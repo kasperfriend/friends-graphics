@@ -88,7 +88,7 @@ namespace renderer
             {
             }
 
-            HRESULT QueryInterface(REFIID riid, void** ppvObject) override
+            HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override
             {
                 if (!ppvObject) return E_POINTER;
                 if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3DBlob))
@@ -101,9 +101,9 @@ namespace renderer
                 return E_NOINTERFACE;
             }
 
-            ULONG AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_refs)); }
+            ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_refs)); }
 
-            ULONG Release() override
+            ULONG STDMETHODCALLTYPE Release() override
             {
                 const LONG refs = InterlockedDecrement(&m_refs);
                 if (refs == 0) delete this;
@@ -111,12 +111,12 @@ namespace renderer
             }
 
             // Official ID3DBlob (= ID3D10Blob) accessors: no-arg, by-value.
-            SIZE_T GetBufferSize() override
+            SIZE_T STDMETHODCALLTYPE GetBufferSize() override
             {
                 return static_cast<SIZE_T>(m_data.size());
             }
 
-            LPVOID GetBufferPointer() override
+            LPVOID STDMETHODCALLTYPE GetBufferPointer() override
             {
                 return m_data.data();
             }

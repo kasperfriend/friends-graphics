@@ -5,6 +5,7 @@
 #include <cstring>
 #include "../Core/DeviceHealth.h"
 #include "../Core/FrameContext.h"
+#include "../D3D9/DepthCapture.h"
 #include "../D3D9/TrackedRenderState.h"
 #include "../D3D9/ScopedPassState.h"
 
@@ -98,7 +99,7 @@ public:
         // One Capture holds textures 0..3, both shaders and all 16 render
         // states at once; the legacy manual save runs only when the device
         // has no state blocks.
-        static constexpr D3DRENDERSTATE kStates[] = {
+        static constexpr D3DRENDERSTATETYPE kStates[] = {
             D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ZFUNC, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
             D3DRS_CULLMODE, D3DRS_COLORWRITEENABLE, D3DRS_FOGENABLE, D3DRS_LIGHTING, D3DRS_STENCILENABLE,
             D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_FILLMODE, D3DRS_CLIPPLANEENABLE,

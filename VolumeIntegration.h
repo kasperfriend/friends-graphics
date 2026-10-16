@@ -782,7 +782,7 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
     ComPtr<IDirect3DSurface9> rt0, depth0;
     D3DVIEWPORT9 oldVp{};
     if (FAILED(d->GetRenderTarget(0, rt0.GetAddressOf()))) return;
-    DepthCapture::Instance().RawGetDepth(d, depth0.GetAddressOf());
+    renderer::DepthCapture::Instance().RawGetDepth(d, depth0.GetAddressOf());
     if (FAILED(d->GetViewport(&oldVp))) return;
     DWORD alphaTest = 0;
     d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
@@ -806,7 +806,7 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
     }
     auto restoreFramebuffer = [&] {
         d->SetRenderTarget(0, rt0.Get());
-        DepthCapture::Instance().RawSetDepth(d, depth0.Get());
+        renderer::DepthCapture::Instance().RawSetDepth(d, depth0.Get());
         d->SetViewport(&oldVp);
     };
     internal = true;
