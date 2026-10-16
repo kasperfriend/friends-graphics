@@ -132,6 +132,10 @@ namespace renderer
         void DrawScreenQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
 
         VolumetricCloudSettings m_settings;
+        // Fingerprint of the last settings Configure() fully applied. A
+        // crossing that resolves this section to the same values skips the
+        // re-apply (see Configure). 0 = never applied.
+        uint64_t m_settingsFingerprint = 0;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_fullWidth = 0, m_fullHeight = 0, m_lowWidth = 0, m_lowHeight = 0;
         ComPtr<IDirect3DTexture9> m_cloudTexture;

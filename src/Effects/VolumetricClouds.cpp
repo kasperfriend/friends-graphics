@@ -626,7 +626,12 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_logPath=basePath+L"Clouds.log";
  m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
  m_cachePath=basePath+L"CloudFields.cache";
- auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));};
+ // Fingerprint the raw inputs: a crossing whose place resolves this section
+ // to the values already applied re-derives identical settings, and the
+ // re-apply below (quality preset, log, field-cache probe, generation thread)
+ // is the hitch on the frame the player crosses.
+ renderer::locationtuning::SettingsFingerprint fp;
+ auto read=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.enabled=read(L"Enabled",1)!=0;
  ApplyQualityPreset(static_cast<uint32_t>(std::clamp(read(L"Quality",2),0,3)));
  // Older INIs shipped explicit SampleCount/LightSampleCount/BaseStep values
@@ -676,6 +681,7 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.weatherClouds=read(L"WeatherClouds",1)!=0;
  m_settings.evolutionSpeed=std::clamp(read(L"EvolutionPercent",100),0,400)*.01f;
  m_settings.transitionSeconds=float(std::clamp(read(L"TransitionSeconds",12),0,60));
+ if(renderer::locationtuning::SameSettings(m_settingsFingerprint,fp))return;
  // Cold-start field generation is roughly a second of CPU. It used to run on
  // the first frame that would draw clouds - hidden under a loading screen on
  // slow machines, but in-game on a fast one. When the cache is missing, start
@@ -685,7 +691,10 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  // deterministic (fixed seeds), so the two paths can never disagree.
  if(m_settings.enabled&&!m_cachePath.empty()) {
   std::error_code ec;
-  if(!std::filesystem::exists(m_cachePath,ec)) {
+  // Not exists alone: a settings change can re-enter this block while the
+  // first worker is still generating, and two workers writing the same
+  // cache is wasted CPU on the crossing's frame.
+  if(!std::filesystem::exists(m_cachePath,ec)&&!m_fieldsGenerating) {
    m_fieldsGenerating=true;
    std::thread([this]{
     try {

@@ -74,14 +74,26 @@ inline std::wstring& LowerInPlace(std::wstring& text) {
 // exactly the stall a player feels walking across a border. A profile file is a
 // few kilobytes of key=value text: read a section ONCE, keep it, and answer from
 // memory until the file's own identity (its write time and size) changes. Every
-// read still stats the file first, so an edit is visible to the very next read -
-// the guarantee the old comment made - at microseconds instead of milliseconds.
+// read still checks the file's identity first, so an edit is visible to the
+// next frame's reads - the guarantee the old comment made - at microseconds
+// instead of milliseconds. The identity is re-stat'd at most once every 10 ms
+// per file, not once per read: one settled crossing stats the same file once
+// per read (hundreds of identity checks for one answer), and on a game folder
+// a scanner is watching each stat is a millisecond the player feels on the
+// crossing. 10 ms sits safely under the 15.625 ms system-timer step, so on the
+// default 64 Hz timer the very next tick re-stats and no external edit can
+// stay hidden for more than one tick (a reload cannot act on an edit before
+// the next frame either, so the window hides nothing); on a high-resolution
+// timer it is a plain 10 ms. Every write this project makes drops the values
+// outright, and F12 drops everything, so no edit can stay hidden for more
+// than one frame regardless.
 // Blank values are absent, exactly as the profile API treats them.
 struct ProfileValues {
     bool known=false;
     bool exists=false;
     ULONGLONG written=0;
     DWORD bytes=0;
+    ULONGLONG lastStatMs=0;
     std::unordered_map<std::wstring,std::unordered_map<std::wstring,std::wstring>> sections;
 };
 inline std::unordered_map<std::wstring,ProfileValues>& ProfileCache() {
@@ -89,6 +101,12 @@ inline std::unordered_map<std::wstring,ProfileValues>& ProfileCache() {
     return files;
 }
 inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path) {
+    // Trust the cached identity until 10 ms have passed (see the comment on
+    // ProfileValues for why 10 ms hides no edit). A first-ever look or a file
+    // we have not stat'd recently stats for real.
+    const ULONGLONG now=GetTickCount64();
+    if(file.known&&(now-file.lastStatMs)<10)return true;
+    file.lastStatMs=now;
     WIN32_FILE_ATTRIBUTE_DATA info{};
     const bool exists=GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)!=0;
     const ULONGLONG written=exists?((static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime):0;
@@ -99,6 +117,43 @@ inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path) {
         return false;
     }
     return true;
+}
+// ---------------------------------------------------------------------------
+// Per-subsystem settings fingerprints.
+//
+// The file-level fingerprint below answers "did the scoped settings for this
+// place change". A crossing between two places that genuinely differ in one
+// key still re-applies every subsystem, and each re-apply pays its side
+// effects - a log write, a temporal-history reset, a cloud-field thread
+// check, a cache invalidation - on exactly the frame the player is walking
+// the border on. Each ReloadTuning therefore fingerprints the raw values it
+// reads and, when they are exactly what it applied before, skips the
+// re-apply: the values the draw loop sees are unchanged by construction, so
+// nothing about the picture changes. A 0 stored fingerprint means "never
+// applied", which is why the guard also tests it.
+struct SettingsFingerprint {
+    uint64_t h=1469598103934665603ull;
+    void mix(uint64_t v){h^=v+0x9e3779b97f4a7c15ull+(h<<6)+(h>>2);}
+};
+inline void MixInt(SettingsFingerprint& fp,int v){fp.mix(static_cast<uint64_t>(static_cast<uint32_t>(v)));}
+inline void MixBool(SettingsFingerprint& fp,bool v){fp.mix(v?1ull:0ull);}
+inline bool SameSettings(uint64_t& applied,SettingsFingerprint& fp) {
+    const bool same=applied!=0&&applied==fp.h;
+    if(!same)applied=fp.h;
+    return same;
+}
+// The renderer's log grows across a long session, and a large file sitting in
+// the game folder is what a scanner keeps re-scanning - deleting it
+// mid-session is how players have found the crossing stall. Once past two
+// megabytes the log is rotated to <name>.1: the oldest content is discarded,
+// the recent content - the part anyone reading the log cares about - survives.
+inline void RotateLogIfLarge(const std::wstring& path,size_t limitBytes=2*1024*1024) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if(GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info)==0)return;
+    if(static_cast<size_t>(info.nFileSizeLow)<limitBytes)return;
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(path+L".1"),ec);
+    std::filesystem::rename(std::filesystem::path(path),std::filesystem::path(path+L".1"),ec);
 }
 // What the cache actually did, for the line a report is read from: settings reads
 // answered out of a section already in memory, and whole-file parses made to fill

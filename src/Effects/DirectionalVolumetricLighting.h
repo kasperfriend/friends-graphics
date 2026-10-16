@@ -111,6 +111,11 @@ namespace renderer
         bool ValidateHistory(const FrameContext& frameContext);
 
         VolumetricSettings m_settings;
+        // Fingerprint of the last settings Configure() fully applied; a
+        // crossing that resolves the same values skips the re-apply (which
+        // also keeps the temporal history valid instead of shimmering a
+        // frame). 0 = never applied.
+        uint64_t m_settingsFingerprint = 0;
         IDirect3DDevice9* m_owner = nullptr;
         uint32_t m_fullWidth = 0, m_fullHeight = 0, m_lowWidth = 0, m_lowHeight = 0;
         D3DFORMAT m_targetFormat = D3DFMT_UNKNOWN;

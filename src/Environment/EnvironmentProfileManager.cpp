@@ -8,7 +8,7 @@
 #include <sstream>
 namespace renderer {
 EnvironmentProfileManager& EnvironmentProfileManager::Instance() {static EnvironmentProfileManager manager;return manager;}
-void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty())std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}
+void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty()){renderer::locationtuning::RotateLogIfLarge(basePath+L"ModernWoWRenderer.log");std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}}
 void EnvironmentProfileManager::Configure(const std::wstring& base) {
     basePath=base;std::string error;
     menudiagnostics::Configure(base);

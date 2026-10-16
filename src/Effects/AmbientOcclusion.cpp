@@ -172,8 +172,15 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
     const std::wstring ini = basePath + L"GraphicsEffects.ini";
     m_logPath = basePath + L"AmbientOcclusion.log";
     m_shaderCacheDir = renderer::shaderbytecode::Dir(basePath);
+    // Fingerprint the raw inputs: a crossing that resolves them to the values
+    // already applied re-derives identical settings, and the re-apply below -
+    // above all the log open-plus-write in the game folder - is the hitch the
+    // player feels on the crossing.
+    renderer::locationtuning::SettingsFingerprint fp;
     auto read = [&](const wchar_t* key, int fallback) -> int {
-        return static_cast<int>(renderer::locationtuning::ReadInt(L"AmbientOcclusion", key, fallback, ini.c_str()));
+        const int v = static_cast<int>(renderer::locationtuning::ReadInt(L"AmbientOcclusion", key, fallback, ini.c_str()));
+        renderer::locationtuning::MixInt(fp, v);
+        return v;
     };
     m_settings.enabled = read(L"Enabled", 1) != 0;
     // 60 % of full darkening by default: enough to seat objects on the ground
@@ -185,6 +192,11 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
     m_settings.radius = float(std::clamp(read(L"RadiusUnits", 1), 1, 6));
     m_settings.fadeDistance = float(std::clamp(read(L"DistanceFadeUnits", 250), 20, 600));
     m_settings.debug = read(L"DebugMask", 0) != 0;
+    // Nothing changed since the last apply: the settings (and therefore the
+    // log line and any resource the draw loop keys off them) are exactly what
+    // they are, so the re-apply - and its log write in the game folder - buys
+    // nothing but a hitch on the crossing's frame.
+    if (renderer::locationtuning::SameSettings(m_settingsFingerprint, fp)) return;
     char message[160];
     sprintf_s(message, sizeof(message), "tuning enabled=%d strength=%.2f radius=%.1f fade=%.0f debug=%d",
               m_settings.enabled ? 1 : 0, m_settings.strength, m_settings.radius, m_settings.fadeDistance,

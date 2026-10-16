@@ -547,7 +547,13 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Atmosphere.log";
  m_shaderCacheDir=renderer::shaderbytecode::Dir(basePath);
- auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));};
+ // Fingerprint the raw inputs (all three sections this reads): a crossing
+ // that resolves them to the values already applied re-derives identical
+ // settings, and the re-apply below - including dropping the temporal
+ // history (m_historyValid) - is a hitch and a one-frame shimmer on the
+ // frame the player crosses.
+ renderer::locationtuning::SettingsFingerprint fp;
+ auto read=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.enabled=read(L"DirectionalVolumetricEnabled",1)!=0;
  m_settings.quality=static_cast<uint32_t>(std::clamp(read(L"AtmosphereQuality",1),0,2));
  static constexpr uint32_t samples[]={12,16,24}; static constexpr float scales[]={.25f,.25f,.5f};
@@ -588,7 +594,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // more zones. The toggle in the overlay still works for testing it.
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
- const auto readLocal=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));};
+ const auto readLocal=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.localFogEnabled=readLocal(L"Enabled",1)!=0;
  m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",12),0,100)*.003f;
  // Height is now a real thickness in world units: higher means taller.
@@ -597,9 +603,16 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.localFogWakeStrength=std::clamp(readLocal(L"WakeStrengthPercent",85),0,150)*.01f;
  m_settings.localFogWakeRadius=float(std::clamp(readLocal(L"WakeRadius",5),2,14));
  m_settings.localFogTrailLength=float(std::clamp(readLocal(L"TrailLength",18),4,40));
- m_settings.edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str())!=0;
- m_settings.edgeFogDistance=float(std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",100,ini.c_str())),10,300));
- m_settings.edgeFogPower=std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",100,ini.c_str())),10,300)*.01f;
+ const int edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str());
+ const int edgeFogDistance=renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",100,ini.c_str());
+ const int edgeFogPower=renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",100,ini.c_str());
+ renderer::locationtuning::MixInt(fp,edgeFogEnabled);
+ renderer::locationtuning::MixInt(fp,edgeFogDistance);
+ renderer::locationtuning::MixInt(fp,edgeFogPower);
+ if(renderer::locationtuning::SameSettings(m_settingsFingerprint,fp))return;
+ m_settings.edgeFogEnabled=edgeFogEnabled!=0;
+ m_settings.edgeFogDistance=float(std::clamp(edgeFogDistance,10,300));
+ m_settings.edgeFogPower=std::clamp(edgeFogPower,10,300)*.01f;
  m_historyValid=false;
 }
 

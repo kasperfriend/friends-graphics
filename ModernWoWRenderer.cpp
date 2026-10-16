@@ -99,6 +99,13 @@ void FlushLog() noexcept
     try
     {
         if(g_logPending.empty())return;
+        // A long session grows this log into the megabytes, and a big file in
+        // the game folder is what a scanner keeps re-scanning - the stall a
+        // player finds by deleting the log mid-session. Rotate it past two
+        // megabytes: the recent lines (what anyone reading it cares about)
+        // survive, the oldest are discarded, and the file never outgrows the
+        // scanner's patience.
+        renderer::locationtuning::RotateLogIfLarge(g_basePath + L"ModernWoWRenderer.log");
         std::ofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
         out << g_logPending;
         out.flush();
