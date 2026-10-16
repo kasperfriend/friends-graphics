@@ -138,7 +138,7 @@ bool Compile(IDirect3DDevice9* device, const char* source, const std::wstring& c
     // falls back to one recompile, keeping the error text as before.
     ComPtr<ID3DBlob> blob;
     return renderer::shaderbytecode::GetShader(cacheDir, source, "main", "ps_3_0", blob,
-        [device, shader](const ID3DBlob* b)
+        [device, shader](ID3DBlob* b)
         { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), shader)); },
         &error);
 }

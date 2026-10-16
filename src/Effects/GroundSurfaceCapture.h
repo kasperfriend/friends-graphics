@@ -91,11 +91,6 @@ public:
     // framebuffer attachments need manual saves - roughly a third of the
     // driver calls the hand-cut manual scope needed, and a fraction of the
     // full ~170-call ScopedRenderState.
-    static constexpr D3DRENDERSTATE kStates[16]={
-        D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ZFUNC,D3DRS_ALPHABLENDENABLE,D3DRS_ALPHATESTENABLE,
-        D3DRS_CULLMODE,D3DRS_COLORWRITEENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_STENCILENABLE,
-        D3DRS_SCISSORTESTENABLE,D3DRS_SRGBWRITEENABLE,D3DRS_FILLMODE,D3DRS_CLIPPLANEENABLE,
-        D3DRS_DEPTHBIAS,D3DRS_SLOPESCALEDEPTHBIAS};
     template<class Draw> void Capture(IDirect3DDevice9* d,const FrameContext& f,UINT matrixRegister,Draw draw) {
         if(!Ensure(d))return;
         float saved[9][4]{},mv[4][4]{};
@@ -103,6 +98,12 @@ public:
         // One Capture holds textures 0..3, both shaders and all 16 render
         // states at once; the legacy manual save runs only when the device
         // has no state blocks.
+        static constexpr D3DRENDERSTATE kStates[] = {
+            D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ZFUNC, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
+            D3DRS_CULLMODE, D3DRS_COLORWRITEENABLE, D3DRS_FOGENABLE, D3DRS_LIGHTING, D3DRS_STENCILENABLE,
+            D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_FILLMODE, D3DRS_CLIPPLANEENABLE,
+            D3DRS_DEPTHBIAS, D3DRS_SLOPESCALEDEPTHBIAS
+        };
         const bool block=detail::BeginPassState(d);
         ComPtr<IDirect3DSurface9> rt0,depth0;
         d->GetRenderTarget(0,rt0.GetAddressOf());

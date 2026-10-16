@@ -987,7 +987,7 @@ void Configure(const std::wstring& base) {
     AdvanceSea(0.f);
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     compiling=true;
-    std::thread([cacheDir=renderer::shaderbytecode::Dir(base),logPath,strength,normalStrength,specularStrength,effectEnabled]{
+    std::thread([cacheDir=renderer::shaderbytecode::Dir(base),logPath=logPath,strength=strength,normalStrength=normalStrength,specularStrength=specularStrength,effectEnabled=effectEnabled]{
         try {
         ComPtr<ID3DBlob> blob,error;
         std::vector<DWORD> ps,vs;

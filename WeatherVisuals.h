@@ -399,7 +399,7 @@ inline void EnsureShaders(IDirect3DDevice9* device)
     {
         std::string error;
         if (!renderer::shaderbytecode::GetShader(cacheDir, precipitationHLSL, "main", "ps_3_0", codeBlob,
-                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), precipitationPS.GetAddressOf())); }, &error))
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), precipitationPS.GetAddressOf())); }, &error))
             Log(error.c_str());
     }
 
@@ -408,7 +408,7 @@ inline void EnsureShaders(IDirect3DDevice9* device)
         codeBlob.Reset();
         std::string error;
         if (!renderer::shaderbytecode::GetShader(cacheDir, lensDropletsHLSL, "main", "ps_3_0", codeBlob,
-                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), lensDropletsPS.GetAddressOf())); }, &error))
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), lensDropletsPS.GetAddressOf())); }, &error))
             Log(error.c_str());
     }
 
@@ -417,7 +417,7 @@ inline void EnsureShaders(IDirect3DDevice9* device)
         codeBlob.Reset();
         std::string error;
         if (!renderer::shaderbytecode::GetShader(cacheDir, nativeParticleHLSL, "main", "ps_2_0", codeBlob,
-                [device](const ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), nativeParticlePS.GetAddressOf())); }, &error))
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), nativeParticlePS.GetAddressOf())); }, &error))
             Log(error.c_str());
     }
 }

@@ -177,28 +177,28 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     // on a miss, so a repeat launch skips all ten fxc passes. GetShader
     // also recompiles once and retries if the driver refuses a cached blob.
     const std::wstring cacheDir = renderer::shaderbytecode::Dir(savedBasePath);
-    auto createPS = [&](const ID3DBlob* b, ComPtr<IDirect3DPixelShader9>& out)
+    auto createPS = [&](ID3DBlob* b, ComPtr<IDirect3DPixelShader9>& out)
     { return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out.GetAddressOf())); };
 
-    if (!renderer::shaderbytecode::GetShader(cacheDir, volumePixelSource, "main", "ps_3_0", bytecode, [&](const ID3DBlob* b) { return createPS(b, volume); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumePixelSource, "main", "ps_3_0", bytecode, [&](ID3DBlob* b) { return createPS(b, volume); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeBlurPixelSource, "main", "ps_3_0", blurBytecode, [&](const ID3DBlob* b) { return createPS(b, blur); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeBlurPixelSource, "main", "ps_3_0", blurBytecode, [&](ID3DBlob* b) { return createPS(b, blur); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeCopyPixelSource, "main", "ps_3_0", copyBytecode, [&](const ID3DBlob* b) { return createPS(b, copy); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeCopyPixelSource, "main", "ps_3_0", copyBytecode, [&](ID3DBlob* b) { return createPS(b, copy); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeTemporalPixelSource, "main", "ps_3_0", temporalBytecode, [&](const ID3DBlob* b) { return createPS(b, temporal); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, volumeTemporalPixelSource, "main", "ps_3_0", temporalBytecode, [&](ID3DBlob* b) { return createPS(b, temporal); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, solarRadialPixelSource, "main", "ps_3_0", radialBytecode, [&](const ID3DBlob* b) { return createPS(b, radial); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, solarRadialPixelSource, "main", "ps_3_0", radialBytecode, [&](ID3DBlob* b) { return createPS(b, radial); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, contactShadowPixelSource, "main", "ps_3_0", contactShadowBytecode, [&](const ID3DBlob* b) { return createPS(b, contactShadow); }))
+    if (!renderer::shaderbytecode::GetShader(cacheDir, contactShadowPixelSource, "main", "ps_3_0", contactShadowBytecode, [&](ID3DBlob* b) { return createPS(b, contactShadow); }))
         return false;
 
     // These four are optional: a compile/create failure only disables their
     // feature, it must not abort the rest of the pass (as before).
-    renderer::shaderbytecode::GetShader(cacheDir, postProcessPixelSource, "main", "ps_3_0", postProcessBytecode, [&](const ID3DBlob* b) { return createPS(b, postProcess); });
-    renderer::shaderbytecode::GetShader(cacheDir, rayCompositePixelSource, "main", "ps_3_0", rayCompositeBytecode, [&](const ID3DBlob* b) { return createPS(b, rayComposite); });
-    renderer::shaderbytecode::GetShader(cacheDir, localLightPixelSource, "main", "ps_3_0", localLightBytecode, [&](const ID3DBlob* b) { return createPS(b, localLight); });
-    renderer::shaderbytecode::GetShader(cacheDir, celestialMarkerPixelSource, "main", "ps_3_0", celestialMarkerBytecode, [&](const ID3DBlob* b) { return createPS(b, celestialMarker); });
+    renderer::shaderbytecode::GetShader(cacheDir, postProcessPixelSource, "main", "ps_3_0", postProcessBytecode, [&](ID3DBlob* b) { return createPS(b, postProcess); });
+    renderer::shaderbytecode::GetShader(cacheDir, rayCompositePixelSource, "main", "ps_3_0", rayCompositeBytecode, [&](ID3DBlob* b) { return createPS(b, rayComposite); });
+    renderer::shaderbytecode::GetShader(cacheDir, localLightPixelSource, "main", "ps_3_0", localLightBytecode, [&](ID3DBlob* b) { return createPS(b, localLight); });
+    renderer::shaderbytecode::GetShader(cacheDir, celestialMarkerPixelSource, "main", "ps_3_0", celestialMarkerBytecode, [&](ID3DBlob* b) { return createPS(b, celestialMarker); });
 
     return true;
 }

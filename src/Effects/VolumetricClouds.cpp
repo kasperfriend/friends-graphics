@@ -487,7 +487,7 @@ bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir
  // recompile, exactly as a fresh compile would.
  ComPtr<ID3DBlob> blob;
  return renderer::shaderbytecode::GetShader(cacheDir,source,"main","ps_3_0",blob,
-  [d,shader](const ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
+  [d,shader](ID3DBlob* b){return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()),shader));});
 }
 
 // Extinction of fully dense cloud material per world unit. DensityPercent

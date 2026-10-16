@@ -547,7 +547,7 @@ namespace renderer
         std::string error;
         const bool created = renderer::shaderbytecode::GetShader(
             renderer::shaderbytecode::Dir(m_basePath), source.c_str(), "main", "ps_3_0", code,
-            [this, device, layerCount](const ID3DBlob* b)
+            [this, device, layerCount](ID3DBlob* b)
             { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_materialPS[layerCount].GetAddressOf())); },
             &error);
         if (!created)
@@ -652,7 +652,7 @@ float4 main(PS_IN input) : COLOR0
         std::string error;
         const bool created = renderer::shaderbytecode::GetShader(
             renderer::shaderbytecode::Dir(m_basePath), source, "main", "ps_3_0", code,
-            [this, device](const ID3DBlob* b)
+            [this, device](ID3DBlob* b)
             { return SUCCEEDED(device->CreatePixelShader(static_cast<const DWORD*>(b->GetBufferPointer()), m_objectPS.GetAddressOf())); },
             &error);
         if(!created){

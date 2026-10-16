@@ -72,6 +72,61 @@ namespace renderer
             return dir + L"ShaderCache\\";
         }
 
+#if defined(_MSC_VER)
+        // The official D3D9 SDK has no "blob from memory" factory (the
+        // ID3DBuffer helper only exists in Wine's headers), so the cache
+        // implements the tiny ID3DBlob interface itself over an owned copy
+        // of the cached file. Lifetime is plain COM: the ComPtr that Load
+        // fills takes ownership via Attach and releases it away.
+        class MemoryBlob final : public ID3DBlob
+        {
+        public:
+            MemoryBlob(const void* data, size_t size)
+                : m_data(static_cast<const uint8_t*>(data),
+                         static_cast<const uint8_t*>(data) + static_cast<size_t>(size)),
+                  m_refs(1)
+            {
+            }
+
+            HRESULT QueryInterface(REFIID riid, void** ppvObject) override
+            {
+                if (!ppvObject) return E_POINTER;
+                if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3DBlob))
+                {
+                    *ppvObject = static_cast<ID3DBlob*>(this);
+                    AddRef();
+                    return S_OK;
+                }
+                *ppvObject = nullptr;
+                return E_NOINTERFACE;
+            }
+
+            ULONG AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_refs)); }
+
+            ULONG Release() override
+            {
+                const LONG refs = InterlockedDecrement(&m_refs);
+                if (refs == 0) delete this;
+                return static_cast<ULONG>(refs);
+            }
+
+            // Official ID3DBlob (= ID3D10Blob) accessors: no-arg, by-value.
+            SIZE_T GetBufferSize() override
+            {
+                return static_cast<SIZE_T>(m_data.size());
+            }
+
+            LPVOID GetBufferPointer() override
+            {
+                return m_data.data();
+            }
+
+        private:
+            std::vector<uint8_t> m_data;
+            LONG m_refs;
+        };
+#endif
+
         // Reads cached bytecode into blob. False on any miss or validation
         // failure (no directory/file, too short, size or magic mismatch).
         inline bool Load(const std::wstring& dir, const char* source, const char* entry, const char* profile, ComPtr<ID3DBlob>& blob)
@@ -86,13 +141,24 @@ namespace renderer
             std::vector<uint8_t> bytes(size);
             in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
             if (!in) return false;
+            // 8-byte header: u32 total file size, u32 shader magic. Both
+            // must agree with the file before the bytecode after the header
+            // is handed out (a truncated or profile-swapped entry misses).
             uint32_t declared = 0, fileMagic = 0;
             std::memcpy(&declared, bytes.data(), 4);
             std::memcpy(&fileMagic, bytes.data() + 4, 4);
             if (declared != size || fileMagic != magic) return false;
+            const uint8_t* code = bytes.data() + 8;
+            const uint32_t codeSize = static_cast<uint32_t>(size) - 8;
+            ID3DBlob* raw = nullptr;
+#if defined(_MSC_VER)
+            raw = new MemoryBlob(code, codeSize);
+#else
             LPVOID buffer = nullptr;
-            if (FAILED(ID3DBuffer::CreateID3DBlobFromMemory(bytes.data(), static_cast<UINT>(size), &buffer))) return false;
-            blob.Attach(static_cast<ID3DBlob*>(buffer));
+            if (FAILED(ID3DBuffer::CreateID3DBlobFromMemory(code, codeSize, &buffer))) return false;
+            raw = static_cast<ID3DBlob*>(buffer);
+#endif
+            blob.Attach(raw);
             return true;
         }
 
@@ -100,7 +166,7 @@ namespace renderer
         // identical entry already loads (fxc output is deterministic, so a
         // valid existing file is the same generation); otherwise writes to
         // a unique temp file and renames it into place.
-        inline void Save(const std::wstring& dir, const char* source, const char* entry, const char* profile, const ID3DBlob* blob)
+        inline void Save(const std::wstring& dir, const char* source, const char* entry, const char* profile, ID3DBlob* blob)
         {
             if (dir.empty() || !source || !entry || !profile || !blob) return;
             std::error_code ec;
@@ -113,7 +179,15 @@ namespace renderer
             const auto tmp = std::filesystem::path(tmpName);
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             if (!out) return;
-            out.write(reinterpret_cast<const char*>(blob->GetBufferPointer()), static_cast<std::streamsize>(blob->GetBufferSize()));
+            // Same layout Load validates: u32 total size, u32 shader magic,
+            // then the raw bytecode (which already starts with its own
+            // XPSF/XVSP tag).
+            const uint32_t codeSize = static_cast<uint32_t>(blob->GetBufferSize());
+            const uint32_t declared = static_cast<uint32_t>(8 + codeSize);
+            const uint32_t fileMagic = (profile[0] == 'p') ? kPixelMagic : kVertexMagic;
+            out.write(reinterpret_cast<const char*>(&declared), 4);
+            out.write(reinterpret_cast<const char*>(&fileMagic), 4);
+            out.write(reinterpret_cast<const char*>(blob->GetBufferPointer()), static_cast<std::streamsize>(codeSize));
             out.close();
             if (!out) { std::filesystem::remove(tmp, ec); return; }
             std::filesystem::rename(tmp, path, ec);
