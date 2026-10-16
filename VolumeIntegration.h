@@ -729,101 +729,132 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 
     if (!EnsureShadowResources(d)) return;
     if (!shadowFrameStarted) {
-        BuildShadowCamera();
         shadowFrameStarted = true;
         internal = true;
-        setDepth(d, nullptr);
-        d->SetRenderTarget(0, resources.shadowColorSurface.Get());
-        setDepth(d, resources.shadowDepthSurface.Get());
-        D3DVIEWPORT9 vp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
-        d->SetViewport(&vp);
-        d->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xffffffff, 1.0f, 0);
-        setDepth(d, nullptr);
-        d->SetRenderTarget(0, target.Get());
-        setDepth(d, surface.Get());
-        D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
-        d->SetViewport(&mainVp);
+        try {
+            BuildShadowCamera();
+            setDepth(d, nullptr);
+            d->SetRenderTarget(0, resources.shadowColorSurface.Get());
+            setDepth(d, resources.shadowDepthSurface.Get());
+            D3DVIEWPORT9 vp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
+            d->SetViewport(&vp);
+            d->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xffffffff, 1.0f, 0);
+            setDepth(d, nullptr);
+            d->SetRenderTarget(0, target.Get());
+            setDepth(d, surface.Get());
+            D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
+            d->SetViewport(&mainVp);
+            shadowFrameValid = true;
+        } catch (...) {
+            // A half-built shadow frame is unusable (shadowFrameValid stays
+            // false, so this frame skips shadows) but the framebuffer must be
+            // back on the main target or every later draw of the frame would
+            // land in the shadow map.
+            d->SetRenderTarget(0, target.Get());
+            setDepth(d, surface.Get());
+            D3DVIEWPORT9 mainVp{ 0, 0, legacyTargets.width, legacyTargets.height, 0, 1 };
+            d->SetViewport(&mainVp);
+        }
         internal = false;
-        shadowFrameValid = true;
     }
     if (!shadowFrameValid) return;
 
-    D3DVIEWPORT9 oldVp{}; d->GetViewport(&oldVp);
-    DWORD colorWrite = 0, zEnable = 0, zWrite = 0, zFunc = 0, fog = 0;
-    DWORD alphaBlend = 0, alphaTest = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
-    d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
-    d->GetRenderState(D3DRS_ZENABLE, &zEnable);
-    d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
-    d->GetRenderState(D3DRS_ZFUNC, &zFunc);
-    d->GetRenderState(D3DRS_FOGENABLE, &fog);
-    d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
+    // The block holds the render states, the pixel shader and the vertex
+    // constants at once; only the framebuffer attachments (which a block
+    // cannot hold) are saved manually. The framebuffer restore runs no
+    // matter what - a throw mid-pass must not leave the shadow map bound
+    // as RT0, which would silently swallow every later draw of the frame.
+    ComPtr<IDirect3DSurface9> rt0, depth0;
+    D3DVIEWPORT9 oldVp{};
+    if (FAILED(d->GetRenderTarget(0, rt0.GetAddressOf()))) return;
+    DepthCapture::Instance().RawGetDepth(d, depth0.GetAddressOf());
+    if (FAILED(d->GetViewport(&oldVp))) return;
+    DWORD alphaTest = 0;
     d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-    d->GetRenderState(D3DRS_DEPTHBIAS, &oldDepthBias);
-    d->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &oldSlopeBias);
-    d->GetRenderState(D3DRS_CULLMODE, &oldCull);
-
+    DWORD colorWrite = 0, zEnable = 0, zWrite = 0, zFunc = 0, fog = 0;
+    DWORD alphaBlend = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
     ComPtr<IDirect3DPixelShader9> originalPixelShader;
-    d->GetPixelShader(originalPixelShader.GetAddressOf());
-
     float originalConsts[8][4]{};
-    d->GetVertexShaderConstantF(0, originalConsts[0], 8);
-
+    const bool block = renderer::detail::BeginPassState(d);
+    if (!block) {
+        d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
+        d->GetRenderState(D3DRS_ZENABLE, &zEnable);
+        d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
+        d->GetRenderState(D3DRS_ZFUNC, &zFunc);
+        d->GetRenderState(D3DRS_FOGENABLE, &fog);
+        d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
+        d->GetRenderState(D3DRS_DEPTHBIAS, &oldDepthBias);
+        d->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &oldSlopeBias);
+        d->GetRenderState(D3DRS_CULLMODE, &oldCull);
+        d->GetPixelShader(originalPixelShader.GetAddressOf());
+        d->GetVertexShaderConstantF(0, originalConsts[0], 8);
+    }
+    auto restoreFramebuffer = [&] {
+        d->SetRenderTarget(0, rt0.Get());
+        DepthCapture::Instance().RawSetDepth(d, depth0.Get());
+        d->SetViewport(&oldVp);
+    };
     internal = true;
-    setDepth(d, nullptr);
-    d->SetRenderTarget(0, resources.shadowColorSurface.Get());
-    setDepth(d, resources.shadowDepthSurface.Get());
-    D3DVIEWPORT9 shadowVp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
-    d->SetViewport(&shadowVp);
+    try {
+        setDepth(d, nullptr);
+        d->SetRenderTarget(0, resources.shadowColorSurface.Get());
+        setDepth(d, resources.shadowDepthSurface.Get());
+        D3DVIEWPORT9 shadowVp{ 0, 0, configuredShadowMapSize, configuredShadowMapSize, 0, 1 };
+        d->SetViewport(&shadowVp);
 
-    bool isWmo = (dc.material == renderer::MaterialType::WMO);
-    if (isWmo) {
-        d->SetVertexShaderConstantF(4, viewToShadowMatrix[0], 4);
+        bool isWmo = (dc.material == renderer::MaterialType::WMO);
+        if (isWmo) {
+            d->SetVertexShaderConstantF(4, viewToShadowMatrix[0], 4);
+        }
+        else {
+            float shadowRows[4][4]{};
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                    shadowRows[row][col] = viewToShadowMatrix[col][row];
+            d->SetVertexShaderConstantF(2, shadowRows[0], 4);
+        }
+
+        float rasterBias = .00045f, slopeBias = 2.25f;
+        DWORD rasterBiasBits = 0, slopeBiasBits = 0;
+        memcpy(&rasterBiasBits, &rasterBias, sizeof(DWORD));
+        memcpy(&slopeBiasBits, &slopeBias, sizeof(DWORD));
+        d->SetRenderState(D3DRS_DEPTHBIAS, rasterBiasBits);
+        d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, slopeBiasBits);
+        d->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+        d->SetRenderState(D3DRS_ZENABLE, TRUE);
+        d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+        d->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        d->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        if (!alphaTest) d->SetPixelShader(nullptr);
+
+        HRESULT shadowHr = draw();
+        if (SUCCEEDED(shadowHr)) {
+            ++shadowFrameDraws;
+            if (++shadowDraws == 1) Log("uncapped depth-only light-space shadows active");
+        }
+    } catch (...) {
+        // The pass state and framebuffer are restored below regardless; the
+        // throw only costs this one shadow draw.
     }
-    else {
-        float shadowRows[4][4]{};
-        for (int row = 0; row < 4; ++row)
-            for (int col = 0; col < 4; ++col)
-                shadowRows[row][col] = viewToShadowMatrix[col][row];
-        d->SetVertexShaderConstantF(2, shadowRows[0], 4);
+    if (block) {
+        renderer::detail::EndPassState();
+    } else {
+        d->SetPixelShader(originalPixelShader.Get());
+        d->SetVertexShaderConstantF(0, originalConsts[0], 8);
+        d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
+        d->SetRenderState(D3DRS_ZENABLE, zEnable);
+        d->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
+        d->SetRenderState(D3DRS_ZFUNC, zFunc);
+        d->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend);
+        d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
+        d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
+        d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
+        d->SetRenderState(D3DRS_CULLMODE, oldCull);
+        d->SetRenderState(D3DRS_FOGENABLE, fog);
     }
-
-    float rasterBias = .00045f, slopeBias = 2.25f;
-    DWORD rasterBiasBits = 0, slopeBiasBits = 0;
-    memcpy(&rasterBiasBits, &rasterBias, sizeof(DWORD));
-    memcpy(&slopeBiasBits, &slopeBias, sizeof(DWORD));
-    d->SetRenderState(D3DRS_DEPTHBIAS, rasterBiasBits);
-    d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, slopeBiasBits);
-    d->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
-    d->SetRenderState(D3DRS_ZENABLE, TRUE);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-    d->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
-    d->SetRenderState(D3DRS_FOGENABLE, FALSE);
-    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-    if (!alphaTest) d->SetPixelShader(nullptr);
-
-    HRESULT shadowHr = draw();
-    if (SUCCEEDED(shadowHr)) {
-        ++shadowFrameDraws;
-        if (++shadowDraws == 1) Log("uncapped depth-only light-space shadows active");
-    }
-
-    d->SetPixelShader(originalPixelShader.Get());
-    d->SetVertexShaderConstantF(0, originalConsts[0], 8);
-    setDepth(d, nullptr);
-    d->SetRenderTarget(0, target.Get());
-    setDepth(d, surface.Get());
-    d->SetViewport(&oldVp);
-    d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
-    d->SetRenderState(D3DRS_ZENABLE, zEnable);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
-    d->SetRenderState(D3DRS_ZFUNC, zFunc);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend);
-    d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
-    d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
-    d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
-    d->SetRenderState(D3DRS_CULLMODE, oldCull);
-    d->SetRenderState(D3DRS_FOGENABLE, fog);
+    restoreFramebuffer();
     internal = false;
 }
 

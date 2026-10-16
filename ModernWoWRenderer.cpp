@@ -83,10 +83,18 @@ std::once_flag g_initialize;
 thread_local bool g_drawingOverlay = false;
 std::wstring g_basePath;
 
-void Log(char const* text)
+void Log(char const* text) noexcept
 {
-    std::wofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
-    out << text << '\n';
+    // A logging failure (or an allocation throw from the string concat) must
+    // never escape into a hooked D3D9 call: an exception unwinding through
+    // the driver's COM dispatch is how a zone-change hiccup becomes a
+    // permanently frozen image.
+    try
+    {
+        std::wofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
+        out << text << '\n';
+    }
+    catch (...) {}
 }
 
 void SetAvailability(renderer::DeviceAvailability next)
@@ -119,12 +127,14 @@ void ReloadWindTuning()
 }
 
 void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
+void ResetEffectStateForDeviceChange(IDirect3DDevice9* d) noexcept;
 
 HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 {
     // Overlays cannot draw on a lost device; forward the call untouched.
     if (g_availability == renderer::DeviceAvailability::Lost) return g_originalEndScene(device);
     g_drawingOverlay=true;
+    try {
     if(unified){if(graphicsShowStatus){watereffect::DrawStatus(device,graphicsActive?"FX ON":"FX OFF",0);
         if(graphicsActive&&volume::enabled)watereffect::DrawStatus(device,volume::composed?"AIR ON":"AIR WAIT",1);}
     }
@@ -140,6 +150,11 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind,vegetation::DebugLine());
     tuningoverlay::Draw(device);
     renderer::MaterialCacheManager::Instance().DrawDebugOverlay(device);
+    } catch (...) {
+        // An overlay exception must not strand g_drawingOverlay=true (which
+        // would disable every effect for the rest of the session) nor reach
+        // the game: the original EndScene still runs.
+    }
     g_drawingOverlay=false;
     return g_originalEndScene(device);
 }
@@ -183,6 +198,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     // independent signal. A focused menu/loading frame with neither is NOT a
     // location sample: the provider would return an invalid tuple, whose debounce
     // eventually clears zone tuning.
+    try {
     {
         const bool knownWorldDraw = weathervisuals::worldGeometrySeenThisFrame || watereffect::frameCandidates>0;
         const bool worldFrame = renderer::HasWorldContext(
@@ -239,11 +255,24 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     celestialdiag::Present(d);
     nativeshadowdiag::OnPresent(d);
     renderer::RendererDiagnostics::Instance().OnFrameEnd();
+    } catch (...) {
+        // A throw anywhere in the effect frame (INI read, allocation, a file
+        // op) must never reach the game: the frame still presents, the effect
+        // state that a reload was halfway through re-arms on the next zone
+        // change or F12, and the device handshake is untouched.
+        Log("Present: effect pass threw; the frame still presents.");
+    }
     const HRESULT presentResult = originalPresent(d,a,b,w,r);
     SetAvailability(renderer::ClassifyDeviceResult(presentResult));
     return presentResult;
 }
-HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
+// Drops every effect's device resources and cached GPU identity. Runs before
+// the game's own Reset, and again when the game replaces the device entirely
+// (a discarded device never gets a Reset, so the effects would otherwise
+// keep holding the old device's dead resources).
+void ResetEffectStateForDeviceChange(IDirect3DDevice9* d) noexcept
+{
+    try {
     tuningoverlay::font.Reset();
     tuningoverlay::windDebugFont.Reset();
     waterreflection::Reset(d);
@@ -261,14 +290,30 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DepthCapture::Instance().Reset(d);
     renderer::CameraCapture::Instance().Reset();
+    renderer::g_trackedState={};
+    } catch (...) {
+        // Effect cleanup may throw (a failed file op, an allocation). It must
+        // never block the game's own reset: partially cleaned state is
+        // harmless - every readiness gate checks live, and the next reset or
+        // the next frame finishes the job. Skipping originalReset here is
+        // how a one-off error becomes a device that never comes back.
+        Log("Reset: effect cleanup threw; the device reset still runs.");
+    }
+}
+
+HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
+    ResetEffectStateForDeviceChange(d);
     HRESULT hr=originalReset(d,p);
+    try {
     if(SUCCEEDED(hr)){
-        renderer::g_trackedState={};
         RestoreDeviceHooksAfterReset(d);
         SetAvailability(renderer::DeviceAvailability::Operational);
     }
     else {
         // Stay paused; Present keeps probing and resumes once the device is usable.
+        SetAvailability(renderer::DeviceAvailability::Lost);
+    }
+    } catch (...) {
         SetAvailability(renderer::DeviceAvailability::Lost);
     }
     return hr;
@@ -279,7 +324,8 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
     const bool waterNeedsDepth=watereffect::NeedsScene();
     if(volume::internal||g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
         return originalClear(d,n,rect,flags,color,z,stencil);
-    volume::BeforeClear(d,n,rect,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
+    try { volume::BeforeClear(d,n,rect,flags,z); } catch (...) {}
+    return originalClear(d,n,rect,flags,color,z,stencil);
 }
 using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
 using SetRenderTargetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
@@ -320,7 +366,7 @@ HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3D
     const HRESULT hr = originalSetRenderTarget(d, index, surface);
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
         !renderer::MaterialCacheManager::Instance().IsInternalPass())
-        nativeshadowdiag::OnSetRenderTarget(index, surface);
+        try { nativeshadowdiag::OnSetRenderTarget(index, surface); } catch (...) {}
     return hr;
 }
 
@@ -330,8 +376,10 @@ HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseT
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
         !renderer::MaterialCacheManager::Instance().IsInternalPass())
     {
-        nativeshadowdiag::OnSetTexture(stage, texture);
-        renderer::MaterialCacheManager::Instance().OnSetTexture(stage, texture);
+        try {
+            nativeshadowdiag::OnSetTexture(stage, texture);
+            renderer::MaterialCacheManager::Instance().OnSetTexture(stage, texture);
+        } catch (...) {}
     }
     return hr;
 }
@@ -340,8 +388,17 @@ HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9
 {
     if (renderer::g_trackedState.currentVS != vs || (vs && renderer::g_trackedState.vsHash == 0))
     {
-        renderer::g_trackedState.currentVS = vs;
-        renderer::g_trackedState.vsHash = (vs && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+        try {
+            // Hash first, then commit both: a throw leaves the mirror
+            // untouched so the next setter retries instead of stranding a
+            // stale hash under the new shader pointer.
+            const uint64_t h = (vs && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+            renderer::g_trackedState.vsHash = h;
+            renderer::g_trackedState.currentVS = vs;
+        } catch (...) {
+            // A hashing throw must not reach the game; the original setter
+            // still runs and the mirror keeps its previous identity.
+        }
     }
     return originalSetVertexShader(d, vs);
 }
@@ -351,8 +408,14 @@ HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* 
     if (!weathervisuals::internal &&
         (renderer::g_trackedState.currentPS != ps || (ps && renderer::g_trackedState.psHash == 0)))
     {
-        renderer::g_trackedState.currentPS = ps;
-        renderer::g_trackedState.psHash = (ps && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+        try {
+            const uint64_t h = (ps && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+            renderer::g_trackedState.psHash = h;
+            renderer::g_trackedState.currentPS = ps;
+        } catch (...) {
+            // Same as the vertex path: swallow, keep the old identity, and
+            // let the original setter run.
+        }
     }
     return originalSetPixelShader(d, ps);
 }
@@ -419,6 +482,8 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDraw(d,t,start,n);
     if(volume::internal||weathervisuals::internal)return originalDraw(d,t,start,n);
+    bool gameDrawRan=false;
+    try {
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
@@ -432,13 +497,13 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-        volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
+        volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDraw(d,t,start,n);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,start,n,false);
-    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDraw(d,t,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{gameDrawRan=true;return originalDraw(d,t,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
@@ -449,14 +514,31 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDraw(d,t,start,n);
+    gameDrawRan=true;
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
+    } catch (...) {
+        // An effect throw must never drop the game's draw nor strand the
+        // internal flags (a stuck `volume::internal` would silence every
+        // effect for the rest of the session): clear both, and run the game's
+        // draw below if the pass threw before it ran. The injected per-draw
+        // state is gone (its scopes unwound), but the geometry still draws.
+        volume::internal=false;
+        weathervisuals::internal=false;
+        if (gameDrawRan) return S_OK;
+        // The retry itself may throw (the driver call is the very thing that
+        // just threw); a swallowed driver error is preferable to an exception
+        // escaping the hook.
+        try { return originalDraw(d,t,start,n); } catch (...) { return 0; }
+    }
 }
 
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    bool gameDrawRan=false;
+    try {
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
@@ -470,13 +552,13 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-        volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+        volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,base,start,n);
-    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
@@ -487,23 +569,40 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
+    gameDrawRan=true;
     if(SUCCEEDED(hr)&&!g_drawingOverlay&&renderer::MaterialCacheManager::Instance().IsActive()){
-        auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-        if(dc.material==renderer::MaterialType::Terrain){
-            renderer::MaterialCacheManager::Instance().ApplyNormalModulation(d,t,base,min,vertices,start,n,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+            auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
+            if(dc.material==renderer::MaterialType::Terrain){
+                renderer::MaterialCacheManager::Instance().ApplyNormalModulation(d,t,base,min,vertices,start,n,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+            }
+            else if(dc.material==renderer::MaterialType::WMO||dc.material==renderer::MaterialType::M2){
+                renderer::MaterialCacheManager::Instance().ApplyObjectMaterial(d,n,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+            }
         }
-        else if(dc.material==renderer::MaterialType::WMO||dc.material==renderer::MaterialType::M2){
-            renderer::MaterialCacheManager::Instance().ApplyObjectMaterial(d,n,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
-        }
+        if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
+        return hr;
+    } catch (...) {
+        // An effect throw must never drop the game's draw nor strand the
+        // internal flags (a stuck `volume::internal` would silence every
+        // effect for the rest of the session): clear both, and run the game's
+        // draw below if the pass threw before it ran. The injected per-draw
+        // state is gone (its scopes unwound), but the geometry still draws.
+        volume::internal=false;
+        weathervisuals::internal=false;
+        if (gameDrawRan) return S_OK;
+        // The retry itself may throw (the driver call is the very thing that
+        // just threw); a swallowed driver error is preferable to an exception
+        // escaping the hook.
+        try { return originalDrawIndexed(d,t,base,min,vertices,start,n); } catch (...) { return 0; }
     }
-    if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
-    return hr;
 }
 
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawUP(d,t,n,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawUP(d,t,n,v,stride);
+    bool gameDrawRan=false;
+    try {
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
@@ -517,13 +616,13 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-        volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
+        volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawUP(d,t,n,v,stride);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,false,v,stride);
-    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawUP(d,t,n,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{gameDrawRan=true;return originalDrawUP(d,t,n,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
@@ -535,14 +634,31 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawUP(d,t,n,v,stride);
+    gameDrawRan=true;
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
-    return hr;
+        return hr;
+    } catch (...) {
+        // An effect throw must never drop the game's draw nor strand the
+        // internal flags (a stuck `volume::internal` would silence every
+        // effect for the rest of the session): clear both, and run the game's
+        // draw below if the pass threw before it ran. The injected per-draw
+        // state is gone (its scopes unwound), but the geometry still draws.
+        volume::internal=false;
+        weathervisuals::internal=false;
+        if (gameDrawRan) return S_OK;
+        // The retry itself may throw (the driver call is the very thing that
+        // just threw); a swallowed driver error is preferable to an exception
+        // escaping the hook.
+        try { return originalDrawUP(d,t,n,v,stride); } catch (...) { return 0; }
+    }
 }
 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     // While the device is lost nothing can draw; pass through without any effect work.
     if(g_availability==renderer::DeviceAvailability::Lost)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(volume::internal||weathervisuals::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    bool gameDrawRan=false;
+    try {
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
@@ -556,13 +672,13 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-        volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
+        volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d,waterDraw.available?&waterDraw.material:nullptr);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
     if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,true,v,stride,indices,f,min+vertices);
-    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
+    if(captureGround){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{gameDrawRan=true;return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);},waterDraw.available?&waterDraw.material:nullptr);volume::internal=false;}
     vegetation::Scope vegetationSway(d,g_drawingOverlay);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
@@ -574,8 +690,23 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    gameDrawRan=true;
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
-    return hr;
+        return hr;
+    } catch (...) {
+        // An effect throw must never drop the game's draw nor strand the
+        // internal flags (a stuck `volume::internal` would silence every
+        // effect for the rest of the session): clear both, and run the game's
+        // draw below if the pass threw before it ran. The injected per-draw
+        // state is gone (its scopes unwound), but the geometry still draws.
+        volume::internal=false;
+        weathervisuals::internal=false;
+        if (gameDrawRan) return S_OK;
+        // The retry itself may throw (the driver call is the very thing that
+        // just threw); a swallowed driver error is preferable to an exception
+        // escaping the hook.
+        try { return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride); } catch (...) { return 0; }
+    }
 }
 
 void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
@@ -627,9 +758,17 @@ void HookDevice(IDirect3DDevice9* device)
     void** table = *reinterpret_cast<void***>(device);
     if (g_hookedTable)
     {
-        if (g_hookedTable != table)
-            Log("Different device implementation: leaving this device untouched.");
-        return;
+        if (g_hookedTable == table)
+            return;
+        // A new device implementation: the game re-created its device
+        // (driver recovery, full render re-init). The old table may belong
+        // to a destroyed device - never touch it - but this one must be
+        // hooked or every effect dies for the rest of the session while the
+        // game itself keeps running normally. A discarded device never gets
+        // a Reset, so drop the old device's resources now.
+        Log("New device implementation: re-hooking.");
+        ResetEffectStateForDeviceChange(device);
+        SetAvailability(renderer::DeviceAvailability::Operational);
     }
     DWORD oldProtect = 0;
     if (!VirtualProtect(&table[16], 95*sizeof(void*), PAGE_READWRITE, &oldProtect))
