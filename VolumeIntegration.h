@@ -328,7 +328,7 @@ void ReloadTuning() {
     // unchanged, so an existing log still reads the same way.
     {
         char message[160];
-        sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
+        sprintf_s(message, sizeof(message), "PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
             postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);
         static std::string lastPostProcessLine;
         if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}
@@ -518,9 +518,17 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
             }
             // A mask without matching, freshly cleared depth would stop air at
             // stale water. Expose both or neither, and fail without disabling water.
+            auto clearWaterSurface = [&](IDirect3DSurface9* surface) -> bool {
+                IDirect3DSurface9* previous = nullptr;
+                if (FAILED(d->GetRenderTarget(0, &previous))) return false;
+                const bool ok = SUCCEEDED(d->SetRenderTarget(0, surface)) &&
+                                SUCCEEDED(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0));
+                if (previous) { d->SetRenderTarget(0, previous); previous->Release(); }
+                return ok;
+            };
             if (resources.waterMaskSurface && resources.waterDepthSurface &&
-                SUCCEEDED(d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0)) &&
-                SUCCEEDED(d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0))) {
+                clearWaterSurface(resources.waterMaskSurface.Get()) &&
+                clearWaterSurface(resources.waterDepthSurface.Get())) {
                 watereffect::waterTargetSurface = target.Get();
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
                 watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
@@ -1048,7 +1056,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (FAILED(hr) && ok) {
             ok = false;
             char msg[96];
-            sprintf_s(msg, "composite:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
+            sprintf_s(msg, sizeof(msg), "composite:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
             Log(msg);
         }
     };
@@ -1393,7 +1401,7 @@ bool Composite(IDirect3DDevice9* d) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
         const float postParams[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
         const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams);
-        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg,"PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
+        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg, sizeof(msg), "PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
     }
 
     // Debug: crosshair(s) at the screen position(s) various sun/moon source
@@ -1456,11 +1464,11 @@ bool Composite(IDirect3DDevice9* d) {
                 celestialProbeLogCounter = 0;
                 char msg[512];
                 if (!probe.addressesReadable) {
-                    sprintf_s(msg, "celestial-probe: addresses not readable (module layout may not match)");
+                    sprintf_s(msg, sizeof(msg), "celestial-probe: addresses not readable (module layout may not match)");
                 } else if (!probe.valuesPlausible) {
-                    sprintf_s(msg, "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
+                    sprintf_s(msg, sizeof(msg), "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
                 } else {
-                    sprintf_s(msg,
+                    sprintf_s(msg, sizeof(msg),
                         "celestial-probe: day=%.4f sunRaw=(%.2f %.2f %.2f) moonRaw=(%.2f %.2f %.2f) ref=(%.2f %.2f %.2f) "
                         "sunToLight=(%.3f %.3f %.3f) valid=%d moonToLight=(%.3f %.3f %.3f) valid=%d legacy_v24_screen=(%.3f %.3f)",
                         probe.day,
@@ -1502,7 +1510,7 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
         if (FAILED(hr) && ok) {
             ok = false;
             char msg[96];
-            sprintf_s(msg, "localLights:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
+            sprintf_s(msg, sizeof(msg), "localLights:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
             Log(msg);
         }
     };

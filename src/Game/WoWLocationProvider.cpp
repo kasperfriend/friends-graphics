@@ -68,9 +68,9 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // cached on disk keyed by the module's PE identity, so a repeat launch of
     // the same client reads a few dozen bytes instead of re-hashing.
     if(!HasVerified12340CodeSignature(client)) {
-        std::filesystem::path dir{path}.parent_path();
+        std::filesystem::path dir = std::filesystem::path{path}.parent_path();
         if(dir.empty())dir=L".";
-        client.EnsureSha256((dir/L"ClientSha256.cache").string());
+        client.EnsureSha256((dir/L"ClientSha256.cache").wstring());
     }
     // A blank shipped configuration trusts the verified Ascension and stock 3.3.5a
     // (build 12340) executables. Explicit custom configurations keep their rules.

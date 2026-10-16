@@ -952,17 +952,20 @@ float4 main(PS_IN input) : COLOR0
             if (m_disassembledShaders.find(currentPSHash) == m_disassembledShaders.end())
             {
                 m_disassembledShaders[currentPSHash] = true;
-                UINT funcSize = 0;
-                if (SUCCEEDED(origPS->GetFunction(nullptr, &funcSize)) && funcSize > 0)
+                ID3DBlob* funcBlob = nullptr;
+                if (SUCCEEDED(origPS->GetFunction(&funcBlob)) && funcBlob)
                 {
-                    std::vector<BYTE> func(funcSize);
-                    if (SUCCEEDED(origPS->GetFunction(func.data(), &funcSize)))
+                    const UINT funcSize = static_cast<UINT>(funcBlob->GetBufferSize());
+                    if (funcSize > 0)
                     {
+                        std::vector<BYTE> func(funcSize);
+                        memcpy(func.data(), funcBlob->GetBufferPointer(), funcSize);
+                        funcBlob->Release();
                         Microsoft::WRL::ComPtr<ID3DBlob> disasm;
-                        if (SUCCEEDED(D3DDisassemble(func.data(), funcSize, 0, nullptr, disasm.GetAddressOf())))
+                        if (SUCCEEDED(D3DDisassemble(func.data(), funcSize, 0, nullptr, disasm.GetAddressOf(), nullptr)))
                         {
                             char hBuf[32];
-                            sprintf_s(hBuf, "0x%llx", currentPSHash);
+                            sprintf_s(hBuf, sizeof(hBuf), "0x%llx", currentPSHash);
                             LogMessage(m_logPath, "--- WOW TERRAIN PIXEL SHADER DISASSEMBLY (Hash: " + std::string(hBuf) + ") ---");
                             LogMessage(m_logPath, static_cast<const char*>(disasm->GetBufferPointer()));
                             LogMessage(m_logPath, "--------------------------------------------------------");

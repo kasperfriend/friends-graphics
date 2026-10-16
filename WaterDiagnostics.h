@@ -139,10 +139,13 @@ void Reset(IDirect3DDevice9* d) noexcept {
 template<class Shader> std::string DumpShader(Shader* shader,const char* stage,HRESULT hr) {
     if(FAILED(hr)) return "query-error:"+std::to_string(hr);
     if(!shader) return "fixed-function";
-    UINT size=0;
-    if(FAILED(shader->GetFunction(nullptr,&size))||!size||size>65536) return "bytecode-unavailable";
+    ID3DBlob* blob=nullptr;
+    if(FAILED(shader->GetFunction(&blob))||!blob) return "bytecode-unavailable";
+    const UINT size=static_cast<UINT>(blob->GetBufferSize());
+    if(!size||size>65536) { blob->Release(); return "bytecode-unavailable"; }
     std::vector<unsigned char> bytes(size);
-    if(FAILED(shader->GetFunction(bytes.data(),&size))) return "bytecode-read-error";
+    memcpy(bytes.data(),blob->GetBufferPointer(),size);
+    blob->Release();
     uint64_t hash=14695981039346656037ull;
     for(unsigned char c:bytes) { hash^=c; hash*=1099511628211ull; }
     std::ostringstream key; key<<stage<<'_'<<std::hex<<hash;

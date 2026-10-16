@@ -186,7 +186,7 @@ void AmbientOcclusion::Configure(const std::wstring& basePath)
     m_settings.fadeDistance = float(std::clamp(read(L"DistanceFadeUnits", 250), 20, 600));
     m_settings.debug = read(L"DebugMask", 0) != 0;
     char message[160];
-    sprintf_s(message, "tuning enabled=%d strength=%.2f radius=%.1f fade=%.0f debug=%d",
+    sprintf_s(message, sizeof(message), "tuning enabled=%d strength=%.2f radius=%.1f fade=%.0f debug=%d",
               m_settings.enabled ? 1 : 0, m_settings.strength, m_settings.radius, m_settings.fadeDistance,
               m_settings.debug ? 1 : 0);
     Log(m_logPath, message);

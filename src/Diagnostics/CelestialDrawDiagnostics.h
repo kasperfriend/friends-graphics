@@ -61,7 +61,7 @@ bool SampleCrosshair(IDirect3DDevice9* d, BYTE outPixel[4]) {
     if(FAILED(d->GetRenderTargetData(rt.Get(),readback.Get()))) return false;
     RECT r{ LONG(desc.Width/2)-2, LONG(desc.Height/2)-2, LONG(desc.Width/2)+2, LONG(desc.Height/2)+2 };
     D3DLOCKED_RECT locked{};
-    if(FAILED(readback->LockRect(&locked,&r,D3DLOCK_READONLY))) return false;
+    if(FAILED(readback->LockRect(&r,&locked,D3DLOCK_READONLY))) return false;
     uint32_t sum[4]{}; int n=0;
     for(int y=0;y<4;++y) {
         const BYTE* row=static_cast<const BYTE*>(locked.pBits)+y*locked.Pitch;
@@ -131,10 +131,13 @@ void Reset(IDirect3DDevice9* d) noexcept {
 template<class Shader> std::string HashShader(Shader* shader,const char* stage,HRESULT hr,bool dumpIfNew) {
     if(FAILED(hr)) return "query-error";
     if(!shader) return "fixed-function";
-    UINT size=0;
-    if(FAILED(shader->GetFunction(nullptr,&size))||!size||size>65536) return "bytecode-unavailable";
+    ID3DBlob* blob=nullptr;
+    if(FAILED(shader->GetFunction(&blob))||!blob) return "bytecode-unavailable";
+    const UINT size=static_cast<UINT>(blob->GetBufferSize());
+    if(!size||size>65536) { blob->Release(); return "bytecode-unavailable"; }
     std::vector<unsigned char> bytes(size);
-    if(FAILED(shader->GetFunction(bytes.data(),&size))) return "bytecode-read-error";
+    memcpy(bytes.data(),blob->GetBufferPointer(),size);
+    blob->Release();
     uint64_t hash=14695981039346656037ull;
     for(unsigned char c:bytes) { hash^=c; hash*=1099511628211ull; }
     std::ostringstream key; key<<stage<<'_'<<std::hex<<hash;

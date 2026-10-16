@@ -20,7 +20,7 @@
 #include "src/Materials/WicTextureLoader.h"
 #include "src/Materials/TextureHashLookup.h"
 #include "src/D3D9/CelestialTracker.h"
-#include "../D3D9/ScopedPassState.h"
+#include "src/D3D9/ScopedPassState.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/Core/FrameContext.h"
 

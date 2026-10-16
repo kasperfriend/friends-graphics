@@ -431,10 +431,13 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     auto& entry = patchedStrengthShaders[hash];
     if (entry.shader && std::abs(entry.builtForScale - strengthScale) < .001f) return entry.shader.Get();
 
-    UINT size = 0;
-    if (!original || FAILED(original->GetFunction(nullptr, &size)) || !size || size > 65536) return nullptr;
+    ID3DBlob* blob = nullptr;
+    if (!original || FAILED(original->GetFunction(&blob)) || !blob) return nullptr;
+    const UINT size = static_cast<UINT>(blob->GetBufferSize());
+    if (!size || size > 65536) { blob->Release(); return nullptr; }
     std::vector<BYTE> bytecode(size);
-    if (FAILED(original->GetFunction(bytecode.data(), &size))) return nullptr;
+    memcpy(bytecode.data(), blob->GetBufferPointer(), size);
+    blob->Release();
 
     const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
     std::vector<DWORD> patched;
@@ -693,10 +696,13 @@ template<typename Shader>
 inline void DumpShader(Shader* shader, uint64_t hash, const wchar_t* stage, std::unordered_set<uint64_t>& dumped)
 {
     if (!shader || !hash || !dumped.insert(hash).second) return;
-    UINT size = 0;
-    if (FAILED(shader->GetFunction(nullptr, &size)) || !size || size > 65536) return;
+    ID3DBlob* blob = nullptr;
+    if (FAILED(shader->GetFunction(&blob)) || !blob) return;
+    const UINT size = static_cast<UINT>(blob->GetBufferSize());
+    if (!size || size > 65536) { blob->Release(); return; }
     std::vector<BYTE> bytes(size);
-    if (FAILED(shader->GetFunction(bytes.data(), &size))) return;
+    memcpy(bytes.data(), blob->GetBufferPointer(), size);
+    blob->Release();
 
     wchar_t name[96]{};
     swprintf_s(name, L"\\%s_%016llx.bin", stage, static_cast<unsigned long long>(hash));
@@ -709,7 +715,7 @@ inline void DumpShader(Shader* shader, uint64_t hash, const wchar_t* stage, std:
     }
 
     ID3DBlob* disassembly = nullptr;
-    if (SUCCEEDED(D3DDisassemble(bytes.data(), size, D3D_DISASM_ENABLE_INSTRUCTION_NUMBERING, nullptr, &disassembly)) && disassembly)
+    if (SUCCEEDED(D3DDisassemble(bytes.data(), size, D3D_DISASM_ENABLE_INSTRUCTION_NUMBERING, nullptr, &disassembly, nullptr)) && disassembly)
     {
         swprintf_s(name, L"\\%s_%016llx.asm", stage, static_cast<unsigned long long>(hash));
         file = CreateFileW((dumpDirectory + name).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
