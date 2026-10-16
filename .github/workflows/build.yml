@@ -204,6 +204,29 @@ jobs:
           }
           Write-Output "::notice title=Environment regression results::$flat"
 
+      # The zone-crossing settings cache, against a reference that re-parses the
+      # files on every call. This suite was written with the crossing fix and never
+      # wired into CI, so the fix it guards ran nowhere: it needs the real profile
+      # API, which only a Windows runner has.
+      - name: Location tuning cache regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-LocationTuningCache.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          # GitHub truncates annotation messages at 4096 characters, so the tail -
+          # where the failure lives - is the annotation and the step log keeps all
+          # of it, including the measured sweep timings.
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Location tuning cache regression failed::$flat"
+            exit $result
+          }
+          Write-Output "::notice title=Location tuning cache regression results::$flat"
+
       - name: Weather motion regressions
         if: matrix.configuration == 'Release'
         shell: pwsh
@@ -325,6 +348,50 @@ jobs:
           mkdir -p build
           g++ -O2 -std=c++20 -Wall -Wextra -Werror tools/LocationStatusRegression.cpp -o build/location-status-test
           ./build/location-status-test
+
+      # The shared diagnostic sink: what it buffers, when it opens a file, and what
+      # rotation does to the file the README tells a supporter to look for. Every
+      # diagnostic write in the renderer goes through this now, so its behaviour is
+      # pinned rather than assumed.
+      - name: Diagnostic file sink regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic -Itools/fixtures \
+            tools/FileSinkRegression.cpp -o build/filesink-test
+          ./build/filesink-test
+
+      # The settings cache the crossing fix rests on, against a reference that
+      # re-parses the files on every call. The Windows job runs the same source
+      # against the real profile API; this runs it on every commit against the
+      # shim's independent one, so the parser's rules are checked twice and the
+      # suite does not depend on the Release matrix to run at all.
+      - name: Location tuning cache regressions (portable)
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Itools/fixtures \
+            tools/LocationTuningCacheRegression.cpp tools/LocationTuningCacheOtherTu.cpp \
+            -o build/location-tuning-cache-test
+          ./build/location-tuning-cache-test
+
+      # What ONE zone/area crossing costs, and how that cost moves as a player
+      # accumulates per-zone and per-area settings. This runs the production
+      # settings cache against the Linux shim's independent profile API, so it is
+      # both a differential test of the parser the cache now does itself and the
+      # only place the crossing budgets are measured on every commit.
+      - name: Zone crossing cost regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic -Itools/fixtures \
+            tools/LocationTuningCrossingRegression.cpp -o build/crossing-test
+          ./build/crossing-test
+          # The fingerprint walks pointers into the materialised section maps, so
+          # the same suite runs under the sanitizers too. The absolute millisecond
+          # budgets step aside there - they are about a frame, and an instrumented
+          # build is not one.
+          g++ -std=c++20 -g -Wall -Wextra -Werror -pedantic -Itools/fixtures \
+            -fsanitize=address,undefined \
+            tools/LocationTuningCrossingRegression.cpp -o build/crossing-test-asan
+          ./build/crossing-test-asan
 
       - name: Build and run portable overlay regressions
         run: |

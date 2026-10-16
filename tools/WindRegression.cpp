@@ -616,7 +616,22 @@ static void TestConfigurationAndWiring()
     // applied once the place has settled, the scoped key sets are read once per
     // scope, and the chain itself is untouched.
     const auto tuning = Read("src/Environment/LocationTuning.h");
-    Check(tuning.find("GetPrivateProfileSectionW(section,buffer.data(),static_cast<DWORD>(buffer.size()),path.c_str())") != tuning.npos &&
+    // Caching the VALUES was only half of it: an entry still had to be FILLED, and
+    // filling one asked the profile API for a single section - which opens and
+    // parses the whole file to find it. A crossing touches ~66 sections, so its
+    // cost was the size of the settings file times 66: measured at 1.4 ms for a
+    // fresh install, 66 ms for an 84 KB LocationGraphics.ini, 691 ms for 587 KB
+    // and 2653 ms for 2.1 MB, and every F7 save invalidates the cache so the next
+    // crossing pays the table again. The file is now read and indexed ONCE per
+    // identity and a section is parsed out of that text, which is what makes the
+    // cost of a crossing independent of how much the player has authored.
+    Check(tuning.find("inline void EnsureProfileLoaded(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
+          tuning.find("IndexProfileText(file);") != tuning.npos &&
+          tuning.find("ParseSectionSpan(file.text,file.spans[at],values);") != tuning.npos &&
+          // No per-section profile-API call is left to re-read the whole file.
+          tuning.find("GetPrivateProfileSectionW(") == tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") == tuning.npos &&
+          tuning.find("std::vector<wchar_t> buffer(32768)") == tuning.npos &&
           tuning.find("const std::wstring wanted=LowerKeyName(key);") != tuning.npos &&
           tuning.find("if(values->find(wanted)==values->end())continue;") != tuning.npos &&
           tuning.find("GetPrivateProfileStringW(scope.c_str(),key,L\"\",value,128,localFile.c_str())") == tuning.npos &&
@@ -626,7 +641,8 @@ static void TestConfigurationAndWiring()
           // There is no second, key-only memo left to fall out of step with the
           // value cache or to overflow in the middle of an apply.
           tuning.find("RememberScopedFile") == tuning.npos && tuning.find("memoWritten") == tuning.npos,
-          "a scoped read answers from the scope's own key set, read once, instead of probing the file per key and per level");
+          "a scoped read answers from one whole-file load per identity, so filling a section costs that section and "
+          "not another parse of the whole file");
     Check(tuning.find("inline DWORD ReadProfileString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path)") != tuning.npos &&
           tuning.find("inline bool ProfileIdentity(ProfileValues& file,const std::wstring& path)") != tuning.npos &&
           tuning.find("file.sections.clear();") != tuning.npos &&
@@ -725,18 +741,31 @@ static void TestConfigurationAndWiring()
           "startup configures itself - while a place whose tuning is already in force is skipped without spending the "
           "gap, and a walk along a border does not write a log line per sample about it: the line says how many reads "
           "the apply answered from memory and how many whole-file parses it paid");
-    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(") != tuning.npos &&
-          tuning.find("GetPrivateProfileSectionNamesW(") != tuning.npos &&
-          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") != tuning.npos &&
-          tuning.find("const std::vector<std::wstring>* names=SectionNamesOf(path,written,bytes);") != tuning.npos &&
-          tuning.find("if(path==localFile)localNames=names; else baseNames=names;") != tuning.npos &&
+    // And the skip has to survive a heavy settings file. The listing it is decided
+    // on came from GetPrivateProfileSectionNamesW into a fixed 32768-character
+    // buffer, which about a thousand authored scopes overflow: the overflow made
+    // the fingerprint unprovable, unprovable turned the skip OFF, and an
+    // unprovable listing is not cached either - so the whole file was re-listed on
+    // every ask, twice per crossing, forever. Measured at 84 KB: 1.4 ms per
+    // listing and no skip at all; at 2.1 MB, 46 ms. The listing now comes off the
+    // index the load builds, so it has no ceiling, and both the suffix walk and
+    // the fingerprint are kept against the identities they were derived from.
+    Check(tuning.find("inline const std::vector<std::wstring>* SectionNamesOf(const std::wstring& path)") != tuning.npos &&
+          tuning.find("for(const auto& entry:file.firstSpanOf)file.listing.push_back(entry.first);") != tuning.npos &&
+          tuning.find("GetPrivateProfileSectionNamesW(") == tuning.npos &&
+          tuning.find("if(length>=static_cast<DWORD>(buffer.size())-2)return nullptr;") == tuning.npos &&
+          tuning.find("ScopedSuffixList(localWritten,localBytes,baseWritten,baseBytes)") != tuning.npos &&
           tuning.find("std::wstring suffix=SectionSuffixOf(name);") != tuning.npos &&
-          tuning.find("effective.try_emplace(key,value);") != tuning.npos &&
-          tuning.find("present.insert(key);") != tuning.npos &&
+          // Deepest level wins, by a stable sort of pointers rather than a
+          // std::map and a std::set of copied strings per suffix.
+          tuning.find("std::stable_sort(resolved.begin(),resolved.end(),") != tuning.npos &&
           tuning.find("FingerprintMix(hash,L\"scoped\");") != tuning.npos &&
           tuning.find("FingerprintMix(hash,suffix);") != tuning.npos &&
           tuning.find("return current!=0&&current==appliedFingerprint;") != tuning.npos &&
-          tuning.find("return provable?hash:0;") != tuning.npos,
+          tuning.find("if(!provable) {active=previous;return 0;}") != tuning.npos &&
+          // The answers are remembered, and a write drops them with the values.
+          tuning.find("for(const FingerprintMemo& memo:FingerprintMemos())") != tuning.npos &&
+          tuning.find("ForgetScopedAnswers();") != tuning.npos,
           "the skip is decided on what the FILE holds, never on what a previous read cached: the section list and "
           "the per-suffix answers are read from the profile file itself, so a scope written by hand - or by the "
           "editor - in a section no read has touched still refuses the skip instead of quietly never applying, and a "

@@ -156,6 +156,11 @@ unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
 
+// This file is NOT on the shared sink, even though it is written on a crossing:
+// PerformanceProfiler is handed the same path below and appends to it directly
+// every frame, and the sink may only buffer a file it is the sole writer of -
+// otherwise a direct append can land before an older buffered line and the log
+// reads out of order. See the ownership rule in src/Diagnostics/FileSink.h.
 void Log(const char* s) { std::ofstream(std::filesystem::path(logPath), std::ios::app) << s << '\n'; }
 int ReadTuning(const wchar_t* key, int fallback, const wchar_t* section = L"Atmosphere") {
     wchar_t value[64]{};

@@ -1,6 +1,7 @@
 #include "EnvironmentProfileManager.h"
 #include "LocationTuning.h"
 #include "MenuDiagnostics.h"
+#include "../Diagnostics/FileSink.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -8,7 +9,15 @@
 #include <sstream>
 namespace renderer {
 EnvironmentProfileManager& EnvironmentProfileManager::Instance() {static EnvironmentProfileManager manager;return manager;}
-void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty()){renderer::locationtuning::RotateLogIfLarge(basePath+L"ModernWoWRenderer.log");std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}}
+// The location line is written on every CONFIRMED place, which is not the same
+// thing as a settled one: this client's place flaps across a border while the
+// player walks it, and the settle logic in HookedPresent deliberately applies
+// nothing on most of those alternations. This used to open the log, write one
+// line and close it again on every one of them - and stat the file for rotation
+// first - so the crossings that re-applied nothing still paid two opens in the
+// game folder, on the frame the player was walking on. It now buffers into the
+// shared sink and goes out in the one open Present already makes.
+void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty())renderer::filesink::AppendLine(basePath+L"ModernWoWRenderer.log","[Environment] "+message);}
 void EnvironmentProfileManager::Configure(const std::wstring& base) {
     basePath=base;std::string error;
     menudiagnostics::Configure(base);

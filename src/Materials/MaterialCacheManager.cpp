@@ -3,6 +3,7 @@
 #include "TextureHashLookup.h"
 #include "WicTextureLoader.h"
 #include "../Core/FrameContext.h"
+#include "../Diagnostics/FileSink.h"
 #include "../D3D9/CameraContinuity.h"
 #include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedRenderState.h"
@@ -20,11 +21,14 @@
 
 namespace renderer
 {
+    // Buffered into the shared sink: the tuning line is written on a crossing
+    // whose material numbers actually changed, and an open/write/close of a file
+    // in the game folder is a cost on exactly the frame a player walks a border
+    // on. See src/Diagnostics/FileSink.h.
     static void LogMessage(const std::wstring& logPath, const std::string& msg)
     {
         if (logPath.empty()) return;
-        std::ofstream out(logPath, std::ios::app);
-        if (out) out << msg << '\n';
+        filesink::AppendLine(logPath, msg);
     }
 
     static Vec3 ResolveMaterialLightWorldDirection(const FrameContext& frame)

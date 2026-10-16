@@ -38,8 +38,27 @@ static int failures = 0;
 namespace reference {
 // Faithful mini-emulation of GetPrivateProfileStringW for the subset the
 // renderer uses: case-insensitive sections/keys, trimmed section and key,
-// verbatim value after the first '=', ';'/'#' comment lines, defaults for
-// missing keys, UTF-8/ANSI bytes decoded one-to-one.
+// the API's own treatment of a value's edges (see ProfileValue), ';'/'#'
+// comment lines, defaults for missing keys, ANSI bytes decoded one-to-one.
+
+// The edges of a value as GetPrivateProfileStringW hands them back. Leading and
+// trailing blanks (space, tab, vertical tab) that exist in the file are stripped;
+// if what is left is enclosed in one matching pair of single or double quotes that
+// pair is discarded and the blanks inside it are kept; an unmatched pair, or a pair
+// in the wrong order, is left alone. This is the documented-and-measured behaviour
+// of the API, not a convenience: the cached parse in LocationTuning.h implements
+// the same rule and the differential below compares the two character by character.
+std::wstring ProfileValue(const std::wstring& text, size_t begin, size_t end)
+{
+    const auto blank = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\v'; };
+    while (begin < end && blank(text[begin])) ++begin;
+    while (end > begin && blank(text[end - 1])) --end;
+    if (end - begin >= 2) {
+        const wchar_t quote = text[begin];
+        if ((quote == L'"' || quote == L'\'') && text[end - 1] == quote) { ++begin; --end; }
+    }
+    return text.substr(begin, end - begin);
+}
 std::wstring GetString(const fs::path& path, const std::wstring& section, const std::wstring& key, const std::wstring& fallback)
 {
     std::ifstream file(path, std::ios::binary);
@@ -78,7 +97,8 @@ std::wstring GetString(const fs::path& path, const std::wstring& section, const 
         if (eq == std::wstring::npos || current.empty()) continue;
         if (current != wantSection) continue;
         if (lower(trim(line.substr(0, eq))) != wantKey) continue;
-        return line.substr(eq + 1); // first occurrence, verbatim - exactly like the API
+        // First occurrence wins, and the value's edges go the way the API does.
+        return ProfileValue(line, eq + 1, line.size());
     }
     return fallback;
 }
@@ -146,7 +166,9 @@ int main()
         "[Volume]\r\n"
         "Enabled=0\r\n"
         "[Notes]\r\n"
-        "SpacedNote = hello  world \r\n");
+        "SpacedNote = hello  world \r\n"
+        "QuotedNote=\"  kept  \"\r\n"
+        "TabbedNote=\thello\t\r\n");
     WriteFile(location,
         "[Map.571.Zone.65.Area.4164.Water]\r\n"
         "RipplePermille = 42\r\n"
@@ -168,8 +190,15 @@ int main()
         wchar_t value[64]{};
         ReadString(L"Water", L"WaterColour", L"", value, 64, graphicsW.c_str());
         Require(std::wstring(value) == L"0x808080", "string read keeps hex verbatim");
+        // The blanks a value was padded with are not part of it - the API strips
+        // them, so a hand-aligned settings file reads the same as one that was not.
+        // The blanks INSIDE the value, and inside a quoted one, are part of it.
         ReadString(L"Notes", L"SpacedNote", L"", value, 64, graphicsW.c_str());
-        Require(std::wstring(value) == L" hello  world ", "string read keeps value spaces verbatim like the API");
+        Require(std::wstring(value) == L"hello  world", "string read strips a value's surrounding blanks like the API");
+        ReadString(L"Notes", L"QuotedNote", L"", value, 64, graphicsW.c_str());
+        Require(std::wstring(value) == L"  kept  ", "string read keeps the blanks inside quotes");
+        ReadString(L"Notes", L"TabbedNote", L"", value, 64, graphicsW.c_str());
+        Require(std::wstring(value) == L"hello", "string read strips surrounding tabs like the API");
     }
     Require(ReadInt(L"Water", L"Missing", 7, graphicsW.c_str()) == 7, "missing key returns fallback");
 
