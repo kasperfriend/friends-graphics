@@ -47,6 +47,7 @@ namespace renderer
         m_intensityScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
         m_rayScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
         m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
+        m_normalSpread = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"NormalSpreadPercent", 100, m_iniPath.c_str())), 25, 400) * 0.01f;
         m_debugMode = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
     }
 

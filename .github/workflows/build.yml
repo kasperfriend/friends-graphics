@@ -331,6 +331,16 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/AmbientOcclusionRegression.cpp -o build/ambient-occlusion-test
           ./build/ambient-occlusion-test
 
+      # A lamp pool sees only a depth buffer, a camera and the light table too,
+      # and the noise a player reports lives exactly there: the built-in scene
+      # carries ground whose true normal is exactly straight up, so what the
+      # reconstruction reports on it is noise by construction.
+      - name: Dynamic light regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/LocalLightingRegression.cpp -o build/local-lighting-test
+          ./build/local-lighting-test
+
       # The shader text is only compiled on the Windows runner, so the GLSL
       # spellings fxc rejects are checked here, where a shader change can be
       # tested before it is pushed.

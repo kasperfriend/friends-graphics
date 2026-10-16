@@ -9,6 +9,7 @@
 #include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Lighting/LocalLightManager.h"
+#include "LocalLightingCore.h"
 
 #include <windows.h>
 
@@ -18,6 +19,11 @@ namespace renderer
 {
 namespace
 {
+// Line-by-line mirror of src/Effects/LocalLightingCore.h: Footprint,
+// TapWeights, ReconstructNormal and PoolShade. The relative edge band
+// (.30/.85) is NormalTuning::relativeEdgeLow/High at their shipped defaults -
+// the only part of that struct the shader spells out instead of receiving.
+// Change it in both places in the same commit.
 const char* kSurfaceSource = R"HLSL(
 sampler2D depthMap:register(s0);
 // s1 is read through a LINEAR filter: the water gate must not inherit the
@@ -30,8 +36,9 @@ sampler2D waterMask:register(s1);
 float4 cameraPos:register(c0);
 float4 projection:register(c1); // x=A,y=B,z=P00,w=P11
 float4 inv0:register(c2); float4 inv1:register(c3); float4 inv2:register(c4);
-float4 texel:register(c5);       // xy=full-res texel, z=count, w=occluded count
-float4 tuning:register(c6);      // x=intensity, y=debug
+float4 texel:register(c5);        // xy=full-res texel, zw=THIS buffer's texel
+float4 tuning:register(c6);       // x=intensity, y=debug, z=count
+float4 normalTuning:register(c7); // x=min window width (world), y=edge floor, z=edge slope, w=growth per yard
 float4 lightPosRadius[8]:register(c8);
 float4 lightColorPower[8]:register(c16);
 float4 lightDirectionCone[8]:register(c24);
@@ -42,30 +49,109 @@ float3 World(float2 uv,float raw) {
  float3 v=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*z;
  return cameraPos.xyz+v.x*inv0.xyz+v.y*inv1.xyz+v.z*inv2.xyz;
 }
+// locallighting::TapWeights, one axis, in inverse depth. .x is the weight of
+// the side the offset points away from, .y the other side.
+float2 AxisWeights(float dA,float dB,float curv,float absolute,float surfA,float surfB) {
+ float edge=smoothstep(absolute,absolute*4,curv)*smoothstep(.30,.85,curv/max(dA+dB,absolute));
+ // Normalized by the larger side, not by their sum: the sum saturates, so a
+ // side four times further off the surface than its partner kept a third of the
+ // weight and dragged the tangent onto the occluder behind it.
+ float asym=(dA-dB)/max(max(dA,dB),1e-4);
+ // locallighting::TapVetoRange: a side standing this much further from the
+ // receiver than its partner is on something else and does not get to steer the
+ // tangent. Measured against the partner, because the partner is what proves
+ // the window is on a surface - over ground at a grazing angle both sides take
+ // in many yards of depth per pixel, and they do it together - while an
+ // occluder's edge is exactly the asymmetry this catches.
+ float veto=6*min(dA,dB)+absolute;
+ float2 w=float2(surfA*(dA<=veto)*(1-edge*smoothstep(0,1,asym)),surfB*(dB<=veto)*(1-edge*smoothstep(0,1,-asym)));
+ // A side that measured nothing - off the frame, or the sky beyond it - was
+ // zeroed above; left to the edge test it reads as total disagreement and takes
+ // the surviving side with it, which collapses the tangent and the normal to
+ // zero. One surviving side is the whole axis.
+ if(w.x<=0&&w.y>0) w=float2(0,1);
+ if(w.y<=0&&w.x>0) w=float2(1,0);
+ return w;
+}
+// locallighting::SnapUv. tex2D is POINT, so a tap returns the texel centre's
+// depth; reconstructing that depth along the requested uv puts the point off
+// the surface by the depth gradient times up to half a texel, which at grazing
+// angles is yards. Every position this pass builds comes from a snapped uv, so
+// every tap is a point the depth buffer actually describes.
+float2 Snap(float2 uv) {
+ float2 i=min(floor(saturate(uv)/texel.xy),1/texel.xy-1);
+ return (i+.5)*texel.xy;
+}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
+ uv=Snap(uv);
  float raw=tex2D(depthMap,uv).r;
  if(raw>=.99990||tex2D(waterMask,uv).r>.25) return float4(0,0,0,0);
- float3 p=World(uv,raw);
- float dl=tex2D(depthMap,uv-float2(texel.x,0)).r,dr=tex2D(depthMap,uv+float2(texel.x,0)).r;
- float du=tex2D(depthMap,uv-float2(0,texel.y)).r,dd=tex2D(depthMap,uv+float2(0,texel.y)).r;
- float3 x0=World(uv-float2(texel.x,0),dl),x1=World(uv+float2(texel.x,0),dr);
- float3 y0=World(uv-float2(0,texel.y),du),y1=World(uv+float2(0,texel.y),dd);
- // Central differences average both sides of the tap, so the pool no longer
- // dapples and shimmers on textured ground the way a one-sided gradient
- // does. A tap window that straddles a depth edge must fall back to the
- // near side or the cliff face lights up from the wrong direction. The
- // fallback kicks in only once one side is already a clear step away, so
- // it fires at the cliff line itself - where the geometry actually turns
- // - instead of mid-pool, where the old dL==dR switch landed.
  float z=Linear(raw);
- float edge=max(.12,z*.008);
- float dL=abs(Linear(dl)-z),dR=abs(Linear(dr)-z);
- float3 px=max(dL,dR)<edge?(x0+x1)*.5:(dL<dR?x0:x1);
- float dU=abs(Linear(du)-z),dD=abs(Linear(dd)-z);
- float3 py=max(dU,dD)<edge?(y0+y1)*.5:(dU<dD?y0:y1);
- float3 n=normalize(cross(px-p,py-p));
- float3 toEye=normalize(cameraPos.xyz-p); if(dot(n,toEye)<0)n=-n;
- float3 sum=0,sourceDebug=0; float visibilityDebug=0; int count=(int)texel.z; int occ=(int)texel.w;
+ float3 p=World(uv,raw);
+ // locallighting::Footprint. One texel of the buffer being shaded, so the
+ // normal is a resolvable estimate for the pixel it lights: a window pinned
+ // to the FULL-resolution grid is narrower than a 0.75x texel, so the normal
+ // field was undersampled against its own grid and its high-frequency part
+ // aliased into grain. The world floor keeps the window off the terrain's
+ // micro-relief close to the camera, where one texel is a fraction of an
+ // inch of ground and the pool used to dapple with it.
+ float2 spread=max(texel.zw*(1+max(z,0)*normalTuning.w),normalTuning.x*.5/max(z,.25)*projection.zw);
+ // locallighting::TapOffset: the window is a whole number of depth texels per
+ // side, so the two taps mirror the receiver. A window that lands one texel one
+ // way and two the other reads as a step in any second difference however flat
+ // the ground is - and at a grazing angle one texel is yards of depth.
+ spread=max(round(spread/texel.xy),1)*texel.xy;
+ // The window's taps are sampled and reconstructed from the same snapped uv, so
+ // an off-frame tap shrinks the window to the frame instead of pairing the
+ // border texel's depth with a ray that never touched it.
+ float2 uvL=Snap(uv-float2(spread.x,0)),uvR=Snap(uv+float2(spread.x,0));
+ float2 uvU=Snap(uv-float2(0,spread.y)),uvD=Snap(uv+float2(0,spread.y));
+ float rawL=tex2D(depthMap,uvL).r,rawR=tex2D(depthMap,uvR).r;
+ float rawU=tex2D(depthMap,uvU).r,rawD=tex2D(depthMap,uvD).r;
+ float zL=Linear(rawL),zR=Linear(rawR),zU=Linear(rawU),zD=Linear(rawD);
+ float3 pL=World(uvL,rawL),pR=World(uvR,rawR);
+ float3 pU=World(uvU,rawU),pD=World(uvD,rawD);
+ float3 toEye=normalize(cameraPos.xyz-p);
+ // locallighting::TapWeights, per axis. An absolute yard threshold cannot
+ // separate a silhouette from ground seen at a grazing angle: out there the
+ // surface itself steps yards per pixel, so the old test read "edge" across
+ // the whole far field and quietly degraded into a one-sided difference of
+ // the terrain relief - an independent decision per pixel, which is what made
+ // the pool read as noise. An edge is a window whose two sides disagree with
+ // EACH OTHER more than with the surface's own slope; both halves are
+ // continuous, so the tangent slides from central to one-sided instead of
+ // switching.
+ //
+ // locallighting::InverseDepth: the test runs in 1/z, where every plane is
+ // flat. In yards a flat road at the horizon is yards of depth per pixel and
+ // its own perspective trips an absolute "this window straddles a step" test,
+ // which is how flat ground at range came to be treated as an edge. The yard
+ // tolerance is carried across (a yard at z is 1/z^2), so it keeps meaning the
+ // same thing on the ground.
+ //
+ // The depth map also says which taps found a surface at all: a clear value is
+ // the far plane, so a tap that reads it is the sky, not a neighbour. Handing
+ // that ray to the tangent is what aimed lamp light along the horizon.
+ float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);
+ float iU=1./max(zU,.001),iD=1./max(zD,.001);
+ float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);
+ float2 wx=AxisWeights(abs(iL-iC),abs(iR-iC),abs(iL+iR-2*iC),absolute,step(rawL,.99990),step(rawR,.99990));
+ float2 wy=AxisWeights(abs(iU-iC),abs(iD-iC),abs(iU+iD-2*iC),absolute,step(rawU,.99990),step(rawD,.99990));
+ float wL=wx.x,wR=wx.y,wU=wy.x,wD=wy.y;
+ // locallighting::ReconstructNormal: weighted central difference. With all
+ // four weights at one this is exactly (far-near)/2 on both axes, i.e. the
+ // central difference the pool had before; where a side is off-surface the
+ // tangent becomes the one-sided difference on the surviving side.
+ float3 tx=((p-pL)*wL+(pR-p)*wR)/max(wL+wR,1e-4);
+ float3 ty=((p-pU)*wU+(pD-p)*wD)/max(wU+wD,1e-4);
+ // A pixel of ground at the horizon can have its whole window in the sky: no
+ // surface left to measure. Face the viewer there instead of handing the
+ // cross product of two sky-ray remnants to the lamp as a normal.
+ float3 c=cross(tx,ty);
+ float3 n=dot(c,c)>1e-12?normalize(c):-toEye;
+ if(dot(n,toEye)<0)n=-n;
+ float intact=saturate((wL+wR+wU+wD)*.25);
+ float3 sum=0,sourceDebug=0; float visibilityDebug=0; int count=(int)tuning.z;
  [loop] for(int i=0;i<8;++i) {
   if(i>=count) break;
   float3 toL=lightPosRadius[i].xyz-p; float dist=length(toL); float radius=lightPosRadius[i].w;
@@ -74,17 +160,23 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
   float cone=lightDirectionCone[i].w;
   if(cone>-0.5) attenuation*=smoothstep(cone,min(1.0,cone+.12),dot(-l,normalize(lightDirectionCone[i].xyz)));
   float diffuse=saturate(dot(n,l));
-  float spec=pow(saturate(dot(reflect(-l,n),toEye)),24)*.055;
+  // locallighting::PoolShade. The highlight is scaled by how much of the
+  // window survived as one surface: pow(24) turns one compromised normal into
+  // one bright speck, and specks are what every other smoothing step fails to
+  // remove. `intact` is one on an untouched window, so flat ground is
+  // unchanged. LIGHT DEBUG 4 shows it on its own.
+  float spec=pow(saturate(dot(reflect(-l,n),toEye)),24)*.055*intact;
   float visibility=1; // Preserve native shadows; no duplicate screen-depth shadows.
   sum+=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation*visibility;
   sourceDebug+=lightColorPower[i].rgb*lightColorPower[i].w*fall*fall;
   visibilityDebug+=attenuation*(1-visibility);
  }
  sum*=tuning.x;
- if(tuning.y>.5&&tuning.y<1.5) return float4(sourceDebug,Linear(raw));
- if(tuning.y>1.5&&tuning.y<2.5) return float4(sum,Linear(raw));
- if(tuning.y>2.5&&tuning.y<3.5) return float4(saturate(visibilityDebug).xxx,Linear(raw));
- return float4(min(sum,3.0),Linear(raw));
+ if(tuning.y>.5&&tuning.y<1.5) return float4(sourceDebug,z);
+ if(tuning.y>1.5&&tuning.y<2.5) return float4(sum,z);
+ if(tuning.y>2.5&&tuning.y<3.5) return float4(saturate(visibilityDebug).xxx,z);
+ if(tuning.y>3.5) return float4(intact.xxx,z);
+ return float4(min(sum,3.0),z);
 })HLSL";
 
 const char* kCompositeSource = R"HLSL(
@@ -107,22 +199,32 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float slope=min(abs(zl-receiverZ),abs(zr-receiverZ))+min(abs(zu-receiverZ),abs(zd-receiverZ));
  float tolerance=max(max(.12,receiverZ*.008),slope*max(texel.x/fullTexel.x,texel.y/fullTexel.y)*1.5);
  float2 size=1/texel.xy; float2 pixel=uv*size-.5; float2 base=floor(pixel); float2 f=frac(pixel);
- float2 o[4]={float2(0,0),float2(1,0),float2(0,1),float2(1,1)};
+ float2 o[9]={float2(-1,-1),float2(0,-1),float2(1,-1),float2(-1,0),float2(0,0),
+              float2(1,0),float2(-1,1),float2(0,1),float2(1,1)};
  float3 light=0; float sum=0;
- [unroll]for(int i=0;i<4;++i){
+ [unroll]for(int i=0;i<9;++i){
   float2 q=(base+o[i]+.5)*texel.xy; float4 s=tex2D(lightMap,q);
-  // The depth mask must keep a bilinear floor: without it a tap window that
-  // straddles a depth edge goes winner-takes-all and the pool snaps in
-  // 1-2 px steps along the light-map grid (the "lines" at sub-1.0 quality).
-  // The floor keeps the blend continuous everywhere; the masked-out side of
-  // a silhouette still only contributes its (tiny) bilinear share.
-  float d=abs(s.a-receiverZ); float2 aw=1-abs(o[i]-f);
-  float w=max(aw.x*aw.y*exp(-d/max(tolerance,.01)*3),aw.x*aw.y*0.02);
+  // locallighting::CompositeSpatialWeight/CompositeDepthWeight. The spatial
+  // kernel is a 1.5-texel tent over a 3x3 window instead of a bilinear 2x2:
+  // a lamp pool is a smooth field, so the wider kernel costs nothing to look
+  // at and averages away whatever grain the depth-derived normals still
+  // carry. Support has to be above 1.0 or the outer ring weighs exactly zero
+  // at every subpixel phase and the window collapses back to bilinear.
+  // The depth mask must keep a floor: without it a tap window that straddles
+  // a depth edge goes winner-takes-all and the pool snaps in 1-2 px steps
+  // along the light-map grid (the "lines" at sub-1.0 quality). The floor
+  // keeps the blend continuous everywhere; the masked-out side of a silhouette
+  // still only contributes its (tiny) share, halved from the 2x2 value so
+  // twice the taps cannot twice the leak.
+  float2 spatial=float2(max(0,1.5-abs(o[i].x-f.x)),max(0,1.5-abs(o[i].y-f.y)));
+  float kernel=spatial.x*spatial.y;
+  float d=abs(s.a-receiverZ);
+  float w=max(kernel*exp(-d/max(tolerance,.01)*3),kernel*0.01);
   light+=s.rgb*w;sum+=w;
  }
- // sum is >= .02 by construction of the floor, so this is always a bounded
+ // sum is >= .01 by construction of the floor, so this is always a bounded
  // weighted blend - no argmin fallback, hence no hard switch line anywhere.
- light=light/max(sum,.02);
+ light=light/max(sum,.01);
  if(tuning.x>.5)return float4(light,1);
  // Half a level of fixed dither on the way into the 8-bit scene: a lamp
  // pool's smooth falloff otherwise quantizes into concentric rings on the
@@ -280,8 +382,18 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const int maxLights = manager.Quality() <= 0 ? 4 : 8;
     const int count = std::min<int>(maxLights, int(lights.size()));
     const int occluded = std::min(count, manager.Quality() <= 0 ? 2 : 4);
-    const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,float(count),float(occluded) };
-    const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(manager.DebugMode()),0,0 };
+    // zw are the texels of the buffer this pass is drawing into, not of the
+    // scene: the normal's window is sized against them (locallighting::
+    // Footprint), so the estimate always covers at least the pixel it lights.
+    const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,1.f / m_lightWidth,1.f / m_lightHeight };
+    const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(manager.DebugMode()),
+        float(count),float(occluded) };
+    // One description of the normal's tuning, shared with the CPU mirror the
+    // regression test runs (src/Effects/LocalLightingCore.h). LIGHT SMOOTHING
+    // scales the world floor of the window; the edge scales stay fixed.
+    const locallighting::NormalTuning normal = locallighting::DefaultNormalTuning(manager.NormalSpread());
+    const float normalTuning[4] = { normal.minWorldSpread, normal.edgeFloor, normal.edgeSlope,
+        normal.distanceGrowth };
     // c8..c31 are contiguous in the shader (pos c8, color c16, direction
     // c24), so the whole light table is one constant call, not three.
     float lightData[24][4]{};
@@ -300,6 +412,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
         f.projUnpack[1] * depthRange, f.projUnpack[2], f.projUnpack[3] };
     device->SetPixelShaderConstantF(0, camera, 1); device->SetPixelShaderConstantF(1, projection, 1);
     device->SetPixelShaderConstantF(2, inv[0], 3); device->SetPixelShaderConstantF(5, texel, 1); device->SetPixelShaderConstantF(6, tuning, 1);
+    device->SetPixelShaderConstantF(7, normalTuning, 1);
     device->SetPixelShaderConstantF(8, lightData[0], 24);
     DrawQuad(device, m_lightWidth, m_lightHeight);
     device->SetTexture(0, nullptr); device->SetTexture(1, nullptr);
