@@ -65,6 +65,10 @@ struct WaterSettings {
 };
 void TestWaterSettings(WaterSettings& settings) {
     watereffect::Configure(settings.base);
+    // Configure compiles the replacement stage on a worker thread (fast load);
+    // the game draws native water until that publishes, so poll readiness
+    // instead of asserting on the Configure return.
+    for (int i = 0; i < 1500 && watereffect::compiling.load(); ++i) Sleep(10);
     Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),
         "production shaders prepared even when startup and live water are OFF");
     Require(!watereffect::effectEnabled&&!watereffect::NeedsScene(),"starting OFF does not request water capture");
