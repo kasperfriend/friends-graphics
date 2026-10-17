@@ -126,6 +126,7 @@ float contactShadowStrength = .28f, contactShadowRadius = 10.f, contactShadowMax
 UINT configuredShadowMapSize = 1024;
 int brightnessPercent = 0, contrastPercent = 100, gammaPercent = 100, sharpnessPercent = 35;
 int sunGlowPercent = 150;
+int moonGlowPercent = 80;
 float shadowMatrix[4][4]{}, viewToShadowMatrix[4][4]{}, shadowView[4][4]{}, shadowProjection[4][4]{};
 bool shadowFrameStarted = false, shadowFrameValid = false;
 bool stableShadowLightValid = false;
@@ -291,9 +292,9 @@ void ReloadTuning() {
     temporalShaftsEnabled = ReadTuning(L"TemporalShaftsEnabled", 0) != 0;
     baseHeight = float(ReadTuning(L"BaseHeight", 60));
     density = std::clamp(ReadTuning(L"DensityPermille", 4), 0, 20) * .001f;
-    strength = std::clamp(ReadTuning(L"ShaftPercent", 160), 0, 500) * .01f;
+    strength = std::clamp(ReadTuning(L"ShaftPercent", 160), 0, 800) * .01f;
     variation = std::clamp(ReadTuning(L"VariationPercent", 135), 0, 250) * .01f;
-    moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 60), 0, 100) * .01f;
+    moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 60), 0, 800) * .01f;
     lowLayer = std::clamp(ReadTuning(L"LowLayerPercent", 35), 0, 150) * .01f;
     // Ground mist: low, dense, tightly height-limited - a second fog layer
     // stacked on top of the broad distance haze above, not a replacement.
@@ -337,7 +338,8 @@ void ReloadTuning() {
         static std::string lastPostProcessLine;
         if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}
     }
-    sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 300);
+    sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 400);
+    moonGlowPercent = std::clamp(ReadTuning(L"MoonGlowPercent", 80), 0, 400);
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
     shaftDebug = ReadTuning(L"ShaftDebugMask", 0) != 0;
@@ -1220,6 +1222,10 @@ bool Composite(IDirect3DDevice9* d) {
     // on UI. Water is explicitly masked by LocalLightingRenderer.
     const bool localLightingRendered =
         renderer::LocalLightingRenderer::Instance().Render(d, frameCtx);
+    // The atmosphere halo follows the same body as the glare: the moon has its
+    // own glow slider, so a moonlit sky is not lit by the sun's setting.
+    renderer::DirectionalVolumetricLighting::Instance().Settings().sunGlowStrength =
+        float(renderer::FrameContext::Current().celestialIsMoon ? moonGlowPercent : sunGlowPercent) * .01f;
     // Dedicated low-resolution atmosphere. This replaces the old full-res
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
     bool atmosphereRendered = false;
@@ -1250,7 +1256,8 @@ bool Composite(IDirect3DDevice9* d) {
         // which squashed the whole slider into a barely-perceptible range -
         // see the amount formula in volumePixelSource for the other half of
         // that fix.
-        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
+        const int glowPercent = renderer::FrameContext::Current().celestialIsMoon ? moonGlowPercent : sunGlowPercent;
+        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(glowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
         check(d->SetTexture(3, frameCtx.cloudTexture));
         check(d->SetSamplerState(3, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));

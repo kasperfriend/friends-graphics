@@ -8,8 +8,10 @@ inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
  {KIND_TOGGLE,L"Atmosphere",L"ShaftsEnabled","SUN RAYS",0,1,1,1},
- {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
- {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
+ {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,800,5,160},
+ {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,400,5,80},
+ {KIND_SLIDER,L"Atmosphere",L"MoonShaftPercent","MOON RAY STRENGTH",0,800,5,60},
+ {KIND_SLIDER,L"Atmosphere",L"MoonGlowPercent","MOON GLOW",0,400,5,80},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
  // Derives fog distance/colour from WoW's own authored values for the
  // current zone/shader (read-only capture) instead of one fixed profile
