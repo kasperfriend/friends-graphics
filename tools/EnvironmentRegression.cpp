@@ -19,7 +19,10 @@ void TestGlobalOverrides(const std::wstring& base) {
  editGlobal=true;
  Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==60,"untouched Global editor shows baseline, not current subarea");
  Require(runtime()==170&&!HasGlobalValue(L"Atmosphere",L"ShaftPercent"),"opening Global does not create overrides");
- Require(Save(L"Atmosphere",L"ShaftPercent",0)&&runtime()==0,"explicit zero Global edit overrides subarea");
+ Require(Save(L"Atmosphere",L"ShaftPercent",0),"save explicit zero Global edit");
+ Require(runtime()==170&&!HasInheritGlobal(L"Atmosphere",L"ShaftPercent"),"location does not inherit Global edit until Inherit Global is toggled on");
+ Require(SetInheritGlobal(L"Atmosphere",L"ShaftPercent",true)&&HasInheritGlobal(L"Atmosphere",L"ShaftPercent"),"toggle on Inherit Global");
+ Require(runtime()==0,"explicit zero Global edit overrides subarea once Inherit Global is active");
  Require(GetPrivateProfileIntW(L"Atmosphere",L"ShaftPercent",0,path.c_str())==60,"Global override preserves baseline file");
  Require(ReadInt(L"Water",L"Enabled",1,path.c_str())==0&&!HasGlobalValue(L"Water",L"Enabled"),"Global edit leaves other keys untouched");
  editGlobal=false;editZone=true;
