@@ -107,8 +107,6 @@ namespace precipitationlayers
     // Lattice periods, per mode and axis (the stage spells the same values).
     // Chosen so each layer's visible pattern repeats on an independent
     // 8-50 min cycle; the combined pattern effectively never repeats.
-    constexpr float rainPeriodX[3] = { 32768.f, 32768.f, 32768.f };
-    constexpr float rainPeriodY[3] = { 32768.f, 16384.f, 8192.f };
     constexpr float snowPeriodX[3] = { 32768.f, 32768.f, 32768.f };
     constexpr float snowPeriodY[3] = { 32768.f, 16384.f, 8192.f };
     constexpr float sandPeriodX[3] = { 1024.f, 2048.f, 8192.f };
@@ -153,12 +151,8 @@ static inline void SplitPhase(double phase, double period, float& f, float& n)
 inline WrappedPhases ComputeWrappedPhases(double fall, double windX, double windY, int mode) noexcept
 {
     WrappedPhases out;
-    const auto* periodX = mode == 2 ? precipitationlayers::snowPeriodX
-                       : mode == 3 ? precipitationlayers::sandPeriodX
-                       :              precipitationlayers::rainPeriodX;
-    const auto* periodY = mode == 2 ? precipitationlayers::snowPeriodY
-                       : mode == 3 ? precipitationlayers::sandPeriodY
-                       :              precipitationlayers::rainPeriodY;
+    const auto* periodX = mode == 3 ? precipitationlayers::sandPeriodX : precipitationlayers::snowPeriodX;
+    const auto* periodY = mode == 3 ? precipitationlayers::sandPeriodY : precipitationlayers::snowPeriodY;
     for (int i = 0; i < 3; ++i)
     {
         const float v = precipitationlayers::speed[i];
@@ -179,10 +173,9 @@ inline WrappedPhases ComputeWrappedPhases(double fall, double windX, double wind
         }
         else
         {
-            // Rain: the grid's x offset is 64*v*windX and its y offset
-            // 16*v*(1.2*fall + windY), both in lattice cells.
-            px = 64.0 * v * windX;
-            py = 16.0 * v * (1.2 * fall + windY);
+            // Invalid modes use the snow lattice; rain has its own field.
+            px = 6.0 * v * windX;
+            py = 7.2 * v * fall;
         }
         float* dst = i == 0 ? out.c6 : i == 1 ? out.c7 : out.c8;
         SplitPhase(px, periodX[i], dst[0], dst[1]);
