@@ -599,6 +599,12 @@ static void TestConfigurationAndWiring()
           weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,
           "production weather uses native type and integrated fall/wind, not separate clocks or overrides");
+    Check(weatherSource.find("primitiveCount >= 6000") == weatherSource.npos &&
+          weatherSource.find("ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height") != weatherSource.npos &&
+          weatherSource.find("rainCompositeReady = drewPrecipitation;") != weatherSource.npos &&
+          Read("ModernWoWRenderer.cpp").find("weathervisuals::NeedsPresentFallback()") != std::string::npos &&
+          Read("ModernWoWRenderer.cpp").find("weathervisuals::BeforeDraw(d, true);") != std::string::npos,
+          "small rain batches and missing UI draws cannot silently disable the rain pass");
     const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
     Check(weatherResetStart != weatherSource.npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)

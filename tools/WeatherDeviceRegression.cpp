@@ -34,6 +34,49 @@ int main() try {
     weathervisuals::Configure(L".\\");weathervisuals::EnsureShaders(d.Get());
     Require(bool(weathervisuals::rainPS)&&bool(weathervisuals::precipitationPS)&&bool(weathervisuals::lensDropletsPS),
         "production rain, snow/sand and lens shaders compile and install");
+    // Native weather batch size varies with particle emission, not with the
+    // server weather type. A small valid draw must refresh the rain signal.
+    Require(weathervisuals::ClassifyNativeWeather(1,16,128,0xde9331cb560b9814ull,
+        0x8832bcc5ed4ff2a6ull,0)==1 &&
+        weathervisuals::ClassifyNativeWeather(1,64,64,0x50aa504baa78b237ull,
+        0xec9ee827b8bf5afaull,0)==2 &&
+        weathervisuals::ClassifyNativeWeather(1,64,64,0x50aa504baa78b237ull,
+        0x8832bcc5ed4ff2a6ull,0)==3 &&
+        weathervisuals::ClassifyNativeWeather(0,16,128,0xde9331cb560b9814ull,
+        0x8832bcc5ed4ff2a6ull,0)==0 &&
+        weathervisuals::ClassifyNativeWeather(1,16,128,0xde9331cb560b9814ull,
+        0x8832bcc5ed4ff2a6ull,42)==0,
+        "weather identity accepts small native batches but rejects zero/foreign draws");
+    weathervisuals::nativeWeatherSeenThisFrame=1;
+    weathervisuals::UpdateWeatherObservation(1000,true,false);
+    weathervisuals::nativeWeatherSeenThisFrame=0;
+    weathervisuals::UpdateWeatherObservation(7000,true,false);
+    Require(weathervisuals::nativeWeatherMode==1,
+        "a missed native rain batch cannot turn rain off after five seconds");
+    // Steady rain may emit only occasional small batches; each one refreshes
+    // the observation while clear weather eventually releases the latch.
+    for(DWORD tick=12000;tick<120000;tick+=12000) {
+        weathervisuals::nativeWeatherSeenThisFrame=1;
+        weathervisuals::UpdateWeatherObservation(tick,true,false);
+        weathervisuals::nativeWeatherSeenThisFrame=0;
+        weathervisuals::UpdateWeatherObservation(tick+9000,true,false);
+        Require(weathervisuals::nativeWeatherMode==1,"steady intermittent rain stays active");
+    }
+    weathervisuals::UpdateWeatherObservation(120000+weathervisuals::nativeWeatherHoldMs,true,false);
+    Require(weathervisuals::nativeWeatherMode==0,"rain eventually clears without any further native evidence");
+    weathervisuals::nativeWeatherSeenThisFrame=1;
+    weathervisuals::UpdateWeatherObservation(200000,true,false);
+    weathervisuals::nativeWeatherSeenThisFrame=0;
+    weathervisuals::UpdateWeatherObservation(200000+weathervisuals::nativeWeatherHoldMs+1,false,false);
+    Require(weathervisuals::nativeWeatherMode==1&&weathervisuals::weatherSuspended,
+        "focus loss holds a detected storm");
+    weathervisuals::UpdateWeatherObservation(240000,true,false);
+    Require(weathervisuals::nativeWeatherMode==1&&!weathervisuals::weatherSuspended,
+        "returning to the game restarts the evidence window");
+    weathervisuals::nativeWeatherMode=0;
+    weathervisuals::nativeWeatherSeenThisFrame=0;
+    weathervisuals::weatherSuspended=false;
+    weathervisuals::lastNativeWeatherTick=0;
     auto texture=[&](UINT width,UINT height,DWORD value,bool band=false) {
         ComPtr<IDirect3DTexture9> t;Check(d->CreateTexture(width,height,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,t.GetAddressOf(),nullptr));
         D3DLOCKED_RECT r{};Check(t->LockRect(0,&r,nullptr,0));
@@ -165,6 +208,21 @@ int main() try {
     Check(d->GetSamplerState(3,D3DSAMP_SRGBTEXTURE,&state));Require(state==TRUE,"mist sampler color space restored");
     float c[4]{};Check(d->GetPixelShaderConstantF(5,c,1));Require(memcmp(c,sentinel,sizeof(c))==0,"depth-range constants restored");
     Require(renderer::g_trackedState.vsHash==tracked.vsHash&&renderer::g_trackedState.currentPS==tracked.currentPS,"tracked game pipeline preserved");
+    // A frame with no matching UI draw gets one late world-frame composite,
+    // not a duplicate pass or an invisible rain frame.
+    weathervisuals::composedThisFrame=false;
+    weathervisuals::worldGeometrySeenThisFrame=true;
+    renderer::g_trackedState.vsHash=0;renderer::g_trackedState.psHash=0;
+    weathervisuals::rainDebugView=1;
+    Require(weathervisuals::NeedsPresentFallback(),"missing UI draw requests one weather fallback");
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+    Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get(),true);Check(d->EndScene());
+    Require(weathervisuals::composedThisFrame&&weathervisuals::rainCompositeReady&&
+        nonblack(pixels())>100&&!weathervisuals::NeedsPresentFallback(),
+        "fallback renders detected rain once without a UI trigger");
+    weathervisuals::rainDebugView=0;
+    weathervisuals::worldGeometrySeenThisFrame=false;
+    renderer::g_trackedState=tracked;
     weathervisuals::nativeWeatherMode=0;weathervisuals::composedThisFrame=false;
     Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());
     Require(!weathervisuals::composedThisFrame,"no native weather means no added weather pass");

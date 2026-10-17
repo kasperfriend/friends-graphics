@@ -354,6 +354,15 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     waterreflection::Present();
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
+    // The normal weather pass precedes the first UI draw. Some client frames
+    // have no matching UI draw (or emit weather after it); compose those once
+    // after the other post effects, inside a real D3D scene. Do not invoke the
+    // hooked EndScene here: that would paint the diagnostic overlay twice.
+    if (weathervisuals::NeedsPresentFallback() && SUCCEEDED(d->BeginScene())) {
+        try { weathervisuals::BeforeDraw(d, true); }
+        catch (...) { weathervisuals::internal = false; }
+        g_originalEndScene(d);
+    }
     weathervisuals::Present(d,tuningoverlay::visible);
     const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
     const bool placeChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());

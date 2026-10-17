@@ -78,8 +78,11 @@ inline int nativeWeatherMode = 0;
 inline UINT nativeWeatherPrimitives = 0;
 inline DWORD lastNativeWeatherTick = 0;
 inline bool composedThisFrame = false;
+inline bool rainCompositeReady = false;
 inline bool weatherSuspended = false;
-inline constexpr DWORD nativeWeatherHoldMs = 5000;
+// Native particle batches can be sparse even in steady rain (or disappear
+// under cover). A missed draw is not a clear-weather event.
+inline constexpr DWORD nativeWeatherHoldMs = 30000;
 inline std::unordered_set<uint64_t> loggedParticleCandidates;
 inline unsigned loggedParticleCandidateCount = 0;
 
@@ -631,6 +634,7 @@ inline void Reset(IDirect3DDevice9* device)
     nativeWeatherSeenThisFrame = 0;
     nativeWeatherPrimitives = 0;
     composedThisFrame = false;
+    rainCompositeReady = false;
     weatherSuspended = nativeWeatherMode != 0;
     lastTick = GetTickCount();
 }
@@ -655,6 +659,23 @@ inline void ObserveWorldDraw()
         worldGeometrySeenThisFrame = true;
 }
 
+// Texture identity plus the captured weather shader pair is the type signal.
+// Batch size is NOT weather intensity: the client varies particle counts and
+// can emit small batches while the same game rain continues.
+inline int ClassifyNativeWeather(UINT primitives, UINT width, UINT height,
+                                 uint64_t textureHash, uint64_t vsHash, uint64_t psHash)
+{
+    if (!primitives || psHash) return 0;
+    if (width == 16 && height == 128 && textureHash == 0xde9331cb560b9814ull &&
+        vsHash == 0x8832bcc5ed4ff2a6ull) return 1;
+    if (width == 64 && height == 64 && textureHash == 0x50aa504baa78b237ull)
+    {
+        if (vsHash == 0xec9ee827b8bf5afaull) return 2;
+        if (vsHash == 0x8832bcc5ed4ff2a6ull) return 3;
+    }
+    return 0;
+}
+
 // Recognize native weather draws for detection even when rendering is off.
 // Snow/sand keep their world-space billboards; rain is hidden only after the
 // wind-driven compositor has a working shader and target.
@@ -667,7 +688,7 @@ public:
         if (!device ||
             !renderer::g_trackedState.alphaBlend ||
             renderer::g_trackedState.zWrite || !renderer::g_trackedState.zEnable ||
-            primitiveCount < 16)
+            primitiveCount == 0)
             return;
 
         IDirect3DBaseTexture9* base = nullptr;
@@ -685,40 +706,21 @@ public:
 
         // Captured directly from this Ascension 3.3.5 client. Dimensions alone
         // also matched UI atlases and spell particles, so they are not safe.
-        const bool countOk = primitiveCount >= 6000;
         const bool dimRain = desc.Width == 16 && desc.Height == 128;
         const bool dimSmall = desc.Width == 64 && desc.Height == 64;
-        // GetTextureHash LOCKS THE TEXTURE AND HASHES ITS ENTIRE CONTENT on
-        // first sight of a pointer - a multi-millisecond stall for the large
-        // UI/spell atlases that spell effects bind to this stage. Hash only
-        // when it can change an outcome: every other match condition holds
-        // (then the dimensions above already bound the texture to a tiny
-        // precipitation size), or for the bounded candidate log, where only
-        // the two particle-sized textures are worth identifying.
+        // Only hash the two tiny candidate atlases, and only when the
+        // native weather vertex/pixel pair can match (or for bounded logs).
         const uint64_t trackedVs = renderer::g_trackedState.vsHash;
         const uint64_t trackedPs = renderer::g_trackedState.psHash;
-        const bool matchPossible = countOk &&
-            ((dimRain && trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0) ||
-             (dimSmall && (trackedVs == 0xec9ee827b8bf5afaull || trackedVs == 0x8832bcc5ed4ff2a6ull) && trackedPs == 0));
+        const bool matchPossible = trackedPs == 0 &&
+            ((dimRain && trackedVs == 0x8832bcc5ed4ff2a6ull) ||
+             (dimSmall && (trackedVs == 0xec9ee827b8bf5afaull || trackedVs == 0x8832bcc5ed4ff2a6ull)));
         const bool logWorthIt = loggedParticleCandidateCount < 128 && (dimRain || dimSmall) && !matchPossible;
         uint64_t textureHash = 0;
         if (matchPossible || logWorthIt)
             textureHash = renderer::TextureHashLookup::Instance().GetTextureHash(base);
-
-        const bool exactRain = dimRain && countOk &&
-            textureHash == 0xde9331cb560b9814ull &&
-            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
-        const bool exactSnow = dimSmall && countOk &&
-            textureHash == 0x50aa504baa78b237ull &&
-            trackedVs == 0xec9ee827b8bf5afaull && trackedPs == 0;
-        // Type 3 (sandstorm) reuses the 64x64 precipitation atlas but selects
-        // the rain-family vertex shader. This exact pairing was captured from
-        // the client's native draw and is distinct from snow above.
-        const bool exactSand = dimSmall && countOk &&
-            textureHash == 0x50aa504baa78b237ull &&
-            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
-
-        const int detected = exactRain ? 1 : (exactSnow ? 2 : (exactSand ? 3 : 0));
+        const int detected = ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height,
+            textureHash, trackedVs, trackedPs);
 
         // Record a bounded set of native transparent candidates for exact
         // rain/clear/snow comparison without flooding the log.
@@ -767,7 +769,8 @@ public:
         // Once the analytical compositor has a valid target, do not mix
         // differently directed native rain with the shared-wind field.
         // Until then the game's billboards remain a visible fallback.
-        const bool replaceRain = detected == 1 && rainPS && sceneCopySurface && neutralDepthTex;
+        const bool replaceRain = detected == 1 && rainCompositeReady && rainPS &&
+            sceneCopySurface && neutralDepthTex;
         const float alphaScale = replaceRain ? 0.f :
             intensity * renderer::FrameContext::Current().environment[renderer::Weather] *
             (detected == 2 ? 1.55f : (detected == 3 ? .48f : .70f));
@@ -805,18 +808,17 @@ private:
 
 // Composite rain, or snow/sand continuity, immediately before the first UI
 // draw without touching the game UI or F7 overlay.
-inline void BeforeDraw(IDirect3DDevice9* device)
+inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
 {
     const bool isUi = renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                       renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull;
-    if (!isUi || composedThisFrame || !enabled || !effectEnabled || !active || !device)
+    if ((!isUi && !presentFallback) || composedThisFrame || !enabled || !effectEnabled || !active || !device)
         return;
     // Only the native observation owns the type. The old "Mode" override
     // changed this layer alone while clouds, waves, native particles and
     // the status display kept reporting the real rain/snow/sand type.
     const int renderMode = nativeWeatherMode;
     if (!renderMode) return;
-    composedThisFrame = true;
 
     // Time step calculation
     DWORD now = GetTickCount();
@@ -851,20 +853,22 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     IDirect3DTexture9* depthTex = hasCapturedDepth
         ? renderer::DepthCapture::Instance().GetDepthTexture()
         : neutralDepthTex.Get();
-    if (!depthTex) return;
+    if (!depthTex) { if (renderMode == 1) rainCompositeReady = false; return; }
 
     ComPtr<IDirect3DSurface9> backBuffer;
     if (FAILED(device->GetRenderTarget(0, backBuffer.GetAddressOf())) || !backBuffer)
-        return;
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     D3DSURFACE_DESC desc{};
     backBuffer->GetDesc(&desc);
-    if (desc.Width == 0 || desc.Height == 0) return;
+    if (desc.Width == 0 || desc.Height == 0)
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     EnsureShaders(device);
     LoadTextures(device);
 
-    if (renderMode == 1 ? !rainPS : !precipitationPS) return;
+    if (renderMode == 1 ? !rainPS : !precipitationPS)
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     // Precipitation itself composites over sceneTex, so the scene copy is
     // mandatory even when lens droplets are disabled.
@@ -878,10 +882,11 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     }
 
     if (!sceneCopySurface || FAILED(device->StretchRect(backBuffer.Get(), nullptr, sceneCopySurface.Get(), nullptr, D3DTEXF_NONE)))
-        return;
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     const auto trackedState = renderer::g_trackedState;
     internal = true;
+    bool drewPrecipitation = false;
     {
     renderer::ScopedPassState savedState(device);
 
@@ -1002,10 +1007,10 @@ inline void BeforeDraw(IDirect3DDevice9* device)
             : "WeatherVisuals render path active: precipitation fallback without captured depth");
     }
 
-    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex));
+    drewPrecipitation = SUCCEEDED(device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex)));
 
     // Render camera lens droplets pass (if rain and enabled)
-    if (lensDroplets && rainDebugView == 0 && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
+    if (drewPrecipitation && lensDroplets && rainDebugView == 0 && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
     {
         // A render-target texture cannot be a StretchRect destination while
         // it is still bound for sampling by the precipitation pass.
@@ -1037,6 +1042,47 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     }
     internal = false;
     renderer::g_trackedState = trackedState;
+    // Commit only a real draw. Failure leaves native rain available on the
+    // next frame and allows the Present fallback to retry this frame.
+    if (drewPrecipitation) composedThisFrame = true;
+    if (renderMode == 1) rainCompositeReady = drewPrecipitation;
+}
+
+// Native draws are observations, not a per-frame boolean weather API. Missing
+// draws in steady light rain must not repeatedly switch the shader off.
+inline void UpdateWeatherObservation(DWORD now, bool focused, bool preserveDetection)
+{
+    if (nativeWeatherSeenThisFrame)
+    {
+        nativeWeatherMode = nativeWeatherSeenThisFrame;
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if ((!focused || preserveDetection) && nativeWeatherMode)
+    {
+        // Loading, Alt+Tab and F7 can throttle native particle emission.
+        weatherSuspended = true;
+    }
+    else if (weatherSuspended && nativeWeatherMode)
+    {
+        // Restart the grace window after returning to the game.
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if (lastNativeWeatherTick && now - lastNativeWeatherTick > nativeWeatherHoldMs)
+    {
+        nativeWeatherMode = 0;
+        lastNativeWeatherTick = 0;
+    }
+}
+
+// Called after the rest of the world effects, before Present resets the frame.
+// The normal pre-UI path is preferred; this is only for frames with no UI
+// trigger (or a late native weather batch).
+inline bool NeedsPresentFallback() noexcept
+{
+    return !composedThisFrame && enabled && effectEnabled && active && nativeWeatherMode != 0 &&
+        (worldGeometrySeenThisFrame || nativeWeatherSeenThisFrame != 0);
 }
 
 inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
@@ -1052,32 +1098,7 @@ inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
     }
     keyDown = down;
 
-    const DWORD now = GetTickCount();
-    if (nativeWeatherSeenThisFrame)
-    {
-        nativeWeatherMode = nativeWeatherSeenThisFrame;
-        lastNativeWeatherTick = now;
-        weatherSuspended = false;
-    }
-    else if ((!focused || preserveDetection) && nativeWeatherMode)
-    {
-        // Alt+Tab and the interactive F7 overlay can pause or throttle native
-        // particle emission. Absence of a draw then is not evidence that the
-        // weather ended.
-        weatherSuspended = true;
-    }
-    else if (weatherSuspended && nativeWeatherMode)
-    {
-        // Give the client time to refill its native particle system after
-        // focus/device restoration while the continuity layer stays alive.
-        lastNativeWeatherTick = now;
-        weatherSuspended = false;
-    }
-    else if (lastNativeWeatherTick && now - lastNativeWeatherTick > nativeWeatherHoldMs)
-    {
-        nativeWeatherMode = 0;
-        lastNativeWeatherTick = 0;
-    }
+    UpdateWeatherObservation(GetTickCount(), focused, preserveDetection);
 
     nativeWeatherSeenThisFrame = 0;
     nativeWeatherPrimitives = 0;

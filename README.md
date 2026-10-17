@@ -91,7 +91,7 @@ of the cloud shader, at the shipped defaults.*
 
 - Rain uses a new depth-aware, camera-relative field of sharp procedural streaks. Gravity pulls them down while the shared world wind moves them downwind; native rain is hidden once the new pass is ready. F7 offers speed, density, length, width, opacity, wind influence and mask/direction debug views.
 - Snow and sand retain native particles plus a small continuity layer; their native direction remains with the game.
-- Weather state survives short native-particle gaps caused by opening F7 or returning from Alt+Tab. Clouds, wind, waves and the continuity layer all use the detected native rain/snow/sand type; the old visual-only weather hint is ignored.
+- Weather state survives intermittent native particle batches, missing UI draws, opening F7 and returning from Alt+Tab. Clouds, wind, waves and the continuity layer all use the detected native rain/snow/sand type; the old visual-only weather hint is ignored.
 - Optional rain lens droplets and subtle snow mist are available; this setting does not also retune the volumetric atmosphere.
 
 ### Shared wind
