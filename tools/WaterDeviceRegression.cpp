@@ -355,6 +355,24 @@ int main() try {
         for(auto state:{D3DRS_COLORWRITEENABLE1,D3DRS_COLORWRITEENABLE2}){DWORD value=1;Check(d->GetRenderState(state,&value));Require(value==0,"MRT write masks restored");}
     };
     watereffect::reflectionScene=watereffect::reflectionDepth=nullptr;
+    // A camera-selected native water VS may reuse c4 for another constant. It must
+    // not make the replacement vertex shader fog the entire surface to fogColor.
+    // The fallback is scoped to this draw and the original c4 returns exactly.
+    float savedFog[4]{},badFog[4]={0.f,0.f,0.f,0.f},currentFog[4]{};
+    Check(d->GetVertexShaderConstantF(4,savedFog,1));
+    Check(d->SetVertexShaderConstantF(4,badFog,1));
+    {
+        watereffect::Scope scope(d.Get());
+        Require(scope.device==d.Get()&&scope.vertexFogFallback,
+            "malformed native c4 keeps the replacement water shader and selects the no-fog fallback");
+        Check(d->GetVertexShaderConstantF(4,currentFog,1));
+        Require(currentFog[0]==0.f&&currentFog[1]==1.f&&currentFog[2]==1.f&&currentFog[3]==0.f,
+            "replacement draw receives the identity fog curve instead of malformed c4");
+    }
+    Check(d->GetVertexShaderConstantF(4,currentFog,1));
+    Require(memcmp(currentFog,badFog,sizeof(badFog))==0,
+        "malformed native c4 is restored exactly after the water draw");
+    Check(d->SetVertexShaderConstantF(4,savedFog,1));
     {
         watereffect::Scope scope(d.Get());
         Require(scope.device==d.Get(),"replacement installs without scene/depth capture");

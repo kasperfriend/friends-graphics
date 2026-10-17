@@ -43,6 +43,7 @@
 #include "../src/Water/WaveField.h"
 #include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
+#include "../src/Water/WaterQuality.h"
 #include "PreviewSheet.h"
 
 #include <algorithm>
@@ -112,6 +113,9 @@ struct Config
     // WAVE HEIGHT in percent of the shipped sea, the same number and the same scale as the
     // client's GeometryWavePercent (0 = a flat sheet, 100 = the reference look, 300 = a gale).
     float sunDisc = 40.f, geometryWaves = 100.f;
+    // WATER QUALITY, the same 0..10 level and the same ladder the DLL resolves through
+    // QualityPlanFor: how much of the look is evaluated, never how strong any of it is.
+    int quality = kQualityDefault;
     float reflectionStrength = 80.f, environmentStrength = 45.f, reflectionDistance = 120.f;
     float reflectionThickness = 350.f;
     unsigned waterColour = 0x808080u, deepColour = 0x0e2a28u, absorptionColour = 0xff8c6bu;
@@ -164,6 +168,12 @@ static float BottomOf(const Config& c, float x, float y)
 
 static float FieldSlope(const Config& c, float x, float y)
 {
+    // +-1.5 yards is the baseline the shader's bed slope is floored at
+    // (WaterEffect.h's kBedSlopeSpanYards), and the floor is not cosmetic: a per-pixel depth
+    // difference divided by a per-pixel footprint measures the depth buffer's quantization
+    // rather than the bed once one pixel is a few inches wide, which is exactly what a shoreline
+    // looks like from the water's edge. This mirror samples the analytic bottom over the same
+    // span, so the two halves read the same slope and the same foam.
     const float e = 1.5f;
     return std::hypot(BottomOf(c, x + e, y) - BottomOf(c, x - e, y),
                       BottomOf(c, x, y + e) - BottomOf(c, x, y - e)) / (2.f * e);
@@ -281,7 +291,18 @@ struct WaveState
 {
     V3 normal{ 0, 0, 1 };
     V2 slopes{};
-    float detail = .5f, swell01 = .5f, foamPattern = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
+    float detail = .5f, swell01 = .5f, foamPattern = .5f, broadValue = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
+    // The two chop values the foam lace reads that `detail` does not already carry: the fine
+    // octave's own value and the mid octave's. Both sit at the shader's neutral .5 when the
+    // quality level does not sample them, which is exactly what the shader's seeded samples
+    // are worth, so a low level here and there mean the same surface.
+    float fineValue = .5f, midValue = .5f;
+    // The longest swell train this point stands in, and its rate of change: the sine is the
+    // height the shore back-flow runs a beach up by, and the cosine says whether the sheet is
+    // arriving (positive, run-up) or leaving (negative, backwash). The DLL reads both out of
+    // the interpolated long-train pair the vertex stage forwards; this mirror has no vertex
+    // stage, so it evaluates the same train at the same point.
+    float swashSine = 0.f, swashCosine = 0.f;
     // The Gerstner pair: how hard the surface is pinching here (1 - Jacobian), and the
     // Jacobian itself, which is what the shading slope is divided by so that a crest the
     // geometry steepened is a crest the light also sees steepened.
@@ -297,7 +318,7 @@ struct WaveState
 // preview cannot borrow BuildWaveField's basis for it - the rasterizer knows the pixel's own
 // footprint, a CPU loop has to derive it from the view.
 static WaveState SampleWaves(const Config& c, const WaveField& field, const GeometryWaves& geometry,
-                             float worldX, float worldY, V2 footprint)
+                             const QualityPlan& plan, float worldX, float worldY, V2 footprint)
 {
     WaveState w;
     const V2 plane{ worldX * field.lattice[0] + worldY * field.lattice[1],
@@ -325,22 +346,44 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     const float filter = 1.f / std::sqrt(1.f + c.softening * .16f
         * (footprint.x * footprint.x + footprint.y * footprint.y));
     // The chop rides the swell instead of scrolling over it, exactly as the shader's does.
-    const NoiseSample ripple = NoiseGradient(plane.x + field.ripplePhase[0] + swell * .62f,
-                                            plane.y + field.ripplePhase[1] + swell * .33f);
+    // WATER QUALITY decides how many octaves are evaluated at all, and an octave the level
+    // does not sample stays at the neutral value/zero slope the shader seeds its sample with,
+    // so "no chop here" means the same surface in both halves of the renderer.
+    const NoiseSample neutral{ .5f, 0.f, 0.f };
+    const NoiseSample ripple = plan.chopOctaves >= 1
+        ? NoiseGradient(plane.x + field.ripplePhase[0] + swell * .62f,
+                        plane.y + field.ripplePhase[1] + swell * .33f)
+        : neutral;
     // The shader's second chop octave: finer, counter-phased, footprint-faded sooner.
-    const NoiseSample rippleFine = NoiseGradient(plane.x * 2.17f + field.ripplePhase[1] * 1.31f + swell * .9f,
-                                                 plane.y * 2.17f - field.ripplePhase[0] * 1.31f + swell * .47f);
+    const NoiseSample rippleFine = plan.chopOctaves >= 2
+        ? NoiseGradient(plane.x * 2.17f + field.ripplePhase[1] * 1.31f + swell * .9f,
+                        plane.y * 2.17f - field.ripplePhase[0] * 1.31f + swell * .47f)
+        : neutral;
+    // The shader's mid octave, the band between the shortest analytic train and the base chop:
+    // just under half the base frequency, counter-phased against the base octave the way the
+    // fine one is, riding the swell between the two, and faded by `filter` rather than by its
+    // square because it stays resolvable about twice as far.
+    const NoiseSample rippleMid = plan.chopOctaves >= 3
+        ? NoiseGradient(plane.x * .46f - field.ripplePhase[0] * .87f + swell * .40f,
+                        plane.y * .46f + field.ripplePhase[1] * .87f + swell * .66f)
+        : neutral;
     const float strength = c.ripple * .001f, normalResponse = c.normalResponse * .01f;
     // The shader's waveFlow.w gate, which the DLL fills from WAVES rather than from the
-    // strengths: the preview has no such switch, so it derives the same 0/1 from them.
-    const float flowGate = Saturate(strength * 100.f + normalResponse * 4.f);
-    w.slopes = V2{ ((ripple.dx * .72f * filter + rippleFine.dx * .30f * filter * filter) * gain + swellSlope.x) * flowGate,
-                   ((ripple.dy * .72f * filter + rippleFine.dy * .30f * filter * filter) * gain + swellSlope.y) * flowGate };
+    // strengths: the preview has no such switch, so it derives the same 0/1 from them. WATER
+    // QUALITY at FLAT closes the same gate from the other direction, and does it here too.
+    const float flowGate = plan.waves ? Saturate(strength * 100.f + normalResponse * 4.f) : 0.f;
+    w.slopes = V2{ ((ripple.dx * .72f * filter + rippleFine.dx * .30f * filter * filter
+        + rippleMid.dx * .40f * filter) * gain + swellSlope.x) * flowGate,
+                   ((ripple.dy * .72f * filter + rippleFine.dy * .30f * filter * filter
+        + rippleMid.dy * .40f * filter) * gain + swellSlope.y) * flowGate };
     w.detail = Mix(.5f, ripple.value, filter);
+    w.fineValue = rippleFine.value;
+    w.midValue = rippleMid.value;
     // Long foam tongues inherit the broad crest-scale breakup while chop tears
     // their edges into smaller, moving flecks. Both fields are already sampled
     // for the warped swell and normal, so the preview mirrors the shader exactly.
     w.foamPattern = Saturate(.45f * warp.noiseValue + .55f * w.detail);
+    w.broadValue = warp.noiseValue;
     w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
@@ -362,16 +405,31 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // dimmed is a wave the sea has flattened, in three dimensions as well as in light.
     const float thetaA = SwellTheta(0, warp.plane.x, warp.plane.y, field.swellPhase);
     const float thetaB = SwellTheta(1, warp.plane.x, warp.plane.y, field.swellPhase);
-    w.height = geometry.amplitude * gain
-        * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB));
+    // The shore back-flow reads the longest train this point stands in, and its rate of
+    // change: the DLL gets both from the interpolated pair the vertex stage forwards, here
+    // they are the same analytic values at the same warped point.
+    w.swashSine = std::sin(thetaA);
+    w.swashCosine = std::cos(thetaA);
+    // The mid wave the highest levels also displace, and the renormalization that keeps WAVE
+    // HEIGHT the same peak lift whether the mesh carries two trains or three: the third train
+    // adds shape, not size, and the fold budget gets smaller rather than larger.
+    const float thetaC = SwellTheta(2, warp.plane.x, warp.plane.y, field.swellPhase);
+    const float midGate = plan.midGeometry ? 1.f : 0.f;
+    const float meshScale = (kTrainWeight[0] + kTrainWeight[1])
+        / (kTrainWeight[0] + kTrainWeight[1] + midGate * kTrainWeight[2]);
+    w.height = geometry.amplitude * gain * meshScale
+        * (kTrainWeight[0] * std::sin(thetaA) + kTrainWeight[1] * std::sin(thetaB)
+            + midGate * kTrainWeight[2] * std::sin(thetaC));
     const V2 baseSlide{
         kTrainWeight[0] * std::cos(thetaA) * kTrainDirX[0]
-            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1],
+            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirX[1]
+            + midGate * kTrainWeight[2] * std::cos(thetaC) * kTrainDirX[2],
         kTrainWeight[0] * std::cos(thetaA) * kTrainDirY[0]
-            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1] };
+            + kTrainWeight[1] * std::cos(thetaB) * kTrainDirY[1]
+            + midGate * kTrainWeight[2] * std::cos(thetaC) * kTrainDirY[2] };
     const float slideAlongWarp=baseSlide.x*kWaveWarpDirectionX+baseSlide.y*kWaveWarpDirectionY;
-    const V2 slide{ geometry.lateral * gain * (baseSlide.x+slideAlongWarp*kWaveWarpAmplitude*warp.gradientX),
-                    geometry.lateral * gain * (baseSlide.y+slideAlongWarp*kWaveWarpAmplitude*warp.gradientY) };
+    const V2 slide{ geometry.lateral * meshScale * gain * (baseSlide.x+slideAlongWarp*kWaveWarpAmplitude*warp.gradientX),
+                    geometry.lateral * meshScale * gain * (baseSlide.y+slideAlongWarp*kWaveWarpAmplitude*warp.gradientY) };
     // Lattice axes to world axes: the lattice rows are the world directions scaled by
     // 1/cell, so one cell length turns them back into unit vectors.
     w.lateral = V2{ (slide.x * field.lattice[0] + slide.y * field.lattice[2]) * geometry.cellYards,
@@ -418,8 +476,15 @@ int main(int argc, char** argv)
         else if (a == "--wave-scale") base.waveScale = ArgFloat(next());
         else if (a == "--softening") base.softening = ArgFloat(next());
         else if (a == "--geometry-waves") base.geometryWaves = ArgFloat(next());
+        else if (a == "--quality") base.quality = std::atoi(next());
         else if (a == "--shoal-foam") base.shoalFoam = ArgFloat(next());
         else if (a == "--shore-foam") base.shoreFoam = ArgFloat(next());
+        // The shore band's own width in percent of a yard, which is the DLL's SHORE FOAM
+        // WIDTH (waterStyle.w). It is the one number that decides how far up a beach the
+        // swash, the wet foam and the backwash streaks reach, and the presets only ever set
+        // it to the shipped value - so a shoreline that sits outside the frame, as the coast
+        // panel's does, could not be audited at all without it.
+        else if (a == "--shore-foam-width") base.shoreFoamWidth = ArgFloat(next());
         else if (a == "--refraction") base.refraction = ArgFloat(next());
         else if (a == "--absorption") base.absorption = ArgFloat(next());
         else if (a == "--roughness") base.roughness = ArgFloat(next());
@@ -546,8 +611,14 @@ int main(int argc, char** argv)
         // no vertex stage, so it displaces the shaded point itself. `--geometry-waves` stands
         // in for the DLL's GEOMETRY WAVES percent, and the sea state scales it exactly as it
         // does in the client, so a storm panel lifts the same coast a storm frame does.
+        // The quality ladder, resolved exactly where the DLL resolves it: once per frame from
+        // the level, into the one plan both the wave sampling and the shading below read. A
+        // preview that re-derived the gates would be a picture of a ladder nobody ships.
+        const QualityPlan plan = QualityPlanFor(c.quality);
         const GeometryWaves geometry = BuildGeometryWaves(c.geometryWaves, c.waveScale,
-            sea.agitation, c.geometryWaves > 0.f, true);
+            sea.agitation, c.geometryWaves > 0.f && plan.geometryTrains >= kGeometryTrainCount, true);
+        // The shore back-flow run-up, in yards, from the same amplitude the mesh lifts by.
+        const float swashYards = SwashYards(plan, geometry.amplitude);
         // Rendered larger than the sheet and box filtered down, the way a 2x backbuffer is
         // resolved for display. It matters for the mirror specifically: the scene silhouette is
         // ray-marched, and the wave octave is exactly what the shader's anti-alias gain exists to
@@ -667,7 +738,7 @@ int main(int argc, char** argv)
                             + std::fabs(field.lattice[0] * v.up.x + field.lattice[1] * v.up.y) * pixelsY,
                         std::fabs(field.lattice[2] * v.right.x + field.lattice[3] * v.right.y) * pixelsX
                             + std::fabs(field.lattice[2] * v.up.x + field.lattice[3] * v.up.y) * pixelsY };
-                    WaveState wave = SampleWaves(c, field, geometry, surface.x, surface.y, footprint);
+                    WaveState wave = SampleWaves(c, field, geometry, plan, surface.x, surface.y, footprint);
                     if (geometry.amplitude > 0.f || geometry.lateral > 0.f)
                     {
                         // Gerstner: the point the shading belongs to is the flat-plane hit
@@ -678,17 +749,27 @@ int main(int argc, char** argv)
                         surface = Add(surface, V3{ wave.lateral.x, wave.lateral.y, 0.f });
                         const float push = std::max((surface.z - wave.height) / -dir.z, 0.f);
                         surface = Add(v.pos, Mul(dir, planeHit.distance + push));
-                        wave = SampleWaves(c, field, geometry, surface.x, surface.y, footprint);
+                        wave = SampleWaves(c, field, geometry, plan, surface.x, surface.y, footprint);
                     }
                     const float viewZ = std::max(Dot(Sub(surface, v.pos), v.fwd), .05f);
                     const V3 viewPos = Sub(surface, v.pos);
                     const V3 n{ 0, 0, 1 }, wn = wave.normal;   // n = the geometric normal (the surface is flat)
+                    // The shader's own `v`, declared where the shader declares it: the body shading's
+                    // transmission floor below is the first thing that needs it.
+                    const V3 toCamera = Normalize(Mul(viewPos, -1.f));
 
                     // The client's own painted water, as a flat tone (no textures here).
                     V3 rgb{ .15f, .19f, .20f };
                     const float sunElev = Dot(light, n);
-                    rgb = Mul(rgb, 1.f + normalResponse * (1.9f * (Dot(wn, light) - Dot(n, light))
-                        + .75f * (Dot(wn, v.up) - Dot(n, v.up))));
+                    // Floored exactly as the shader floors it. `normalResponse` is the shader's
+                    // controls.z and reaches 2.5 in an agitated sea, so on a face turning away from
+                    // the light this multiplier goes NEGATIVE and the colour it leaves behind is
+                    // black - which, seen through the nearer face of the same wave, is the dark shape
+                    // that used to sit inside the sea at surface height. The floor rises with the
+                    // light coming through the sheet toward the camera.
+                    rgb = Mul(rgb, std::max(1.f + normalResponse * (1.9f * (Dot(wn, light) - Dot(n, light))
+                        + .75f * (Dot(wn, v.up) - Dot(n, v.up))),
+                        Mix(.22f, .78f, Saturate(-Dot(toCamera, light) * 1.7f - .45f))));
 
                     const float screenU = u * .5f + .5f, screenV = .5f - vv * .5f;   // 0..1 uv, the capture's own space
                     const float behindZ = sceneDepth > 1e8f ? 1e5f : sceneDepth;
@@ -699,7 +780,12 @@ int main(int argc, char** argv)
                     const float openOcean = behindZ >= 99999.f ? 1.f : 0.f;
                     const float effectiveDepth = Mix(waterDepth, 9999.f, openOcean);
                     const float column = std::min(effectiveDepth, 400.f);
-                    const float bend = refractionStrength * Saturate(column * .05f + .25f);
+                    // The shader's soft contact line at the top level: the last inches of a
+                    // waterline are a meniscus, not a step, so the refracted offset fades in
+                    // over the first yard instead of pulling the bottom by the full wave slope
+                    // right at the contact. Below that level the contact factor is exactly 1.
+                    const float contact = plan.foamGlow ? Saturate(effectiveDepth * .9f) : 1.f;
+                    const float bend = refractionStrength * Saturate(column * .05f + .25f) * contact;
                     const V2 uvOffset{ wave.slopes.x * refractGain * bend, -wave.slopes.y * refractGain * bend };
                     float refractU = screenU + uvOffset.x, refractV = screenV + uvOffset.y;
                     const float refractZ = copy.Sample(refractU, refractV);   // raw, no bias
@@ -712,7 +798,6 @@ int main(int argc, char** argv)
                     const V3 transmittance{ std::exp(-lightReach * absorptionStrength * column * absorbRate.x),
                                             std::exp(-lightReach * absorptionStrength * column * absorbRate.y),
                                             std::exp(-lightReach * absorptionStrength * column * absorbRate.z) };
-                    const V3 toCamera = Normalize(Mul(viewPos, -1.f));
                     const float absorption = 1.f - transmittance.y;
                     const float g = .3f + .34f * Saturate(sunElev);
                     const float phaseDen = std::max(1.f + g * g - 2.f * g * Dot(Mul(toCamera, -1.f), light), 1e-3f);
@@ -729,7 +814,28 @@ int main(int argc, char** argv)
                     inScatter = Mul(inScatter, 1.f + 2.2f * backlit);
                     inScatter = Mul(inScatter, lightColour);
 
-                    const float shallowEdge = 1.f - Smoothstep(.08f, .08f + std::max(shoreFoamWidth, .1f), effectiveDepth);
+                    // SHORE UNDERSTANDING: the bed slope, in world yards here and from the
+                    // captured depth divided by its own lattice footprint in the shader, so both
+                    // read the same dimensionless number at any resolution and distance. A gentle
+                    // beach and a rock wall both come up fast and they are not the same water: one
+                    // carries a wide swash zone with sheets running up it and draining back out,
+                    // the other a narrow bright contact line and nothing that can run up it.
+                    const float bottomSlope = FieldSlope(c, surface.x, surface.y);
+                    const float beach = 1.f - Saturate(bottomSlope * 1.6f - .32f);
+                    // BACK FLOW: the sheet that runs up a beach and drains back out again, driven
+                    // by the same longest train the mesh lifts with, so the run-up arrives with a
+                    // crest the player can already see coming. Depth is the shoreline's own
+                    // coordinate - "up the beach" is "less water over the bottom" - so the whole
+                    // effect is a shift of the depth the shore masks are built from. It moves the
+                    // shore and foam edges only: the absorption column and the refraction above
+                    // still measure the water that is really there, because a sheet running up a
+                    // beach is thin water and thin water is what those terms describe.
+                    const float runUp = swashYards * beach;
+                    const float draining = (swashYards > .0001f ? 1.f : 0.f) * Saturate(-wave.swashCosine * 1.8f);
+                    const float swashWidth = 1.f + beach * 1.4f * (plan.shore ? 1.f : 0.f);
+                    const float swashDepth = std::max(effectiveDepth - wave.swashSine * runUp, 0.f);
+                    const float shallowEdge = 1.f - Smoothstep(.08f,
+                        .08f + std::max(shoreFoamWidth, .1f) * swashWidth, swashDepth);
                     const float shore = validDepth * shallowEdge;
                     const float crest = Saturate(.42f + wave.swell01 * .6f + wave.detail * .3f);
                     // ---- foam, computed before the reflections because the shader lets it damp
@@ -747,13 +853,50 @@ int main(int argc, char** argv)
                     // shape; drifting chop detail shreds the edges.
                     const float foamThreshold = .82f + (1.f - wave.foamPattern) * .14f;
                     const float whitecap = Smoothstep(foamThreshold, foamThreshold + .14f, capBand);
-                    const float bottomSlope = FieldSlope(c, surface.x, surface.y);
                     const float shoal = Saturate(bottomSlope * shoalGain * 2.f - .3f)
                         * Saturate(1.f - column * .05f) * validDepth;
                     const float crestMask = Smoothstep(.60f, .94f, wave.swell01 + wave.rippleEnergy * .05f)
                         * (.35f + .65f * wave.foamPattern);
+                    // FOAM LACE, at the mid-wave level and above: a mask decides WHERE foam is
+                    // and says nothing about what it looks like, and one scalar of coverage can
+                    // only ever be a grey sheet. Real foam is a lace - bright filaments with dark,
+                    // water-filled gaps, at three scales at once - and all three samples already
+                    // exist, so it costs arithmetic and no noise evaluation: the fine chop is the
+                    // fleck, the mid octave is the lump a fleck sits on, and the broad warp is the
+                    // tongue both are torn out of. It multiplies the crest terms whole, because a
+                    // whitecap IS a broken streak, and only .45 of the shore term, because a sheet
+                    // running up a beach is continuous in a way a cap on a crest is not.
+                    //
+                    // The previous two iterations incorrectly blamed either distant aliasing or
+                    // the clipped saturate. The user's latest underwater capture still showed the
+                    // grid after both changes. Quality 7 is the switch that introduces the mid
+                    // octave, and that octave's value was still being read by the lace even after the
+                    // threshold was fixed. Keep the continuous fine fleck, but use the broad warp
+                    // already interpolated from vertices as the other lace scale: unlike per-pixel
+                    // mid value noise it cannot print a cell grid onto foam or split at mesh tiles.
+                    const float laceFine = Mix(.5f, wave.fineValue, wave.filter * wave.filter);
+                    const float laceBroad = Mix(.5f, wave.broadValue, wave.filter);
+                    const float lace = plan.midWaves
+                        ? Mix(1.f, 1.f - .70f * (1.f - laceFine) * (1.f - laceBroad),
+                            Saturate(wave.filter * 2.f - .2f))
+                        : 1.f;
+                    // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline,
+                    // in streaks the next sheet pushes up and the drain pulls back out. Contours of
+                    // the bottom are the shoreline's own coordinate, so a band in depth is a band
+                    // along the shore, and moving that band with the arriving swell is the retreat
+                    // the eye reads as back flow. The chop value tears the bands into flecks so
+                    // they can never read as rings painted on the water, `shallowEdge` keeps them
+                    // inside the swash zone they belong to, and `draining` is what makes them a
+                    // backwash rather than a run-up: the streaks are only there while the sheet is
+                    // leaving.
+                    const float backwash = plan.midWaves
+                        ? Saturate(.55f + .45f * std::sin(swashDepth * 2.4f - wave.swashSine * 2.1f))
+                            * (.30f + .70f * wave.foamPattern) * Saturate(shallowEdge * 2.2f) * draining
+                        : 0.f;
                     const float foamAmount = Saturate((shore * shoreFoamStrength * (.35f + .65f * foamWind)
-                        + (crestMask * .45f + whitecap * 1.15f + shoal * .6f) * foamWind * crestFoamStrength) * crest);
+                            * Mix(1.f, lace, .45f) * (1.f + .45f * draining)
+                        + (crestMask * .45f + whitecap * 1.15f + shoal * .6f) * foamWind * crestFoamStrength * lace
+                        + backwash * shoreFoamStrength * lace) * crest);
                     const float rough = Saturate(sheenFloor
                         + std::hypot(wave.slopes.x, wave.slopes.y) * roughnessGain + foamAmount * 1.4f);
 
@@ -848,8 +991,34 @@ int main(int argc, char** argv)
                     // The foam colour itself, added last so it sits on top of everything the
                     // water did below it. The lift toward the light is softened at NoL = -.25
                     // so a shaded face still carries its own cap instead of going flat black.
-                    rgb = Add(rgb, Mul(Add(Mul(deep, .3f), V3{ .42f, .48f, .43f }),
+                    // From the mid-wave level up the colour is a ramp on the coverage the masks
+                    // already produced instead of one flat white: a thick cap scatters everything
+                    // back and reads as the bright chalk of a breaking crest, a thin veil lets the
+                    // water's own tint through and reads as the grey-green lace underneath it.
+                    // The same ramp is what lets the two coexist on one wave - the filaments stay
+                    // water-coloured while the crests go white - and it is why the amount that
+                    // used to be one number now has a colour of its own.
+                    V3 foamColour = Add(Mul(deep, .3f), V3{ .42f, .48f, .43f });
+                    if (plan.midWaves)
+                    {
+                        const V3 thinFoam = Add(Mul(deep, .55f), V3{ .28f, .34f, .32f });
+                        foamColour = Lerp(thinFoam, Add(Mul(deep, .3f), V3{ .42f, .48f, .43f }),
+                            Saturate(foamAmount * 1.35f));
+                    }
+                    rgb = Add(rgb, Mul(foamColour,
                         foamAmount * (.55f + .45f * Saturate(NoL + .25f)) * foamBrightness));
+                    // Backlit veil, at the top level only: foam is air and water, and a thin one
+                    // lit from behind is translucent in exactly the way the crest above is, which
+                    // is the same cue the in-scattering lobe gives the body of the water. It uses
+                    // the one dot the lobe already computed - `toCamera` is the shader's `v`, both
+                    // normalize(-viewPos) - and the weight the colour ramp left over, so the thick
+                    // white caps that already scatter everything back are not double-lit.
+                    if (plan.foamGlow)
+                    {
+                        rgb = Add(rgb, Mul(foamColour, (1.f - Saturate(foamAmount * 1.35f)) * foamAmount
+                            * Saturate(-Dot(toCamera, light) * 1.4f - .35f)
+                            * Saturate(sunElev * 2.f + .2f) * .55f * foamBrightness));
+                    }
                     const float columnBottom = std::max(-BottomOf(c, surface.x, surface.y), 0.f);   // the client's own alpha stand-in
                     const float baseAlpha = Saturate(.30f + columnBottom * .30f);
                     const float depthAlpha = absorption * (.78f - .20f * fresnel);
@@ -867,6 +1036,19 @@ int main(int argc, char** argv)
                             refractU, refractV, refractZ, validDepth, transmittance.x, transmittance.y, transmittance.z);
                         std::printf("    absorption %g  fresnel %g  rough %g  hit %g  alpha %g  foam %g\n",
                             absorption, fresnel, rough, hit, alpha, foamAmount);
+                        // The shore and foam intermediates WATER QUALITY adds, printed with the
+                        // rest so a level can be audited one pixel at a time: `bedSlope` is the
+                        // dimensionless bed the shader measures from the captured depth, `beach`
+                        // is the shape read off it, and the swash/backwash/lace trio is what the
+                        // mid-wave level turns on. `runUp 0` or `lace 1` on a level that should
+                        // have them is a wiring bug, not a quiet pixel.
+                        std::printf("    shore bedSlope %g  beach %g  runUp %g  draining %g  swashDepth %g\n",
+                            bottomSlope, beach, runUp, draining, swashDepth);
+                        std::printf("    foam lace %g  backwash %g  colour %g %g %g  veil %g\n",
+                            lace, backwash, foamColour.x, foamColour.y, foamColour.z,
+                            plan.foamGlow ? (1.f - Saturate(foamAmount * 1.35f)) * foamAmount
+                                * Saturate(-Dot(toCamera, light) * 1.4f - .35f)
+                                * Saturate(sunElev * 2.f + .2f) * .55f * foamBrightness : 0.f);
                         std::printf("    rgb %g %g %g  body %g %g %g  n %g %g %g  slopes %g %g\n",
                             rgbBefore.x, rgbBefore.y, rgbBefore.z, waterBody.x, waterBody.y, waterBody.z,
                             wn.x, wn.y, wn.z, wave.slopes.x, wave.slopes.y);

@@ -57,11 +57,8 @@ $budgets = @{
     # Keep snow/sand continuity and the analytical rain field within it.
     'precipitationHLSL'      = 512
     'rainHLSL'               = 512
-    # Water pixel stage, capped on explicit request: 2048 is ~3x the slots
-    # it actually uses (642 measured 2026-10-14, ~580 after the 2026-10-17
-    # CSE pass; see docs/water-rendering.md), so the ceiling guards against
-    # a pathological edit (an unrolled march, a forgotten constant array)
-    # rather than acting as a design input on wave-train quality.
+    # Water pixel stage, capped on explicit request; quality gates are branches,
+    # so every level compiles the same shader and the cap guards pathological edits.
     'source'                 = 2048
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
@@ -97,7 +94,12 @@ $measureOnly = @()
 # compiler diagnostics have to end up in one.
 function Write-Annotation([string]$level, [string]$title, [string]$message) {
     $flat = ($message -replace "`r`n", "`n") -replace "`n", '%0A'
-    Write-Output "::$level title=$title::$flat"
+    # A workflow command's fields are comma-separated, so an unescaped comma simply ends the title:
+    # "fxc failed (postProcessPixelSource, ps_3_0)" came back from the API as "fxc failed
+    # (postProcessPixelSource", which is the one part of the diagnostic that says WHICH profile was
+    # being compiled. Escape it the same way the message's newlines are escaped.
+    $safeTitle = $title -replace ',', '%2C'
+    Write-Output "::$level title=$safeTitle::$flat"
 }
 
 $temp = Join-Path $env:TEMP 'modern-wow-renderer-shaders'

@@ -115,7 +115,19 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
   absorption with light scattering back out of the water, shoreline/crest/shoal foam, ripples,
   Schlick Fresnel response, and a sun glint that broadens as the source drops toward the horizon.
 - The long swell is analytic and shared with the vertex stage, so a displaced crest and the
-  light on it are the same wave; only the chop fades when a pixel cannot resolve it.
+  light on it are the same wave; only the chop fades when a pixel cannot resolve it. A mid-wave
+  band between the swell and the chop carries the texture a player reads as "waves", and above
+  WATER QUALITY 8 the mesh lifts it too.
+- `[Water] Quality` (F7: WATER QUALITY, 0-10) is the one water setting that is a cost rather than
+  a look: it trades the chop octaves, both ray marches, the mirrored emitters, the displaced mid
+  wave, the foam lace and the shore back flow at once. 0 is a flat sheet, 6 is the sea that shipped
+  before the slider existed, 7 is the default, 10 is everything - and no level changes what any
+  other water slider means.
+- Shorelines are read off the captured depth buffer as a bed slope in world yards, so the same
+  shore is the same shore at any resolution and distance: a beach gets a wide swash zone with
+  sheets running up it and draining back out, a rock wall gets a narrow bright contact line.
+- Foam is a lace of bright filaments over dark water-filled gaps at three scales, coloured by its
+  own coverage rather than painted one flat white, and it glows when a low sun is behind it.
 - Waves are evaluated on a world-anchored lattice, not on a tile's texture coordinates, so
   one continuous surface is never framed by the squares of a repeated or degenerate pattern.
 - Texture-signature matching covers liquid shader variants without splitting a continuous water surface.

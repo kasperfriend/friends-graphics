@@ -658,6 +658,14 @@ static void TestConfigurationAndWiring()
           weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,
           "production weather uses native type and integrated fall/wind, not separate clocks or overrides");
+    // The depth gate and roof fade use actual signals, while the refactored
+    // rain path still accepts sparse native batches and has a Present fallback.
+    Check(weatherSource.find("if (isSand < 0.5 && weatherParams.w > 0.5 && sceneZ > 6.0)") != weatherSource.npos &&
+          weatherSource.find("hasCapturedDepth ? 1.0f : 0.0f };") != weatherSource.npos &&
+          weatherSource.find("smoothedIndoor = std::clamp(smoothedIndoor + (coverTarget - smoothedIndoor)") != weatherSource.npos &&
+          weatherSource.find("if (nativeWeatherSeenThisFrame || !focused || weatherSuspended || !nativeWeatherMode)") != weatherSource.npos &&
+          weatherSource.find("coverMs > coverEvidenceMs ? 1.0f : 0.0f") != weatherSource.npos,
+          "the depth-gated mist and the under-cover fade both have a real signal behind them");
     Check(weatherSource.find("primitiveCount >= 6000") == weatherSource.npos &&
           weatherSource.find("ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height") != weatherSource.npos &&
           weatherSource.find("rainCompositeReady = drewPrecipitation;") != weatherSource.npos &&
