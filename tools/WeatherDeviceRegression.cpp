@@ -62,8 +62,12 @@ int main() try {
     struct Vertex{float x,y,z,w,u,v;};
     Vertex quad[]={{-.5f,-.5f,0,1,0,0},{size-.5f,-.5f,0,1,1,0},{-.5f,size-.5f,0,1,0,1},{size-.5f,size-.5f,0,1,1,1}};
     // Five units exposes only the nearest precipitation layer; all farther
-    // layers are occluded. Mist is disabled so movement has one exact answer.
-    auto render=[&](int mode,float time,float sceneZ,float minZ=0.f,float maxZ=1.f,float windX=0.f) {
+    // layers are occluded. Mist is disabled (haze 0) so movement has one exact
+    // answer; the three trailing arguments exist for the mist-gate assertions
+    // below, which need the term measurable and the depth-valid flag in c1.w
+    // under their own control.
+    auto render=[&](int mode,float time,float sceneZ,float minZ=0.f,float maxZ=1.f,float windX=0.f,
+                    float haze=0.f,float depthValid=1.f,IDirect3DTexture9* mistTex=nullptr) {
         D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
         *static_cast<float*>(r.pBits)=minZ+(maxZ-minZ)*(1.001f-.1f/sceneZ);Check(depth->UnlockRect(0));
         Check(d->SetRenderTarget(0,back.Get()));D3DVIEWPORT9 vp{0,0,size,size,0,1};Check(d->SetViewport(&vp));
@@ -71,12 +75,14 @@ int main() try {
             D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_SRGBWRITEENABLE,D3DRS_CLIPPLANEENABLE})Check(d->SetRenderState(state,FALSE));
         Check(d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));Check(d->SetRenderState(D3DRS_FILLMODE,D3DFILL_SOLID));Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,15));
         Check(d->SetVertexShader(nullptr));Check(d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));Check(d->SetPixelShader(weathervisuals::precipitationPS.Get()));
-        Check(d->SetTexture(0,black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,clear.Get()));
+        Check(d->SetTexture(0,black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,mistTex?mistTex:clear.Get()));
         for(DWORD slot=0;slot<4;++slot){Check(d->SetSamplerState(slot,D3DSAMP_MINFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MAGFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MIPFILTER,D3DTEXF_NONE));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSU,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSV,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_SRGBTEXTURE,FALSE));}
         // c0..c5 carry the raw values; c6..c8 carry the same phases
         // wrapped exactly as BeforeDraw does (the motion asserts below
         // measure the 8px/4px steps those formulas produce).
-        float constants[6][4]={{1.001f,-.1f,1,1},{time,1,float(mode),1},{windX,0,0,0},{float(size),float(size),1.f/size,1.f/size},{1,1,1,1},{minZ,1/(maxZ-minZ),0,0}};
+        // c1.w is the depth-valid flag the mist gate reads; production fills it
+        // from hasCapturedDepth, and c2.z is the haze the mist is scaled by.
+        float constants[6][4]={{1.001f,-.1f,1,1},{time,1,float(mode),depthValid},{windX,0,haze,0},{float(size),float(size),1.f/size,1.f/size},{1,1,1,1},{minZ,1/(maxZ-minZ),0,0}};
         auto wrapped = renderer::ComputeWrappedPhases(double(time),double(windX),0.0,mode);
         Check(d->SetPixelShaderConstantF(0,constants[0],6));
         Check(d->SetPixelShaderConstantF(6,wrapped.c6,1));
@@ -103,6 +109,31 @@ int main() try {
     Require(nonblack(render(1,0,1))==0,"near foreground fully occludes precipitation");
     auto compressed=render(1,0,5,0,.94f),offset=render(1,0,5,.1f,.94f);
     Require(difference(rain0,compressed,0,0)<.1&&difference(rain0,offset,0,0)<.1,"rain occlusion normalizes viewport MinZ and MaxZ");
+
+    // THE MIST GATE - the second half of "rain overflows the full screen", reproduced exactly. With
+    // no INTZ capture the neutral depth texture reads 1.0 and sceneZ comes back 100000, which is past
+    // BOTH of the mist's distance gates, so the mist used to run at full strength over every pixel of
+    // the screen whenever depth was missing - which above 1x multisampling is always. c1.w now says
+    // whether depth exists and the mist is gated on it. Slot 3 has to be a white texture for any of
+    // this to be measurable: production binds a soft noise, this harness binds a 1x1 clear, and with
+    // a zero alpha the mist contributes nothing whatever the gate says, which is why no assertion
+    // here ever noticed the term running full-screen. Haze is at its authored maximum (3.0) so the
+    // term is ~0.24 of a white mist, i.e. 0.8*0.08*3.0 = ~49 of 255 levels in red, against the 20
+    // the first assertion asks for.
+    const auto mist=texture(1,1,0xffffffff);
+    auto withDepthHaze=render(1,0,40,0,1,0,3.0f,1.f,mist.Get());
+    auto withDepthNoHaze=render(1,0,40,0,1,0,0.f,1.f,mist.Get());
+    auto noDepthHaze=render(1,0,100000,0,1,0,3.0f,0.f,mist.Get());
+    auto noDepthNoHaze=render(1,0,100000,0,1,0,0.f,0.f,mist.Get());
+    // haze is read nowhere else in the stage, so the two no-depth renders are not "close", they are
+    // the same image: the gate removes the term rather than scaling it down. Printed in 8-bit levels,
+    // which is the unit difference() works in, and the expected first number is 0.8*0.08*3.0*255 = 49.
+    std::printf("mist gate: with depth %.3f levels, without depth %.3f levels\n",
+                difference(withDepthHaze,withDepthNoHaze,0,0),difference(noDepthHaze,noDepthNoHaze,0,0));
+    Require(difference(withDepthHaze,withDepthNoHaze,0,0)>20.0,
+            "with depth captured, haze still makes mist at mid distance");
+    Require(difference(noDepthHaze,noDepthNoHaze,0,0)<.5,
+            "with no depth captured, haze makes no mist however far sceneZ reads");
 
     // Run the actual integration path with native snow, without INTZ/clouds, and
     // with hostile inherited UI state. Snow uses its own texture, not rain's.
