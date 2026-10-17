@@ -172,6 +172,9 @@ Beer-Lambert coefficients and converges it toward the body's deep tint. This use
 view-Z, so an oblique underwater view does not artificially shorten the water column. Above water,
 the camera-side blend is exactly identity and the new reflection term is gated off.
 
+The output alpha is at least the reflection weight already mixed into the water colour. Without that
+floor the fixed-function blend applies the original scene a second time over the computed reflection,
+letting the opposite liquid face show through at the exact angles where the reflection should dominate.
 The user-reported seam after swimming underwater remains a runtime acceptance case: adjacent liquid
 tiles must keep continuous foam and optics through the camera-side transition. The attachment supplied
 so far was `NativeShadowDiagnostics.log`, not the water draw capture, so it contains no evidence about

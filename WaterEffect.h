@@ -1209,7 +1209,14 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
-    result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);
+    // `rgb` already contains the water/reflection mix. If alpha stays at the native
+    // translucent base while reflectionAmount is high, the fixed-function blend mixes
+    // the captured scene a second time and exposes the opposite liquid face through this
+    // one - the underwater silhouette/seam seen while crossing the interface. Keep the
+    // output coverage at least as strong as the reflection we already placed in rgb.
+    surfaceAlpha=max(surfaceAlpha,reflectionAmount);
+    result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;
 }

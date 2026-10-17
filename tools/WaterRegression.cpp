@@ -890,8 +890,9 @@ int main() try
                 pixel.find("float totalInternal=1-smoothstep(.63,.69,NoV);")!=std::string::npos&&
                 pixel.find("fresnel=max(fresnel,underwater*totalInternal*foreverStyle.z);")!=std::string::npos&&
                 pixel.find("float cameraColumn=min(length(viewPos),250.0);")!=std::string::npos&&
-                pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos,
-                "the underside uses a water-to-air critical-angle reflection and attenuates light along the camera-side water column");
+                pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos&&
+                pixel.find("surfaceAlpha=max(surfaceAlpha,reflectionAmount);")!=std::string::npos,
+                "the underside uses a water-to-air critical-angle reflection, camera-side absorption and coverage that does not double-blend the scene");
         Require(pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
                 pixel.find("max(max(sqrt(footprintSquared),kBedSlopeSpanYards)")!=std::string::npos&&
                 mirror.find("const float e = 1.5f;")!=std::string::npos,
