@@ -362,6 +362,54 @@ static void TestPrecipitationMotion()
     Check(motion.Phase().windX == previous.windX &&
           Near(motion.Phase().fall - previous.fall, .1f, 2e-5),
           "turning shared wind off removes added drift without freezing rain");
+    // The phase split (the long-session banding fix): after a full six-hour
+    // integration, what the pixel stage receives must still be small - the
+    // fraction in [0,1), the wrapped integer in [0,period) - and it must
+    // reconstruct the true phase. Either range broken is the float32
+    // cancellation the stage exists to avoid.
+    {
+        PrecipitationMotion session;
+        const auto east = Air(WindDirection::East);
+        for (int i = 0; i < 6*3600*60; ++i)
+            session.Advance(1.f/60.f, 1.2f, east, {1.f, 0.f}, {0.f, 1.f}, true);
+        const double fall = session.Fall(), wx = session.WindX(), wy = session.WindY();
+        Check(fall > 1000.0, "the six-hour session actually accumulated phase");
+        const auto split = ComputeWrappedPhases(fall, wx, wy, 0);
+        const double speed[3] = { 1.25, 1.0, 0.75 };
+        const double periodX[3] = { 32768.0, 32768.0, 32768.0 };
+        const double periodY[3] = { 32768.0, 16384.0, 8192.0 };
+        for (int i = 0; i < 3; ++i) {
+            const double px = 64.0*speed[i]*wx;
+            const double py = 16.0*speed[i]*(1.2*fall + wy);
+            const float* layer = i == 0 ? split.c6 : i == 1 ? split.c7 : split.c8;
+            for (int a = 0; a < 2; ++a) {
+                const float fv = layer[a*2], nv = layer[a*2+1];
+                const double phase = a ? py : px;
+                const double period = a ? periodY[i] : periodX[i];
+                Check(fv >= 0.f && fv < 1.f,
+                      "the split's fraction stays in [0,1) after six hours");
+                Check(nv >= 0.f && nv < (float)period,
+                      "the split's integer part stays wrapped after six hours");
+                const double k = std::round((phase - (double(nv) + double(fv))) / period);
+                Check(std::fabs(phase - (double(nv) + double(fv) + k*period)) < 1e-6,
+                      "the wrapped phase reconstructs the true phase");
+            }
+        }
+        // The period tables must stay in lockstep with the constants the
+        // stage spells into its hash.
+        Check(precipitationlayers::rainPeriodX[0] == 32768.f &&
+              precipitationlayers::rainPeriodY[1] == 16384.f &&
+              precipitationlayers::rainPeriodY[2] == 8192.f,
+              "the rain periods match the stage's hard-coded hash periods");
+        // The wobble and mist lanes stay bounded in every mode.
+        for (int mode = 0; mode <= 3; ++mode) {
+            const auto m = ComputeWrappedPhases(fall, wx, wy, mode);
+            Check(m.c9[0] >= 0.f && m.c9[0] < 6.29f && m.c9[3] >= 0.f && m.c9[3] < 6.29f,
+                  "the wobble arguments stay 2pi-wrapped");
+            Check(m.c10[0] >= 0.f && m.c10[0] < 1.f && m.c10[1] >= 0.f && m.c10[1] < 1.f,
+                  "the mist drift keeps its decimal part only");
+        }
+    }
     Pass("precipitation follows the shared wind in camera space without duplicate angle/speed clocks");
 }
 static void TestWaveMotion()
@@ -530,8 +578,12 @@ static void TestConfigurationAndWiring()
     Check(weatherSource.find("precipitationMotion.Advance(dt, speed, frame.wind") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"WindAngle\"") == weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
-          weatherSource.find("float t = weatherParams.x;") != weatherSource.npos &&
-          weatherSource.find("windParams.xy * layerSpeeds[i]") != weatherSource.npos &&
+          // The long-session banding fix: the shader no longer carries an
+          // unbounded phase of its own. The integrated fall/wind arrive as
+          // the CPU's split decimal parts (c6/c7/c8), and the integer parts
+          // move only the wrapped cell index.
+          weatherSource.find("float phaseX[3] = { layerPhase0.x, layerPhase1.x, layerPhase2.x };") != weatherSource.npos &&
+          weatherSource.find("float2 cell = floor(gridDec) - float2(phaseXInt[i], phaseYInt[i]);") != weatherSource.npos &&
           weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos &&
           weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,

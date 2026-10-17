@@ -616,12 +616,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float2 tilt=-slopes*(controls.z/jacobian)*flip;
     float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
     float3 l=safeNormalize(-lightDirection.xyz);
+    float NoL=dot(wave,l);
     float sunElev=dot(l,upWind.xyz);
     // A wave has to change the BODY of the water, not only its highlight. What makes
     // a swell read as a rounded form is a lit back and a shaded face, and the
     // hemisphere it sees: both are differences against the geometric normal, so flat
     // water and an authored zero-strength sea stay exactly as the client drew them.
-    rgb*=1+controls.z*(1.9*(dot(wave,l)-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
+    rgb*=1+controls.z*(1.9*(NoL-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
     float captureValid=reflectionStyle.w;
@@ -666,19 +667,23 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // a Henyey-Greenstein lobe forwards that glow into the sun, which is where the
     // reference shots put it.
     float g=.3+.34*saturate(sunElev);
-    float phaseDen=max(1+g*g-2*g*dot(-v,l),1e-3);
+    // One dot serves both the Henyey-Greenstein denominator and the backlit
+    // gate below: dot(-v,l) is -dot(v,l) bit-exactly, so nothing is re-deriven.
+    float vDotL=dot(v,l);
+    float phaseDen=max(1+g*g+2*g*vDotL,1e-3);
     // The lobe is divided by 4*pi as well as normalized in exponent: a (1-g^2)/den^2 phase
     // function peaks at 18x on a face turned toward the sun, and the CPU preview showed what
     // that did to a whole sea - one flat pale wash. The 3/2 exponent is the HG function's
     // own, and .17 (1.2/4pi, folded) puts the forward peak near 1.3 and the side lobe near .08.
+    float3 lightPos=max(lightColor.rgb,0);
     float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
-        *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0);
+        *saturate(sunElev*2.5+.2)*lightPos;
     // A crest thin enough to see through glows when the source is behind it. The lobe
     // above scatters in every direction; this is the half of it that needs a swell to
     // exist at all - looking into the light at the top of a wave - and it is the single
     // strongest cue that water is a volume rather than a surface with a picture on it.
     // Both gates matter: facing away from the light, or in a trough, there is no glow.
-    float backlit=saturate(-dot(v,l)*1.7-.45)*saturate(detail.y*1.7-.45);
+    float backlit=saturate(-vDotL*1.7-.45)*saturate(detail.y*1.7-.45);
     inScatter*=1+2.2*backlit;
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
@@ -724,19 +729,22 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float rayUp=saturate(dot(ray,upWind.xyz));
     float3 sky=lerp(fogColor.rgb,fogColor.rgb*.5+float3(.015,.045,.11)*saturate(sunElev*2+.25),
                     rayUp*rayUp);
-    sky+=max(lightColor.rgb,0)*pow(saturate(dot(ray,l)),160)*waterTint.a;
+    sky+=lightPos*pow(saturate(dot(ray,l)),160)*waterTint.a;
     // 2. Screen-space reflections against the pre-water copy, perturbed by the
     // wave normal. Eight steps: the extra four bought a marginally sharper hit
     // and cost the whole frame budget of two other terms.
     float3 environment=sky;
     float3 reflected=environment;
     float hit=0;
+    // The wave offset is the same on every step of the march: evaluate it
+    // once instead of eight times.
+    float3 waveSample=wave*.15;
     if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
         float3 hitColor=environment;
         [loop] for(int stepIndex=0;stepIndex<8 && hit<1.0;++stepIndex) {
             float q=(stepIndex+1)/8.0;
             float traceDistance=.45+q*q*reflectionStyle.y;
-            float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
+            float3 samplePosition=viewPos+waveSample+ray*traceDistance;
             // Pre-compute reciprocal Z once: the two UV components share the
             // same max(z,.05) divisor, so one rcp replaces two per step.
             float invSampleZ=1.0/max(samplePosition.z,.05);
@@ -783,7 +791,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // used to evaluate three overlapping lobes plus a halo, which washed water out
     // and exceeded PS3 limits; one lobe plus a breakup mask is all it needed.
     float NoH=saturate(dot(wave,H));
-    float NoL=dot(wave,l);
     // The exponent IS the roughness and the sun's height: a low source smears the
     // road wide, a high one keeps it short and tight, and chop broadens it further.
     // That replaces a full Smith visibility chain, which cost eight slots to describe
@@ -798,11 +805,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // pre-water depth buffer. Buildings and terrain suppress direct glint,
     // while ambient sky reflection remains visible under cover.
     float lightVisibility=1.0;
+    float3 waveLight=wave*.18;
     if(reflectionStyle.w>.5 && celestialPath>.00005) {
         [loop] for(int lightStep=0;lightStep<8 && lightVisibility>0;++lightStep) {
             float q=(lightStep+1)/8.0;
             float traceDistance=1.5+q*q*110.0;
-            float3 lightSample=viewPos+wave*.18+l*traceDistance;
+            float3 lightSample=viewPos+waveLight+l*traceDistance;
             // Pre-compute reciprocal Z once: the two UV components share the
             // same max(z,.05) divisor, so one rcp replaces two per step.
             float invLightZ=1.0/max(lightSample.z,.05);
@@ -823,7 +831,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         }
     }
     celestialPath*=lightVisibility;
-    float3 sheenColor=max(lightColor.rgb,0);
+    float3 sheenColor=lightPos;
     // 1. Water body: refracted bottom, absorbed and scattered through the column.
     float3 waterBody=rgb;
     // Gated on the capture, exactly as before: without a depth/colour copy there is

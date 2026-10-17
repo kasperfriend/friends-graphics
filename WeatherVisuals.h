@@ -85,9 +85,10 @@ sampler2D mistTex : register(s3);
 
 // c0: x=projA, y=projB, z=scaleX, w=scaleY
 float4 projection : register(c0);
-// c1: x=integrated fall phase, y=intensity, z=mode (1=Rain, 2=Snow, 3=Sandstorm)
+// c1: x=raw fall phase (diagnostics only), y=intensity,
+//     z=mode (1=Rain, 2=Snow, 3=Sandstorm)
 float4 weatherParams : register(c1);
-// c2: xy=integrated projected downwind offset, z=haze, w=indoorFactor
+// c2: xy=raw wind offset (diagnostics only), z=haze, w=indoorFactor
 float4 windParams : register(c2);
 // c3: x=resX, y=resY, z=invResX, w=invResY
 float4 screenParams : register(c3);
@@ -95,9 +96,33 @@ float4 screenParams : register(c3);
 float4 lightColor : register(c4);
 // c5: x=viewport MinZ, y=reciprocal viewport depth range
 float4 depthRange : register(c5);
+// c6/c7/c8: one float4 per layer, (xFrac, xInt, yFrac, yInt) in lattice
+// cells. The CPU splits each grid phase PHASE = N + f (f in [0,1), N
+// wrapped into the layer's period, all exact double math in
+// PrecipitationMotion.h): the pixels subtract only f - small minus small,
+// no float32 cancellation, so the drop levels stay as fine as at t=0 for
+// any session length - and N only shifts the cell INDEX, which the hash
+// wraps by the same period (seamless wrap, no unbounded value anywhere).
+float4 layerPhase0 : register(c6);
+float4 layerPhase1 : register(c7);
+float4 layerPhase2 : register(c8);
+// c9: x = snow wobble sin argument (2pi-wrapped), yzw = sand gust sin
+//     arguments (2pi-wrapped)
+float4 wobbles : register(c9);
+// c10: xy = mist drift (decimal parts; the mist samples with frac)
+float4 mistDrift : register(c10);
 
-float WeatherHash(float2 cell)
+float WeatherHash(float2 cell, float2 period)
 {
+    // The pattern must be periodic in `period` (the same value the CPU
+    // wraps the integer phase parts into). Because the integer parts
+    // arrive wrapped into [0, period) and the decimal parts are below 1,
+    // the cell lies in [-period, cellsPerScreen+1): one conditional add
+    // is an exact modulo by the period - no division. It also keeps the
+    // hash argument small, which float32 needs or neighboring cells
+    // smear into one hash.
+    cell.x += (cell.x < 0.0) ? period.x : 0.0;
+    cell.y += (cell.y < 0.0) ? period.y : 0.0;
     float3 p=frac(float3(cell.x,cell.y,cell.x)*.1031);
     p+=dot(p,p.yzx+33.33);
     return frac((p.x+p.y)*p.z);
@@ -122,8 +147,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     if (intensity <= 0.001)
         return baseColor;
         
-    float t = weatherParams.x;
-    float2 aspect = float2(screenParams.x * screenParams.w, 1.0);
     float3 accum = float3(0, 0, 0);
     float totalAlpha = 0.0;
     
@@ -136,6 +159,18 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float isSnow = step(1.5, weatherParams.z) * step(weatherParams.z, 2.5);
     float isSand = step(2.5, weatherParams.z);
     
+    float sandWobble[3] = { wobbles.y, wobbles.z, wobbles.w };
+    // The CPU's split phase parts per layer (c6/c7/c8: xFrac, xInt, yFrac,
+    // yInt). The hash's Y period per rain layer (PrecipitationMotion.h's
+    // rainPeriodY; the X period is 32768 for all rain layers) - the layers
+    // are deliberately non-commensurate so the patterns repeat on
+    // independent ~8-19 min cycles and never realign.
+    float rainPeriodY[3] = { 32768.0, 16384.0, 8192.0 };
+    float phaseX[3] = { layerPhase0.x, layerPhase1.x, layerPhase2.x };
+    float phaseXInt[3] = { layerPhase0.y, layerPhase1.y, layerPhase2.y };
+    float phaseY[3] = { layerPhase0.z, layerPhase1.z, layerPhase2.z };
+    float phaseYInt[3] = { layerPhase0.w, layerPhase1.w, layerPhase2.w };
+    
     [unroll] for (int i = 0; i < 3; ++i)
     {
         float lz = layerDepths[i];
@@ -143,27 +178,32 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         float occlusion = (lightColor.w > 0.5) ? smoothstep(lz * 0.75, lz * 1.15, sceneZ) : 1.0;
         if (occlusion <= 0.001) continue;
         
-        float2 windOffset = windParams.xy * layerSpeeds[i];
-        float2 layerUV = uv * aspect * layerScales[i];
-        
+        // phaseX/Y[i] (c6/c7/c8) are the CPU's split decimal parts: what
+        // the pixels subtract (small); the integer parts only move the
+        // cell index, which the hash wraps.
         if (isSnow > 0.5)
         {
-            // Snow: sinusoidal drift
-            layerUV.x += sin(t * 1.6 + layerUV.y * 3.5) * 0.12 - windOffset.x * 0.5;
-            // Screen V grows downwards. Subtract travel from the sampled UV
-            // to move the visible flake down, not up.
-            layerUV.y -= t * layerSpeeds[i] * 0.6;
-            float4 snowSamp = tex2D(weatherTex, frac(layerUV * 12.0));
+            // Snow: sinusoidal drift. Screen V grows downwards, so
+            // subtracting travel from the sampled UV moves the visible
+            // flake down, not up. (frac() is 1-periodic, so the integer
+            // phase part never needs to enter the sample.)
+            float2 gridDec = uv * (12.0 * layerScales[i])
+                           - float2(phaseX[i], phaseY[i]);
+            gridDec.x += sin(wobbles.x + uv.y * layerScales[i] * 3.5) * 1.44;
+            float4 snowSamp = tex2D(weatherTex, frac(gridDec));
             float flake = snowSamp.a * snowSamp.r;
             accum += float3(0.92, 0.95, 1.0) * flake * layerWeights[i] * occlusion;
             totalAlpha += flake * layerWeights[i] * occlusion;
         }
         else if (isSand > 0.5)
         {
-            // Sandstorm: rapid dusty drift
-            layerUV.x -= windOffset.x * 3.0 + t * 2.0;
-            layerUV.y += sin(layerUV.x * 2.0) * 0.05 - windOffset.y;
-            float4 sandSamp = tex2D(mistTex, frac(layerUV * 0.5));
+            // Sandstorm: rapid dusty drift. The wobble arguments are
+            // 2pi-wrapped on the CPU, so the gusts stay exact for a whole
+            // session.
+            float2 gridDec = uv * (0.5 * layerScales[i])
+                           - float2(phaseX[i], phaseY[i]);
+            gridDec.y += sin(2.0 * layerScales[i] * uv.x - sandWobble[i]) * 0.025;
+            float4 sandSamp = tex2D(mistTex, frac(gridDec));
             float dust = sandSamp.a * 0.6;
             accum += float3(0.85, 0.75, 0.55) * dust * layerWeights[i] * occlusion;
             totalAlpha += dust * layerWeights[i] * occlusion;
@@ -171,14 +211,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         else
         {
             // A texture lookup at uv+travel moves the IMAGE against travel.
-            // Subtract it so rain falls down/right with positive gravity/wind.
-            layerUV -= float2(windOffset.x, t * layerSpeeds[i] * 1.2 + windOffset.y);
-            // The old V multiplier (.22) stretched one drop over almost THREE
-            // screen heights in the nearest layer. Tile compact, sparse drops
-            // instead: each near-layer cell is at most 1/(16*1.6) screen high.
-            float2 grid = layerUV * float2(64.0, 16.0);
-            float cellNoise = WeatherHash(floor(grid));
-            float2 dropUV = frac(grid);
+            // Subtracting the phase keeps rain falling down/right with
+            // positive gravity/wind. The old V multiplier (.22) stretched
+            // one drop over almost THREE screen heights in the nearest
+            // layer; these cells tile compact, sparse drops instead (each
+            // near-layer cell at most 1/(16*1.6) screen high).
+            float2 gridDec = uv * (float2(64.0, 16.0) * layerScales[i])
+                           - float2(phaseX[i], phaseY[i]);
+            float2 cell = floor(gridDec) - float2(phaseXInt[i], phaseYInt[i]);
+            float cellNoise = WeatherHash(cell, float2(32768.0, rainPeriodY[i]));
+            float2 dropUV = frac(gridDec);
             dropUV.x = (dropUV.x-.5)*2.5+.5+(cellNoise-.5)*.6;
             dropUV.y = dropUV.y*1.25-frac(cellNoise*17.17)*.25;
             float inside = step(0,dropUV.x)*step(dropUV.x,1);
@@ -196,7 +238,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // Add subtle ambient mist during heavy rain/snow at mid-distances
     if (isSand < 0.5 && sceneZ > 6.0)
     {
-        float2 mistUV = uv * aspect * 1.5 - float2(windParams.x * 0.2, t * 0.15);
+        // The drift phases' decimal parts (c10); the soft haze samples
+        // with frac(), so only the [0,1) parts matter.
+        float2 mistUV = uv * 1.5 - float2(mistDrift.x, mistDrift.y);
         float mistSamp = tex2D(mistTex, frac(mistUV)).a;
         float mistDepthFade = smoothstep(6.0, 40.0, sceneZ);
         // Apply intensity once, below, just like the drops. Squaring it here
@@ -784,6 +828,12 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 
     const auto motion = precipitationMotion.Phase();
+    // c6/c7/c8: the same phases, wrapped per layer into their own lattice
+    // periods (see ComputeWrappedPhases). These are what the pixel stage's
+    // grids actually use; motion.fall/windX/windY stay raw for c1/c2.
+    const auto layerPhases = renderer::ComputeWrappedPhases(
+        precipitationMotion.Fall(), precipitationMotion.WindX(),
+        precipitationMotion.WindY(), renderMode);
 
     // Setup shader constants
     // c0: Projection params from CameraCapture / frame constants
@@ -815,6 +865,11 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     const float depthConst[4] = {hasCapturedDepth ? frame.viewport.MinZ : 0.f,
         hasCapturedDepth ? 1.f/(frame.viewport.MaxZ-frame.viewport.MinZ) : 1.f, 0, 0};
     device->SetPixelShaderConstantF(5, depthConst, 1);
+    device->SetPixelShaderConstantF(6, layerPhases.c6, 1);
+    device->SetPixelShaderConstantF(7, layerPhases.c7, 1);
+    device->SetPixelShaderConstantF(8, layerPhases.c8, 1);
+    device->SetPixelShaderConstantF(9, layerPhases.c9, 1);
+    device->SetPixelShaderConstantF(10, layerPhases.c10, 1);
 
     struct QuadVertex { float x, y, z, rhw, u, v; };
     float w = float(desc.Width) - 0.5f, h = float(desc.Height) - 0.5f;

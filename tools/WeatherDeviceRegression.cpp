@@ -73,8 +73,17 @@ int main() try {
         Check(d->SetVertexShader(nullptr));Check(d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));Check(d->SetPixelShader(weathervisuals::precipitationPS.Get()));
         Check(d->SetTexture(0,black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,clear.Get()));
         for(DWORD slot=0;slot<4;++slot){Check(d->SetSamplerState(slot,D3DSAMP_MINFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MAGFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MIPFILTER,D3DTEXF_NONE));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSU,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSV,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_SRGBTEXTURE,FALSE));}
+        // c0..c5 carry the raw values; c6..c8 carry the same phases
+        // wrapped exactly as BeforeDraw does (the motion asserts below
+        // measure the 8px/4px steps those formulas produce).
         float constants[6][4]={{1.001f,-.1f,1,1},{time,1,float(mode),1},{windX,0,0,0},{float(size),float(size),1.f/size,1.f/size},{1,1,1,1},{minZ,1/(maxZ-minZ),0,0}};
-        Check(d->SetPixelShaderConstantF(0,constants[0],6));Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,quad,sizeof(Vertex)));Check(d->EndScene());return pixels();
+        auto wrapped = renderer::ComputeWrappedPhases(double(time),double(windX),0.0,mode);
+        Check(d->SetPixelShaderConstantF(0,constants[0],6));
+        Check(d->SetPixelShaderConstantF(6,wrapped.c6,1));
+        Check(d->SetPixelShaderConstantF(7,wrapped.c7,1));
+        Check(d->SetPixelShaderConstantF(8,wrapped.c8,1));
+        Check(d->SetPixelShaderConstantF(9,wrapped.c9,1));
+        Check(d->SetPixelShaderConstantF(10,wrapped.c10,1));Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,quad,sizeof(Vertex)));Check(d->EndScene());return pixels();
     };
     auto rain0=render(1,0,5),rain1=render(1,1.f/60,5);
     Require(nonblack(rain0)>1000,"rain remains visible with no cloud or atmosphere renderer");

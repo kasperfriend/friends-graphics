@@ -14,6 +14,16 @@
   always the runtime one: a card reporting fewer slots than the shader needs fails `CreatePixelShader`
   and keeps native water. What the count is for now: it is visible in the Checks tab, so a change that
   moves it by tens has to be argued in the pull request that makes it.
+- [x] Cap the water pixel stage and optimize it without a visual change: on explicit request the
+  water pixel stage is back in `$budgets` in `tools/ValidateShaders.ps1` at **2048** (about three
+  times its count, so the ceiling guards against a pathological edit instead of steering wave-train
+  quality), and `$measureOnly` is empty. The optimization pass removes only work that cannot change
+  an output bit: the two raymarch loops' wave offsets hoisted out of their eight steps each (48
+  multiplies), `dot(wave,l)` shared between the body modulation and the glint term,
+  `max(lightColor.rgb,0)` shared across in-scatter, the sky disc and the sheen colour, and the
+  HG-denominator/backlit dots unified on `dot(v,l)` (whose sign-flipped form is bit-identical).
+  Estimated ~580 slots against the 642 measured on 2026-10-14; the first Windows run after the
+  pass is authoritative. The two march loops' step count is quality, not waste, and stays.
 - [x] Stop the replacement water from showing square patterns: the wave field is anchored to the terrain instead of to a tile's uv, the noise hash is bounded so it cannot collapse onto its lattice, and the unresolved octave fades in value as well as in slope. Live comparison against a 3.3.5 coast remains.
 - [x] Stop the waves marching in lines: the swell is six trains whose wavelengths are never an
   octave apart and whose crest lines are never closer than 21 degrees, each starting at an
