@@ -216,11 +216,15 @@ int main()
     Require(HasScopedValue(L"Water", L"RipplePermille"), "scoped int detected");
     Require(!HasScopedValue(L"Water", L"Enabled"), "global-only key not scoped");
 
-    // global mask still outranks the location chain
+    // global mask outranks the location chain when inherited (or unverified)
     {
         wchar_t value[64]{};
-        ReadString(L"Water", L"FoamEnabled", L"", value, 64, graphicsW.c_str());
-        Require(std::wstring(value) == L"0", "explicit global outranks location");
+        ReadString(L"Water", L"FoamEnabled", L"1", value, 64, graphicsW.c_str());
+        Require(std::wstring(value) == L"1", "explicit global requires inherit toggle in verified location");
+        renderer::locationtuning::SetInheritGlobal(L"Water", L"FoamEnabled", true);
+        ReadString(L"Water", L"FoamEnabled", L"1", value, 64, graphicsW.c_str());
+        Require(std::wstring(value) == L"0", "explicit global outranks location when inherit toggle is on");
+        renderer::locationtuning::SetInheritGlobal(L"Water", L"FoamEnabled", false);
     }
 
     // sibling area inherits zone, not the sibling's override
@@ -289,7 +293,8 @@ int main()
                     if (chain.empty()) chain = reference::GetString(location, map, sk.second, L"");
                 }
                 const std::wstring globalMask = reference::GetString(location, L"Global." + sk.first, sk.second, L"");
-                const bool masked = !globalMask.empty();
+                const bool inheritsGlobal = renderer::locationtuning::HasInheritGlobal(sk.first.c_str(), sk.second.c_str());
+                const bool masked = !globalMask.empty() && (!place.valid || inheritsGlobal);
                 const bool chained = place.valid && !chain.empty();
                 const std::wstring want = masked ? (globalMask.empty() ? std::wstring(L"") : globalMask)
                                        : chained ? chain

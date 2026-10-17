@@ -120,6 +120,46 @@ inline bool ClearGlobalActiveTab(){
  renderer::menudiagnostics::Write(failed?"CLEAR GLOBAL OVERRIDES FAILED":"CLEARED GLOBAL OVERRIDES");
  return changed;
 }
+inline bool CanInheritGlobalTab(){
+ return !renderer::locationtuning::editGlobal&&renderer::locationtuning::editable&&!renderer::locationtuning::IsGlobal(items[Tabs()[layout.activeTab].begin].section);
+}
+inline bool HasActiveTabInheritGlobal(){
+ if(!CanInheritGlobalTab())return false;
+ const auto tab=Tabs()[layout.activeTab];
+ for(int index=tab.begin;index<tab.end;++index){
+  const auto& item=items[index];
+  if(!renderer::locationtuning::HasInheritGlobal(item.section,item.key))return false;
+ }
+ return true;
+}
+inline bool ToggleInheritGlobalActiveTab(){
+ if(!CanInheritGlobalTab())return false;
+ const auto tab=Tabs()[layout.activeTab];
+ const bool next=!HasActiveTabInheritGlobal();
+ bool changed=false,failed=false;
+ for(int index=tab.begin;index<tab.end;++index){
+  const auto& item=items[index];
+  if(renderer::locationtuning::HasInheritGlobal(item.section,item.key)!=next){
+   if(renderer::locationtuning::SetInheritGlobal(item.section,item.key,next))changed=true;else failed=true;
+  }
+ }
+ CancelInteraction();ReloadValues();
+ saveError=failed?"Inherit update incomplete; see MenuDiagnostics.log":"";
+ renderer::menudiagnostics::Write(failed?"TOGGLE INHERIT GLOBAL FAILED":"TOGGLED INHERIT GLOBAL TAB");
+ return changed;
+}
+inline bool ToggleInheritGlobalItem(Item& item){
+ if(!CanInheritGlobalTab())return false;
+ const bool next=!renderer::locationtuning::HasInheritGlobal(item.section,item.key);
+ const bool ok=renderer::locationtuning::SetInheritGlobal(item.section,item.key,next);
+ if(ok){saveError.clear();CancelInteraction();ReloadValues();}
+ else{
+  const DWORD error=GetLastError();
+  saveError="Inherit update failed (Windows "+std::to_string(error)+"). Send MenuDiagnostics.log";
+  renderer::menudiagnostics::Write("SET INHERIT GLOBAL FAILED control="+std::string(item.label));
+ }
+ return ok;
+}
 inline const std::array<unsigned char,7>& Glyph(char c){
  if(c>='a'&&c<='z')c=char(c-'a'+'A');
  static const std::array<unsigned char,7> blank{};
@@ -213,10 +253,13 @@ inline bool Update(){
   else if(layout.ScrollButton(false).Contains(px,py)){layout.Scroll(-1);}
   else if(layout.ScrollButton(true).Contains(px,py)){layout.Scroll(1);}
   else if(CanClearGlobalTab()&&layout.ClearOverridesButton().Contains(px,py)){dragItem=-1;changed=ClearGlobalActiveTab();}
+  else if(CanInheritGlobalTab()&&layout.InheritGlobalTabButton().Contains(px,py)){dragItem=-1;changed=ToggleInheritGlobalActiveTab();}
   else if(layout.ResetButton().Contains(px,py)){dragItem=-1;changed=ResetActiveTab();}
   else if(const int index=layout.HitItem(px,py);index>=0){
    auto& item=items[index];
-   if(item.kind==KIND_TOGGLE){item.value=!item.value;changed=Save(item);}
+   if(CanInheritGlobalTab()&&layout.InheritToggle(index).Contains(px,py)){
+    dragItem=-1;changed=ToggleInheritGlobalItem(item);
+   }else if(item.kind==KIND_TOGGLE){item.value=!item.value;changed=Save(item);}
    // Labels are not slider tracks: clicking a label must not reset its value.
    else if(layout.Slider(index).Contains(px,py))dragItem=index;
   }
@@ -327,24 +370,42 @@ inline void Draw(IDirect3DDevice9* d){
  const auto content=layout.Content();const auto& tab=Tabs()[layout.activeTab];
  const auto resetButton=layout.ResetButton();
  const auto clearButton=layout.ClearOverridesButton();
- label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,(CanClearGlobalTab()?clearButton.x:resetButton.x)-8);
- if(CanClearGlobalTab()){box(clearButton,0xff263f4b);label(clearButton.x+8,clearButton.y+5,"CLEAR OVERRIDES",0xff9dffc0,clearButton.x+clearButton.w-6);}
+ const auto inheritTabButton=layout.InheritGlobalTabButton();
+ const bool canClear=CanClearGlobalTab();
+ const bool canInheritTab=CanInheritGlobalTab();
+ const bool tabInheriting=canInheritTab&&HasActiveTabInheritGlobal();
+ const float headerRight=(canClear?clearButton.x:(canInheritTab?inheritTabButton.x:resetButton.x))-8;
+ label(content.x,y+206,CompactLabel(items[tab.header]),0xffffdc82,headerRight);
+ if(canClear){box(clearButton,0xff263f4b);label(clearButton.x+8,clearButton.y+5,"CLEAR OVERRIDES",0xff9dffc0,clearButton.x+clearButton.w-6);}
+ else if(canInheritTab){
+  box(inheritTabButton,tabInheriting?0xff246b47:0xff263f4b);
+  label(inheritTabButton.x+8,inheritTabButton.y+5,tabInheriting?"INHERIT: ON":"INHERIT GLOBAL",tabInheriting?0xff9dffc0:0xffb5cbd6,inheritTabButton.x+inheritTabButton.w-6);
+ }
  box(resetButton,0xff263f4b);label(resetButton.x+8,resetButton.y+5,"RESET DEFAULTS",0xff9dffc0,resetButton.x+resetButton.w-6);
  const int first=tab.begin+layout.offsets[layout.activeTab];
  const int end=std::min(tab.end,first+layout.VisibleRows());
  for(int index=first;index<end;++index){
   const auto& item=items[index];const auto b=layout.Row(index);
   box({b.x,b.y,b.w,b.h-2},index==hover?0xff243a46:((index-first)%2?0xff16232d:0xff192933));
+  const bool showInheritRow=canInheritTab;
+  const bool inheriting=showInheritRow&&renderer::locationtuning::HasInheritGlobal(item.section,item.key);
+  if(showInheritRow){
+   const auto inhToggle=layout.InheritToggle(index);
+   box(inhToggle,inheriting?0xff246b47:0xff372626);
+   label(inhToggle.x+6,inhToggle.y+4,inheriting?"GLOB":"SELF",inheriting?0xff9dffc0:0xff8a9ba8,inhToggle.x+inhToggle.w-4);
+  }
   if(item.kind==KIND_TOGGLE){
    const auto toggle=layout.Toggle(index);
-   label(b.x+8,b.y+9,CompactLabel(item),0xffdce5ea,toggle.x-12);
+   const float labelRight=showInheritRow?layout.InheritToggle(index).x-12:toggle.x-12;
+   label(b.x+8,b.y+9,CompactLabel(item),0xffdce5ea,labelRight);
    box(toggle,item.value?0xff246b47:0xff4a3232);
    label(toggle.x+14,toggle.y+4,item.value?"ON":"OFF",item.value?0xff9dffc0:0xffffaaaa,toggle.x+toggle.w-4);
   }else{
    const auto track=layout.Slider(index);
+   const float labelRight=showInheritRow?layout.InheritToggle(index).x-12:track.x-62;
    const std::string full=item.label;const auto hint=full.find(" (");
-   label(b.x+8,b.y+(hint==full.npos?9:1),CompactLabel(item),index==hover?0xffffffff:0xffdce5ea,track.x-62);
-   if(hint!=full.npos)label(b.x+8,b.y+18,full.substr(hint+2,full.size()-hint-3),0xff819ca8,track.x-62);
+   label(b.x+8,b.y+(hint==full.npos?9:1),CompactLabel(item),index==hover?0xffffffff:0xffdce5ea,labelRight);
+   if(hint!=full.npos)label(b.x+8,b.y+18,full.substr(hint+2,full.size()-hint-3),0xff819ca8,labelRight);
    label(track.x-56,b.y+9,ValueLabel(item),0xffffdc82,track.x-6);
    box({track.x,track.y+7,track.w,6},0xff30424d);
    const float t=float(item.value-item.lo)/std::max(1,item.hi-item.lo);
