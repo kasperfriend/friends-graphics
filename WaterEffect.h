@@ -563,6 +563,14 @@ static const float kSwellToUnit=0.20550760;
 // multiplied the noise by them, and as src/Water/WaveField.h declares them.
 static const float kGroupBase=0.52;
 static const float kGroupDepth=0.62;
+// The shortest baseline the bed slope may be measured over, in world yards. A per-pixel depth
+// difference divided by a per-pixel world footprint is a slope, but only while that footprint is
+// wide enough to be measuring the bed rather than the depth buffer's own quantization - and at
+// the water's edge one pixel is a few inches. 1.5 yards is the span tools/WaterPreview.cpp's
+// FieldSlope samples (+-1.5 yd), so the shader and the mirror the look was tuned against read
+// the same baseline; it is a floor, so any coarser pixel keeps its own footprint and distant
+// water is untouched.
+static const float kBedSlopeSpanYards=1.5;
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
 // already sitting in the main depth buffer - water doesn't write that).
@@ -768,8 +776,19 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // the view angle's 1/cos, because the separation this pass can read is along the view
     // axis rather than vertical; that is a property of the camera and not of the resolution,
     // and the authored gain absorbs it.
+    // The divisor has a floor of kBedSlopeSpanYards, and the floor is the whole point of it:
+    // `ddx(depth)` is a difference over ONE pixel, so dividing by a pixel footprint that is a
+    // fifth of a yard - which is what a shoreline looks like from the water's edge - measures
+    // the depth buffer's own quantization and dither, not the bed, and reports it as an
+    // enormous slope. That number then drives the shoal foam, the beach/wall split and the
+    // swash band width, so near the camera it read as a checkerboard of foam on the bottom that
+    // crawled with the view. One and a half yards is the span the CPU mirror has always
+    // measured its bed slope over (FieldSlope samples +-1.5 yd), so this floor also puts the
+    // two halves of the renderer on the same baseline: the shader reads a coarser, calmer slope
+    // up close and the same slope everywhere else.
     float bedSlope=length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))
-        /max(sqrt(footprintSquared)*rsqrt(max(dot(waveLattice.xy,waveLattice.xy),1e-8)),1e-3);
+        /max(max(sqrt(footprintSquared),kBedSlopeSpanYards)
+            *rsqrt(max(dot(waveLattice.xy,waveLattice.xy),1e-8)),1e-3);
     // A gentle beach and a rock wall both read as "the bottom comes up fast", and they are
     // not the same water: a beach carries a wide swash zone with sheets running up it and
     // draining back out, a wall carries a narrow bright contact line and nothing that can
@@ -884,11 +903,21 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // the tongue both are torn out of. It multiplies the crest terms whole, because a whitecap
     // IS a broken streak, and only .45 of the shore term, because a sheet running up a beach
     // is continuous in a way a cap on a crest is not.
+    // ...and the lace reads those octaves' VALUES, which is exactly the thing the `detail`
+    // fade above exists for: value noise a pixel cannot resolve aliases into a fixed
+    // screen-aligned grid, and on foam - where the term multiplies a bright colour - that grid
+    // reads as a checkerboard crawling with the camera instead of as texture. So each octave is
+    // faded by the same factor its own slope uses (the fine one by the square, the mid one by
+    // the first power), which pulls both back to the neutral .5 where they are unresolved, and
+    // the lace itself fades toward 1 - no lace - on the same filter, because unresolved foam is
+    // flat coverage and that is a truth rather than a loss. Without the second fade the .5 seed
+    // would still leave a lace of saturate(.30+.80*.5+.48*.5)=.94 on distant water, i.e. a
+    // visible darkening of every distant crest; with it, distant foam is the foam that shipped.
     float lace=1;
     [branch] if(qualityLevel>=6.5) {
-        float fleck=saturate(rippleFine.x*1.7-.35);
-        float lump=saturate(rippleMid.x*1.6-.30);
-        lace=saturate(.30+.80*fleck+.48*lump);
+        float fleck=saturate(lerp(.5,rippleFine.x,filter*filter)*1.7-.35);
+        float lump=saturate(lerp(.5,rippleMid.x,filter)*1.6-.30);
+        lace=lerp(1,saturate(.30+.80*fleck+.48*lump),saturate(filter*2-.2));
     }
     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline, in streaks
     // the next sheet pushes up and the drain pulls back out. Contours of the captured depth
@@ -1425,6 +1454,13 @@ struct Scope {
         // per-draw driver overhead; retain the exact target descriptor instead.
         const D3DSURFACE_DESC& colorDesc=waterTargetDesc;
         const D3DCAPS9& caps=waterMrtInfo.caps;
+        // Above 1x multisampling this returns, and unlike the colour capture in WaterReflection.h it
+        // cannot be made to work: D3D9 requires every bound render target to share one multisample
+        // type and quality, and the mask/depth surfaces below were created non-multisampled to match
+        // an immutable target descriptor. What that costs is the water's own mask and depth outputs -
+        // the "this pixel is water" marker the atmosphere pass reads - not the water draw, which goes
+        // ahead without them. It is one more reason the client belongs at 1x, where the anti-aliasing
+        // in the image pass takes over from hardware multisampling.
         if(colorDesc.MultiSampleType!=D3DMULTISAMPLE_NONE)return;
         if(colorDesc.Format!=D3DFMT_A8R8G8B8&&colorDesc.Format!=D3DFMT_X8R8G8B8&&
            !(caps.PrimitiveMiscCaps&D3DPMISCCAPS_MRTINDEPENDENTBITDEPTHS))return;

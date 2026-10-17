@@ -451,9 +451,87 @@ sampler2D scene:register(s0);
 float4 postParams:register(c0);
 // xy=1/renderWidth, 1/renderHeight
 float4 renderSize:register(c1);
+// x=anti-aliasing enabled (0/1), yzw spare
+float4 aaParams:register(c2);
+
+// ANTI-ALIASING, and the reason it is here rather than in the client's own video options: a
+// multisampled depth buffer cannot be sampled by a pixel shader in D3D9 at all, so setting the
+// client above 1x multisampling takes the depth away from every effect that reads it - water
+// refraction, absorption and shore foam, ambient occlusion, local lighting, rain roof occlusion,
+// fog - and they do not degrade, they disappear. The client is therefore meant to run at 1x and
+// the edges come from this pass instead.
+//
+// This is FXAA: find the contrast edge nearest the pixel, work out which way it runs, and resample
+// along it. It is spatial, so it needs no motion vectors, no history buffer and no sub-pixel
+// jitter in the client's projection matrix - which is exactly what makes it addable from a proxy
+// at all, because a temporal resolve would need jitter injected into D3DTS_PROJECTION before the
+// client draws, and hooking the client's own transforms is a different and much larger change.
+// The cost of being spatial is that it cannot recover detail the geometry edge destroyed, so it
+// reads as slightly softer than 2x hardware multisampling on thin railings and ropes; the
+// Sharpness slider next to it in F7 is the companion knob for that.
+//
+// It runs on the scene exactly as the client left it, which is already display-referred 8-bit
+// colour, so the luma measured below is the luma the eye sees - the space FXAA's thresholds are
+// written for. The user's grade is applied AFTER, so a brightness or gamma setting cannot move an
+// edge past a threshold that was tuned for ungraded values.
+float Luma(float3 c){return dot(c,float3(.299,.587,.114));}
+
+// `blended` comes back 1 only on a pixel that actually sat on an edge, and that is not cosmetic:
+// the sharpening Laplacian below takes its four neighbours straight from the un-anti-aliased
+// scene, so on a pixel this has already blended, centre and neighbours would no longer be samples
+// of the same image and their difference would ring as a halo along exactly the edge being
+// smoothed. Flat and textured pixels are returned untouched, so sharpening stays correct - and at
+// full strength - everywhere it is safe.
+float3 AntiAlias(float2 uv,float2 texel,float3 centre,out float blended){
+    blended=0;
+    // The four taps are HALF a texel out, not a whole one, and that is the part of this algorithm
+    // that is easy to get wrong: at +-0.5 texel a tap lands exactly on the corner four pixels
+    // share, so the sampler's own bilinear filter returns the average of that 2x2 box. Four taps
+    // therefore read sixteen pixels, and the luma gradient below is estimated at sub-pixel
+    // resolution rather than at pixel centres. At +-1.0 texel the same code reads four single
+    // pixels, the gradient is then blind to anything finer than a whole pixel, and a 45 degree
+    // staircase - the commonest aliased edge there is - measures as two black samples and two white
+    // ones, produces a step that runs exactly ALONG itself, and comes back untouched.
+    float3 nw=tex2D(scene,uv+float2(-texel.x,-texel.y)*.5).rgb;
+    float3 ne=tex2D(scene,uv+float2(texel.x,-texel.y)*.5).rgb;
+    float3 sw=tex2D(scene,uv+float2(-texel.x,texel.y)*.5).rgb;
+    float3 se=tex2D(scene,uv+float2(texel.x,texel.y)*.5).rgb;
+    float lumaCentre=Luma(centre);
+    float lumaNW=Luma(nw),lumaNE=Luma(ne),lumaSW=Luma(sw),lumaSE=Luma(se);
+    float lumaMin=min(lumaCentre,min(min(lumaNW,lumaNE),min(lumaSW,lumaSE)));
+    float lumaMax=max(lumaCentre,max(max(lumaNW,lumaNE),max(lumaSW,lumaSE)));
+    // Local contrast first, because most of a frame is not an edge: flat water, sky, the interior
+    // of a texture. Below this the five samples are the same colour as far as the eye is
+    // concerned and blending them only costs detail. Both numbers are FXAA's own - an absolute
+    // floor, so a dark gradient is not mistaken for an edge, and a fraction of the local maximum,
+    // so a bright one is not either.
+    if(lumaMax-lumaMin<max(.0312,lumaMax*.125))return centre;
+    // dir is the luma gradient ACROSS the edge. Dividing by its smaller component (biased, so a
+    // perfectly axis-aligned edge cannot divide by zero) and clamping to 8 texels turns it into a
+    // step that runs ALONG the edge - which is the whole trick: two more samples along it, instead
+    // of a search, and the clamp is what stops a near-axis-aligned edge from reaching across the
+    // screen and smearing an unrelated pixel into this one.
+    float2 dir=float2(-((lumaNW+lumaNE)-(lumaSW+lumaSE)),((lumaNW+lumaSW)-(lumaNE+lumaSE)));
+    float dirReduce=max((lumaNW+lumaNE+lumaSW+lumaSE)*.03125,1./128.);
+    float rcpDirMin=1./(min(abs(dir.x),abs(dir.y))+dirReduce);
+    dir=min(float2(8.,8.),max(float2(-8.,-8.),dir*rcpDirMin))*texel;
+    // The narrow pair straddles the edge a third and two thirds along that step; the wide pair adds
+    // the two samples at the step's ends and is sharper but can overshoot.
+    float3 narrow=.5*(tex2D(scene,uv+dir*(1./3.-.5)).rgb+tex2D(scene,uv+dir*(2./3.-.5)).rgb);
+    float3 wide=narrow*.5+.25*(tex2D(scene,uv+dir*-.5).rgb+tex2D(scene,uv+dir*.5).rgb);
+    blended=1;
+    // Take the wide result only while it stays inside this pixel's own luma range. Overshooting
+    // that range is the classic FXAA dark halo on a bright edge, and falling back to the narrow
+    // pair is what stops it - the range is already measured above, so the check is free.
+    float lumaWide=Luma(wide);
+    return (lumaWide<lumaMin||lumaWide>lumaMax)?narrow:wide;
+}
+
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 c=tex2D(scene,uv);
     float3 col=c.rgb;
+    float aaEdge=0;
+    [branch] if(aaParams.x>.5)col=AntiAlias(uv,renderSize.xy,c.rgb,aaEdge);
     if(postParams.w>.005) {
         float2 off=renderSize.xy;
         float3 up=tex2D(scene,uv+float2(0,-off.y)).rgb;
@@ -461,7 +539,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         float3 left=tex2D(scene,uv+float2(-off.x,0)).rgb;
         float3 right=tex2D(scene,uv+float2(off.x,0)).rgb;
         float3 lap=col*4.0-(up+down+left+right);
-        col=saturate(col+lap*(postParams.w*.75));
+        col=saturate(col+lap*(postParams.w*.75)*(1.0-aaEdge));
     }
     col=col+postParams.x;
     col=(col-.5)*postParams.y+.5;

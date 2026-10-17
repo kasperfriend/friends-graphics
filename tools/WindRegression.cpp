@@ -588,6 +588,23 @@ static void TestConfigurationAndWiring()
           weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,
           "production weather uses native type and integrated fall/wind, not separate clocks or overrides");
+    // Two ways the fullscreen precipitation pass could cover the whole screen when it should not.
+    // (1) The mist is gated on scene depth, and with no INTZ capture the neutral depth texture
+    // reads 1.0, GetLinearDepth answers 100000, and every one of those gates answers "as far away
+    // as possible" - so the mist ran at full strength over every pixel. A distance-gated term
+    // reading a missing distance is an ungated term, so the stage is now told whether depth exists.
+    // (2) `smoothedIndoor` - the factor that keeps rain out of caves, inns and arcades, read by the
+    // stage as `intensity * (1 - indoor*0.96)` - was declared, uploaded twice and never written by
+    // anything in the tree, so it was permanently 0 and rain drew at full strength under any roof
+    // for the whole of the five second mode hold. It is now driven by the client's own emission,
+    // which this file already counts, and it must stay silent while the game is unfocused or the
+    // detector is suspended, where absence of a draw means nothing at all.
+    Check(weatherSource.find("if (isSand < 0.5 && weatherParams.w > 0.5 && sceneZ > 6.0)") != weatherSource.npos &&
+          weatherSource.find("hasCapturedDepth ? 1.0f : 0.0f };") != weatherSource.npos &&
+          weatherSource.find("smoothedIndoor = std::clamp(smoothedIndoor + (coverTarget - smoothedIndoor)") != weatherSource.npos &&
+          weatherSource.find("if (nativeWeatherSeenThisFrame || !focused || weatherSuspended || !nativeWeatherMode)") != weatherSource.npos &&
+          weatherSource.find("coverMs > coverEvidenceMs ? 1.0f : 0.0f") != weatherSource.npos,
+          "the depth-gated mist and the under-cover fade both have a real signal behind them");
     const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
     Check(weatherResetStart != weatherSource.npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)

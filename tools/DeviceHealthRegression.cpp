@@ -171,6 +171,46 @@ int main() try
                 Contains(capture, "CameraCapture::ApplySkyFallback") &&
                 Contains(composite, "CaptureSkyFallback()"),
             "sky fallback camera capture keeps clouds alive when looking straight up and terrain is culled");
+
+        // MULTISAMPLING, AND THE ANTI-ALIASING THAT REPLACES IT. A multisampled depth buffer cannot be
+        // sampled by a pixel shader in D3D9 at all, so above 1x every effect here that reads depth
+        // loses it - water refraction, absorption and shore foam, ambient occlusion, local lighting,
+        // rain roof occlusion, fog - and those do not degrade, they disappear. Two guards that followed
+        // from that were wrong in opposite directions. The colour capture refused multisampling even
+        // though copying a multisampled target into a plain render-target texture IS the resolve, so
+        // reflections and refraction threw their colour source away for nothing. And the image pass had
+        // no anti-aliasing of any kind, so a player who did the right thing and ran at 1x had no way to
+        // get their edges back. Pinned: the colour guard is gone, the MRT guard stays (that one is a
+        // real limit - D3D9 makes every bound target share one multisample type), FXAA is in the image
+        // pass at the sub-pixel tap offset that is the difference between it working and it compiling,
+        // it runs on its own switch, and the grade is forced to identity when the grade master is off.
+        const auto imagePass = Read("src/Effects/ImagePostProcess.h");
+        const auto effects = Read("VolumeEffects.h");
+        const auto reflection = Read("WaterReflection.h");
+        const auto water = Read("WaterEffect.h");
+        const auto overlay = Read("src/Environment/OverlayItems.h");
+        const auto ini = Read("GraphicsEffects.ini");
+        Require(!Contains(reflection, "desc.MultiSampleType!=D3DMULTISAMPLE_NONE") &&
+                Contains(reflection, "if(FAILED(volume::target->GetDesc(&desc))){++failedFrames;return;}"),
+            "the SSR colour capture resolves a multisampled target instead of refusing it");
+        Require(Contains(water, "if(colorDesc.MultiSampleType!=D3DMULTISAMPLE_NONE)return;"),
+            "the water MRT stays guarded, because every bound target must share one multisample type");
+        Require(Contains(effects, "float4 aaParams:register(c2);") &&
+                Contains(effects, "uv+float2(-texel.x,-texel.y)*.5") &&
+                Contains(effects, "uv+float2(texel.x,texel.y)*.5") &&
+                !Contains(effects, "float3 nw=tex2D(scene,uv+float2(-texel.x,-texel.y)).rgb;") &&
+                Contains(effects, "if(lumaMax-lumaMin<max(.0312,lumaMax*.125))return centre;") &&
+                Contains(effects, "col=saturate(col+lap*(postParams.w*.75)*(1.0-aaEdge));"),
+            "FXAA taps the corners pixels share for a sub-pixel edge, skips flat areas, and does not sharpen what it just smoothed");
+        Require(Contains(imagePass, "const float* parameters,const float* aaParameters") &&
+                Contains(imagePass, "SetPixelShaderConstantF(2,aaParameters,1)"),
+            "the anti-aliasing switch is always uploaded, so it cannot inherit a stale constant register");
+        Require(Contains(composite, "(gradeWanted || antiAliasingEnabled)") &&
+                Contains(composite, "gradeWanted?brightnessPercent*.01f:0.f") &&
+                Contains(composite, "antiAliasingEnabled = ReadTuning(L\"AntiAliasing\", 1, L\"PostProcess\") != 0;"),
+            "anti-aliasing runs on its own switch and forces an identity grade when the master is off");
+        Require(Contains(overlay, "L\"PostProcess\",L\"AntiAliasing\"") && Contains(ini, "AntiAliasing=1"),
+            "anti-aliasing is in the F7 image tab and in the shipped INI, both defaulting on");
     }
 
     {

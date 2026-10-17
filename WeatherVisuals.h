@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -65,6 +66,28 @@ inline UINT copyWidth = 0, copyHeight = 0;
 
 inline DWORD lastTick = 0;
 inline float elapsedTime = 0.0f;
+// UNDER COVER. The precipitation stage is a screen-sized quad composited over everything the
+// client drew, so nothing in it knows where the player is standing. The one thing that was meant
+// to keep rain out of a cave, an inn or a city arcade is this factor, uploaded as c2.w and read by
+// the stage as `intensity * (1 - indoor*0.96)` - and for as long as it has existed it was declared
+// here, read into two constant buffers, and never once written by anything in the tree, so it was
+// permanently 0.0 and that suppression never happened: rain drew at full strength over the whole
+// screen under any roof, and kept doing so for the whole of nativeWeatherHoldMs after the client
+// itself had stopped emitting.
+//
+// The evidence used here is the client's own emission, which this file already counts per frame.
+// WoW stops drawing weather particles under cover, so a frame that still recognizes the weather
+// mode but sees no native weather draw is a frame with a roof in it. It needs no depth buffer
+// (which MSAA takes away entirely), no client global and no new hook, and it deliberately does not
+// fire while the game is unfocused or the mode detector is suspended, because absence of a draw
+// then means the same thing the 5 second hold already assumes it means: nothing.
+inline DWORD lastCoverTick = 0;
+inline DWORD coverMs = 0;
+// How long the client must have emitted nothing before that is read as cover. Long enough that a
+// client emitting on alternate frames - or one throttled frame - never trips it, since either
+// resets the clock, and short enough that walking under a roof dims the rain in about a third of a
+// second instead of leaving it drawing for the five seconds the mode hold lasts.
+inline constexpr DWORD coverEvidenceMs = 350;
 inline float smoothedIndoor = 0.0f;
 inline bool worldGeometrySeenThisFrame = false;
 inline int nativeWeatherSeenThisFrame = 0;
@@ -86,7 +109,8 @@ sampler2D mistTex : register(s3);
 // c0: x=projA, y=projB, z=scaleX, w=scaleY
 float4 projection : register(c0);
 // c1: x=raw fall phase (diagnostics only), y=intensity,
-//     z=mode (1=Rain, 2=Snow, 3=Sandstorm)
+//     z=mode (1=Rain, 2=Snow, 3=Sandstorm),
+//     w=whether a real depth texture was captured this frame (0 = every sceneZ below is a guess)
 float4 weatherParams : register(c1);
 // c2: xy=raw wind offset (diagnostics only), z=haze, w=indoorFactor
 float4 windParams : register(c2);
@@ -235,8 +259,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
     }
     
-    // Add subtle ambient mist during heavy rain/snow at mid-distances
-    if (isSand < 0.5 && sceneZ > 6.0)
+    // Add subtle ambient mist during heavy rain/snow at mid-distances.
+    // `weatherParams.w` is whether the depth this term is gated on actually exists, and it has to
+    // be asked explicitly: with no INTZ capture the neutral depth texture reads 1.0, GetLinearDepth
+    // answers 100000, and every gate below - `sceneZ > 6.0` and the 6..40 yard fade - then answers
+    // "as far away as it is possible to be", so the mist ran at FULL strength over every pixel of
+    // the screen. A distance-gated term reading a missing distance is not a distant term; it is an
+    // ungated one, and an ungated wash over the whole screen is what that looked like. No depth now
+    // means no depth-gated term, which is the same rule the occlusion factor already follows.
+    if (isSand < 0.5 && weatherParams.w > 0.5 && sceneZ > 6.0)
     {
         // The drift phases' decimal parts (c10); the soft haze samples
         // with frac(), so only the [0,1) parts matter.
@@ -845,7 +876,12 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     // c1: Weather params
     // A restrained layer supplements native particles rather than doubling
     // their density. It remains camera-relative, so mount speed cannot outrun it.
-    float weatherConst[4] = { motion.fall, intensity * frame.environment[renderer::Weather] * .45f, float(renderMode), 0.f };
+    // The fourth lane is depth validity, for the mist gate inside the stage. It is the same
+    // `hasCapturedDepth` that decides whether roof occlusion is honoured at all, so "no depth"
+    // now disables BOTH depth-gated terms instead of one of them silently answering
+    // "infinitely far away" and running at full strength over the whole screen.
+    float weatherConst[4] = { motion.fall, intensity * frame.environment[renderer::Weather] * .45f, float(renderMode),
+        hasCapturedDepth ? 1.0f : 0.0f };
     // c2: Integrated screen-space displacement, not current wind * session age.
     float windConst[4] = { motion.windX, motion.windY, atmosphereHaze, smoothedIndoor };
     // c3: Screen params
@@ -985,6 +1021,23 @@ inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
         lastNativeWeatherTick = 0;
     }
 
+    // COVER ESTIMATE, run after the state machine above because it needs `weatherSuspended` to have
+    // already decided whether absence of a native draw means anything this frame.
+    const DWORD frameMs = lastCoverTick ? std::min<DWORD>(now - lastCoverTick, 250) : 0;
+    lastCoverTick = now;
+    if (nativeWeatherSeenThisFrame || !focused || weatherSuspended || !nativeWeatherMode)
+        coverMs = 0;
+    else
+        coverMs = std::min<DWORD>(coverMs + frameMs, nativeWeatherHoldMs);
+
+    const float coverTarget = coverMs > coverEvidenceMs ? 1.0f : 0.0f;
+    // Eased, not switched, so a doorway dims the rain over about half a second rather than blinking
+    // it, and walking back out takes about a second and a half to bring it back - a roof edge should
+    // not be able to strobe a fullscreen pass. The rates are per second of real time, so they hold
+    // at any frame rate; `frameMs` is clamped above so a stall or a resume cannot jump the factor.
+    const float coverRate = float(frameMs) * .001f * (coverTarget > smoothedIndoor ? 2.0f : 0.7f);
+    smoothedIndoor = std::clamp(smoothedIndoor + (coverTarget - smoothedIndoor) * std::min(1.0f, coverRate), 0.f, 1.f);
+
     nativeWeatherSeenThisFrame = 0;
     nativeWeatherPrimitives = 0;
     worldGeometrySeenThisFrame = false;
@@ -995,12 +1048,22 @@ inline const char* GetStatusText()
 {
     if (!enabled || !effectEnabled || !active)
         return "WEATHER OFF";
+    // "(COVER)" makes the new suppression legible: it says the pass is dimming because the client
+    // itself has stopped emitting weather particles, which is the only evidence a proxy has that
+    // there is a roof overhead. Without it the rain fading under cover reads as the effect failing.
+    static char status[40];
+    const char* mode = "WEATHER AUTO";
     switch (nativeWeatherMode)
     {
-    case 3: return "SANDSTORM ON";
-    case 2: return "SNOW ON";
-    case 1: return "RAIN ON";
-    default: return "WEATHER AUTO";
+    case 3: mode = "SANDSTORM ON"; break;
+    case 2: mode = "SNOW ON"; break;
+    case 1: mode = "RAIN ON"; break;
     }
+    if (smoothedIndoor > 0.5f)
+    {
+        std::snprintf(status, sizeof status, "%s (COVER)", mode);
+        return status;
+    }
+    return mode;
 }
 }

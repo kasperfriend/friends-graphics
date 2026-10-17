@@ -81,6 +81,17 @@ was always meant to be - the same number at any resolution and any distance, and
 published frames were tuned against. It carries the view angle's `1/cos`, because the separation this
 pass can read is along the view axis rather than vertical.
 
+That divisor has a floor, `kBedSlopeSpanYards`, and the floor is the part that was missing at first.
+`ddx(depth)` is a difference across **one pixel**, so at the water's edge - where one pixel is a few
+inches - dividing by that pixel's own footprint measures the depth buffer's quantization and dither
+rather than the bed, and reports it as an enormous slope. That number drives the shoal foam, the
+beach/wall split and the swash band width, so up close it read as a checkerboard of foam on the
+seabed that crawled with the camera. The floor is 1.5 yards because that is the span `FieldSlope`
+samples (`+-1.5`), so the shader and the mirror the look was tuned against read the same baseline;
+it is a floor, so any coarser pixel keeps its own footprint and distant water is untouched. Up close
+the shader now reports a calmer slope than a per-pixel difference would, which is the trade: less
+shoal foam in the last yard than a number that was mostly noise was producing.
+
 One number then separates the two shores that look the same to a depth buffer: about twelve degrees
 of bed is a beach, about forty is a wall. A beach gets a wide swash zone and sheets running up it; a
 wall gets a narrow bright contact line and nothing that can run up it. At level 10 the same slope
@@ -121,6 +132,22 @@ costs arithmetic and no noise evaluation - the fine chop is the fleck, the mid o
 fleck sits on, and the broad warp is the tongue both are torn out of. It multiplies the crest terms
 whole, because a whitecap *is* a broken streak, and only `.45` of the shore term, because a sheet
 running up a beach is continuous in a way a cap on a crest is not.
+
+The lace reads those octaves' **values**, which is exactly what the chop fade elsewhere in the stage
+exists for, and the first version of it forgot that. A value noise a pixel cannot resolve aliases
+into a fixed screen-aligned grid - the stage's own comment says so, and it is why `detail` is
+`lerp(.5, ripple.x, filter)` rather than `ripple.x` - and on a term that multiplies a bright foam
+colour, that grid reads as a checkerboard crawling with the camera rather than as texture. So each
+octave now enters through the same fade its own slope uses (the fine one squared, the mid one to the
+first power), which pulls both back to the neutral `.5` where they are unresolved, *and* the lace
+itself fades toward 1 - no lace - on `saturate(filter*2-.2)`. The second fade is the part that is
+easy to miss: with the octaves seeded at `.5` and no fade on the lace, distant water would still get
+`saturate(.30+.80*.5+.48*.5)=.94`, a visible darkening of every distant crest. Where the octaves do
+resolve, none of this changes the published look - `tools/WaterPreview.cpp` prints `lace 0.339549`
+against `0.338764` before it, and a probe sweep across a coast panel agrees to three decimals
+(0.504574/0.507068, 0.643193/0.642790, 0.767165/0.765184) - so the fade costs nothing up close and
+removes the grid at distance. `tools/WaterRegression.cpp` pins both spellings and requires the
+unfaded one to be gone, because a fix that leaves the raw read in place somewhere is not a fix.
 
 At the same level the colour becomes a ramp on the coverage the masks already produced instead of
 one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
@@ -188,10 +215,14 @@ change like this one has to answer for.
   `veil`), so a level can be audited one pixel at a time:
 
   ```
-  build/waterpreview --scene coast --quality 7 --probe 274 220 --time 22
-      shore bedSlope 0.0357  beach 1  runUp 1.31625  draining 1  swashDepth 3.31377
-      foam lace 0.338764  backwash 0.265436  colour 0.310196 0.430588 0.406274  veil 0
+  build/waterpreview --scene coast --quality 7 --shore-foam 220 --wind 190 \
+      --shore-foam-width 320 --probe 274 242 --time 22
+      shore bedSlope 0.0357304  beach 1  runUp 1.31625  draining 1  swashDepth 3.31377
+      foam lace 0.339549  backwash 0.265436  colour 0.436471 0.529412 0.477059  veil 0
   ```
+
+  (Printed in full because an earlier revision of this block quoted numbers two different probe
+  pixels had produced under a command line that reproduced neither.)
 
   The same pixel at `--quality 6` prints `runUp 0  draining 0  lace 1  backwash 0`, and the run-up
   travels the waterline between 2.7 and 5.0 yards across a swell period, which is the back flow.
@@ -1155,6 +1186,10 @@ the reporting player's machine. In-game confirmation still matters.
 - **No capture:** valid fallback projection constants prevent `0/0` and NaNs
   when INTZ is unavailable (notably with MSAA). Waves, environment reflection,
   glint and crest foam still render; screen-space features require capture.
+  Above 1x the *colour* source is still captured - a multisampled colour target
+  resolves through the `StretchRect` this was already making - and only depth is
+  impossible. Anti-aliasing comes from the image pass instead:
+  `docs/anti-aliasing.md`.
 - **Refraction off really means off:** zero distortion and zero scene-color
   mixing. Absorption remains independent. Foreground depth is no longer treated
   as a deep seabed, and distorted samples crossing a foreground silhouette are
@@ -1237,6 +1272,8 @@ the reporting player's machine. In-game confirmation still matters.
 4. For SSR/refraction/depth tint, use in-game **Multisampling 1x** and restart;
    INTZ capture cannot replace multisampled depth. `WaterReflection.log` records
    the first pre-water scene copy. Missing capture must not disable basic water.
+   The edges come from the image pass's anti-aliasing instead - see
+   `docs/anti-aliasing.md`, which lists everything above 1x costs.
 5. Check a coast, a shallow canal, under a bridge, sun/moon glint, and a nearby
    lamp. Test reflections off with refraction/depth/foam on, atmosphere off,
    F11 off/on, window resize, and Alt+Tab. Native lava/slime and unsupported

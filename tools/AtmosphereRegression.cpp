@@ -462,12 +462,38 @@ int main() try {
  auto grade=[&](float brightness,float contrast,float gamma){
   Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff404040,1,0));
   d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,1);
-  float params[4]={brightness,contrast,gamma,0};Check(d->BeginScene());Check(ApplyImagePostProcess(d.Get(),back.Get(),postScratch.Get(),postSurface.Get(),postShader.Get(),params));Check(d->EndScene());
+     float params[4]={brightness,contrast,gamma,0};float aaOff[4]={0,0,0,0};Check(d->BeginScene());Check(ApplyImagePostProcess(d.Get(),back.Get(),postScratch.Get(),postSurface.Get(),postShader.Get(),params,aaOff));Check(d->EndScene());
   DWORD mask=0;d->GetRenderState(D3DRS_COLORWRITEENABLE,&mask);Require(mask==1,"post process restores inherited colour mask");
   Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));DWORD result=((DWORD*)((BYTE*)r.pBits+64*r.Pitch))[64];read->UnlockRect();return result&255;};
  Require(abs(int(grade(0,1,1))-64)<=1,"neutral post process preserves scene");
  Require(grade(.35f,1,1)>140,"post brightness visibly changes output");
- Require(grade(0,1,1.68f)>100,"post gamma visibly changes output");
+    Require(grade(0,1,1.68f)>100,"post gamma visibly changes output");
+    // ANTI-ALIASING, on a 45 degree staircase built from per-row clears: the commonest aliased edge
+    // there is, and the one a wrong tap offset fails on quietly. At +-1 texel the four diagonal taps
+    // read single pixels, the luma gradient comes out running exactly ALONG the staircase, the step
+    // then samples only pixels that are already on this side of it, and the pass returns the pixel
+    // untouched - it compiles, it runs, it costs eight fetches, and it does nothing. At +-0.5 texel
+    // each tap is the 2x2 box average the bilinear filter hands back at a shared corner, the
+    // gradient is sub-pixel, and the pixels either side of the step blend. Hence assertions that
+    // cannot pass by accident: off is exactly one side or the other, on is strictly between, and a
+    // flat pixel - dark or bright - is untouched either way, which is the local-contrast early-out
+    // that keeps AA from smearing texture interiors and gradients.
+    auto aaPixel=[&](bool aaOn,int px,int py){
+        D3DRECT all{0,0,128,128};
+        Check(d->SetRenderTarget(0,back.Get()));
+        Check(d->Clear(1,&all,D3DCLEAR_TARGET,0xff000000,1,0));
+        D3DRECT rows[128];
+        for(int y=0;y<128;++y)rows[y]=D3DRECT{LONG(y),LONG(y),128,LONG(y)+1};
+        Check(d->Clear(128,rows,D3DCLEAR_TARGET,0xffffffff,1,0));
+        float params[4]={0,1,1,0};float aa[4]={aaOn?1.f:0.f,0,0,0};
+        Check(d->BeginScene());Check(ApplyImagePostProcess(d.Get(),back.Get(),postScratch.Get(),postSurface.Get(),postShader.Get(),params,aa));Check(d->EndScene());
+        Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));
+        DWORD result=((DWORD*)((BYTE*)r.pBits+py*r.Pitch))[px];read->UnlockRect();return int(result&255);};
+    Require(aaPixel(false,63,64)<=1&&aaPixel(false,64,64)>=254,"without anti-aliasing a staircase stays hard on both sides");
+    Require(aaPixel(true,63,64)>4&&aaPixel(true,63,64)<250,"anti-aliasing blends the dark pixel beside a diagonal step");
+    Require(aaPixel(true,64,64)>4&&aaPixel(true,64,64)<250,"anti-aliasing blends the bright pixel on the other side of it");
+    Require(aaPixel(true,20,64)<=1,"anti-aliasing leaves a flat dark area alone");
+    Require(aaPixel(true,110,30)>=254,"anti-aliasing leaves a flat bright area alone");
  Require(grade(0,1.74f,1)<30,"post contrast visibly changes output");
  ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
  Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));

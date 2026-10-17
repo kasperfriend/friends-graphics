@@ -173,7 +173,14 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},
- {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
+ {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35},
+ // Anti-aliasing is the last item in this tab and sits next to Sharpness on purpose: FXAA trades a
+ // little detail for smooth edges, and Sharpness is the knob that puts the detail back. It is its
+ // own switch rather than a passenger on POST PROCESS above, because it is the replacement for
+ // hardware multisampling - which this renderer cannot use above 1x at all, since a multisampled
+ // depth buffer cannot be sampled by a pixel shader in D3D9 and every depth-reading effect loses
+ // its depth when the client is set higher.
+ {KIND_TOGGLE,L"PostProcess",L"AntiAliasing","ANTI ALIASING (FXAA, USE 1X MULTISAMPLING)",0,1,1,1}
 };
 inline const std::vector<int> defaults=[](){std::vector<int> result;for(const auto& i:items)result.push_back(i.value);return result;}();
 }

@@ -764,6 +764,11 @@ int main() try
         // dispersion, the orientation - lives there and is spelled into both stages.
         const std::string code=stripComments(shader);
         const std::string header=stripComments(ReadAlongside("../src/Water/WaveField.h"));
+        // The CPU mirror is read once, up here, because pins on both the shader text and the
+        // mirror's own spelling of the same formula are interleaved through this section: a
+        // formula that must be faded in the stage must be faded in the mirror too, and that is
+        // one assertion rather than two in different places.
+        const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(header.size()>4096,"the wave field header both stages mirror is readable");
         Require(vertex.size()>1024&&pixel.size()>8192,"both water stages are readable as text");
         // (1) The waves followed the camera. Two causes, both a matrix read the wrong way
@@ -851,6 +856,25 @@ int main() try
                 pixel.find("rippleMid.yz*.40*filter)")!=std::string::npos&&
                 pixel.find("rippleMid.yz*.40*filter*filter")==std::string::npos,
                 "the mid octave rides the swell and fades on the first power of the footprint filter");
+        // Two terms read noise or depth at a scale the pixel may not be able to resolve, and both
+        // were reported as a checkerboard that crawls with the camera: the foam lace read the chop
+        // octaves' raw VALUES (value noise a pixel cannot resolve aliases into a fixed
+        // screen-aligned grid - the artefact `detail` has always been faded for), and the bed slope
+        // divided a one-pixel depth difference by a one-pixel world footprint, which near the
+        // shoreline measures the depth buffer's own quantization instead of the bed and reports it
+        // as an enormous slope driving the shoal foam and the swash band. Pinned in both directions:
+        // the faded spelling must be there and the unfaded one must be gone, because a fix that
+        // leaves the raw read in place somewhere is not a fix.
+        Require(pixel.find("float fleck=saturate(lerp(.5,rippleFine.x,filter*filter)*1.7-.35);")!=std::string::npos&&
+                pixel.find("float lump=saturate(lerp(.5,rippleMid.x,filter)*1.6-.30);")!=std::string::npos&&
+                pixel.find("lace=lerp(1,saturate(.30+.80*fleck+.48*lump),saturate(filter*2-.2));")!=std::string::npos&&
+                pixel.find("saturate(rippleFine.x*1.7-.35)")==std::string::npos&&
+                pixel.find("saturate(rippleMid.x*1.6-.30)")==std::string::npos,
+                "the foam lace fades with the octaves it reads, so unresolved foam is flat and not a screen grid");
+        Require(pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
+                pixel.find("max(max(sqrt(footprintSquared),kBedSlopeSpanYards)")!=std::string::npos&&
+                mirror.find("const float e = 1.5f;")!=std::string::npos,
+                "the bed slope is measured over the mirror's own 1.5 yard baseline, never over one pixel");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
@@ -1078,7 +1102,6 @@ int main() try
                             "                wavesEnabled)")
                     !=std::string::npos,
                 "the geometry waves are lifted by the same sea state the shading is");
-        const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(mirror.find("TargetSeaState(tuning, weather)") != std::string::npos,
                 "the game and the CPU preview ease the same sea state through one function");
         // The look was tuned against this file, so a gain that exists in one copy and not the

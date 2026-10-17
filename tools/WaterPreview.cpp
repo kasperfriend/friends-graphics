@@ -168,6 +168,12 @@ static float BottomOf(const Config& c, float x, float y)
 
 static float FieldSlope(const Config& c, float x, float y)
 {
+    // +-1.5 yards is the baseline the shader's bed slope is floored at
+    // (WaterEffect.h's kBedSlopeSpanYards), and the floor is not cosmetic: a per-pixel depth
+    // difference divided by a per-pixel footprint measures the depth buffer's quantization
+    // rather than the bed once one pixel is a few inches wide, which is exactly what a shoreline
+    // looks like from the water's edge. This mirror samples the analytic bottom over the same
+    // span, so the two halves read the same slope and the same foam.
     const float e = 1.5f;
     return std::hypot(BottomOf(c, x + e, y) - BottomOf(c, x - e, y),
                       BottomOf(c, x, y + e) - BottomOf(c, x, y - e)) / (2.f * e);
@@ -850,9 +856,18 @@ int main(int argc, char** argv)
                     // tongue both are torn out of. It multiplies the crest terms whole, because a
                     // whitecap IS a broken streak, and only .45 of the shore term, because a sheet
                     // running up a beach is continuous in a way a cap on a crest is not.
+                    //
+                    // Both octaves enter through the same footprint fade their slopes use, and the
+                    // lace itself fades toward "no lace" on that filter: a value noise a pixel
+                    // cannot resolve aliases into a screen-aligned grid, which on a term that
+                    // multiplies bright foam reads as a checkerboard crawling with the camera. The
+                    // mirror measures its chop on a world lattice at the same footprint the shader
+                    // does, so it shows the same artefact and needs the same fade.
+                    const float laceFleck = Saturate(Mix(.5f, wave.fineValue, wave.filter * wave.filter) * 1.7f - .35f);
+                    const float laceLump = Saturate(Mix(.5f, wave.midValue, wave.filter) * 1.6f - .30f);
                     const float lace = plan.midWaves
-                        ? Saturate(.30f + .80f * Saturate(wave.fineValue * 1.7f - .35f)
-                            + .48f * Saturate(wave.midValue * 1.6f - .30f))
+                        ? Mix(1.f, Saturate(.30f + .80f * laceFleck + .48f * laceLump),
+                            Saturate(wave.filter * 2.f - .2f))
                         : 1.f;
                     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline,
                     // in streaks the next sheet pushes up and the drain pulls back out. Contours of
