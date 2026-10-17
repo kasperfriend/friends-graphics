@@ -59,9 +59,12 @@ $budgets = @{
     'precipitationHLSL'      = 512
     # Water pixel stage, capped on explicit request: 2048 is ~2.3x the slots
     # it actually uses (642 measured 2026-10-14, 713 after the 2026-10-17 CSE
-    # pass, and 890 after round 5's quality ladder - the mid octave, the
+    # pass, 890 after round 5's quality ladder - the mid octave, the
     # bed-slope shore, the swash/backwash and the foam lace - which the round
-    # estimated at "+80" and measured at +177; see docs/water-rendering.md).
+    # estimated at "+80" and measured at +177, and 895 after the two
+    # foam-checkerboard fixes, which faded the lace with the octaves it reads
+    # and floored the bed slope's measurement span; see
+    # docs/water-rendering.md).
     # A quality level does not shrink this number: the gates are [branch], so
     # every level compiles the same shader and a level buys time per pixel
     # rather than slots. The ceiling guards against a pathological edit (an
