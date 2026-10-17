@@ -753,12 +753,22 @@ int main(int argc, char** argv)
                     const float viewZ = std::max(Dot(Sub(surface, v.pos), v.fwd), .05f);
                     const V3 viewPos = Sub(surface, v.pos);
                     const V3 n{ 0, 0, 1 }, wn = wave.normal;   // n = the geometric normal (the surface is flat)
+                    // The shader's own `v`, declared where the shader declares it: the body shading's
+                    // transmission floor below is the first thing that needs it.
+                    const V3 toCamera = Normalize(Mul(viewPos, -1.f));
 
                     // The client's own painted water, as a flat tone (no textures here).
                     V3 rgb{ .15f, .19f, .20f };
                     const float sunElev = Dot(light, n);
-                    rgb = Mul(rgb, 1.f + normalResponse * (1.9f * (Dot(wn, light) - Dot(n, light))
-                        + .75f * (Dot(wn, v.up) - Dot(n, v.up))));
+                    // Floored exactly as the shader floors it. `normalResponse` is the shader's
+                    // controls.z and reaches 2.5 in an agitated sea, so on a face turning away from
+                    // the light this multiplier goes NEGATIVE and the colour it leaves behind is
+                    // black - which, seen through the nearer face of the same wave, is the dark shape
+                    // that used to sit inside the sea at surface height. The floor rises with the
+                    // light coming through the sheet toward the camera.
+                    rgb = Mul(rgb, std::max(1.f + normalResponse * (1.9f * (Dot(wn, light) - Dot(n, light))
+                        + .75f * (Dot(wn, v.up) - Dot(n, v.up))),
+                        Mix(.22f, .78f, Saturate(-Dot(toCamera, light) * 1.7f - .45f))));
 
                     const float screenU = u * .5f + .5f, screenV = .5f - vv * .5f;   // 0..1 uv, the capture's own space
                     const float behindZ = sceneDepth > 1e8f ? 1e5f : sceneDepth;
@@ -787,7 +797,6 @@ int main(int argc, char** argv)
                     const V3 transmittance{ std::exp(-lightReach * absorptionStrength * column * absorbRate.x),
                                             std::exp(-lightReach * absorptionStrength * column * absorbRate.y),
                                             std::exp(-lightReach * absorptionStrength * column * absorbRate.z) };
-                    const V3 toCamera = Normalize(Mul(viewPos, -1.f));
                     const float absorption = 1.f - transmittance.y;
                     const float g = .3f + .34f * Saturate(sunElev);
                     const float phaseDen = std::max(1.f + g * g - 2.f * g * Dot(Mul(toCamera, -1.f), light), 1e-3f);
@@ -863,10 +872,19 @@ int main(int argc, char** argv)
                     // multiplies bright foam reads as a checkerboard crawling with the camera. The
                     // mirror measures its chop on a world lattice at the same footprint the shader
                     // does, so it shows the same artefact and needs the same fade.
-                    const float laceFleck = Saturate(Mix(.5f, wave.fineValue, wave.filter * wave.filter) * 1.7f - .35f);
-                    const float laceLump = Saturate(Mix(.5f, wave.midValue, wave.filter) * 1.6f - .30f);
+                    //
+                    // And the two are combined as a product of their COMPLEMENTS, never through a
+                    // saturate whose ramp sits inside the noise's own range - that clips, and value
+                    // noise is one blob per lattice cell, so a clipped blob is a flat square one cell
+                    // across printed onto the foam. Measured over the lattice the clipped form put
+                    // 43.1% of the lace exactly on 1.0; this form puts 0.0% on any plateau at the
+                    // same mean (0.817 against 0.805) and the same floor (0.307 against 0.300). The
+                    // mirror carries the identical formula so the frame it publishes is the frame the
+                    // shader draws, plateaus and all - which is how the squares showed up here too.
+                    const float laceFine = Mix(.5f, wave.fineValue, wave.filter * wave.filter);
+                    const float laceMid = Mix(.5f, wave.midValue, wave.filter);
                     const float lace = plan.midWaves
-                        ? Mix(1.f, Saturate(.30f + .80f * laceFleck + .48f * laceLump),
+                        ? Mix(1.f, 1.f - .70f * (1.f - laceFine) * (1.f - laceMid),
                             Saturate(wave.filter * 2.f - .2f))
                         : 1.f;
                     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline,

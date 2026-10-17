@@ -133,21 +133,42 @@ fleck sits on, and the broad warp is the tongue both are torn out of. It multipl
 whole, because a whitecap *is* a broken streak, and only `.45` of the shore term, because a sheet
 running up a beach is continuous in a way a cap on a crest is not.
 
-The lace reads those octaves' **values**, which is exactly what the chop fade elsewhere in the stage
-exists for, and the first version of it forgot that. A value noise a pixel cannot resolve aliases
-into a fixed screen-aligned grid - the stage's own comment says so, and it is why `detail` is
-`lerp(.5, ripple.x, filter)` rather than `ripple.x` - and on a term that multiplies a bright foam
-colour, that grid reads as a checkerboard crawling with the camera rather than as texture. So each
-octave now enters through the same fade its own slope uses (the fine one squared, the mid one to the
-first power), which pulls both back to the neutral `.5` where they are unresolved, *and* the lace
-itself fades toward 1 - no lace - on `saturate(filter*2-.2)`. The second fade is the part that is
-easy to miss: with the octaves seeded at `.5` and no fade on the lace, distant water would still get
-`saturate(.30+.80*.5+.48*.5)=.94`, a visible darkening of every distant crest. Where the octaves do
-resolve, none of this changes the published look - `tools/WaterPreview.cpp` prints `lace 0.339549`
-against `0.338764` before it, and a probe sweep across a coast panel agrees to three decimals
-(0.504574/0.507068, 0.643193/0.642790, 0.767165/0.765184) - so the fade costs nothing up close and
-removes the grid at distance. `tools/WaterRegression.cpp` pins both spellings and requires the
-unfaded one to be gone, because a fix that leaves the raw read in place somewhere is not a fix.
+The lace reads those octaves' **values**, and getting that right took two attempts. The first read
+them raw, which is what the chop fade elsewhere in the stage exists to prevent - a value noise a
+pixel cannot resolve aliases into a fixed screen-aligned grid - so each octave now enters through the
+same fade its own slope uses (the fine one squared, the mid one to the first power), and the lace
+itself fades toward 1, no lace, on `saturate(filter*2-.2)`; without that second fade the octaves'
+neutral `.5` seed would leave a flat `.94` on distant water and darken every distant crest.
+
+That was aimed at the wrong mechanism, and disproving it was cheap. With **WAVE FADE** at 0 the fade
+is off everywhere and the reported checkerboard did not change at all, while **WATER QUALITY** 6 -
+which has neither the lace nor the mid octave - removed it completely. So the grid was not aliasing at
+distance; it was the *shape of the mix*. The first version read `saturate(v*1.7-.35)` and
+`saturate(v*1.6-.30)`, and a saturate whose ramp sits **inside** the noise's own value range clips.
+Measured over the lattice: 21.9% of cells landed flat on the low plateau and 19.0% on the high one for
+the fleck, 20.2% and 17.4% for the lump, and **43.1% of the finished lace sat exactly on 1.0**. Value
+noise is one blob per lattice cell, so a clipped blob is a flat square one cell across - 1.15 yards
+for the fine octave, 5.4 for the mid - and 43% of the foam was paved with them. That is a checkerboard
+at every distance and every angle, it crawls when the camera moves because the lattice is world-anchored
+and the projection of it is not, and no distance fade can touch it.
+
+The lace is therefore a product of the two octaves' complements:
+
+```
+lace = 1 - .70 * (1 - fine) * (1 - mid)
+```
+
+which has no plateau anywhere inside the range - it reaches 1 only where an octave reaches its own
+maximum, a set of measure zero for a continuous field - and is darkest only where both octaves agree
+the water is open, which is what a water-filled gap between two filaments actually is. It keeps the
+look it replaces: mean **0.817** against **0.805**, minimum **0.307** against **0.300**, and **0.0%**
+of cells on a plateau instead of 43.1%. A probe sweep across a coast panel no longer returns an exact
+`1` anywhere at level 7, where two of eight points did before. `tools/WaterRegression.cpp` pins the
+product form in both halves of the renderer and requires the clipped spellings to be gone.
+
+The lesson is worth more than the lace: **on this renderer's value noise, a `saturate` whose ramp does
+not span the whole value range prints the lattice onto the screen.** Any new term that shapes an
+octave's value should either use the full range or use a curve with no plateau in it.
 
 At the same level the colour becomes a ramp on the coverage the masks already produced instead of
 one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
@@ -220,7 +241,7 @@ change like this one has to answer for.
   build/waterpreview --scene coast --quality 7 --shore-foam 220 --wind 190 \
       --shore-foam-width 320 --probe 274 242 --time 22
       shore bedSlope 0.0357304  beach 1  runUp 1.31625  draining 1  swashDepth 3.31377
-      foam lace 0.339549  backwash 0.265436  colour 0.436471 0.529412 0.477059  veil 0
+      foam lace 0.53838  backwash 0.265436  colour 0.436471 0.529412 0.477059  veil 0
   ```
 
   (Printed in full because an earlier revision of this block quoted numbers two different probe
@@ -391,6 +412,20 @@ were structural rather than a matter of tuning numbers:
   the body directly, against the geometric normal, in both the light direction and the
   hemisphere it sees. Flat water and a zero-strength sea are untouched by construction: the
   terms are differences.
+
+  That multiplier is **floored**, and the floor is not a tuning preference. `controls.z` is
+  `NormalPercent * clamp(sqrt(agitation), 0, 2.5)`, so in an agitated sea the expression
+  `1 + controls.z*(1.9*(NoL-dot(n,l)) + .75*(...))` goes **negative** on a face turning away from
+  the source - and nothing saturates `rgb` between there and the output, so the render target
+  clamped it to pure black. Water is alpha-blended and writes no depth, so the far face of a wave
+  shows through the near one, and a far face clamped to black read as a silhouette cut out of the
+  sea: reported as "the blacked shape of a wave visible through the water" from surface height.
+  The floor is `lerp(.22, .78, saturate(-vDotL*1.7-.45))` - it keeps the whole brightening range
+  and most of the shading, and rises with the light coming through the sheet toward the viewer,
+  the same `dot(-v,l)` cue the in-scatter lobe and the foam veil glow use, so all three agree
+  about which side of a wave the sun is on. A thin sheet with the light behind it is among the
+  brightest things in a sea and never the darkest. `vDotL` moved up to the body shading because
+  that is now the first of the three places that needs it; it is still computed once.
 - **The "environment" was fog.** Reflections at grazing angles mixed toward `fogColor`, which
   is why open water read as a dark sheet with a bright smudge on it. The surface now reflects
   a horizon-to-zenith sky built from the scene's own fog and light colour, with the sun/moon

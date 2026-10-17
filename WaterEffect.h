@@ -738,7 +738,22 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // a swell read as a rounded form is a lit back and a shaded face, and the
     // hemisphere it sees: both are differences against the geometric normal, so flat
     // water and an authored zero-strength sea stay exactly as the client drew them.
-    rgb*=1+controls.z*(1.9*(NoL-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
+    // The multiplier has a FLOOR, and the floor is the fix for a black shape that used to sit inside
+    // the waves when the camera was down at the surface. `controls.z` is normalStrength times the
+    // sea's own agitation and reaches 2.5, so on a face turning away from the source this expression
+    // went NEGATIVE - and nothing saturates `rgb` between here and the output, so the render target
+    // clamped it to pure black. The water is alpha-blended and writes no depth, so the far face of a
+    // wave shows through the near one, and a far face clamped to black read as a silhouette cut out
+    // of the sea rather than as water: "the blacked shape of a wave visible through the water".
+    //
+    // A shaded face is darker, not black, so the floor keeps the whole authored brightening range and
+    // most of the shading, and it rises with dot(-v,l) - the light coming through the sheet toward
+    // the viewer, which is the same cue the in-scatter lobe and the foam veil glow use below, so all
+    // three agree about which side of a wave the sun is on. A thin sheet with the light behind it is
+    // among the brightest things in a sea and never the darkest, which is what the .78 end says.
+    float vDotL=dot(v,l);
+    rgb*=max(1+controls.z*(1.9*(NoL-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz))),
+             lerp(.22,.78,saturate(-vDotL*1.7-.45)));
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
     float captureValid=reflectionStyle.w;
@@ -822,9 +837,9 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // a Henyey-Greenstein lobe forwards that glow into the sun, which is where the
     // reference shots put it.
     float g=.3+.34*saturate(sunElev);
-    // One dot serves both the Henyey-Greenstein denominator and the backlit
-    // gate below: dot(-v,l) is -dot(v,l) bit-exactly, so nothing is re-deriven.
-    float vDotL=dot(v,l);
+    // One dot serves the Henyey-Greenstein denominator, the backlit gate below, and the body
+    // shading's transmission floor above: dot(-v,l) is -dot(v,l) bit-exactly, so nothing is
+    // re-derived. It is computed up there because that is the first of the three that needs it.
     float phaseDen=max(1+g*g+2*g*vDotL,1e-3);
     // The lobe is divided by 4*pi as well as normalized in exponent: a (1-g^2)/den^2 phase
     // function peaks at 18x on a face turned toward the sun, and the CPU preview showed what
@@ -910,14 +925,30 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // faded by the same factor its own slope uses (the fine one by the square, the mid one by
     // the first power), which pulls both back to the neutral .5 where they are unresolved, and
     // the lace itself fades toward 1 - no lace - on the same filter, because unresolved foam is
-    // flat coverage and that is a truth rather than a loss. Without the second fade the .5 seed
-    // would still leave a lace of saturate(.30+.80*.5+.48*.5)=.94 on distant water, i.e. a
-    // visible darkening of every distant crest; with it, distant foam is the foam that shipped.
+    // flat coverage and that is a truth rather than a loss.
+    //
+    // THE SHAPE OF THE MIX MATTERS MORE THAN THE FADE, and the first version of this got it wrong
+    // in a way no fade could cover. It read `saturate(v*1.7-.35)` and `saturate(v*1.6-.30)`, and a
+    // saturate whose ramp sits INSIDE the noise's own value range clips: measured over the lattice,
+    // 21.9% of cells landed flat on the low plateau and 19.0% on the high one for the fleck, 20.2%
+    // and 17.4% for the lump, and 43.1% of the finished lace sat exactly on 1.0. Value noise is one
+    // blob per lattice cell, so a clipped blob is a flat SQUARE one cell across - 1.15 yards for the
+    // fine octave, 5.4 for the mid - and 43% of the foam was paved with them. That was the
+    // checkerboard: not aliasing at distance but the lattice itself, printed onto the foam by a
+    // saturate, at every distance and every quality level above 6, which is exactly why fading it by
+    // the pixel footprint left it on the screen.
+    //
+    // A product of the two octaves' COMPLEMENTS has no plateau anywhere inside the range: it reaches
+    // 1 only where an octave reaches its own maximum, which for a continuous field is a set of
+    // measure zero, and it is darkest only where both agree the water is open - which is what a
+    // water-filled gap between two filaments actually is. Measured the same way it keeps the look:
+    // mean 0.817 against 0.805, minimum 0.307 against 0.300, and 0.0% of cells on a plateau instead
+    // of 43.1%.
     float lace=1;
     [branch] if(qualityLevel>=6.5) {
-        float fleck=saturate(lerp(.5,rippleFine.x,filter*filter)*1.7-.35);
-        float lump=saturate(lerp(.5,rippleMid.x,filter)*1.6-.30);
-        lace=lerp(1,saturate(.30+.80*fleck+.48*lump),saturate(filter*2-.2));
+        float fine=lerp(.5,rippleFine.x,filter*filter);
+        float mid=lerp(.5,rippleMid.x,filter);
+        lace=lerp(1,1-.70*(1-fine)*(1-mid),saturate(filter*2-.2));
     }
     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline, in streaks
     // the next sheet pushes up and the drain pulls back out. Contours of the captured depth

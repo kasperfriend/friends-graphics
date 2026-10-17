@@ -856,21 +856,40 @@ int main() try
                 pixel.find("rippleMid.yz*.40*filter)")!=std::string::npos&&
                 pixel.find("rippleMid.yz*.40*filter*filter")==std::string::npos,
                 "the mid octave rides the swell and fades on the first power of the footprint filter");
-        // Two terms read noise or depth at a scale the pixel may not be able to resolve, and both
-        // were reported as a checkerboard that crawls with the camera: the foam lace read the chop
-        // octaves' raw VALUES (value noise a pixel cannot resolve aliases into a fixed
-        // screen-aligned grid - the artefact `detail` has always been faded for), and the bed slope
-        // divided a one-pixel depth difference by a one-pixel world footprint, which near the
-        // shoreline measures the depth buffer's own quantization instead of the bed and reports it
-        // as an enormous slope driving the shoal foam and the swash band. Pinned in both directions:
-        // the faded spelling must be there and the unfaded one must be gone, because a fix that
-        // leaves the raw read in place somewhere is not a fix.
-        Require(pixel.find("float fleck=saturate(lerp(.5,rippleFine.x,filter*filter)*1.7-.35);")!=std::string::npos&&
-                pixel.find("float lump=saturate(lerp(.5,rippleMid.x,filter)*1.6-.30);")!=std::string::npos&&
-                pixel.find("lace=lerp(1,saturate(.30+.80*fleck+.48*lump),saturate(filter*2-.2));")!=std::string::npos&&
-                pixel.find("saturate(rippleFine.x*1.7-.35)")==std::string::npos&&
-                pixel.find("saturate(rippleMid.x*1.6-.30)")==std::string::npos,
-                "the foam lace fades with the octaves it reads, so unresolved foam is flat and not a screen grid");
+        // The foam checkerboard, which took two attempts and is pinned in both directions because the
+        // first fix was aimed at the wrong mechanism. The lace reads the chop octaves' VALUES, and the
+        // obvious reading of "a grid that crawls with the camera" is unresolved value noise aliasing -
+        // so the octaves were faded by the footprint filter, exactly like `detail` has always been. The
+        // pattern stayed on the screen, and WAVE FADE at 0 left it unchanged, which is what proved the
+        // fade was not the mechanism: the real one is that a saturate whose ramp sits INSIDE the noise's
+        // own value range CLIPS, and value noise is one blob per lattice cell, so a clipped blob is a
+        // flat square one cell across - 1.15 yards for the fine octave, 5.4 for the mid. Measured over
+        // the lattice, 43.1% of the old lace sat exactly on 1.0. That is the lattice printed onto the
+        // foam, at every distance, which is why a distance fade could not remove it. A product of the
+        // two octaves' complements has no plateau in range at the same mean and the same floor.
+        Require(pixel.find("float fine=lerp(.5,rippleFine.x,filter*filter);")!=std::string::npos&&
+                pixel.find("float mid=lerp(.5,rippleMid.x,filter);")!=std::string::npos&&
+                pixel.find("lace=lerp(1,1-.70*(1-fine)*(1-mid),saturate(filter*2-.2));")!=std::string::npos&&
+                pixel.find("*1.7-.35)")==std::string::npos&&
+                pixel.find("*1.6-.30)")==std::string::npos&&
+                mirror.find("1.f - .70f * (1.f - laceFine) * (1.f - laceMid)")!=std::string::npos&&
+                mirror.find("laceFleck")==std::string::npos,
+                "the foam lace is a product of complements, so no lattice cell can clip flat into a square");
+        // The black shape inside the waves at surface height. `controls.z` is normalStrength times the
+        // sea's agitation and reaches 2.5, so the body multiplier goes NEGATIVE on a face turning away
+        // from the light, and nothing saturates rgb between there and the output - the render target
+        // clamped it to black. Water is alpha-blended and writes no depth, so the far face of a wave
+        // shows through the near one and a far face clamped to black read as a silhouette cut out of the
+        // sea. Pinned as a floor on the multiplier in BOTH halves of the renderer, because a floor the
+        // mirror does not carry is a floor the published frames were not tuned with.
+        const auto vDotLFirst=pixel.find("float vDotL=dot(v,l);");
+        Require(pixel.find("rgb*=max(1+controls.z*(1.9*(NoL-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz))),")!=std::string::npos&&
+                pixel.find("lerp(.22,.78,saturate(-vDotL*1.7-.45)));")!=std::string::npos&&
+                vDotLFirst!=std::string::npos&&vDotLFirst==pixel.rfind("float vDotL=dot(v,l);"),
+                "a wave face turning from the light is floored above black, and the dot that floors it is computed once");
+        Require(mirror.find("Mix(.22f, .78f, Saturate(-Dot(toCamera, light) * 1.7f - .45f))")!=std::string::npos&&
+                mirror.find("rgb = Mul(rgb, std::max(1.f + normalResponse")!=std::string::npos,
+                "the CPU mirror floors its body shading identically");
         Require(pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
                 pixel.find("max(max(sqrt(footprintSquared),kBedSlopeSpanYards)")!=std::string::npos&&
                 mirror.find("const float e = 1.5f;")!=std::string::npos,
