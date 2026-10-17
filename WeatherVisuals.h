@@ -2,6 +2,7 @@
 #include "src/Environment/LocationTuning.h"
 #include "src/Effects/PrecipitationMotion.h"
 #include "src/Effects/RainField.h"
+#include "src/Core/FrameClock.h"
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
@@ -70,7 +71,7 @@ inline ComPtr<IDirect3DTexture9> sceneCopyTex;
 inline ComPtr<IDirect3DSurface9> sceneCopySurface;
 inline UINT copyWidth = 0, copyHeight = 0;
 
-inline DWORD lastTick = 0;
+inline renderer::FrameClock precipitationClock;
 inline float elapsedTime = 0.0f;
 inline float smoothedIndoor = 0.0f;
 inline bool worldGeometrySeenThisFrame = false;
@@ -635,7 +636,7 @@ inline void Configure(const std::wstring& base)
     logPath = base + L"WeatherVisuals.log";
     enabled = renderer::locationtuning::ReadInt(L"WeatherVisuals", L"Enabled", 1, mainIni.c_str()) != 0;
     ReloadTuning();
-    lastTick = GetTickCount();
+    precipitationClock.Reset();
 }
 
 inline void Reset(IDirect3DDevice9* device)
@@ -655,7 +656,7 @@ inline void Reset(IDirect3DDevice9* device)
     composedThisFrame = false;
     rainCompositeReady = false;
     weatherSuspended = nativeWeatherMode != 0;
-    lastTick = GetTickCount();
+    precipitationClock.Reset();
 }
 
 inline bool IsTerrainShader(uint64_t psHash)
@@ -840,10 +841,8 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     if (!renderMode) return;
 
     // Time step calculation
-    DWORD now = GetTickCount();
-    float dt = (now >= lastTick) ? (now - lastTick) * 0.001f : 0.016f;
-    lastTick = now;
-    dt = std::clamp(dt, 0.f, 0.1f);
+    const float dt = precipitationClock.Observe(
+        renderer::PerformanceCounter(), renderer::PerformanceFrequency());
     elapsedTime += dt; // lens animation is independent of rain fall speed
 
     // All precipitation samples the same published wind snapshot as water

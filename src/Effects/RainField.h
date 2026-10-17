@@ -75,12 +75,11 @@ public:
             distanceSquared += delta[axis] * delta[axis];
         }
         m_previous = camera;
-        // Loading/teleports and a missed capture must rebase instead of
-        // flinging every layer across the screen in one frame.
-        for (unsigned i = 0; i < 3; ++i)
-            m_cameraVelocityX[i] = m_cameraVelocityY[i] = 0;
-        if (distanceSquared > 6.25) return;
+        // A missing capture or teleport rebases without replaying queued
+        // camera movement; wind/gravity keep their independent phases.
+        if (distanceSquared > 6.25) { ForgetCamera(); m_previous = camera; m_haveCamera = true; return; }
         const double gain = std::clamp(WindFinite(amount, .7f), 0.f, 1.5f);
+        if (gain == 0) { CancelPendingCameraMotion(); return; }
         double projectedRight = 0, projectedUp = 0;
         for (unsigned axis = 0; axis < 3; ++axis)
         {
@@ -89,24 +88,30 @@ public:
         }
         const double x = -540.0 * camera.aspect * camera.projectionX * projectedRight * gain;
         const double y =  540.0 * camera.projectionY * projectedUp * gain;
+        const double seconds = double(WindDelta(dt));
+        const double positionBlend = -std::expm1(-seconds / .045);
+        const double directionBlend = -std::expm1(-seconds / .07);
         for (unsigned i = 0; i < 3; ++i)
         {
-            // Cap a single skipped-frame jump without losing the accumulated
-            // phase. Apparent streak direction follows the SAME displacement.
-            const double shiftX = std::clamp(x / layerDepth[i], -32.0, 32.0);
-            const double shiftY = std::clamp(y / layerDepth[i], -32.0, 32.0);
-            m_cameraX[i] += shiftX;
-            m_cameraY[i] += shiftY;
-            const double seconds = std::max(.008, double(WindDelta(dt)));
-            m_cameraVelocityX[i] = float(shiftX / seconds);
-            m_cameraVelocityY[i] = float(shiftY / seconds);
+            // Clamp each newly observed displacement, then ease its target
+            // into the rendered phase on EVERY frame. An irregular camera
+            // capture no longer moves the whole pattern in discrete jumps.
+            m_targetX[i] += std::clamp(x / layerDepth[i], -32.0, 32.0);
+            m_targetY[i] += std::clamp(y / layerDepth[i], -32.0, 32.0);
+            const double stepX = (m_targetX[i] - m_cameraX[i]) * positionBlend;
+            const double stepY = (m_targetY[i] - m_cameraY[i]) * positionBlend;
+            m_cameraX[i] += stepX;
+            m_cameraY[i] += stepY;
+            const float velocityX = seconds > 0 ? float(stepX / seconds) : 0.f;
+            const float velocityY = seconds > 0 ? float(stepY / seconds) : 0.f;
+            m_cameraVelocityX[i] += (velocityX - m_cameraVelocityX[i]) * float(directionBlend);
+            m_cameraVelocityY[i] += (velocityY - m_cameraVelocityY[i]) * float(directionBlend);
         }
     }
     void ForgetCamera() noexcept
     {
         m_haveCamera = false;
-        for (unsigned i = 0; i < 3; ++i)
-            m_cameraVelocityX[i] = m_cameraVelocityY[i] = 0;
+        CancelPendingCameraMotion();
     }
     Projection Direction(unsigned i, Projection wind, float fallSpeed) const noexcept
     {
@@ -129,7 +134,17 @@ public:
     double Y() const noexcept { return m_y; }
 private:
     double m_x = 0, m_y = 0;
+    void CancelPendingCameraMotion() noexcept
+    {
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            m_targetX[i] = m_cameraX[i];
+            m_targetY[i] = m_cameraY[i];
+            m_cameraVelocityX[i] = m_cameraVelocityY[i] = 0;
+        }
+    }
     double m_cameraX[3]{}, m_cameraY[3]{};
+    double m_targetX[3]{}, m_targetY[3]{};
     float m_cameraVelocityX[3]{}, m_cameraVelocityY[3]{};
     Camera m_previous{};
     bool m_haveCamera = false;

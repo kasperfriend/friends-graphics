@@ -415,22 +415,37 @@ static void TestPrecipitationMotion()
     camera.projectionX=1;camera.projectionY=1;camera.aspect=1;
     cameraRain.TrackCamera(camera,.7f);
     camera.position[0]=.2;camera.position[1]=.2;
-    cameraRain.TrackCamera(camera,.7f);
+    cameraRain.TrackCamera(camera,.7f,1.f/60.f);
+    float firstCamera[4]{};cameraRain.Layer(0,firstCamera);
+    const double firstShift=std::remainder(double(firstCamera[0])+firstCamera[1],
+                                           double(rainfield::latticePeriod))*rainfield::cellWidth[0];
+    Check(firstShift<0 && firstShift>-18.9 && std::abs(firstShift)>1,
+          "a sampled camera jump is eased rather than applied in one frame");
+    const auto nearAxis=cameraRain.Direction(0,{},1.f);
+    const auto farAxis=cameraRain.Direction(2,{},1.f);
+    Check(nearAxis.x<farAxis.x && nearAxis.y>0 && farAxis.y>0,
+          "camera movement slants near streaks more than far streaks while rain falls");
+    // CameraCapture can hold the same position for several draws. The rain
+    // must still move on those intervening frames instead of stepping only
+    // when a new camera sample arrives.
+    cameraRain.TrackCamera(camera,.7f,1.f/60.f);
+    float secondCamera[4]{};cameraRain.Layer(0,secondCamera);
+    const double secondShift=std::remainder(double(secondCamera[0])+secondCamera[1],
+                                            double(rainfield::latticePeriod))*rainfield::cellWidth[0];
+    Check(secondShift<firstShift && secondShift>-18.9,
+          "camera rain continues smoothly between unchanged captures");
+    for(int step=0;step<40;++step)cameraRain.TrackCamera(camera,.7f,1.f/60.f);
     for (unsigned i=0;i<3;++i) {
         float phase[4]{}; cameraRain.Layer(i,phase);
         const double x=WindWrap(-75.6/rainfield::layerDepth[i]/rainfield::cellWidth[i],rainfield::latticePeriod);
         const double y=WindWrap( 75.6/rainfield::layerDepth[i]/rainfield::cellHeight[i],rainfield::latticePeriod);
         Check(Near(double(phase[0])+phase[1],x,1e-4) &&
               Near(double(phase[2])+phase[3],y,1e-4),
-              "close rain has stronger opposite-camera motion than distant rain");
+              "eased close rain reaches stronger opposite-camera motion than distant rain");
     }
-    const auto nearAxis=cameraRain.Direction(0,{},1.f);
-    const auto farAxis=cameraRain.Direction(2,{},1.f);
-    Check(nearAxis.x<farAxis.x && nearAxis.y>0 && farAxis.y>0,
-          "camera movement slants near streaks more than far streaks while rain falls");
     float beforeCamera[4]{}; cameraRain.Layer(0,beforeCamera);
     camera.right[0]=0;camera.right[1]=1;
-    cameraRain.TrackCamera(camera,.7f); // rotation alone
+    cameraRain.TrackCamera(camera,.7f,0); // rotation alone, no elapsed frame
     camera.position[0]+=1000;
     cameraRain.TrackCamera(camera,.7f); // teleport rebase
     cameraRain.ForgetCamera();
@@ -634,6 +649,8 @@ static void TestConfigurationAndWiring()
           weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
           weatherSource.find("rainMotion.Advance(dt, rainFallSpeed, rainWind);") != weatherSource.npos &&
           weatherSource.find("rainMotion.TrackCamera(rainCamera, rainParallax, dt);") != weatherSource.npos &&
+          weatherSource.find("precipitationClock.Observe(") != weatherSource.npos &&
+          weatherSource.find("(now - lastTick) * 0.001f") == weatherSource.npos &&
           weatherSource.find("device->SetPixelShaderConstantF(10, rainAxes[0], 3);") != weatherSource.npos &&
           weatherSource.find("float2 id = floor(grid) - phase.yw;") != weatherSource.npos &&
           weatherSource.find("device->SetPixelShader(renderMode == 1 ? rainPS.Get() : precipitationPS.Get());") != weatherSource.npos &&
