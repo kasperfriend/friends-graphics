@@ -624,6 +624,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     rgb*=1+controls.z*(1.9*(dot(wave,l)-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
+    float captureValid=reflectionStyle.w;
     float depthScale=1/max(viewPos.z,.05);
     float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z*depthScale,
                            .5-.5*viewPos.y*reflectionProjection.w*depthScale);
@@ -632,7 +633,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Foreground geometry is not a deep seabed. Never turn negative
     // separation into absorption/foam on the wrong side of a shoreline.
     float waterDepth=max(behindZ-viewPos.z,0);
-    float captureValid=reflectionStyle.w;
     float depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
     // Open ocean has no seafloor within the depth buffer at all (behindRaw
     // reads as sky), so depthValid was 0 here - which used to zero every
@@ -737,8 +737,11 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
             float q=(stepIndex+1)/8.0;
             float traceDistance=.45+q*q*reflectionStyle.y;
             float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
-            float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z/max(samplePosition.z,.05),
-                                   .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
+            // Pre-compute reciprocal Z once: the two UV components share the
+            // same max(z,.05) divisor, so one rcp replaces two per step.
+            float invSampleZ=1.0/max(samplePosition.z,.05);
+            float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z*invSampleZ,
+                                   .5-.5*samplePosition.y*reflectionProjection.w*invSampleZ);
             float inside=step(.05,samplePosition.z)*saturate(min(min(sampleUV.x,sampleUV.y),
                                       min(1-sampleUV.x,1-sampleUV.y))*8);
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
@@ -800,8 +803,11 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
             float q=(lightStep+1)/8.0;
             float traceDistance=1.5+q*q*110.0;
             float3 lightSample=viewPos+wave*.18+l*traceDistance;
-            float2 lightUV=float2(.5+.5*lightSample.x*reflectionProjection.z/max(lightSample.z,.05),
-                                  .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
+            // Pre-compute reciprocal Z once: the two UV components share the
+            // same max(z,.05) divisor, so one rcp replaces two per step.
+            float invLightZ=1.0/max(lightSample.z,.05);
+            float2 lightUV=float2(.5+.5*lightSample.x*reflectionProjection.z*invLightZ,
+                                  .5-.5*lightSample.y*reflectionProjection.w*invLightZ);
             float inside=step(.05,lightSample.z)*saturate(min(min(lightUV.x,lightUV.y),
                                     min(1-lightUV.x,1-lightUV.y))*8);
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
@@ -1220,6 +1226,9 @@ struct Scope {
     explicit Scope(IDirect3DDevice9* d,bool skip=false,
                    const renderer::water::Observation* observed=nullptr) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
+        // A shader-creation failure is permanent until device reset; skip
+        // the Observe + constant reads + all CPU math for every draw.
+        if(shaderCreationFailed)return;
         try {
             const auto observation=observed?*observed:renderer::water::Observe(d);
             if(!observation.liquid) {
