@@ -1264,7 +1264,9 @@ bool Composite(IDirect3DDevice9* d) {
         // Ray look (see rayLook in volumePixelSource): sunward glow spread,
         // glow floor, and gain. Gain 0.35 is the calibrated level of the new
         // whole-frame mask (equal to the GodRayPreview "0.45" over the old 1.28).
-        float rayLook[4] = { 6.f, 0.f, 0.35f, 0.f };
+        // Gain 0.6 is the look calibrated in tools/GodRayPreview (0.35 at full
+        // visibility) divided by the 0.6 clear-air floor applied in the composite.
+        float rayLook[4] = { 6.f, 0.f, 0.6f, 0.f };
         check(d->SetPixelShaderConstantF(15, rayLook, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
         check(d->SetTexture(3, nullptr));
@@ -1380,7 +1382,9 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetSamplerState(2,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
             check(d->SetSamplerState(2,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));
             float link[4]={linkedFog?1.f:0.f,shaftDebug?1.f:0.f,0,0};
-            float depthInfo[4]={constants[2][3],0,0,0};
+            // y = clear-air ray floor (see rayCompositePixelSource). Rays are not
+            // gated to zero in clear sky; banks and thick fog still extinguish them.
+            float depthInfo[4]={constants[2][3],0.6f,0,0};
             check(d->SetPixelShaderConstantF(0,link,1));
             check(d->SetPixelShaderConstantF(1,depthInfo,1));
         }

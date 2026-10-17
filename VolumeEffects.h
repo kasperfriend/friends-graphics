@@ -323,9 +323,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 ray=tex2D(rays,uv);
     if(fogLink.x>.5&&fogLink.y<.5) {
         float transmission=saturate(1-tex2D(resolvedFog,uv).a);
-        // Shared integrated medium: clear air has little scatter; opaque banks
-        // extinguish rays. Maximum visibility occurs at intermediate thickness.
-        float visibility=4*transmission*(1-transmission);
+        // Shared integrated medium: opaque banks extinguish rays, and maximum
+        // visibility occurs at intermediate thickness. The atmosphere's sky
+        // optical depth is analytically ~0 above the horizon (horizon^2 in the
+        // integrate pass), so looking at the sun through clear sky gives T~1 and
+        // the bell curve alone would erase exactly the rays this pass draws.
+        // depthInfo.y is the clear-air floor: it keeps those rays while banks
+        // still extinguish them, since the floor scales with T^2 and vanishes
+        // in thick fog.
+        float clearFloor=depthInfo.y;
+        float visibility=max(4*transmission*(1-transmission),clearFloor*transmission*transmission);
         ray.rgb*=visibility;
     }
     // Radial beams are an overlay: they may fall across clouds, characters,

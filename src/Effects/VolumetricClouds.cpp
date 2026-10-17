@@ -674,7 +674,7 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",24000),2000,80000));
- m_settings.sunRays=read(L"SunRaysEnabled",1)!=0;
+ m_settings.sunRays=read(L"SunRaysEnabled",0)!=0;
  m_settings.sunRayStrength=std::clamp(read(L"SunRayPercent",80),0,200)*.01f;
  m_settings.opacity=std::clamp(read(L"OpacityPercent",100),0,300)*.01f;
  m_settings.debugMode=static_cast<CloudDebugMode>(std::clamp(read(L"DebugMode",0),0,4));

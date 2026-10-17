@@ -137,7 +137,7 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `Enabled` | 1 | Master switch for the pass. |
 | `Quality` | 2 | 0 = LOW (48 steps), 1 = BALANCED (64), 2 = HIGH (96), 3 = ULTRA (128). Owns the sample count, light samples and base step together. Old `SampleCount` / `LightSampleCount` / `BaseStep` INI keys are ignored; they made F7 quality inert on existing installs. |
 | `ResolutionPercent` | 25 | Independent F7 slider, 20–100% of screen width and height in steps of 5. Resizes live without changing march samples; Quality never changes this resolution. |
-| `SunRaysEnabled` / `SunRayPercent` | 1 / 80 | Cloud-filtered world-space shafts, toggle and 0–200% strength in F7. SUN RAYS is also a master gate. |
+| `SunRaysEnabled` / `SunRayPercent` | 0 / 80 | Cloud-filtered world-space shafts, toggle and 0–200% strength in F7. SUN RAYS is also a master gate. |
 | `CoveragePercent` | 50 | How much of the sky the deck covers. 0 skips the pass entirely. |
 | `ZoneClouds` / `WeatherClouds` | 1 / 1 | Apply zone climate / native weather independently; also in F7. |
 | `EvolutionPercent` | 100 | 0–400% independent shape evolution; 0 freezes evolution, not wind. Also in F7. |
