@@ -352,21 +352,97 @@ struct SurfaceFrame
     float intact = 1.f;
 };
 
+// `up` is the unit sky direction of the camera that owns this frame (the
+// inverse view's second row, which the surface pass has as a uniform); the
+// near-object gate below measures standing height against it.
 inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Vec3& pRight,
                                       const Vec3& pUp, const Vec3& pDown,
                                       float zLeft, float zRight, float zUp, float zDown,
                                       float zLeft2, float zRight2, float zUp2, float zDown2,
                                       float zCentre, const Vec3& toEye,
-                                      const NormalTuning& tuning, const TapSurvival& survives = {})
+                                      const NormalTuning& tuning, const TapSurvival& survives,
+                                      const Vec3& up)
 {
+    // HORIZON-FLIGHT VETO. The window is a fixed UV span, but its world size
+    // depends on the ray: the sideways taps (left/right) land a world window
+    // away, while the up tap of a steep down-look is the same ray barely
+    // above the horizon, which lands tens of yards out and turns the up-axis
+    // tangent into a long chord of the terrain - its direction is the
+    // relief's average over that span, not the local slope. That is a soft
+    // wrong-light band around everything the pool lights, and it grows with
+    // LIGHT SMOOTHING, because smoothing is exactly what widens the UV
+    // window until it erases the ray's down-angle. The test must be per
+    // axis: sideways taps are closer than along-ray taps by construction, so
+    // a tap is only foreign to the window when it outruns its own partner
+    // on the same axis - and it must outrun the receiver's own view depth:
+    // a tap further out than the receiver is a ray skimming the horizon,
+    // while a tap that merely outruns its partner can be one hitting a
+    // nearby relief bump (both taps are within the receiver's depth, and
+    // both are measured). More than 2.5x the partner beyond the depth is
+    // that flight (or a ray that left a vertical face); the side is handed
+    // to the partner whole, exactly as if it had measured sky.
+    TapSurvival stays = survives;
+    if (stays.left && stays.right)
+    {
+        const float dL = Length(pLeft - p), dR = Length(pRight - p);
+        if (dL > 2.5f * dR && dL > zCentre) stays.left = false;
+        else if (dR > 2.5f * dL && dR > zCentre) stays.right = false;
+    }
+    if (stays.up && stays.down)
+    {
+        const float dU = Length(pUp - p), dD = Length(pDown - p);
+        if (dU > 2.5f * dD && dU > zCentre) stays.up = false;
+        else if (dD > 2.5f * dU && dD > zCentre) stays.down = false;
+    }
+
     const AxisWeights x = TapWeights(zLeft, zRight, zCentre, zLeft2, zRight2, tuning,
-                                     survives.left, survives.right, survives.left2, survives.right2);
+                                     stays.left, stays.right, stays.left2, stays.right2);
     const AxisWeights y = TapWeights(zUp, zDown, zCentre, zUp2, zDown2, tuning,
-                                     survives.up, survives.down, survives.up2, survives.down2);
-    const Vec3 tangentX = (p - pLeft) * x.left + (pRight - p) * x.right;
-    const Vec3 tangentY = (p - pUp) * y.left + (pDown - p) * y.right;
-    const float weightSumX = std::max(x.left + x.right, 1e-4f);
-    const float weightSumY = std::max(y.left + y.right, 1e-4f);
+                                     stays.up, stays.down, stays.up2, stays.down2);
+
+    // NEAR-OBJECT GATE. The step test above reads DEPTH only. An object
+    // standing beside the receiver has a depth like the terrain a few yards
+    // away - the same jump, the same second difference - and passes it as
+    // terrain: its tap keeps steering the tangent and the pool paints a
+    // shape-copy of the object beside it. At wide smoothing windows both
+    // sides of the window reach the object and the arbitration is a coin
+    // flip, which is why the copies grew with smoothing instead of shrinking.
+    // Whatever the depth says, a standing body is a metre or more off the
+    // local ground plane, and a plane - however sloped - has exactly zero
+    // second difference in world height. Each side's height h (against the
+    // camera's sky direction) therefore forms a height second difference
+    // with its partner side: a side whose second difference AND whose own
+    // height both clear the window's relief scale is foreign, and its weight
+    // slides to zero. Ground relief across a window is centimetres; a
+    // silhouette or object tap is decimetres to metres. A dead or vetoed
+    // tap counts as the receiver's own level, so the gate still fires when
+    // the foreign side is the only one that measured a surface.
+    float left = x.left, right = x.right, upSide = y.left, down = y.right;
+    {
+        const float hL = stays.left ? Dot(pLeft - p, up) : 0.f;
+        const float hR = stays.right ? Dot(pRight - p, up) : 0.f;
+        const float hU = stays.up ? Dot(pUp - p, up) : 0.f;
+        const float hD = stays.down ? Dot(pDown - p, up) : 0.f;
+        const float live = (stays.left ? 1.f : 0.f) + (stays.right ? 1.f : 0.f) +
+                           (stays.up ? 1.f : 0.f) + (stays.down ? 1.f : 0.f);
+        const float spread = ((stays.left ? 1.f : 0.f) * Length(pLeft - p) +
+                              (stays.right ? 1.f : 0.f) * Length(pRight - p) +
+                              (stays.up ? 1.f : 0.f) * Length(pUp - p) +
+                              (stays.down ? 1.f : 0.f) * Length(pDown - p)) /
+                             std::max(live, 1.f);
+        const float tol = 0.10f + 0.10f * spread;
+        const float curvX = std::abs(hL + hR);
+        const float curvY = std::abs(hU + hD);
+        left *= 1.f - Smoothstep(tol, 2.f * tol, curvX) * Smoothstep(tol, 2.f * tol, std::abs(hL));
+        right *= 1.f - Smoothstep(tol, 2.f * tol, curvX) * Smoothstep(tol, 2.f * tol, std::abs(hR));
+        upSide *= 1.f - Smoothstep(tol, 2.f * tol, curvY) * Smoothstep(tol, 2.f * tol, std::abs(hU));
+        down *= 1.f - Smoothstep(tol, 2.f * tol, curvY) * Smoothstep(tol, 2.f * tol, std::abs(hD));
+    }
+
+    const Vec3 tangentX = (p - pLeft) * left + (pRight - p) * right;
+    const Vec3 tangentY = (p - pUp) * upSide + (pDown - p) * down;
+    const float weightSumX = std::max(left + right, 1e-4f);
+    const float weightSumY = std::max(upSide + down, 1e-4f);
     SurfaceFrame frame;
     const Vec3 cross = Cross(tangentX * (1.f / weightSumX), tangentY * (1.f / weightSumY));
     // Both axes can come back empty - a pixel of ground at the horizon whose
@@ -376,7 +452,7 @@ inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Ve
     // whatever direction the float noise happened to point.
     frame.normal = Dot(cross, cross) > 1e-12f ? Normalize(cross) : toEye;
     if (Dot(frame.normal, toEye) < 0.f) frame.normal = frame.normal * -1.f;
-    frame.intact = Saturate((x.left + x.right + y.left + y.right) * 0.25f);
+    frame.intact = Saturate((left + right + upSide + down) * 0.25f);
     return frame;
 }
 
