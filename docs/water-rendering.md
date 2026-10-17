@@ -159,6 +159,9 @@ the acceptance check for the reported camera-moving grid.
 At the same level the colour becomes a ramp on the coverage the masks already produced instead of
 one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
 crest, a thin veil lets the water's own tint through and reads as the grey-green lace underneath it.
+That ramp is what lets the two coexist on one wave. At level 10 the veil also glows when the source
+is behind it, on the same `vDotL` the in-scatter lobe already computed, weighted by what the ramp
+left over so the thick caps that already scatter everything back are not double-lit.
 
 ### Looking up through the water
 
@@ -175,14 +178,21 @@ the camera-side blend is exactly identity and the new reflection term is gated o
 The output alpha is at least the reflection weight already mixed into the water colour. Without that
 floor the fixed-function blend applies the original scene a second time over the computed reflection,
 letting the opposite liquid face show through at the exact angles where the reflection should dominate.
-The user-reported seam after swimming underwater remains a runtime acceptance case: adjacent liquid
-tiles must keep continuous foam and optics through the camera-side transition. The attachment supplied
-so far was `NativeShadowDiagnostics.log`, not the water draw capture, so it contains no evidence about
-water shader selection; don't widen the liquid whitelist based on that file. A water capture is still
-needed to diagnose a draw that truly falls back to native rendering.
-That ramp is what lets the two coexist on one wave. At level 10 the veil also glows when the source
-is behind it, on the same `vDotL` the in-scatter lobe already computed, weighted by what the ramp
-left over so the thick caps that already scatter everything back are not double-lit.
+
+A separate camera-angle dropout was visible in the user's report. Their `WaterEffect.log` showed all
+sampled liquid candidates replaced (128/128, 105/105, 109/109, 157/157), no shader creation failure,
+and no ignored liquid layouts; `WaterReflection.log` showed successful copies. So the effect was not
+being disabled in those frames. The replacement vertex shader nevertheless consumed native VS c4 as a
+fog curve without checking its contents. An alternate camera-selected VS can bind a different c4; the
+fog interpolation can then collapse the whole computed water colour to fogColor, visually identical to
+losing the shader. Before each replacement draw c4 is now checked against the shared finite fog-curve
+shape. If it is invalid, this draw uses the identity fog curve (unfogged water), and the native c4 is
+restored on every exit. The affected VS/PS hashes and bad c4 are recorded once in `WaterEffect.log`.
+
+The user's latest `WaterEffect.log` confirms successful replacement in the sampled frames, but the
+built-in F8 draw capture was disabled (`Enabled=0`), so it does not contain the per-draw shader/c4
+identities at the exact bad angle. The new fallback logs an invalid c4 automatically in `WaterEffect.log`
+without requiring F8. A true unmatched draw family is still separately reported by hash.
 
 ### Registers, slots and the interpolant ceiling
 

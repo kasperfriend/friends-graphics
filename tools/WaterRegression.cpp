@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <initializer_list>
 #include <string>
@@ -44,6 +45,10 @@ void Require(bool value, const char* name)
 
 int main() try
 {
+    const float validFog[4]={-.001f,1.f,1.f,0.f}, invalidFog[4]={0.f,0.f,0.f,0.f};
+    const float nanFog[4]={std::numeric_limits<float>::quiet_NaN(),0.f,1.f,0.f};
+    Require(HasFogCurve(validFog)&&!HasFogCurve(invalidFog)&&!HasFogCurve(nanFog),
+            "water c4 accepts only a finite fog-curve shape; malformed camera variants use the no-fog fallback");
     Require(IsMaterialLayout(8,64,512,512), "canonical liquid material accepted");
     Require(!IsMaterialLayout(8,64,64,64), "weather ripple LUT alone is not water");
     Require(!IsMaterialLayout(512,512,8,64), "swapped slots are not the supported shader ABI");
@@ -758,6 +763,10 @@ int main() try
             return end==std::string::npos?std::string():stripComments(text.substr(start,end-start));
         };
         const std::string vertex=literal(shader,"vertexSource"), pixel=literal(shader,"source");
+        Require(shader.find("renderer::water::HasFogCurve(oldVertexFog)")!=std::string::npos&&
+                shader.find("const float noFog[4]={0.f,1.f,1.f,0.f};")!=std::string::npos&&
+                shader.find("if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);")!=std::string::npos,
+                "an angle-dependent water VS with non-fog c4 cannot fog the replacement surface away, and c4 is restored on every exit");
         // The whole file with its comments off, for the pins that assert an expression is
         // NOT there: both sources explain what the lattice orientation used to be by name.
         // The header is read too, because the wave model itself - the train table, the

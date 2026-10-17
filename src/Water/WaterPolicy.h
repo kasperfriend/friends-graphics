@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cmath>
 
 namespace renderer::water
 {
@@ -39,6 +40,19 @@ namespace renderer::water
     constexpr unsigned FogConstantRegister(uint64_t vertexShaderHash)
     {
         return IsKnownVertexShader(vertexShaderHash) ? 4u : 0u;
+    }
+
+    // c4 is not guaranteed to hold the fog curve on every client VS variant.
+    // The replacement vertex shader consumes it for every matched water draw,
+    // including canonical texture layouts accepted without shader identity. A
+    // malformed c4 can therefore turn the whole surface into fogColor, which
+    // looks exactly like the replacement shader vanished at one camera angle.
+    // Keep this shape test shared with the fog consumers' documented guard.
+    inline bool HasFogCurve(const float* params) noexcept
+    {
+        return params && std::isfinite(params[0]) && std::isfinite(params[1]) &&
+               std::isfinite(params[2]) && std::isfinite(params[3]) &&
+               params[0] <= 0.f && params[1] >= 0.f && params[2] > 0.f;
     }
 
     // Materials that must never be restyled as water, even when they bind the

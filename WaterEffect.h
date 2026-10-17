@@ -1480,8 +1480,8 @@ struct Scope {
     // Save each touched constant span as one block. Pixel c180..c218 includes
     // local lights, the untouched c197..c199 gap, and all water controls, so
     // setup and restoration each cross the D3D9 driver only once.
-    float oldPixelConstants[156]{},oldVertexControls[20]{};
-    bool pixelConstantsSaved=false;
+    float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
+    bool pixelConstantsSaved=false,vertexFogFallback=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -1567,6 +1567,19 @@ struct Scope {
         if(reported.insert(line).second&&!logPath.empty())
             std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
     }
+    static void ReportFogFallback(const renderer::water::Observation& observation,const float* c4) {
+        static std::unordered_set<std::string> reported;
+        char line[288];
+        std::snprintf(line,sizeof(line),
+            "water vertex fog c4 is not a fog curve; using unfogged fallback:"
+            " slot0=%ux%u slot1=%ux%u vs=0x%016llx ps=0x%016llx c4=(%.7g,%.7g,%.7g,%.7g)",
+            observation.width[0],observation.height[0],observation.width[1],observation.height[1],
+            static_cast<unsigned long long>(renderer::g_trackedState.vsHash),
+            static_cast<unsigned long long>(renderer::g_trackedState.psHash),
+            c4[0],c4[1],c4[2],c4[3]);
+        if(reported.insert(line).second&&!logPath.empty())
+            std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
+    }
 
     explicit Scope(IDirect3DDevice9* d,bool skip=false,
                    const renderer::water::Observation* observed=nullptr) noexcept {
@@ -1597,6 +1610,18 @@ struct Scope {
             // of crossing the D3D9 driver three times for scattered reads.
             float nativeVertexConstants[31][4]{};
             if(FAILED(d->GetVertexShaderConstantF(5,nativeVertexConstants[0],31)))return;
+            // This replacement VS consumes native c4 as its fog curve for every
+            // material, including camera-dependent VS variants on canonical layouts.
+            // The documented variants use c4 for fog, but the angle-dependent client
+            // variant reported by players may not. If the contents do not have the
+            // curve's finite shape, replace them with the identity fog curve for this
+            // draw; otherwise a garbage exponent/offset can collapse the whole water
+            // colour to fogColor and look like the water shader switched off.
+            if(SUCCEEDED(d->GetVertexShaderConstantF(4,oldVertexFog,1))&&
+               !renderer::water::HasFogCurve(oldVertexFog)) {
+                vertexFogFallback=true;
+                ReportFogFallback(observation,oldVertexFog);
+            }
             float pixelConstants[39][4];
             std::memcpy(pixelConstants,oldPixelConstants,sizeof(pixelConstants));
             float* controls=pixelConstants[20]; // c200 within the c180 block
@@ -1868,6 +1893,12 @@ struct Scope {
                     for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}
                 }
                 device=d;extraState=!blockState;
+                if(vertexFogFallback) {
+                    // Identity curve: fog=1 at every distance, preserving the computed
+                    // water color instead of fogging the entire surface to the clear color.
+                    const float noFog[4]={0.f,1.f,1.f,0.f};
+                    if(FAILED(d->SetVertexShaderConstantF(4,noFog,1))){Restore();return;}
+                }
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
                 for(unsigned slot=0;slot<2;++slot) {
                     const DWORD values[]={DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),
@@ -1954,7 +1985,10 @@ struct Scope {
                 }
             }
         }
-        device=nullptr;extraState=pixelConstantsSaved=false;
+        // c4 is outside the block's documented water spans. Restore it after either
+        // state-block or manual restoration, including every early-return path.
+        if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
+        device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;
