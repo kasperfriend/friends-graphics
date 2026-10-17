@@ -5,6 +5,7 @@
 #include "../src/Environment/OverlayLayout.h"
 #include "../src/Effects/CloudDynamics.h"
 #include "../src/Effects/PrecipitationMotion.h"
+#include "../src/Effects/RainField.h"
 #include "../src/Water/WaveMotion.h"
 #include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
@@ -362,53 +363,108 @@ static void TestPrecipitationMotion()
     Check(motion.Phase().windX == previous.windX &&
           Near(motion.Phase().fall - previous.fall, .1f, 2e-5),
           "turning shared wind off removes added drift without freezing rain");
-    // The phase split (the long-session banding fix): after a full six-hour
-    // integration, what the pixel stage receives must still be small - the
-    // fraction in [0,1), the wrapped integer in [0,period) - and it must
-    // reconstruct the true phase. Either range broken is the float32
-    // cancellation the stage exists to avoid.
-    {
-        PrecipitationMotion session;
-        const auto east = Air(WindDirection::East);
-        for (int i = 0; i < 6*3600*60; ++i)
-            session.Advance(1.f/60.f, 1.2f, east, {1.f, 0.f}, {0.f, 1.f}, true);
-        const double fall = session.Fall(), wx = session.WindX(), wy = session.WindY();
-        Check(fall > 1000.0, "the six-hour session actually accumulated phase");
-        const auto split = ComputeWrappedPhases(fall, wx, wy, 0);
-        const double speed[3] = { 1.25, 1.0, 0.75 };
-        const double periodX[3] = { 32768.0, 32768.0, 32768.0 };
-        const double periodY[3] = { 32768.0, 16384.0, 8192.0 };
-        for (int i = 0; i < 3; ++i) {
-            const double px = 64.0*speed[i]*wx;
-            const double py = 16.0*speed[i]*(1.2*fall + wy);
-            const float* layer = i == 0 ? split.c6 : i == 1 ? split.c7 : split.c8;
-            for (int a = 0; a < 2; ++a) {
-                const float fv = layer[a*2], nv = layer[a*2+1];
-                const double phase = a ? py : px;
-                const double period = a ? periodY[i] : periodX[i];
-                Check(fv >= 0.f && fv < 1.f,
-                      "the split's fraction stays in [0,1) after six hours");
-                Check(nv >= 0.f && nv < (float)period,
-                      "the split's integer part stays wrapped after six hours");
-                const double k = std::round((phase - (double(nv) + double(fv))) / period);
-                Check(std::fabs(phase - (double(nv) + double(fv) + k*period)) < 1e-6,
-                      "the wrapped phase reconstructs the true phase");
-            }
+    // Eight wind-from bearings project the actual DOWNWIND velocity into
+    // the camera basis. Calm/disabled/no-view must have gravity only.
+    for (unsigned i = 0; i < 8; ++i) {
+        const auto wind = Air(static_cast<WindDirection>(i));
+        const auto projected = rainfield::Project(wind,{1,0},{0,1},true,1.f);
+        Check(Near(projected.x,wind.direction.x*140.f,1e-4) &&
+              Near(projected.y,-wind.direction.y*140.f,1e-4),
+              "rain projects downwind for every compass source");
+        const auto turned = rainfield::Project(wind,{0,-1},{1,0},true,1.f);
+        Check(Near(turned.x,-wind.direction.y*140.f,1e-4) &&
+              Near(turned.y,-wind.direction.x*140.f,1e-4),
+              "camera rotation rotates rain drift without reversing world wind");
+    }
+    Check(rainfield::Project(Air(WindDirection::North,0),{1,0},{0,1},true,1).x == 0 &&
+          rainfield::Project(Air(WindDirection::North),{1,0},{0,1},false,1).y == 0,
+          "calm air and missing view invent no rain drift");
+    rainfield::Motion rain;
+    const auto south = rainfield::Project(Air(WindDirection::North),{1,0},{0,1},true,1);
+    rain.Advance(.1f,1.f,south);
+    Check(Near(rain.X(),-14,1e-4) && Near(rain.Y(),62,1e-4),
+          "north wind moves rain south while gravity always falls down");
+    const double rainBefore = rain.X();
+    rain.Advance(0,4.f,{800,800});
+    Check(rain.X() == rainBefore, "edits do not rephase elapsed rain time");
+    Check(rainfield::VerticalSpeed(.1f,{0,-840.f}) > 0,
+          "strong projected wind cannot reverse gravity");
+    rain.Advance(.1f,1.f,{});
+    Check(Near(rain.X(),rainBefore,1e-4) && rain.Y() > 120,
+          "wind disabled removes drift without stopping gravity");
+    for (int step = 0; step < 6*3600*60; ++step)
+        rain.Advance(1.f/60.f,1.2f,south);
+    for (unsigned i = 0; i < 3; ++i) {
+        float phase[4]{}; rain.Layer(i,phase);
+        for (int axis = 0; axis < 2; ++axis) {
+            const double expected = (axis ? rain.Y()/rainfield::cellHeight[i]
+                                          : rain.X()/rainfield::cellWidth[i]) * rainfield::layerSpeed[i];
+            const double period = rainfield::latticePeriod;
+            const double k = std::round((expected - double(phase[axis*2]) - double(phase[axis*2+1]))/period);
+            Check(phase[axis*2] >= 0 && phase[axis*2] < 1 &&
+                  phase[axis*2+1] >= 0 && phase[axis*2+1] < period &&
+                  std::abs(expected - (double(phase[axis*2])+double(phase[axis*2+1])+k*period)) < 1e-5,
+                  "six-hour rain phase remains exact and bounded in each layer");
         }
-        // The period tables must stay in lockstep with the constants the
-        // stage spells into its hash.
-        Check(precipitationlayers::rainPeriodX[0] == 32768.f &&
-              precipitationlayers::rainPeriodY[1] == 16384.f &&
-              precipitationlayers::rainPeriodY[2] == 8192.f,
-              "the rain periods match the stage's hard-coded hash periods");
-        // The wobble and mist lanes stay bounded in every mode.
-        for (int mode = 0; mode <= 3; ++mode) {
-            const auto m = ComputeWrappedPhases(fall, wx, wy, mode);
-            Check(m.c9[0] >= 0.f && m.c9[0] < 6.29f && m.c9[3] >= 0.f && m.c9[3] < 6.29f,
-                  "the wobble arguments stay 2pi-wrapped");
-            Check(m.c10[0] >= 0.f && m.c10[0] < 1.f && m.c10[1] >= 0.f && m.c10[1] < 1.f,
-                  "the mist drift keeps its decimal part only");
-        }
+    }
+    // Camera translation gives close drops stronger world-relative parallax;
+    // turning in place, a teleport, and a reset cannot move the lattice.
+    rainfield::Motion cameraRain;
+    rainfield::Camera camera{};
+    camera.valid=true;camera.right[0]=1;camera.up[1]=1;
+    camera.projectionX=1;camera.projectionY=1;camera.aspect=1;
+    cameraRain.TrackCamera(camera,.7f);
+    camera.position[0]=.2;camera.position[1]=.2;
+    cameraRain.TrackCamera(camera,.7f,1.f/60.f);
+    float firstCamera[4]{};cameraRain.Layer(0,firstCamera);
+    const double firstShift=std::remainder(double(firstCamera[0])+firstCamera[1],
+                                           double(rainfield::latticePeriod))*rainfield::cellWidth[0];
+    Check(firstShift<0 && firstShift>-18.9 && std::abs(firstShift)>1,
+          "a sampled camera jump is eased rather than applied in one frame");
+    const auto nearAxis=cameraRain.Direction(0,{},1.f);
+    const auto farAxis=cameraRain.Direction(2,{},1.f);
+    Check(nearAxis.x<farAxis.x && nearAxis.y>0 && farAxis.y>0,
+          "camera movement slants near streaks more than far streaks while rain falls");
+    // CameraCapture can hold the same position for several draws. The rain
+    // must still move on those intervening frames instead of stepping only
+    // when a new camera sample arrives.
+    cameraRain.TrackCamera(camera,.7f,1.f/60.f);
+    float secondCamera[4]{};cameraRain.Layer(0,secondCamera);
+    const double secondShift=std::remainder(double(secondCamera[0])+secondCamera[1],
+                                            double(rainfield::latticePeriod))*rainfield::cellWidth[0];
+    Check(secondShift<firstShift && secondShift>-18.9,
+          "camera rain continues smoothly between unchanged captures");
+    for(int step=0;step<40;++step)cameraRain.TrackCamera(camera,.7f,1.f/60.f);
+    for (unsigned i=0;i<3;++i) {
+        float phase[4]{}; cameraRain.Layer(i,phase);
+        const double x=WindWrap(-75.6/rainfield::layerDepth[i]/rainfield::cellWidth[i],rainfield::latticePeriod);
+        const double y=WindWrap( 75.6/rainfield::layerDepth[i]/rainfield::cellHeight[i],rainfield::latticePeriod);
+        Check(Near(double(phase[0])+phase[1],x,1e-4) &&
+              Near(double(phase[2])+phase[3],y,1e-4),
+              "eased close rain reaches stronger opposite-camera motion than distant rain");
+    }
+    float beforeCamera[4]{}; cameraRain.Layer(0,beforeCamera);
+    camera.right[0]=0;camera.right[1]=1;
+    cameraRain.TrackCamera(camera,.7f,0); // rotation alone, no elapsed frame
+    camera.position[0]+=1000;
+    cameraRain.TrackCamera(camera,.7f); // teleport rebase
+    cameraRain.ForgetCamera();
+    camera.position[0]+=1;
+    cameraRain.TrackCamera(camera,.7f); // reset rebase
+    camera.position[1]+=1;
+    cameraRain.TrackCamera(camera,0.f); // explicit parallax opt-out
+    float afterCamera[4]{};cameraRain.Layer(0,afterCamera);
+    for(int i=0;i<4;++i)Check(afterCamera[i]==beforeCamera[i],
+        "rotation, teleport, reset and zero parallax do not jump rain");
+    camera.valid=false;cameraRain.TrackCamera(camera,.7f);
+    camera.position[0]+=1;camera.valid=true;cameraRain.TrackCamera(camera,.7f);
+    cameraRain.Layer(0,afterCamera);
+    for(int i=0;i<4;++i)Check(afterCamera[i]==beforeCamera[i],
+        "missing camera sample rebases without a catch-up streak");
+    for (int mode : {2,3}) {
+        const auto m = ComputeWrappedPhases(motion.Fall(),motion.WindX(),motion.WindY(),mode);
+        Check(m.c9[0] >= 0 && m.c9[0] < 6.29f && m.c10[0] >= 0 && m.c10[0] < 1,
+              "snow and sand retain bounded wobble/mist phases");
     }
     Pass("precipitation follows the shared wind in camera space without duplicate angle/speed clocks");
 }
@@ -566,6 +622,19 @@ static void TestConfigurationAndWiring()
           weatherIni.find("\nWindAngle=") == weatherIni.npos &&
           weatherIni.find("\nMode=") == weatherIni.npos,
           "weather continuity layer no longer ships duplicate wind or type overrides");
+    Check(weatherIni.find("RainSpeedPercent=") == weatherIni.npos &&
+          weatherIni.find("RainFallSpeedPercent=100\n") != weatherIni.npos &&
+          weatherIni.find("RainDensityPercent=100\n") != weatherIni.npos &&
+          weatherIni.find("RainParallaxPercent=70\n") != weatherIni.npos &&
+          weatherIni.find("RainDebugView=0\n") != weatherIni.npos,
+          "old rain speed retired; new rain controls and debug ship with defaults");
+    for (const auto& item : tuningoverlay::items) {
+        if (!item.section || std::wstring(item.section) != L"WeatherVisuals" ||
+            std::wstring(item.key).find(L"Rain") != 0) continue;
+        const std::string key(item.key,item.key+std::wcslen(item.key));
+        Check(weatherIni.find(key+"="+std::to_string(item.value)+"\n") != weatherIni.npos,
+              "F7 rain controls match shipped defaults");
+    }
     for (const auto& item : tuningoverlay::items)
         Check(!item.section || std::wstring(item.section) != L"WeatherVisuals" ||
               std::wstring(item.key) != L"Mode", "F7 cannot force rain over detected snow or vice versa");
@@ -578,38 +647,40 @@ static void TestConfigurationAndWiring()
     Check(weatherSource.find("precipitationMotion.Advance(dt, speed, frame.wind") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"WindAngle\"") == weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
-          // The long-session banding fix: the shader no longer carries an
-          // unbounded phase of its own. The integrated fall/wind arrive as
-          // the CPU's split decimal parts (c6/c7/c8), and the integer parts
-          // move only the wrapped cell index.
-          weatherSource.find("float phaseX[3] = { layerPhase0.x, layerPhase1.x, layerPhase2.x };") != weatherSource.npos &&
-          weatherSource.find("float2 cell = floor(gridDec) - float2(phaseXInt[i], phaseYInt[i]);") != weatherSource.npos &&
+          weatherSource.find("rainMotion.Advance(dt, rainFallSpeed, rainWind);") != weatherSource.npos &&
+          weatherSource.find("rainMotion.TrackCamera(rainCamera, rainParallax, dt);") != weatherSource.npos &&
+          weatherSource.find("precipitationClock.Observe(") != weatherSource.npos &&
+          weatherSource.find("(now - lastTick) * 0.001f") == weatherSource.npos &&
+          weatherSource.find("device->SetPixelShaderConstantF(10, rainAxes[0], 3);") != weatherSource.npos &&
+          weatherSource.find("float2 id = floor(grid) - phase.yw;") != weatherSource.npos &&
+          weatherSource.find("device->SetPixelShader(renderMode == 1 ? rainPS.Get() : precipitationPS.Get());") != weatherSource.npos &&
           weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos &&
           weatherSource.find("const int renderMode = nativeWeatherMode;") != weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"Mode\"") == weatherSource.npos,
           "production weather uses native type and integrated fall/wind, not separate clocks or overrides");
-    // Two ways the fullscreen precipitation pass could cover the whole screen when it should not.
-    // (1) The mist is gated on scene depth, and with no INTZ capture the neutral depth texture
-    // reads 1.0, GetLinearDepth answers 100000, and every one of those gates answers "as far away
-    // as possible" - so the mist ran at full strength over every pixel. A distance-gated term
-    // reading a missing distance is an ungated term, so the stage is now told whether depth exists.
-    // (2) `smoothedIndoor` - the factor that keeps rain out of caves, inns and arcades, read by the
-    // stage as `intensity * (1 - indoor*0.96)` - was declared, uploaded twice and never written by
-    // anything in the tree, so it was permanently 0 and rain drew at full strength under any roof
-    // for the whole of the five second mode hold. It is now driven by the client's own emission,
-    // which this file already counts, and it must stay silent while the game is unfocused or the
-    // detector is suspended, where absence of a draw means nothing at all.
+    // The depth gate and roof fade use actual signals, while the refactored
+    // rain path still accepts sparse native batches and has a Present fallback.
     Check(weatherSource.find("if (isSand < 0.5 && weatherParams.w > 0.5 && sceneZ > 6.0)") != weatherSource.npos &&
           weatherSource.find("hasCapturedDepth ? 1.0f : 0.0f };") != weatherSource.npos &&
           weatherSource.find("smoothedIndoor = std::clamp(smoothedIndoor + (coverTarget - smoothedIndoor)") != weatherSource.npos &&
           weatherSource.find("if (nativeWeatherSeenThisFrame || !focused || weatherSuspended || !nativeWeatherMode)") != weatherSource.npos &&
           weatherSource.find("coverMs > coverEvidenceMs ? 1.0f : 0.0f") != weatherSource.npos,
           "the depth-gated mist and the under-cover fade both have a real signal behind them");
+    Check(weatherSource.find("primitiveCount >= 6000") == weatherSource.npos &&
+          weatherSource.find("ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height") != weatherSource.npos &&
+          weatherSource.find("rainCompositeReady = drewPrecipitation;") != weatherSource.npos &&
+          Read("ModernWoWRenderer.cpp").find("weathervisuals::NeedsPresentFallback()") != std::string::npos &&
+          Read("ModernWoWRenderer.cpp").find("weathervisuals::BeforeDraw(d, true);") != std::string::npos,
+          "small rain batches and missing UI draws cannot silently disable the rain pass");
     const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
     Check(weatherResetStart != weatherSource.npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
-              .find("precipitationMotion") == std::string::npos,
-          "device recovery retains precipitation phases while dropping GPU resources");
+              .find("precipitationMotion") == std::string::npos &&
+          weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
+              .find("rainMotion.ForgetCamera()") != std::string::npos &&
+          weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
+              .find("rainMotion =") == std::string::npos,
+          "device recovery retains precipitation phases but rebases camera parallax");
     std::map<std::wstring, int> readDefaults;
     const auto defaults = SettingValues(ReadWindSettings([&](const wchar_t* key, int value) { readDefaults[key] = value; return value; }));
     Check(defaults == SettingValues(WindSettings{}) && defaults == readDefaults, "configuration defaults match simulation defaults");

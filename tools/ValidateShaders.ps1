@@ -35,7 +35,7 @@ $jobs = @(
     @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource', 'volumeBlurPixelSource', 'volumeCopyPixelSource', 'volumeTemporalPixelSource', 'contactShadowPixelSource', 'rayCompositePixelSource', 'solarRadialPixelSource', 'localLightPixelSource', 'celestialMarkerPixelSource', 'postProcessPixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
-    @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
+    @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'rainHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
     @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
     @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') }
@@ -53,23 +53,12 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
-    # 512 is the ps_3_0 floor every baseline card must support, so weather
-    # still fits them all. It was 496; the rain phase-split (the fix for
-    # long-session float32 banding) added its per-layer split+wrap slots.
+    # 512 is the ps_3_0 floor every baseline card must support.
+    # Keep snow/sand continuity and the analytical rain field within it.
     'precipitationHLSL'      = 512
-    # Water pixel stage, capped on explicit request: 2048 is ~2.3x the slots
-    # it actually uses (642 measured 2026-10-14, 713 after the 2026-10-17 CSE
-    # pass, 890 after round 5's quality ladder - the mid octave, the
-    # bed-slope shore, the swash/backwash and the foam lace - which the round
-    # estimated at "+80" and measured at +177, and 895 after the two
-    # foam-checkerboard fixes, which faded the lace with the octaves it reads
-    # and floored the bed slope's measurement span; see
-    # docs/water-rendering.md).
-    # A quality level does not shrink this number: the gates are [branch], so
-    # every level compiles the same shader and a level buys time per pixel
-    # rather than slots. The ceiling guards against a pathological edit (an
-    # unrolled march, a forgotten constant array) rather than acting as a
-    # design input on wave-train quality.
+    'rainHLSL'               = 512
+    # Water pixel stage, capped on explicit request; quality gates are branches,
+    # so every level compiles the same shader and the cap guards pathological edits.
     'source'                 = 2048
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512

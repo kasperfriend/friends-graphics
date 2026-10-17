@@ -1,6 +1,8 @@
 #pragma once
 #include "src/Environment/LocationTuning.h"
 #include "src/Effects/PrecipitationMotion.h"
+#include "src/Effects/RainField.h"
+#include "src/Core/FrameClock.h"
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
@@ -40,7 +42,12 @@ inline bool internal = false;
 
 // Configuration
 inline float intensity = 1.0f;
-inline float speed = 1.2f;
+inline float speed = 1.2f; // snow/sand continuity only
+inline renderer::rainfield::Motion rainMotion;
+inline float rainFallSpeed = 1.f, rainDensity = 1.f, rainLength = 1.f;
+inline float rainWidth = 1.f, rainOpacity = 1.f, rainWindInfluence = 1.f;
+inline float rainParallax = .7f;
+inline int rainDebugView = 0;
 inline renderer::PrecipitationMotion precipitationMotion;
 inline bool depthOcclusion = true;
 inline bool lensDroplets = true;
@@ -52,6 +59,7 @@ inline IDirect3DDevice9* currentDevice = nullptr;
 
 // GPU Resources
 inline ComPtr<IDirect3DPixelShader9> precipitationPS;
+inline ComPtr<IDirect3DPixelShader9> rainPS;
 inline ComPtr<IDirect3DPixelShader9> lensDropletsPS;
 inline ComPtr<IDirect3DPixelShader9> nativeParticlePS;
 inline ComPtr<IDirect3DTexture9> rainDropTex;
@@ -64,7 +72,7 @@ inline ComPtr<IDirect3DTexture9> sceneCopyTex;
 inline ComPtr<IDirect3DSurface9> sceneCopySurface;
 inline UINT copyWidth = 0, copyHeight = 0;
 
-inline DWORD lastTick = 0;
+inline renderer::FrameClock precipitationClock;
 inline float elapsedTime = 0.0f;
 // UNDER COVER. The precipitation stage is a screen-sized quad composited over everything the
 // client drew, so nothing in it knows where the player is standing. The one thing that was meant
@@ -95,8 +103,11 @@ inline int nativeWeatherMode = 0;
 inline UINT nativeWeatherPrimitives = 0;
 inline DWORD lastNativeWeatherTick = 0;
 inline bool composedThisFrame = false;
+inline bool rainCompositeReady = false;
 inline bool weatherSuspended = false;
-inline constexpr DWORD nativeWeatherHoldMs = 5000;
+// Native particle batches can be sparse even in steady rain (or disappear
+// under cover). A missed draw is not a clear-weather event.
+inline constexpr DWORD nativeWeatherHoldMs = 30000;
 inline std::unordered_set<uint64_t> loggedParticleCandidates;
 inline unsigned loggedParticleCandidateCount = 0;
 
@@ -109,8 +120,8 @@ sampler2D mistTex : register(s3);
 // c0: x=projA, y=projB, z=scaleX, w=scaleY
 float4 projection : register(c0);
 // c1: x=raw fall phase (diagnostics only), y=intensity,
-//     z=mode (1=Rain, 2=Snow, 3=Sandstorm),
-//     w=whether a real depth texture was captured this frame (0 = every sceneZ below is a guess)
+//     z=mode (2=Snow, 3=Sandstorm),
+//     w=whether a real depth texture was captured this frame
 float4 weatherParams : register(c1);
 // c2: xy=raw wind offset (diagnostics only), z=haze, w=indoorFactor
 float4 windParams : register(c2);
@@ -120,13 +131,7 @@ float4 screenParams : register(c3);
 float4 lightColor : register(c4);
 // c5: x=viewport MinZ, y=reciprocal viewport depth range
 float4 depthRange : register(c5);
-// c6/c7/c8: one float4 per layer, (xFrac, xInt, yFrac, yInt) in lattice
-// cells. The CPU splits each grid phase PHASE = N + f (f in [0,1), N
-// wrapped into the layer's period, all exact double math in
-// PrecipitationMotion.h): the pixels subtract only f - small minus small,
-// no float32 cancellation, so the drop levels stay as fine as at t=0 for
-// any session length - and N only shifts the cell INDEX, which the hash
-// wraps by the same period (seamless wrap, no unbounded value anywhere).
+// c6/c7/c8: bounded snow/sand phase coordinates, split on the CPU.
 float4 layerPhase0 : register(c6);
 float4 layerPhase1 : register(c7);
 float4 layerPhase2 : register(c8);
@@ -135,22 +140,6 @@ float4 layerPhase2 : register(c8);
 float4 wobbles : register(c9);
 // c10: xy = mist drift (decimal parts; the mist samples with frac)
 float4 mistDrift : register(c10);
-
-float WeatherHash(float2 cell, float2 period)
-{
-    // The pattern must be periodic in `period` (the same value the CPU
-    // wraps the integer phase parts into). Because the integer parts
-    // arrive wrapped into [0, period) and the decimal parts are below 1,
-    // the cell lies in [-period, cellsPerScreen+1): one conditional add
-    // is an exact modulo by the period - no division. It also keeps the
-    // hash argument small, which float32 needs or neighboring cells
-    // smear into one hash.
-    cell.x += (cell.x < 0.0) ? period.x : 0.0;
-    cell.y += (cell.y < 0.0) ? period.y : 0.0;
-    float3 p=frac(float3(cell.x,cell.y,cell.x)*.1031);
-    p+=dot(p,p.yzx+33.33);
-    return frac((p.x+p.y)*p.z);
-}
 
 float GetLinearDepth(float raw)
 {
@@ -174,7 +163,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float3 accum = float3(0, 0, 0);
     float totalAlpha = 0.0;
     
-    // Multi-layer depth-tested precipitation
+    // Snow/sand continuity (rain uses the separate analytical pass below)
     float layerDepths[3] = { 3.5, 11.0, 26.0 };
     float layerScales[3] = { 1.6, 3.8, 8.5 };
     float layerSpeeds[3] = { 1.25, 1.0, 0.75 };
@@ -184,16 +173,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float isSand = step(2.5, weatherParams.z);
     
     float sandWobble[3] = { wobbles.y, wobbles.z, wobbles.w };
-    // The CPU's split phase parts per layer (c6/c7/c8: xFrac, xInt, yFrac,
-    // yInt). The hash's Y period per rain layer (PrecipitationMotion.h's
-    // rainPeriodY; the X period is 32768 for all rain layers) - the layers
-    // are deliberately non-commensurate so the patterns repeat on
-    // independent ~8-19 min cycles and never realign.
-    float rainPeriodY[3] = { 32768.0, 16384.0, 8192.0 };
+    // Snow and sand use their existing bounded phase coordinates.
     float phaseX[3] = { layerPhase0.x, layerPhase1.x, layerPhase2.x };
-    float phaseXInt[3] = { layerPhase0.y, layerPhase1.y, layerPhase2.y };
     float phaseY[3] = { layerPhase0.z, layerPhase1.z, layerPhase2.z };
-    float phaseYInt[3] = { layerPhase0.w, layerPhase1.w, layerPhase2.w };
     
     [unroll] for (int i = 0; i < 3; ++i)
     {
@@ -202,9 +184,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         float occlusion = (lightColor.w > 0.5) ? smoothstep(lz * 0.75, lz * 1.15, sceneZ) : 1.0;
         if (occlusion <= 0.001) continue;
         
-        // phaseX/Y[i] (c6/c7/c8) are the CPU's split decimal parts: what
-        // the pixels subtract (small); the integer parts only move the
-        // cell index, which the hash wraps.
+        // Snow/sand sample only the bounded fractional phase.
         if (isSnow > 0.5)
         {
             // Snow: sinusoidal drift. Screen V grows downwards, so
@@ -232,41 +212,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             accum += float3(0.85, 0.75, 0.55) * dust * layerWeights[i] * occlusion;
             totalAlpha += dust * layerWeights[i] * occlusion;
         }
-        else
-        {
-            // A texture lookup at uv+travel moves the IMAGE against travel.
-            // Subtracting the phase keeps rain falling down/right with
-            // positive gravity/wind. The old V multiplier (.22) stretched
-            // one drop over almost THREE screen heights in the nearest
-            // layer; these cells tile compact, sparse drops instead (each
-            // near-layer cell at most 1/(16*1.6) screen high).
-            float2 gridDec = uv * (float2(64.0, 16.0) * layerScales[i])
-                           - float2(phaseX[i], phaseY[i]);
-            float2 cell = floor(gridDec) - float2(phaseXInt[i], phaseYInt[i]);
-            float cellNoise = WeatherHash(cell, float2(32768.0, rainPeriodY[i]));
-            float2 dropUV = frac(gridDec);
-            dropUV.x = (dropUV.x-.5)*2.5+.5+(cellNoise-.5)*.6;
-            dropUV.y = dropUV.y*1.25-frac(cellNoise*17.17)*.25;
-            float inside = step(0,dropUV.x)*step(dropUV.x,1);
-            float envelope = smoothstep(.08,.18,dropUV.y)*(1-smoothstep(.65,.90,dropUV.y));
-            float4 dropSamp = tex2Dlod(weatherTex, float4(saturate(dropUV),0,0));
-            // Random occupancy breaks tiled columns and their apparent reverse
-            // motion at high speeds. Explicit finite support also bounds the
-            // streak when an optional texture has opaque/untapered edges.
-            float drop = saturate(dropSamp.a * 4.5) * inside * envelope * step(.55,cellNoise);
-            accum += float3(0.75, 0.82, 0.92) * drop * layerWeights[i] * occlusion;
-            totalAlpha += drop * layerWeights[i] * occlusion;
-        }
+
     }
     
-    // Add subtle ambient mist during heavy rain/snow at mid-distances.
-    // `weatherParams.w` is whether the depth this term is gated on actually exists, and it has to
-    // be asked explicitly: with no INTZ capture the neutral depth texture reads 1.0, GetLinearDepth
-    // answers 100000, and every gate below - `sceneZ > 6.0` and the 6..40 yard fade - then answers
-    // "as far away as it is possible to be", so the mist ran at FULL strength over every pixel of
-    // the screen. A distance-gated term reading a missing distance is not a distant term; it is an
-    // ungated one, and an ungated wash over the whole screen is what that looked like. No depth now
-    // means no depth-gated term, which is the same rule the occlusion factor already follows.
+    // Add subtle ambient mist only when depth is captured; a missing depth texture
+    // reads as infinitely far away and would otherwise turn this distance gate into
+    // a fullscreen wash. The same validity bit also controls roof occlusion.
     if (isSand < 0.5 && weatherParams.w > 0.5 && sceneZ > 6.0)
     {
         // The drift phases' decimal parts (c10); the soft haze samples
@@ -288,6 +239,121 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float3 litColor = accum * (lightColor.rgb * 0.65 + 0.35);
     
     return float4(baseColor.rgb * (1.0 - totalAlpha * 0.35) + litColor, baseColor.a);
+}
+)HLSL";
+
+// Dedicated analytical rain renderer. No reused rain atlas or tiled UV streaks:
+// every occupied cell contains one independently seeded, subpixel-antialiased
+// falling line. Cell-local bounds keep it inside its cell as the lattice moves.
+inline const char* rainHLSL = R"HLSL(
+sampler2D sceneTex : register(s0);
+sampler2D depthMap : register(s1);
+float4 projection : register(c0); // depth unpack A/B
+float4 screen : register(c1); // width, height, invWidth, invHeight
+float4 light : register(c2); // neutral lighting RGB, depth available
+float4 shape : register(c3); // density, length, width, opacity
+float4 control : register(c4); // intensity, indoor, occlusion, debug (0/1/2)
+float4 travel : register(c5); // unit screen direction XY, wind X/Y in px/s
+float4 phase0 : register(c6);
+float4 phase1 : register(c7);
+float4 phase2 : register(c8);
+float4 depthRange : register(c9);
+float4 rainAxis0 : register(c10); // per-depth apparent motion, unit XY
+float4 rainAxis1 : register(c11);
+float4 rainAxis2 : register(c12);
+
+float Hash(float2 id)
+{
+    // Wrap the integer phase before hashing: adjacent cells remain distinct
+    // even after hours, and the 4096-cell seam repeats without a jump.
+    id = id - 4096.0 * floor(id / 4096.0);
+    float3 p = frac(float3(id.x, id.y, id.x) * .1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+float Depth(float raw)
+{
+    if (raw >= .99999) return 100000.0;
+    float d = saturate((raw-depthRange.x)*depthRange.y);
+    return projection.y / min(d-projection.x, -.000001);
+}
+float Particle(float2 pixel, float2 cellSize, float4 phase, float2 axis, float seed,
+               float lengthPx, float widthPx, float occupancy, float pixelFootprint)
+{
+    float2 grid = pixel / cellSize - phase.xz;
+    float2 id = floor(grid) - phase.yw;
+    float2 local = frac(grid) - .5;
+    float a = Hash(id + seed);
+    if (a >= occupancy) return 0.0;
+    float b = Hash(id + seed + 31.7);
+    float c = Hash(id + seed + 73.2);
+    // Seeded center is inset so no line is clipped at a cell boundary.
+    float2 center = float2((b-.5)*.36, (c-.5)*.22);
+    float2 delta = (local-center)*cellSize;
+    float along = dot(delta,axis);
+    float across = abs(dot(delta,float2(axis.y,-axis.x)));
+    float width = max(.35,widthPx * lerp(.75,1.25,c));
+    float halfLength = min(lengthPx * lerp(.65,1.15,b) * .5,
+        min((cellSize.x*.5-abs(center.x*cellSize.x)-width-1.0)/max(abs(axis.x),.01),
+            (cellSize.y*.5-abs(center.y*cellSize.y)-width-1.0)/max(abs(axis.y),.01)));
+    // The leading (downwind) head catches more light; the trailing end is
+    // thinner and less bright. Coverage is integrated across ONE output
+    // pixel in reference units, so 720p rain doesn't break into hard dots
+    // and 4K rain doesn't turn into blurry ribbons.
+    float head = saturate(.5 + .5*along/max(halfLength,1.0));
+    float taperedWidth = width * lerp(.58,1.0,head);
+    float body = saturate((taperedWidth-across)/pixelFootprint + .5);
+    float ends = saturate((halfLength-abs(along))/pixelFootprint + .5);
+    return body * ends * lerp(.68,1.08,head) * lerp(.55,1.0,a/max(occupancy,.001));
+}
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 scene = tex2D(sceneTex,uv);
+    float z = Depth(tex2D(depthMap,uv).r);
+    float scale = screen.y / 1080.0;
+    float2 pixel = uv * screen.xy / scale; // reference 1080p pixels
+    float pixelFootprint = max(.25,1.0/scale);
+    float coverage = 0.0;
+    float visibility = 0.0;
+    float3 weights = float3(.44,.33,.23);
+    float3 distances = float3(4.0, 11.0, 25.0);
+    float4 phases[3] = {phase0,phase1,phase2};
+    float2 axes[3] = {rainAxis0.xy,rainAxis1.xy,rainAxis2.xy};
+    // A few longer, legible foreground streaks and many fine distant drops:
+    // RDR2-like depth rhythm, restrained for WoW's brighter stylized scenes.
+    float2 cells[3] = {float2(60,88),float2(34,58),float2(22,38)};
+    float lengths[3] = {34.0,18.0,8.0};
+    float widths[3] = {1.20,.96,.72};
+    [unroll] for (int i=0;i<3;++i)
+    {
+        float visible = light.w > .5 && control.z > .5
+            ? smoothstep(distances[i]-.8,distances[i]+.8,z) : 1.0;
+        float drop = Particle(pixel,cells[i],phases[i],axes[i],float(i)*127.13,
+            lengths[i]*shape.y,widths[i]*shape.z,
+            saturate(shape.x * (i==0 ? .50 : (i==1 ? .36 : .30))),pixelFootprint);
+        coverage += drop * weights[i] * visible;
+        visibility += weights[i] * visible;
+    }
+    coverage = saturate(coverage * shape.w * control.x * (1.0-control.y*.96));
+    if (control.w > 1.5)
+    {
+        // Direction / occlusion diagnostic: red=rightward drift,
+        // blue=leftward drift, green=downward; dark = geometry blocks rain.
+        float blocked = visibility;
+        float3 direction = float3(saturate(.35+travel.z/400.0),
+                                  saturate(.35+travel.y*.35),
+                                  saturate(.35-travel.z/400.0));
+        return float4(lerp(float3(.08,.015,.015),direction*.35,blocked) + coverage.xxx,scene.a);
+    }
+    if (control.w > .5) return float4(coverage.xxx,scene.a);
+    // A wet streak scatters cool daylight on dark scenery but gently
+    // refracts (rather than painting white over) a bright WoW sky. This
+    // preserves contrast without a gray rain curtain or neon zone tint.
+    float3 scatter = float3(.68,.73,.80) * (.60 + .40*saturate(light.rgb));
+    float sceneLuma = dot(scene.rgb,float3(.2126,.7152,.0722));
+    float3 refracted = scene.rgb*.55 + scatter*.45;
+    float3 rainColor = lerp(scatter,refracted,smoothstep(.25,.85,sceneLuma));
+    return float4(lerp(scene.rgb,rainColor,coverage*.70),scene.a);
 }
 )HLSL";
 
@@ -463,7 +529,7 @@ inline void CreateNeutralDepthFallback(IDirect3DDevice9* device)
 inline void EnsureShaders(IDirect3DDevice9* device)
 {
     if (!device) return;
-    if (precipitationPS && lensDropletsPS && nativeParticlePS) return;
+    if (precipitationPS && rainPS && lensDropletsPS && nativeParticlePS) return;
 
     // On-disk bytecode cache first (renderer::shaderbytecode): a repeat
     // launch skips all three fxc passes, and a cached blob the driver
@@ -475,6 +541,15 @@ inline void EnsureShaders(IDirect3DDevice9* device)
         std::string error;
         if (!renderer::shaderbytecode::GetShader(cacheDir, precipitationHLSL, "main", "ps_3_0", codeBlob,
                 [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), precipitationPS.GetAddressOf())); }, &error))
+            Log(error.c_str());
+    }
+
+    if (!rainPS)
+    {
+        codeBlob.Reset();
+        std::string error;
+        if (!renderer::shaderbytecode::GetShader(cacheDir, rainHLSL, "main", "ps_3_0", codeBlob,
+                [device](ID3DBlob* b) { return SUCCEEDED(device->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), rainPS.GetAddressOf())); }, &error))
             Log(error.c_str());
     }
 
@@ -564,7 +639,14 @@ inline void ReloadTuning()
 {
     effectEnabled = ReadTuningInt(L"Enabled", 1) != 0;
     intensity = std::clamp(ReadTuningInt(L"IntensityPercent", 100), 0, 300) * 0.01f;
-    speed = std::clamp(ReadTuningInt(L"RainSpeedPercent", 120), 10, 400) * 0.01f;
+    rainFallSpeed = std::clamp(ReadTuningInt(L"RainFallSpeedPercent", 100), 10, 400) * .01f;
+    rainDensity = std::clamp(ReadTuningInt(L"RainDensityPercent", 100), 0, 250) * .01f;
+    rainLength = std::clamp(ReadTuningInt(L"RainLengthPercent", 100), 30, 160) * .01f;
+    rainWidth = std::clamp(ReadTuningInt(L"RainWidthPercent", 100), 40, 180) * .01f;
+    rainOpacity = std::clamp(ReadTuningInt(L"RainOpacityPercent", 100), 0, 200) * .01f;
+    rainWindInfluence = std::clamp(ReadTuningInt(L"RainWindInfluencePercent", 100), 0, 200) * .01f;
+    rainParallax = std::clamp(ReadTuningInt(L"RainParallaxPercent", 70), 0, 150) * .01f;
+    rainDebugView = std::clamp(ReadTuningInt(L"RainDebugView", 0), 0, 2);
     depthOcclusion = ReadTuningInt(L"DepthOcclusion", 1) != 0;
     lensDroplets = ReadTuningInt(L"LensDroplets", 1) != 0;
     lensStrength = std::clamp(ReadTuningInt(L"LensDropletStrength", 60), 0, 200) * 0.01f;
@@ -580,12 +662,14 @@ inline void Configure(const std::wstring& base)
     logPath = base + L"WeatherVisuals.log";
     enabled = renderer::locationtuning::ReadInt(L"WeatherVisuals", L"Enabled", 1, mainIni.c_str()) != 0;
     ReloadTuning();
-    lastTick = GetTickCount();
+    precipitationClock.Reset();
 }
 
 inline void Reset(IDirect3DDevice9* device)
 {
     precipitationPS.Reset();
+    rainPS.Reset();
+    rainMotion.ForgetCamera(); // keep phases, not a stale pre-reset camera
     lensDropletsPS.Reset();
     nativeParticlePS.Reset();
     sceneCopyTex.Reset();
@@ -596,8 +680,9 @@ inline void Reset(IDirect3DDevice9* device)
     nativeWeatherSeenThisFrame = 0;
     nativeWeatherPrimitives = 0;
     composedThisFrame = false;
+    rainCompositeReady = false;
     weatherSuspended = nativeWeatherMode != 0;
-    lastTick = GetTickCount();
+    precipitationClock.Reset();
 }
 
 inline bool IsTerrainShader(uint64_t psHash)
@@ -620,10 +705,26 @@ inline void ObserveWorldDraw()
         worldGeometrySeenThisFrame = true;
 }
 
-// WoW already creates world-space, depth-tested rain/snow billboards. The
-// Classic/Forever assets belong on those draws, not on a screen-sized quad in
-// Present(). This scope recognizes only plausible native precipitation draws,
-// swaps their stage-0 texture, and restores the game's texture immediately.
+// Texture identity plus the captured weather shader pair is the type signal.
+// Batch size is NOT weather intensity: the client varies particle counts and
+// can emit small batches while the same game rain continues.
+inline int ClassifyNativeWeather(UINT primitives, UINT width, UINT height,
+                                 uint64_t textureHash, uint64_t vsHash, uint64_t psHash)
+{
+    if (!primitives || psHash) return 0;
+    if (width == 16 && height == 128 && textureHash == 0xde9331cb560b9814ull &&
+        vsHash == 0x8832bcc5ed4ff2a6ull) return 1;
+    if (width == 64 && height == 64 && textureHash == 0x50aa504baa78b237ull)
+    {
+        if (vsHash == 0xec9ee827b8bf5afaull) return 2;
+        if (vsHash == 0x8832bcc5ed4ff2a6ull) return 3;
+    }
+    return 0;
+}
+
+// Recognize native weather draws for detection even when rendering is off.
+// Snow/sand keep their world-space billboards; rain is hidden only after the
+// wind-driven compositor has a working shader and target.
 class NativeParticleScope
 {
 public:
@@ -633,7 +734,7 @@ public:
         if (!device ||
             !renderer::g_trackedState.alphaBlend ||
             renderer::g_trackedState.zWrite || !renderer::g_trackedState.zEnable ||
-            primitiveCount < 16)
+            primitiveCount == 0)
             return;
 
         IDirect3DBaseTexture9* base = nullptr;
@@ -651,40 +752,21 @@ public:
 
         // Captured directly from this Ascension 3.3.5 client. Dimensions alone
         // also matched UI atlases and spell particles, so they are not safe.
-        const bool countOk = primitiveCount >= 6000;
         const bool dimRain = desc.Width == 16 && desc.Height == 128;
         const bool dimSmall = desc.Width == 64 && desc.Height == 64;
-        // GetTextureHash LOCKS THE TEXTURE AND HASHES ITS ENTIRE CONTENT on
-        // first sight of a pointer - a multi-millisecond stall for the large
-        // UI/spell atlases that spell effects bind to this stage. Hash only
-        // when it can change an outcome: every other match condition holds
-        // (then the dimensions above already bound the texture to a tiny
-        // precipitation size), or for the bounded candidate log, where only
-        // the two particle-sized textures are worth identifying.
+        // Only hash the two tiny candidate atlases, and only when the
+        // native weather vertex/pixel pair can match (or for bounded logs).
         const uint64_t trackedVs = renderer::g_trackedState.vsHash;
         const uint64_t trackedPs = renderer::g_trackedState.psHash;
-        const bool matchPossible = countOk &&
-            ((dimRain && trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0) ||
-             (dimSmall && (trackedVs == 0xec9ee827b8bf5afaull || trackedVs == 0x8832bcc5ed4ff2a6ull) && trackedPs == 0));
+        const bool matchPossible = trackedPs == 0 &&
+            ((dimRain && trackedVs == 0x8832bcc5ed4ff2a6ull) ||
+             (dimSmall && (trackedVs == 0xec9ee827b8bf5afaull || trackedVs == 0x8832bcc5ed4ff2a6ull)));
         const bool logWorthIt = loggedParticleCandidateCount < 128 && (dimRain || dimSmall) && !matchPossible;
         uint64_t textureHash = 0;
         if (matchPossible || logWorthIt)
             textureHash = renderer::TextureHashLookup::Instance().GetTextureHash(base);
-
-        const bool exactRain = dimRain && countOk &&
-            textureHash == 0xde9331cb560b9814ull &&
-            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
-        const bool exactSnow = dimSmall && countOk &&
-            textureHash == 0x50aa504baa78b237ull &&
-            trackedVs == 0xec9ee827b8bf5afaull && trackedPs == 0;
-        // Type 3 (sandstorm) reuses the 64x64 precipitation atlas but selects
-        // the rain-family vertex shader. This exact pairing was captured from
-        // the client's native draw and is distinct from snow above.
-        const bool exactSand = dimSmall && countOk &&
-            textureHash == 0x50aa504baa78b237ull &&
-            trackedVs == 0x8832bcc5ed4ff2a6ull && trackedPs == 0;
-
-        const int detected = exactRain ? 1 : (exactSnow ? 2 : (exactSand ? 3 : 0));
+        const int detected = ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height,
+            textureHash, trackedVs, trackedPs);
 
         // Record a bounded set of native transparent candidates for exact
         // rain/clear/snow comparison without flooding the log.
@@ -730,7 +812,14 @@ public:
         internal = true;
         device->GetPixelShader(m_originalPS.GetAddressOf());
         device->GetPixelShaderConstantF(0, m_originalC0, 1);
-        const float alphaScale = intensity * renderer::FrameContext::Current().environment[renderer::Weather] * (detected == 2 ? 1.55f : (detected == 3 ? 0.48f : 0.70f));
+        // Once the analytical compositor has a valid target, do not mix
+        // differently directed native rain with the shared-wind field.
+        // Until then the game's billboards remain a visible fallback.
+        const bool replaceRain = detected == 1 && rainCompositeReady && rainPS &&
+            sceneCopySurface && neutralDepthTex;
+        const float alphaScale = replaceRain ? 0.f :
+            intensity * renderer::FrameContext::Current().environment[renderer::Weather] *
+            (detected == 2 ? 1.55f : (detected == 3 ? .48f : .70f));
         const float params[4] = {
             detected == 2 ? 0.96f : (detected == 3 ? 0.78f : 0.90f),
             detected == 2 ? 0.98f : (detected == 3 ? 0.67f : 0.90f),
@@ -763,35 +852,50 @@ private:
     bool m_modified = false;
 };
 
-// Render the procedural continuity layer immediately before WoW's first UI
-// draw. Native particles still provide the world-space precipitation; this
-// fills gaps caused by their small player-centred simulation volume without
-// touching game UI or the F7 overlay.
-inline void BeforeDraw(IDirect3DDevice9* device)
+// Composite rain, or snow/sand continuity, immediately before the first UI
+// draw without touching the game UI or F7 overlay.
+inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
 {
     const bool isUi = renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                       renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull;
-    if (!isUi || composedThisFrame || !enabled || !effectEnabled || !active || !device)
+    if ((!isUi && !presentFallback) || composedThisFrame || !enabled || !effectEnabled || !active || !device)
         return;
     // Only the native observation owns the type. The old "Mode" override
     // changed this layer alone while clouds, waves, native particles and
     // the status display kept reporting the real rain/snow/sand type.
     const int renderMode = nativeWeatherMode;
     if (!renderMode) return;
-    composedThisFrame = true;
 
     // Time step calculation
-    DWORD now = GetTickCount();
-    float dt = (now >= lastTick) ? (now - lastTick) * 0.001f : 0.016f;
-    lastTick = now;
-    dt = std::clamp(dt, 0.f, 0.1f);
+    const float dt = precipitationClock.Observe(
+        renderer::PerformanceCounter(), renderer::PerformanceFrequency());
     elapsedTime += dt; // lens animation is independent of rain fall speed
 
-    // The camera-relative continuity layer samples the same published wind
-    // snapshot as water/clouds, projected through this frame's view basis.
+    // All precipitation samples the same published wind snapshot as water
+    // and clouds, projected through this frame's view basis.
     // Integrate phases once before any GPU early-out; neither a change in
     // speed/direction nor a device reset can rephase the whole session.
     const renderer::FrameContext& frame = renderer::FrameContext::Current();
+    const renderer::WindVector viewRight{frame.viewRaw.m[0][0], frame.viewRaw.m[1][0]};
+    const renderer::WindVector viewUp{frame.viewRaw.m[0][1], frame.viewRaw.m[1][1]};
+    const auto rainWind = renderer::rainfield::Project(frame.wind, viewRight, viewUp,
+        frame.cameraValid && frame.viewRawValid, rainWindInfluence);
+    rainMotion.Advance(dt, rainFallSpeed, rainWind);
+    renderer::rainfield::Camera rainCamera{};
+    rainCamera.valid = renderMode == 1 && frame.cameraValid && frame.viewRawValid &&
+        frame.width != 0 && frame.height != 0;
+    rainCamera.position[0] = frame.cameraPosition.x;
+    rainCamera.position[1] = frame.cameraPosition.y;
+    rainCamera.position[2] = frame.cameraPosition.z;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        rainCamera.right[axis] = frame.viewRaw.m[axis][0];
+        rainCamera.up[axis] = frame.viewRaw.m[axis][1];
+    }
+    rainCamera.projectionX = frame.projUnpack[2];
+    rainCamera.projectionY = frame.projUnpack[3];
+    rainCamera.aspect = frame.height ? float(frame.width)/float(frame.height) : 1.f;
+    rainMotion.TrackCamera(rainCamera, rainParallax, dt);
     precipitationMotion.Advance(dt, speed, frame.wind,
         {frame.viewRaw.m[0][0], frame.viewRaw.m[1][0]},
         {frame.viewRaw.m[0][1], frame.viewRaw.m[1][1]},
@@ -808,20 +912,22 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     IDirect3DTexture9* depthTex = hasCapturedDepth
         ? renderer::DepthCapture::Instance().GetDepthTexture()
         : neutralDepthTex.Get();
-    if (!depthTex) return;
+    if (!depthTex) { if (renderMode == 1) rainCompositeReady = false; return; }
 
     ComPtr<IDirect3DSurface9> backBuffer;
     if (FAILED(device->GetRenderTarget(0, backBuffer.GetAddressOf())) || !backBuffer)
-        return;
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     D3DSURFACE_DESC desc{};
     backBuffer->GetDesc(&desc);
-    if (desc.Width == 0 || desc.Height == 0) return;
+    if (desc.Width == 0 || desc.Height == 0)
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     EnsureShaders(device);
     LoadTextures(device);
 
-    if (!precipitationPS) return;
+    if (renderMode == 1 ? !rainPS : !precipitationPS)
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     // Precipitation itself composites over sceneTex, so the scene copy is
     // mandatory even when lens droplets are disabled.
@@ -835,10 +941,11 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     }
 
     if (!sceneCopySurface || FAILED(device->StretchRect(backBuffer.Get(), nullptr, sceneCopySurface.Get(), nullptr, D3DTEXF_NONE)))
-        return;
+    { if (renderMode == 1) rainCompositeReady = false; return; }
 
     const auto trackedState = renderer::g_trackedState;
     internal = true;
+    bool drewPrecipitation = false;
     {
     renderer::ScopedPassState savedState(device);
 
@@ -874,12 +981,8 @@ inline void BeforeDraw(IDirect3DDevice9* device)
         frame.cameraValid ? frame.projUnpack[2] : float(desc.Width) / float(desc.Height),
         frame.cameraValid ? frame.projUnpack[3] : 1.0f };
     // c1: Weather params
-    // A restrained layer supplements native particles rather than doubling
-    // their density. It remains camera-relative, so mount speed cannot outrun it.
-    // The fourth lane is depth validity, for the mist gate inside the stage. It is the same
-    // `hasCapturedDepth` that decides whether roof occlusion is honoured at all, so "no depth"
-    // now disables BOTH depth-gated terms instead of one of them silently answering
-    // "infinitely far away" and running at full strength over the whole screen.
+    // Snow/sand continuity supplements native particles. The fourth lane also
+    // gates the distance-dependent mist when a real depth texture is available.
     float weatherConst[4] = { motion.fall, intensity * frame.environment[renderer::Weather] * .45f, float(renderMode),
         hasCapturedDepth ? 1.0f : 0.0f };
     // c2: Integrated screen-space displacement, not current wind * session age.
@@ -917,10 +1020,36 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     };
 
     // Render precipitation pass
-    device->SetPixelShader(precipitationPS.Get());
+    if (renderMode == 1)
+    {
+        float phases[3][4]{};
+        for (unsigned i = 0; i < 3; ++i) rainMotion.Layer(i, phases[i]);
+        float rainAxes[3][4]{};
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            const auto direction = rainMotion.Direction(i, rainWind, rainFallSpeed);
+            rainAxes[i][0] = direction.x;
+            rainAxes[i][1] = direction.y;
+        }
+        const float rainTravel[4] = {rainAxes[0][0],rainAxes[0][1],rainWind.x,rainWind.y};
+        const float rainShape[4] = {rainDensity,rainLength,rainWidth,rainOpacity};
+        const float rainControl[4] = {intensity * frame.environment[renderer::Weather],
+            smoothedIndoor,depthOcclusion ? 1.f : 0.f,float(rainDebugView)};
+        device->SetPixelShaderConstantF(0, projConstants, 1);
+        device->SetPixelShaderConstantF(1, screenConst, 1);
+        device->SetPixelShaderConstantF(2, lightConst, 1);
+        device->SetPixelShaderConstantF(3, rainShape, 1);
+        device->SetPixelShaderConstantF(4, rainControl, 1);
+        device->SetPixelShaderConstantF(5, rainTravel, 1);
+        device->SetPixelShaderConstantF(6, phases[0], 3);
+        device->SetPixelShaderConstantF(9, depthConst, 1);
+        device->SetPixelShaderConstantF(10, rainAxes[0], 3);
+    }
+    device->SetPixelShader(renderMode == 1 ? rainPS.Get() : precipitationPS.Get());
     device->SetTexture(0, sceneCopyTex ? sceneCopyTex.Get() : nullptr);
     device->SetTexture(1, depthTex);
-    device->SetTexture(2, (renderMode == 2) ? (snowFlakeTex ? snowFlakeTex.Get() : rainDropTex.Get()) : (rainDropTex ? rainDropTex.Get() : nullptr));
+    device->SetTexture(2, renderMode == 2 ? snowFlakeTex.Get() :
+        (renderMode == 3 ? rainDropTex.Get() : nullptr));
     device->SetTexture(3, snowMistTex ? snowMistTex.Get() : nullptr);
 
     for (DWORD slot=0; slot<4; ++slot)
@@ -944,10 +1073,10 @@ inline void BeforeDraw(IDirect3DDevice9* device)
             : "WeatherVisuals render path active: precipitation fallback without captured depth");
     }
 
-    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex));
+    drewPrecipitation = SUCCEEDED(device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex)));
 
     // Render camera lens droplets pass (if rain and enabled)
-    if (lensDroplets && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
+    if (drewPrecipitation && lensDroplets && rainDebugView == 0 && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
     {
         // A render-target texture cannot be a StretchRect destination while
         // it is still bound for sampling by the precipitation pass.
@@ -979,6 +1108,47 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     }
     internal = false;
     renderer::g_trackedState = trackedState;
+    // Commit only a real draw. Failure leaves native rain available on the
+    // next frame and allows the Present fallback to retry this frame.
+    if (drewPrecipitation) composedThisFrame = true;
+    if (renderMode == 1) rainCompositeReady = drewPrecipitation;
+}
+
+// Native draws are observations, not a per-frame boolean weather API. Missing
+// draws in steady light rain must not repeatedly switch the shader off.
+inline void UpdateWeatherObservation(DWORD now, bool focused, bool preserveDetection)
+{
+    if (nativeWeatherSeenThisFrame)
+    {
+        nativeWeatherMode = nativeWeatherSeenThisFrame;
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if ((!focused || preserveDetection) && nativeWeatherMode)
+    {
+        // Loading, Alt+Tab and F7 can throttle native particle emission.
+        weatherSuspended = true;
+    }
+    else if (weatherSuspended && nativeWeatherMode)
+    {
+        // Restart the grace window after returning to the game.
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if (lastNativeWeatherTick && now - lastNativeWeatherTick > nativeWeatherHoldMs)
+    {
+        nativeWeatherMode = 0;
+        lastNativeWeatherTick = 0;
+    }
+}
+
+// Called after the rest of the world effects, before Present resets the frame.
+// The normal pre-UI path is preferred; this is only for frames with no UI
+// trigger (or a late native weather batch).
+inline bool NeedsPresentFallback() noexcept
+{
+    return !composedThisFrame && enabled && effectEnabled && active && nativeWeatherMode != 0 &&
+        (worldGeometrySeenThisFrame || nativeWeatherSeenThisFrame != 0);
 }
 
 inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
@@ -994,32 +1164,7 @@ inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
     }
     keyDown = down;
 
-    const DWORD now = GetTickCount();
-    if (nativeWeatherSeenThisFrame)
-    {
-        nativeWeatherMode = nativeWeatherSeenThisFrame;
-        lastNativeWeatherTick = now;
-        weatherSuspended = false;
-    }
-    else if ((!focused || preserveDetection) && nativeWeatherMode)
-    {
-        // Alt+Tab and the interactive F7 overlay can pause or throttle native
-        // particle emission. Absence of a draw then is not evidence that the
-        // weather ended.
-        weatherSuspended = true;
-    }
-    else if (weatherSuspended && nativeWeatherMode)
-    {
-        // Give the client time to refill its native particle system after
-        // focus/device restoration while the continuity layer stays alive.
-        lastNativeWeatherTick = now;
-        weatherSuspended = false;
-    }
-    else if (lastNativeWeatherTick && now - lastNativeWeatherTick > nativeWeatherHoldMs)
-    {
-        nativeWeatherMode = 0;
-        lastNativeWeatherTick = 0;
-    }
+    UpdateWeatherObservation(GetTickCount(), focused, preserveDetection);
 
     // COVER ESTIMATE, run after the state machine above because it needs `weatherSuspended` to have
     // already decided whether absence of a native draw means anything this frame.

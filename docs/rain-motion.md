@@ -199,3 +199,31 @@ about a second and a half. It should never fade while you are standing in the op
 fade because you alt-tabbed. Separately, run with Multisampling above 1x (no depth) and confirm the
 low grey mist no longer sits over the whole screen - the drops themselves still draw, because they are
 screen-space and never needed depth.
+
+# Layered rainfall look (2026-10-17)
+
+The current replacement rain stage is an analytical particle field, not the
+older rain-atlas UV shader described above. Its three depth layers have long,
+sparse near streaks, medium drops and many fine distant drops. The visual
+rhythm takes inspiration from rain in Red Dead Redemption 2, but is restrained
+for WoW's brighter, stylized art and D3D9 shader budget: no opaque rain sheet
+or artificial ground splashes. Drops remain sharp at different resolutions,
+with subtle lighting/refraction against dark and bright scenes.
+
+The shared wind still owns the downwind direction. Camera translation now
+shifts the three layers by different amounts (near > far) to avoid a flat
+screen overlay when walking or riding. This bounded, double-precision phase
+is rebased after camera loss, reset or teleports; camera rotation alone cannot
+jump the rain. `RainParallaxPercent=0` disables this additional motion.
+
+# Camera-motion stepping (2026-10-17)
+
+The rain pass used `GetTickCount` for its fall clock and applied each captured
+camera translation straight to the particle lattice. The coarse system tick
+and intermittent camera captures could move the drops in visible jumps while
+turning or riding. Rain now integrates with the same high-resolution
+performance-counter clock used by the other animated effects. Camera samples
+feed a short, frame-rate-independent eased target; positions and streak angles
+continue updating between identical captures. Invalid captures, teleports and
+device resets rebase without replaying pending camera displacement. The wind
+and gravity phases are not reset.

@@ -399,7 +399,8 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
                 frame = ReconstructNormal(p, pLeft, pRight, pUp, pDown,
                                           zLeft, zRight, zUp, zDown,
                                           zLeft2, zRight2, zUp2, zDown2,
-                                          z, toEye, tuning, survives);
+                                          z, toEye, tuning, survives,
+                                          Normalize(Vec3{ kUp[0], kUp[1], kUp[2] }));
             }
 
             SurfaceFrame shaded = frame;
@@ -1181,7 +1182,8 @@ int main()
                         frame = ReconstructNormal(p, pLeft, pRight, pUp, pDown,
                                                   zLeft, zRight, zUp, zDown,
                                                   zLeft2, zRight2, zUp2, zDown2,
-                                                  z, toEye, tuning, survives);
+                                                  z, toEye, tuning, survives,
+                                                  Normalize(Vec3{ nUp[0], nUp[1], nUp[2] }));
                     }
                     const Vec3 lit = PoolShade(nearLamp, p, frame, nearCamera);
                     pool.luminance[index] = lit.x * .3f + lit.y * .5f + lit.z * .2f;
@@ -1286,15 +1288,17 @@ int main()
         // The copy is a shape-scale error, not a rim: the previous weighting
         // left whole slabs of wrong light beside every silhouette at the
         // shipped smoothing. That is the regression this pins - at the
-        // settings where the copies were reported. At maximum smoothing every
-        // window near an object is contested and the pool is soft and wrong in
-        // BOTH versions; the pin there is honesty: no worse than before.
+        // settings where the copies were reported. The near-object gate plus
+        // the horizon-flight veto keep the residual below the old ceiling at
+        // every setting, maximum smoothing included: a tap that outran the
+        // receiver's own depth no longer chords the relief across the horizon,
+        // so the copies no longer grow with smoothing.
         Check(drowned[0] > 1.25f * shipped[0] && drowned[1] > 1.25f * shipped[1],
               "the slope-drowned step detection is what painted the copies (the regression this pins)");
-        Check(shipped[0] < 0.05f && shipped[1] < 0.15f,
+        Check(shipped[0] < 0.04f && shipped[1] < 0.12f,
               "a nearby silhouette paints no copy into the pool at ordinary smoothing");
-        Check(shipped[2] <= drowned[2] * 1.1f,
-              "at maximum smoothing the pool is no worse than the weighting it replaced");
+        Check(shipped[2] < 0.26f && shipped[2] < drowned[2],
+              "at maximum smoothing the pool is better than the weighting it replaced");
         Pass("nearby characters and objects no longer paint copies into the pool");
     }
 
@@ -1336,6 +1340,14 @@ int main()
         Check(surface.find("float surfL=step(rawL,.99990)*step(1e-20,dot(uvL-uv,uvL-uv));") != std::string::npos &&
               surface.find("float surfL2=step(rawL2,.99990)*step(1e-20,dot(uvL2-uv,uvL2-uv));") != std::string::npos,
               "the surface pass marks sky and the clamp's self-tap as no measurement");
+        Check(surface.find("float vz=max(z,.25);") != std::string::npos &&
+              surface.find("if(dL>2.5*dR&&dL>vz) surfL=0.;") != std::string::npos &&
+              surface.find("if(dU>2.5*dD&&dU>vz) surfU=0.;") != std::string::npos,
+              "the surface pass hands a horizon-flying tap to its partner");
+        Check(surface.find("float hL=surfL>0?dot(pL-p,inv1.xyz):0.,hR=surfR>0?dot(pR-p,inv1.xyz):0.;") != std::string::npos &&
+              surface.find("float curvX=abs(hL+hR),curvY=abs(hU+hD);") != std::string::npos &&
+              surface.find("wL*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hL));") != std::string::npos,
+              "the surface pass gates a tap that stands off the local ground plane");
         Check(Near(SideStep(0.12f, 0.11f, 0.10f, true), 0.f, 1e-6f) &&
               Near(SideStep(0.14f, 0.13f, 0.10f, true), 0.02f, 1e-6f) &&
               SideStep(0.5f, 0.2f, 0.1f, false) == 0.f,

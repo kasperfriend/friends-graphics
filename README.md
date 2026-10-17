@@ -89,10 +89,10 @@ of the cloud shader, at the shipped defaults.*
 
 ### Weather
 
-- Native rain and snow receive replacement textures, intensity, speed and depth-occlusion controls; native particle direction stays with the game.
-- A depth-aware continuity layer keeps precipitation visible while moving quickly on a mount, drifting with the shared wind instead of a second weather angle/strength.
-- Weather state survives short native-particle gaps caused by opening F7 or returning from Alt+Tab. Clouds, wind, waves and the continuity layer all use the detected native rain/snow/sand type; the old visual-only weather hint is ignored.
-- Optional rain lens droplets and a subtle rain/snow mist within the continuity layer are available; this setting does not also retune the volumetric atmosphere.
+- Rain uses a depth-aware field of layered, resolution-aware streaks: longer sparse foreground drops, finer distant rain, tapered highlights and scene-adaptive contrast. Gravity pulls them down, shared world wind moves them downwind, and camera movement gives the layers smoothly eased parallax without changing the wind direction. Native rain is hidden once the new pass is ready. F7 offers speed, density, length, width, opacity, wind influence, camera parallax and mask/direction debug views.
+- Snow and sand retain native particles plus a small continuity layer; their native direction remains with the game.
+- Weather state survives intermittent native particle batches, missing UI draws, opening F7 and returning from Alt+Tab. Clouds, wind, waves and the continuity layer all use the detected native rain/snow/sand type; the old visual-only weather hint is ignored.
+- Optional rain lens droplets and subtle snow mist are available; this setting does not also retune the volumetric atmosphere.
 
 ### Shared wind
 
@@ -228,7 +228,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
 | `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, the pool's smoothing window, and debug modes. |
-| `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain/snow rendering speed, occlusion, lens droplets and continuity-layer mist; added precipitation tilt follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
+| `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain particle speed, density, length, width, opacity, wind influence and debug views, plus occlusion and lens droplets; rain follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
 | `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links, continuity-layer drift and diagnostic HUD. |
 | `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, glint, and how hard the zone and the weather push on all of it. |
@@ -297,7 +297,7 @@ The tests cover eight-way wind/time/weather response, wind/cloud/wave phase cont
 ```text
 ModernWoWRenderer.cpp        D3D9 proxy exports, hook dispatch, and frame orchestration
 VolumeIntegration.h         Atmosphere and volumetric composition
-WeatherVisuals.h            Native precipitation and continuity rendering
+WeatherVisuals.h            Wind-driven rain and snow/sand continuity rendering
 WaterEffect.h               Water replacement and shading
 NativeShadowDiagnostics.h   Native cascade discovery and enhancement
 TuningOverlay.h             F7 in-game settings interface
