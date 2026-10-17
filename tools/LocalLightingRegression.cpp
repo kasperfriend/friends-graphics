@@ -129,6 +129,14 @@ float Box(float x, float y, float z, float cx, float cy, float cz, float hx, flo
     return inside + outside;
 }
 
+// A capsule along z: the character-like body of the nearby-object scene.
+float Capsule(float x, float y, float z, float cx, float cy, float r, float z0, float z1)
+{
+    const float zz = std::clamp(z, z0, z1);
+    const float dx = x - cx, dy = y - cy, dz = z - zz;
+    return std::sqrt(dx * dx + dy * dy + dz * dz) - r;
+}
+
 // Material ids: 0 sky, 1 ground, 2 wall, 3 block.
 int MaterialAt(float x, float y, float z, float& distance)
 {
@@ -349,6 +357,12 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
             const Vec3 pRight = tap(spread.x, 0.f, zRight, &rawRight);
             const Vec3 pUp = tap(0.f, -spread.y, zUp, &rawUp);
             const Vec3 pDown = tap(0.f, spread.y, zDown, &rawDown);
+            float zLeft2 = 0.f, zRight2 = 0.f, zUp2 = 0.f, zDown2 = 0.f;
+            float rawLeft2 = 0.f, rawRight2 = 0.f, rawUp2 = 0.f, rawDown2 = 0.f;
+            tap(-spread.x * 2.f, 0.f, zLeft2, &rawLeft2);
+            tap(spread.x * 2.f, 0.f, zRight2, &rawRight2);
+            tap(0.f, -spread.y * 2.f, zUp2, &rawUp2);
+            tap(0.f, spread.y * 2.f, zDown2, &rawDown2);
             const Vec3 toEye = Normalize(kCameraWorld - p);
 
             SurfaceFrame frame;
@@ -368,11 +382,23 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
             else
             {
                 TapSurvival survives;
-                survives.left = rawLeft < .99990f;
-                survives.right = rawRight < .99990f;
-                survives.up = rawUp < .99990f;
-                survives.down = rawDown < .99990f;
-                frame = ReconstructNormal(p, pLeft, pRight, pUp, pDown, zLeft, zRight, zUp, zDown,
+                // locallighting::TapSurvival: sky AND the self-tap of a
+                // clamped off-frame window measure nothing.
+                auto measured = [&](float du, float dv, float raw) {
+                    const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
+                    return raw < .99990f && (tapUv.x != pixelUv.x || tapUv.y != pixelUv.y);
+                };
+                survives.left = measured(-spread.x, 0.f, rawLeft);
+                survives.right = measured(spread.x, 0.f, rawRight);
+                survives.up = measured(0.f, -spread.y, rawUp);
+                survives.down = measured(0.f, spread.y, rawDown);
+                survives.left2 = measured(-spread.x * 2.f, 0.f, rawLeft2);
+                survives.right2 = measured(spread.x * 2.f, 0.f, rawRight2);
+                survives.up2 = measured(0.f, -spread.y * 2.f, rawUp2);
+                survives.down2 = measured(0.f, spread.y * 2.f, rawDown2);
+                frame = ReconstructNormal(p, pLeft, pRight, pUp, pDown,
+                                          zLeft, zRight, zUp, zDown,
+                                          zLeft2, zRight2, zUp2, zDown2,
                                           z, toEye, tuning, survives);
             }
 
@@ -813,7 +839,12 @@ int main()
         // The gate is a statement about a window that had nothing to drop; on
         // ground that is exactly flat it therefore has to read one, and at a
         // silhouette - where the window had to drop a side - it must read less.
-        Check(meanIntactFlat > 0.99f, "the specular gate is one on ground the window fits whole");
+        // Not exactly 1.0: a window cut by the FRAME edge now honestly
+        // reports its dropped side (the clamp's self-tap measures nothing -
+        // locallighting::TapSurvival), and those pixels lie inside this
+        // region. The gate is still essentially one everywhere the window
+        // fits, and clearly less at the silhouette base below.
+        Check(meanIntactFlat > 0.97f, "the specular gate is one on ground the window fits whole");
         Check(meanIntactBase < meanIntactFlat, "the specular gate reports the window that had to drop a side");
         Pass("a silhouette still lights from the correct side, and says so");
     }
@@ -880,6 +911,393 @@ int main()
         Pass("the composite stays continuous and keeps silhouettes closed");
     }
 
+    // -------------------------------- nearby objects painting pool copies ---
+    // The player report this pins: with dynamic lights on and the camera up
+    // close ("go nearby"), the pool painted illusionary copies of characters
+    // and objects - dark shape-copies floating beside them - and LIGHT
+    // SMOOTHING only softened it. The scene is the regime that produces them:
+    // an eye-level camera over undulating ground at a grazing angle, so the
+    // window's own slope step is large, and a character-like capsule and a
+    // crate only a few yards away, so a silhouette's depth jump j is
+    // comparable to that slope. Flat ground measures s = 0 along a scanline
+    // and never enters the regime - which is why the suite above never caught
+    // it.
+    {
+        // Material ids: 0 sky, 1 ground, 2 character (capsule+head), 3 crate.
+        auto relief = [](float x, float y) {
+            return 0.35f * std::sin(x * 0.5f + 0.3f) * std::cos(y * 0.38f) +
+                   0.18f * std::sin(x * 0.9f + y * 0.6f);
+        };
+        auto materialNear = [&](float x, float y, float z, float& distance) {
+            const float ground = (z - relief(x, y)) * 0.8f;
+            const float body = Capsule(x, y, z, 0.9f, 2.2f, 0.34f, 0.34f, 1.75f);
+            const float head = Capsule(x, y, z, 0.9f, 2.2f, 0.22f, 1.85f, 2.05f);
+            const float crate = Box(x, y, z, -1.4f, 3.4f, 0.5f, 0.5f, 0.5f, 0.5f);
+            int material = 1;
+            distance = ground;
+            if (body < distance) { distance = body; material = 2; }
+            if (head < distance) { distance = head; material = 2; }
+            if (crate < distance) { distance = crate; material = 3; }
+            return material;
+        };
+        auto refineNear = [&](const float* camera, const float* d, float t) {
+            const float start = t;
+            for (int i = 0; i < 8; ++i)
+            {
+                const float p[3] = { camera[0] + d[0] * t, camera[1] + d[1] * t, camera[2] + d[2] * t };
+                float distance = 0.f;
+                materialNear(p[0], p[1], p[2], distance);
+                float gradient[3];
+                const float e = 1e-4f;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    float q[3] = { p[0], p[1], p[2] };
+                    q[axis] += e;
+                    float plus = 0.f;
+                    materialNear(q[0], q[1], q[2], plus);
+                    q[axis] -= 2.f * e;
+                    float minus = 0.f;
+                    materialNear(q[0], q[1], q[2], minus);
+                    gradient[axis] = (plus - minus) / (2.f * e);
+                }
+                const float slope = gradient[0] * d[0] + gradient[1] * d[1] + gradient[2] * d[2];
+                if (std::abs(slope) < 1e-7f) break;
+                t -= distance / slope;
+                if (std::abs(t - start) > 0.25f) return start;
+            }
+            return t;
+        };
+        auto trueNormalNear = [&](float x, float y, float z) {
+            const float e = 1e-3f;
+            float g[3];
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                float q[3] = { x, y, z };
+                q[axis] += e;
+                float plus = 0.f;
+                materialNear(q[0], q[1], q[2], plus);
+                q[axis] -= 2.f * e;
+                float minus = 0.f;
+                materialNear(q[0], q[1], q[2], minus);
+                g[axis] = (plus - minus) / (2.f * e);
+            }
+            return Normalize(Vec3{ g[0], g[1], g[2] });
+        };
+
+        const float nCamera[3] = { 0.f, -2.6f, 1.75f };
+        // The probe's exact LookAt basis (the scene that reproduces the
+        // report): look at the character and the crate from just above the
+        // ground, close to level - the grazing regime where the window's own
+        // slope step is large and every silhouette is a nearby object.
+        const float nForward[3] = { 0.06207f, 0.99311f, -0.04136f };
+        const float nRight[3] = { 0.99311f, -0.06207f, 0.f };
+        const float nUp[3] = { 0.00257f, 0.04128f, 0.99914f };
+
+        Scene near;
+        near.width = kWidth;
+        near.height = kHeight;
+        near.raw.assign(size_t(kWidth) * kHeight, kMaxZ);
+        near.material.assign(size_t(kWidth) * kHeight, 0);
+        near.projA = kFar / (kFar - kNear);
+        near.projB = -kNear * kFar / (kFar - kNear);
+        for (int y = 0; y < kHeight; ++y)
+        {
+            for (int x = 0; x < kWidth; ++x)
+            {
+                const float u = (float(x) + .5f) / float(kWidth);
+                const float v = (float(y) + .5f) / float(kHeight);
+                const float vx = (u * 2.f - 1.f) / kP00, vy = (1.f - v * 2.f) / kP11;
+                const float d[3] = { vx * nRight[0] + vy * nUp[0] + nForward[0],
+                                     vx * nRight[1] + vy * nUp[1] + nForward[1],
+                                     vx * nRight[2] + vy * nUp[2] + nForward[2] };
+                float t = kNear;
+                for (int step = 0; step < 512; ++step)
+                {
+                    const float p[3] = { nCamera[0] + d[0] * t, nCamera[1] + d[1] * t, nCamera[2] + d[2] * t };
+                    float distance = 0.f;
+                    const int material = materialNear(p[0], p[1], p[2], distance);
+                    if (distance < 0.0015f)
+                    {
+                        t = refineNear(nCamera, d, t);
+                        const float encoded = near.projA + near.projB / std::max(t, 1e-4f);
+                        near.raw[size_t(y) * kWidth + x] = Quantize24(std::min(encoded, kMaxZ));
+                        near.material[size_t(y) * kWidth + x] = material;
+                        break;
+                    }
+                    t += std::max(distance, 0.004f) * .8f;
+                    if (t > kFar) break;
+                }
+            }
+        }
+        Projection nearProj;
+        nearProj.a = near.projA;
+        nearProj.b = near.projB;
+        nearProj.p00 = kP00;
+        nearProj.p11 = kP11;
+        InverseView nearInv;
+        nearInv.row[0] = { nRight[0], nRight[1], nRight[2] };
+        nearInv.row[1] = { nUp[0], nUp[1], nUp[2] };
+        nearInv.row[2] = { nForward[0], nForward[1], nForward[2] };
+        const Vec3 nearCamera{ nCamera[0], nCamera[1], nCamera[2] };
+        LightSample nearLamp;
+        nearLamp.position = { 1.2f, 4.2f, 2.4f };
+        nearLamp.radius = 14.f;
+        nearLamp.intensity = 1.f;
+        nearLamp.color = { 1.f, .8f, .5f };
+
+        // The evaluator for this scene, with a switch for the PRE-FIX
+        // weighting kept inline: step detection compared the two-sided
+        // disagreement against the window's own one-sided changes (drowned by
+        // the grazing slope) and scaled the outlier slide by the deviation
+        // gap (drowned the same way). Kept here so the numbers this prints
+        // stay honest about what the fix bought.
+        auto evaluateNear = [&](float scale, const NormalTuning& tuning, bool trueNormals, bool drowned) {
+            Pool pool;
+            pool.width = std::max(1, int(float(kWidth) * scale));
+            pool.height = std::max(1, int(float(kHeight) * scale));
+            const size_t pixels = size_t(pool.width) * pool.height;
+            pool.luminance.assign(pixels, 0.f);
+            pool.intact.assign(pixels, 1.f);
+            pool.depth.assign(pixels, 0.f);
+            pool.position.assign(pixels, Vec3{});
+            pool.normal.assign(pixels, Vec3{ 0.f, 0.f, 1.f });
+            const Vec2 bufferTexel{ 1.f / float(pool.width), 1.f / float(pool.height) };
+            const Vec2 sceneTexel{ 1.f / float(kWidth), 1.f / float(kHeight) };
+            for (int y = 0; y < pool.height; ++y)
+            {
+                for (int x = 0; x < pool.width; ++x)
+                {
+                    const Vec2 pixelUv = SnapUv({ (float(x) + .5f) * bufferTexel.x,
+                                                  (float(y) + .5f) * bufferTexel.y }, sceneTexel);
+                    const float u = pixelUv.x, v = pixelUv.y;
+                    const float raw = near.At(u, v);
+                    const size_t index = size_t(y) * pool.width + x;
+                    if (raw >= .99990f) continue;
+                    const float z = LinearDepth(raw, nearProj);
+                    const Vec3 p = WorldPosition(u, v, raw, nearProj, nearInv, nearCamera);
+                    const Vec2 spread = TapOffset(Footprint(z, bufferTexel, nearProj, tuning), sceneTexel);
+                    auto tap = [&](float du, float dv, float& depthOut, float* rawOut = nullptr) {
+                        const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
+                        const float sample = near.At(tapUv.x, tapUv.y);
+                        depthOut = LinearDepth(sample, nearProj);
+                        if (rawOut) *rawOut = sample;
+                        return WorldPosition(tapUv.x, tapUv.y, sample, nearProj, nearInv, nearCamera);
+                    };
+                    float zLeft = 0.f, zRight = 0.f, zUp = 0.f, zDown = 0.f;
+                    float rawLeft = 0.f, rawRight = 0.f, rawUp = 0.f, rawDown = 0.f;
+                    const Vec3 pLeft = tap(-spread.x, 0.f, zLeft, &rawLeft);
+                    const Vec3 pRight = tap(spread.x, 0.f, zRight, &rawRight);
+                    const Vec3 pUp = tap(0.f, -spread.y, zUp, &rawUp);
+                    const Vec3 pDown = tap(0.f, spread.y, zDown, &rawDown);
+                    float zLeft2 = 0.f, zRight2 = 0.f, zUp2 = 0.f, zDown2 = 0.f;
+                    float rawLeft2 = 0.f, rawRight2 = 0.f, rawUp2 = 0.f, rawDown2 = 0.f;
+                    tap(-spread.x * 2.f, 0.f, zLeft2, &rawLeft2);
+                    tap(spread.x * 2.f, 0.f, zRight2, &rawRight2);
+                    tap(0.f, -spread.y * 2.f, zUp2, &rawUp2);
+                    tap(0.f, spread.y * 2.f, zDown2, &rawDown2);
+                    const Vec3 toEye = Normalize(nearCamera - p);
+                    SurfaceFrame frame;
+                    if (trueNormals)
+                    {
+                        Vec3 n = trueNormalNear(p.x, p.y, p.z);
+                        if (Dot(n, toEye) < 0.f) n = n * -1.f;
+                        frame.normal = n;
+                        frame.intact = 1.f;
+                    }
+                    else if (drowned)
+                    {
+                        // Identical to the shipped TapWeights except the step
+                        // detection it replaced: the edge was the curvature
+                        // against the window's own one-sided changes (drowned
+                        // by the grazing slope) and the outlier slide was
+                        // scaled by the deviation gap (drowned the same way).
+                        auto side = [](float dA, float dB, float curv, float absolute,
+                                       bool surfA, bool surfB) {
+                            AxisWeights w;
+                            if (!surfA || !surfB)
+                            {
+                                w.left = surfA ? 1.f : 0.f;
+                                w.right = surfB ? 1.f : 0.f;
+                                return w;
+                            }
+                            const float edge = Smoothstep(absolute, absolute * 4.f, curv) *
+                                               Smoothstep(.30f, .85f, curv / std::max(dA + dB, absolute));
+                            const float asym = (dA - dB) / std::max(std::max(dA, dB), 1e-4f);
+                            // The pre-fix veto, kept verbatim for the
+                            // comparison: 6x the partner's deviation.
+                            const float veto = 6.f * std::min(dA, dB) + absolute;
+                            if (dA > veto || dB > veto)
+                            {
+                                w.left = dA <= veto ? 1.f : 0.f;
+                                w.right = dB <= veto ? 1.f : 0.f;
+                                return w;
+                            }
+                            w.left = 1.f - edge * Smoothstep(0.f, 1.f, asym);
+                            w.right = 1.f - edge * Smoothstep(0.f, 1.f, -asym);
+                            return w;
+                        };
+                        auto measured = [&](float du, float dv, float raw) {
+                            const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
+                            return raw < .99990f && (tapUv.x != pixelUv.x || tapUv.y != pixelUv.y);
+                        };
+                        auto axis = [&](float zA, float zB, float zC, bool surfA, bool surfB) {
+                            const float iC = InverseDepth(zC);
+                            const float dA = std::abs(InverseDepth(zA) - iC);
+                            const float dB = std::abs(InverseDepth(zB) - iC);
+                            const float curv = std::abs(InverseDepth(zA) + InverseDepth(zB) - 2.f * iC);
+                            const float absolute = std::max(tuning.edgeFloor, zC * tuning.edgeSlope) /
+                                                   std::max(zC * zC, 1e-3f);
+                            return side(dA, dB, curv, absolute, surfA, surfB);
+                        };
+                        const AxisWeights x = axis(zLeft, zRight, z,
+                                                   measured(-spread.x, 0.f, rawLeft),
+                                                   measured(spread.x, 0.f, rawRight));
+                        const AxisWeights y = axis(zUp, zDown, z,
+                                                   measured(0.f, -spread.y, rawUp),
+                                                   measured(0.f, spread.y, rawDown));
+                        const Vec3 tangentX = (p - pLeft) * x.left + (pRight - p) * x.right;
+                        const Vec3 tangentY = (p - pUp) * y.left + (pDown - p) * y.right;
+                        const Vec3 cross = Cross(tangentX * (1.f / std::max(x.left + x.right, 1e-4f)),
+                                                 tangentY * (1.f / std::max(y.left + y.right, 1e-4f)));
+                        frame.normal = Dot(cross, cross) > 1e-12f ? Normalize(cross) : toEye;
+                        if (Dot(frame.normal, toEye) < 0.f) frame.normal = frame.normal * -1.f;
+                        frame.intact = Saturate((x.left + x.right + y.left + y.right) * .25f);
+                    }
+                    else
+                    {
+                        TapSurvival survives;
+                        auto measuredShipped = [&](float du, float dv, float raw) {
+                            const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
+                            return raw < .99990f && (tapUv.x != pixelUv.x || tapUv.y != pixelUv.y);
+                        };
+                        survives.left = measuredShipped(-spread.x, 0.f, rawLeft);
+                        survives.right = measuredShipped(spread.x, 0.f, rawRight);
+                        survives.up = measuredShipped(0.f, -spread.y, rawUp);
+                        survives.down = measuredShipped(0.f, spread.y, rawDown);
+                        survives.left2 = measuredShipped(-spread.x * 2.f, 0.f, rawLeft2);
+                        survives.right2 = measuredShipped(spread.x * 2.f, 0.f, rawRight2);
+                        survives.up2 = measuredShipped(0.f, -spread.y * 2.f, rawUp2);
+                        survives.down2 = measuredShipped(0.f, spread.y * 2.f, rawDown2);
+                        frame = ReconstructNormal(p, pLeft, pRight, pUp, pDown,
+                                                  zLeft, zRight, zUp, zDown,
+                                                  zLeft2, zRight2, zUp2, zDown2,
+                                                  z, toEye, tuning, survives);
+                    }
+                    const Vec3 lit = PoolShade(nearLamp, p, frame, nearCamera);
+                    pool.luminance[index] = lit.x * .3f + lit.y * .5f + lit.z * .2f;
+                    pool.intact[index] = frame.intact;
+                    pool.depth[index] = z;
+                    pool.position[index] = p;
+                    pool.normal[index] = frame.normal;
+                }
+            }
+            return pool;
+        };
+
+        // The copy metric. The copies are shape-scale pools of wrong light on
+        // the ground beside a silhouette; the residual that remains after the
+        // fix is a 1-2 px rim ON the silhouette (and the composite's own
+        // upsample outline) - pixel-scale. Box-filter both results first so
+        // the metric reads the shapes and not the rim, then measure the
+        // deviation from the true-normal shading on ground within a band
+        // around every silhouette, normalized by the LOCAL true level (the
+        // pool varies by orders of magnitude) and only where that level is
+        // real light.
+        auto copyError = [&](const Composite& got, const Composite& want) {
+            std::vector<float> smoothGot(size_t(kWidth) * kHeight, 0.f);
+            std::vector<float> smoothWant(size_t(kWidth) * kHeight, 0.f);
+            std::vector<float> local(size_t(kWidth) * kHeight, 0.f);
+            for (int y = 2; y + 2 < kHeight; ++y)
+            {
+                for (int x = 2; x + 2 < kWidth; ++x)
+                {
+                    float g = 0.f, w = 0.f;
+                    for (int dy = -2; dy <= 2; ++dy)
+                        for (int dx = -2; dx <= 2; ++dx)
+                        {
+                            g += got.luminance[size_t(y + dy) * kWidth + x + dx];
+                            w += want.luminance[size_t(y + dy) * kWidth + x + dx];
+                        }
+                    smoothGot[size_t(y) * kWidth + x] = g / 25.f;
+                    smoothWant[size_t(y) * kWidth + x] = w / 25.f;
+                    float level = 0.f;
+                    for (int dy = -2; dy <= 2; ++dy)
+                        for (int dx = -2; dx <= 2; ++dx)
+                            level += want.luminance[size_t(y + dy) * kWidth + x + dx];
+                    local[size_t(y) * kWidth + x] = level / 25.f;
+                }
+            }
+            float peak = 0.f;
+            double sum = 0;
+            size_t n = 0;
+            for (int y = 12; y + 12 < kHeight; ++y)
+            {
+                for (int x = 12; x + 12 < kWidth; ++x)
+                {
+                    const size_t i = size_t(y) * kWidth + x;
+                    if (near.material[i] != 1) continue;
+                    bool band = false;
+                    for (int dy = -12; dy <= 12 && !band; dy += 3)
+                        for (int dx = -12; dx <= 12 && !band; dx += 3)
+                            if (near.material[i + size_t(dy) * kWidth + dx] != 1) band = true;
+                    if (!band) continue;
+                    peak = std::max(peak, local[i]);
+                }
+            }
+            const float floor = peak * 0.10f;
+            for (int y = 12; y + 12 < kHeight; ++y)
+            {
+                for (int x = 12; x + 12 < kWidth; ++x)
+                {
+                    const size_t i = size_t(y) * kWidth + x;
+                    if (near.material[i] != 1) continue;
+                    bool band = false;
+                    for (int dy = -12; dy <= 12 && !band; dy += 3)
+                        for (int dx = -12; dx <= 12 && !band; dx += 3)
+                            if (near.material[i + size_t(dy) * kWidth + dx] != 1) band = true;
+                    if (!band) continue;
+                    if (local[i] < floor) continue;
+                    sum += std::abs(smoothGot[i] - smoothWant[i]) / local[i];
+                    ++n;
+                }
+            }
+            return n ? float(sum / double(n)) : 0.f;
+        };
+
+        // LIGHT SMOOTHING is the artistic window scale; the copies were
+        // reported at every setting with the worst at the shipped one.
+        struct SmoothRow { const char* name; float scale; };
+        const SmoothRow smooths[] = { { "25% ", .25f }, { "100%", 1.f }, { "400%", 4.f } };
+        float shipped[3] = {}, drowned[3] = {};
+        for (int s = 0; s < 3; ++s)
+        {
+            const NormalTuning tuning = DefaultNormalTuning(smooths[s].scale);
+            const Pool truth = evaluateNear(.75f, tuning, true, false);
+            const Pool current = evaluateNear(.75f, tuning, false, false);
+            const Pool previous = evaluateNear(.75f, tuning, false, true);
+            const Composite truthOnScreen = CompositePool(near, truth, nearProj, compositeTuning, false);
+            const Composite currentOnScreen = CompositePool(near, current, nearProj, compositeTuning, false);
+            const Composite previousOnScreen = CompositePool(near, previous, nearProj, compositeTuning, false);
+            shipped[s] = copyError(currentOnScreen, truthOnScreen);
+            drowned[s] = copyError(previousOnScreen, truthOnScreen);
+            std::printf("     smoothing %s: near-silhouette copy error %.4f (was %.4f)\n",
+                        smooths[s].name, shipped[s], drowned[s]);
+        }
+        // The copy is a shape-scale error, not a rim: the previous weighting
+        // left whole slabs of wrong light beside every silhouette at the
+        // shipped smoothing. That is the regression this pins - at the
+        // settings where the copies were reported. At maximum smoothing every
+        // window near an object is contested and the pool is soft and wrong in
+        // BOTH versions; the pin there is honesty: no worse than before.
+        Check(drowned[0] > 1.25f * shipped[0] && drowned[1] > 1.25f * shipped[1],
+              "the slope-drowned step detection is what painted the copies (the regression this pins)");
+        Check(shipped[0] < 0.05f && shipped[1] < 0.15f,
+              "a nearby silhouette paints no copy into the pool at ordinary smoothing");
+        Check(shipped[2] <= drowned[2] * 1.1f,
+              "at maximum smoothing the pool is no worse than the weighting it replaced");
+        Pass("nearby characters and objects no longer paint copies into the pool");
+    }
+
     // --------------------------------------------------------- the mirror ---
     {
         // The core is only worth having if the shipped shaders still spell it.
@@ -895,23 +1313,35 @@ int main()
         Check(surface.find("float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);") != std::string::npos &&
               surface.find("float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);") != std::string::npos,
               "the surface pass runs the edge test in inverse depth");
+        Check(surface.find("float zL2=Linear(rawL2),zR2=Linear(rawR2),zU2=Linear(rawU2),zD2=Linear(rawD2);") != std::string::npos &&
+              surface.find("float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);") != std::string::npos,
+              "the surface pass linearizes the outer taps it feeds to the step test");
         Check(Near(InverseDepth(50.f), 0.02f, 1e-6f) && Near(InverseDepth(0.f), 1000.f, 1.f),
               "inverse depth stays finite at the camera");
-        Check(surface.find("float edge=smoothstep(absolute,absolute*4,curv)*smoothstep(.30,.85,curv/max(dA+dB,absolute));") != std::string::npos,
-              "the surface pass uses the relative edge test");
-        Check(surface.find("float asym=(dA-dB)/max(max(dA,dB),1e-4);") != std::string::npos,
-              "the surface pass measures the outlier side against the larger side");
-        Check(surface.find("float2 wx=AxisWeights(abs(iL-iC),abs(iR-iC),abs(iL+iR-2*iC),absolute,step(rawL,.99990),step(rawR,.99990));") != std::string::npos,
-              "the surface pass tells the weights which taps found a surface");
-        Check(surface.find("float veto=6*min(dA,dB)+absolute;") != std::string::npos &&
-              Near(TapVetoRange(0.02f, 0.003f, 0.001f), 0.019f, 1e-5f) &&
-              TapVetoRange(0.01f, 0.01f, 0.001f) >= 0.01f,
-              "the surface pass vetoes a side that is a different surface entirely");
+        Check(surface.find("float fire=smoothstep(absolute,absolute*4,curv)*smoothstep(.25,.55,curv/max(disagreements,absolute));") != std::string::npos &&
+              surface.find("float curv=abs(iL+iR-2*iC);") != std::string::npos &&
+              surface.find("float disagreements=abs(iL-iC)+abs(iR-iC);") != std::string::npos,
+              "the surface pass closes over a step at once, against both the noise floor and the terrain's own relief");
+        Check(surface.find("float qL=surf2L>0?abs(iL2-2*iL+iC):0.;") != std::string::npos &&
+              surface.find("float qR=surf2R>0?abs(iR2-2*iR+iC):0.;") != std::string::npos,
+              "the surface pass names the step's side with a per-side second difference");
+        Check(surface.find("float dropL=fire*smoothstep(.7,.9,qL/max(qL+qR,absolute));") != std::string::npos &&
+              surface.find("float dropR=fire*smoothstep(.7,.9,qR/max(qL+qR,absolute));") != std::string::npos,
+              "the surface pass drops only the side that stood alone with the step");
+        Check(surface.find("float2 wx=AxisWeights(iL,iR,iC,iL2,iR2,absolute,surfL,surfR,surfL2,surfR2);") != std::string::npos &&
+              surface.find("float2 wy=AxisWeights(iU,iD,iC,iU2,iD2,absolute,surfU,surfD,surfU2,surfD2);") != std::string::npos,
+              "the surface pass feeds the outer taps to the step test on both axes");
+        Check(surface.find("if(surfL<=0||surfR<=0) return float2(surfL>0?1.:0.,surfR>0?1.:0.);") != std::string::npos,
+              "the surface pass hands a window that measured nothing to the other side");
+        Check(surface.find("float surfL=step(rawL,.99990)*step(1e-20,dot(uvL-uv,uvL-uv));") != std::string::npos &&
+              surface.find("float surfL2=step(rawL2,.99990)*step(1e-20,dot(uvL2-uv,uvL2-uv));") != std::string::npos,
+              "the surface pass marks sky and the clamp's self-tap as no measurement");
+        Check(Near(SideStep(0.12f, 0.11f, 0.10f, true), 0.f, 1e-6f) &&
+              Near(SideStep(0.14f, 0.13f, 0.10f, true), 0.02f, 1e-6f) &&
+              SideStep(0.5f, 0.2f, 0.1f, false) == 0.f,
+              "the per-side step is zero on a slope, |J| on a step, silent without its outer tap");
         Check(surface.find("float3 n=dot(c,c)>1e-12?normalize(c):-toEye;") != std::string::npos,
               "the surface pass falls back to a facing normal when the window measured nothing");
-        Check(surface.find("if(w.x<=0&&w.y>0) w=float2(0,1);") != std::string::npos &&
-              surface.find("if(w.y<=0&&w.x>0) w=float2(1,0);") != std::string::npos,
-              "the surface pass keeps the surviving side of a window the frame truncated");
         Check(surface.find("float3 tx=((p-pL)*wL+(pR-p)*wR)/max(wL+wR,1e-4);") != std::string::npos,
               "the surface pass takes its tangent between the taps, not from their midpoint");
         Check(surface.find("float2 i=min(floor(saturate(uv)/texel.xy),1/texel.xy-1);") != std::string::npos &&
@@ -925,8 +1355,8 @@ int main()
               "the composite blends a 1.5-texel tent over a 3x3 window");
         Check(surface.find("kernel*0.01") != std::string::npos,
               "the composite keeps its continuity floor at the wider kernel's share");
-        Check(Near(tuning.relativeEdgeLow, .30f, 1e-6f) && Near(tuning.relativeEdgeHigh, .85f, 1e-6f),
-              "the core's shipped relative edge band is the band the shader spells");
+        Check(Near(tuning.edgeFloor, 0.10f, 1e-6f) && Near(tuning.edgeSlope, 0.004f, 1e-6f),
+              "the core's shipped step scales are the scales the shader receives");
         Check(Near(compositeTuning.support, 1.5f, 1e-6f) && Near(compositeTuning.floor, .01f, 1e-6f),
               "the core's shipped kernel is the kernel the composite spells");
         Pass("the shipped shaders still mirror LocalLightingCore.h");
