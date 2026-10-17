@@ -59,7 +59,10 @@ $budgets = @{
     'precipitationHLSL'      = 512
     # Water pixel stage, capped on explicit request: 2048 is ~3x the slots
     # it actually uses (642 measured 2026-10-14, ~580 after the 2026-10-17
-    # CSE pass; see docs/water-rendering.md), so the ceiling guards against
+    # CSE pass, and round 5's quality ladder - the mid octave, the bed-slope
+    # shore, the swash/backwash and the foam lace - is estimated to add
+    # roughly eighty at the top level while the marches now cost less on
+    # average; see docs/water-rendering.md), so the ceiling guards against
     # a pathological edit (an unrolled march, a forgotten constant array)
     # rather than acting as a design input on wave-train quality.
     'source'                 = 2048

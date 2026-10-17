@@ -3,6 +3,7 @@
 #include "../src/Water/WaveField.h"
 #include "../src/Water/WaterNoise.h"
 #include "../src/Water/WaterSeaState.h"
+#include "../src/Water/WaterQuality.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -335,8 +336,18 @@ int main() try
     // The band now runs down to a five yard wave, so the short trains cross the long ones at
     // the scale the chop lives at instead of leaving six crest families to regroup into lines.
     // Two of the eight are displaced and forwarded to shading; six are evaluated only there.
+    // A third - the twenty yard mid wave - joins them at WATER QUALITY 8 and above, where the
+    // mesh is allowed to spend the vertices on it; the two-train count stays the DEFAULT the
+    // ladder ships at, which is why both numbers are pinned here and the ceiling is a separate
+    // constant rather than a change to this one.
     static_assert(kTrainCount==8,"the swell is eight trains: two the mesh can hold, six for the shading");
     static_assert(kGeometryTrainCount==2,"the vertex stage carries the two longest trains only");
+    static_assert(kGeometryTrainCountMax==3&&kGeometryTrainCount<kGeometryTrainCountMax,
+        "the mesh can be handed one more train, the mid wave, and does not ship with it");
+    Require(MeshNormalization(kGeometryTrainCount)==1.f,
+        "the shipped two-train mesh is not renormalized, so WAVE HEIGHT is the height it always was");
+    Require(MeshNormalization(kGeometryTrainCountMax)<1.f&&MeshNormalization(kGeometryTrainCountMax)>.7f,
+        "the three-train mesh scales its lift and slide down together, so it adds shape and not size");
     for (int train=0;train<kTrainCount;++train)
         Require(std::fabs(kTrainRadians[train]*kTrainCells[train]-kTwoPi)<1e-4f&&
                 std::fabs(kTrainDirX[train]*kTrainDirX[train]+kTrainDirY[train]*kTrainDirY[train]-1.f)<1e-4f,
@@ -367,11 +378,25 @@ int main() try
     Require(kMaxPinch>1.65f&&kMaxPinch<1.85f,"the eight-train pinch budget is the one the shading clamp assumes");
     Require(kGeometryPinch>kTrainWeight[0]*kTrainRadians[0]&&kGeometryPinch<kMaxPinch,
             "the mesh folds against the two trains it displaces, not the eight it shades");
+    // The mid wave the highest quality levels also displace: its pinch, after the
+    // renormalization that keeps the peak lift authored, is still far inside the eight-train
+    // budget the shading clamp assumes, and the renormalization makes the fold budget SMALLER
+    // than the two-train one times its extra weight would suggest. Both are pinned because a
+    // level that lifted a third train without rescaling it would be the one place a slider
+    // could change how tall the authored waves are.
+    Require(kMeshPinchMax>kGeometryPinch&&kMeshPinchMax<kMaxPinch,
+            "the three-train mesh folds against the trains it displaces, and stays inside the shading budget");
+    Require(GeometryPinch(kGeometryTrainCountMax)*MeshNormalization(kGeometryTrainCountMax)<kMeshPinchMax+1e-6f,
+            "the three-train pinch is the renormalized one the ceiling is written against");
     // The envelope multiplies the slide as well as the lift, so the worst Jacobian the mesh
     // can be handed is the shipped steepness at the TOP of a set, not at its average. Written
     // against kGeometryPinch (not kMaxPinch) because the four short trains never move a
     // triangle; 1 - that is how far the shading's .3 floor can be trusted to stay honest.
     Require(kGerstnerSigmaMax*kGeometryPinch*kGroupMax<1.f,"the Gerstner mesh cannot fold at the top of a set");
+    // ...and the same bound for the three-train mesh a high level asks the vertex stage to
+    // displace, which is the case the shipped two-train number cannot speak for.
+    Require(kGerstnerSigmaMax*kMeshPinchMax*kGroupMax<1.f,
+            "the Gerstner mesh cannot fold at the top of a set with the mid wave displaced too");
     Require(kGroupBase>0.f&&kGroupBase+kGroupDepth<=1.15f,"grouping only ever dims a patch, never doubles it");
     {
         // The optimized shader sends the two long trains' sin/cos pairs from the
@@ -784,9 +809,21 @@ int main() try
                 "geometry waves lift the surface along world up and slide it toward the crest");
         Require(vertex.find("float2 warpedDirA=kDirA+6.5*dot(kDirA,float2(.6,.8))*warpGradient;")
                     !=std::string::npos&&
-                vertex.find("float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB)*gain;")
+                vertex.find("float2 slide=waveControl.y*meshScale*gain")!=std::string::npos&&
+                vertex.find("*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB+midGate*kWeightC*cosC*warpedDirC);")
                     !=std::string::npos,
                 "the Gerstner slide follows the domain-warped crest with its chain-rule direction, inside the set");
+        // The mid wave joins the slide through the SAME renormalization as the lift, and the
+        // warp it rides is the warp the two long trains ride: one direction expression, one
+        // envelope, one scale. A level that added the train to the lift only would leave a
+        // crest that rises without steepening, which is the flat-curve artefact this exists for.
+        Require(vertex.find("float2 warpedDirC=kDirC+6.5*dot(kDirC,float2(.6,.8))*warpGradient;")
+                    !=std::string::npos&&
+                vertex.find("float meshScale=(kWeightA+kWeightB)/(kWeightA+kWeightB+midGate*kWeightC);")
+                    !=std::string::npos&&
+                vertex.find("float longSwell=(kWeightA*sinA+kWeightB*sinB+midGate*kWeightC*sinC)*meshScale;")
+                    !=std::string::npos,
+                "the mid wave the mesh displaces is warped, enveloped and renormalized like the trains it joins");
         Require(pixel.find("swellSlope=(swellSlope+dot(swellSlope,float2(.6,.8))*warpGradient*6.5)*foreverStyle.x;")
                     !=std::string::npos,
                 "pixel normals apply the full chain rule through the same crest warp");
@@ -800,8 +837,20 @@ int main() try
                     <pixel.find("swellSlope=swellSlope*gain+swell*worldRel.zw;"),
                 "the slope differentiates the envelope (product rule) after the slider, not before");
         Require(pixel.find("swell*=gain;")!=std::string::npos&&
-                pixel.find("float2 slopes=((ripple.yz*.72*filter+rippleFine.yz*.30*filter*filter)*gain+swellSlope)*waveFlow.w;")!=std::string::npos,
+                pixel.find("float2 slopes=((ripple.yz*.72*filter+rippleFine.yz*.30*filter*filter")
+                    !=std::string::npos&&
+                pixel.find("+rippleMid.yz*.40*filter)*gain+swellSlope)*waveFlow.w;")!=std::string::npos,
                 "the swell height and the chop on top of it ride the same set");
+        // The mid octave is a third chop band, not a fourth term in the shade: it rides the
+        // swell between the base and the fine octave, and it fades with `filter` rather than
+        // with its square because at half the base frequency it stays resolvable twice as far.
+        // Both are pinned because a mid octave faded like the fine one disappears from the
+        // middle distance, which is the only place it was added for.
+        Require(pixel.find("rippleMid=noiseGradient(plane*.46+float2(-wavePhase.x,wavePhase.y)*.87+swell*float2(.40,.66));")
+                    !=std::string::npos&&
+                pixel.find("rippleMid.yz*.40*filter)")!=std::string::npos&&
+                pixel.find("rippleMid.yz*.40*filter*filter")==std::string::npos,
+                "the mid octave rides the swell and fades on the first power of the footprint filter");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
@@ -875,10 +924,25 @@ int main() try
                 occurrences(code,"localLightConstantCache.valid=false")==2,
                 "selected local lights are transformed once per immutable frame instead of once per tile");
         Require(pixel.find("[branch] if(confidence>0)")!=std::string::npos&&
-                pixel.find("stepIndex<8 && hit<1.0")!=std::string::npos&&
-                pixel.find("lightStep<8 && lightVisibility>0")!=std::string::npos&&
+                pixel.find("stepIndex<12 && stepIndex<ssrSteps && hit<1.0")!=std::string::npos&&
+                pixel.find("lightStep<12 && lightStep<lightSteps && lightVisibility>0")!=std::string::npos&&
                 pixel.find("[branch] if(distanceSquared>=radius*radius) continue;")!=std::string::npos,
                 "zero-contribution SSR, celestial and local-light work exits before expensive samples");
+        // WATER QUALITY hands both marches a trip count instead of a compile-time one, so a
+        // level can buy or give back ray steps without a second compiled shader. Pinned in all
+        // three parts: the count arrives from a constant register, the loop is WRITTEN against
+        // the ceiling so any count up to it is legal, and 0 skips the loop through the same
+        // `steps>0` test that decides whether the work is worth doing at all - which is also
+        // what stops a low level from paying for the scene copy it would not read.
+        Require(pixel.find("int ssrSteps=(int)reflectionControl.y;")!=std::string::npos&&
+                pixel.find("int lightSteps=(int)reflectionControl.z;")!=std::string::npos&&
+                pixel.find("reflectionControl.x>.001 && ssrSteps>0 && reflectionBudget>.004")!=std::string::npos&&
+                pixel.find("celestialPath>.00005 && lightSteps>0")!=std::string::npos,
+                "the quality ladder gives both ray marches a trip count, and 0 skips them outright");
+        Require(pixel.find("float q=float(stepIndex+1)*invSteps;")!=std::string::npos&&
+                pixel.find("float q=float(lightStep+1)*invLightSteps;")!=std::string::npos&&
+                pixel.find("/8.0")==std::string::npos,
+                "both marches divide by the steps they were actually given, not by a baked-in eight");
         const std::string volumeCode=stripComments(ReadAlongside("../VolumeIntegration.h"));
         Require(volumeCode.find("const bool volumeConsumesWaterBoundary = enabled && active && HasActiveEffects();")!=std::string::npos&&
                 volumeCode.find("if (volumeConsumesWaterBoundary && target && SUCCEEDED(target->GetDesc(&targetDesc)))")!=std::string::npos&&
@@ -896,26 +960,37 @@ int main() try
         // reconstructs height, x/y slope and pinch without another projection or transcendental.
         // The start belongs only where the angle is evaluated; weights/directions/radians remain
         // in the pixel stage because they cheaply assemble the original analytic terms.
-        for (const char* spelling : {"0.39269908","0.54636394","0.8290376","-0.5591929"})
+        // The displaced set is three trains now, not two: A and B always, and the twenty yard
+        // mid wave C at WATER QUALITY 8 and above. C's coefficients are in BOTH stages for a
+        // different reason than A's and B's are - the vertex stage needs its angle to lift and
+        // slide the mesh, and the pixel stage still evaluates it as one of the six shading
+        // trains it assembles its own eight-train field from - but the requirement is the same:
+        // the two stages cannot disagree about where a crest is.
+        for (const char* spelling : {"0.39269908","0.54636394","0.8290376","-0.5591929",
+                                     "0.78539816","0.9335804","0.3583679","5.68"})
             Require(vertex.find(spelling)!=std::string::npos&&pixel.find(spelling)!=std::string::npos,
                     "both stages assemble the displaced long trains from the same coefficients");
         Require(vertex.find("4.255")!=std::string::npos&&pixel.find("4.255")==std::string::npos&&
-                vertex.find("float longSwell=kWeightA*sinA+kWeightB*sinB;")!=std::string::npos&&
+                vertex.find("float longSwell=(kWeightA*sinA+kWeightB*sinB+midGate*kWeightC*sinC)*meshScale;")
+                    !=std::string::npos&&
                 vertex.find("cosA,cosB")!=std::string::npos&&vertex.find("sinA,sinB")!=std::string::npos&&
                 pixel.find("float2 trigInv=rsqrt(max(uv0.zw*uv0.zw+uv1.zw*uv1.zw,1e-4));")!=std::string::npos&&
                 pixel.find("float2 sin01=uv0.zw*trigInv,cos01=uv1.zw*trigInv;")!=std::string::npos&&
                 pixel.find("float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);")!=std::string::npos&&
                 pixel.find("sincos(t01")==std::string::npos&&pixel.find("float2 t01=")==std::string::npos,
                 "spare UV lanes reconstruct the long waves without pixel-stage sin/cos work");
-        // The six shading-only trains, and their starts: present in the pixel stage, absent
+        // The five shading-only trains, and their starts: present in the pixel stage, absent
         // from the vertex stage. That split is the whole geometry/shading budget, so it is
-        // pinned in both directions rather than left to a reader to notice.
-        for (const char* spelling : {"0.78539816","1.08330781","1.42799666","1.84799568",
-                                     "0.9335804","0.9925462","0.3583679","0.7313537",
+        // pinned in both directions rather than left to a reader to notice. Train C used to be
+        // in this list; it moved to the displaced set above when the mid waves arrived, and a
+        // level below 8 still leaves the vertex stage doing the work of two trains rather than
+        // three, because the gate is the level and not a recompiled shader.
+        for (const char* spelling : {"1.08330781","1.42799666","1.84799568",
+                                     "0.9925462","0.7313537",
                                      "2.46399424","3.22214631","0.4226183","-0.6156615",
-                                     "0.075","5.68","2.822","0.7395","1.2285"})
+                                     "0.075","2.822","0.7395","1.2285"})
             Require(pixel.find(spelling)!=std::string::npos&&vertex.find(spelling)==std::string::npos,
-                    "the six short trains stay out of the displaced pair");
+                    "the five short trains stay out of the displaced three");
         Require(pixel.find("float4 waveSwell2:register(c218);")!=std::string::npos&&
                 pixel.find("float swell=dot(kWgt01,sin01)+dot(kWgt4,sin4)+dot(kWgt2,sin2);")!=std::string::npos&&
                 code.find("controls[72]=wave.swellPhase[6];controls[73]=wave.swellPhase[7];")!=std::string::npos,
@@ -992,9 +1067,15 @@ int main() try
                 pixel.find("(1-saturate(foamAmount))")!=std::string::npos,
                 "foam takes the mirror and the sun road away with it");
         // Per-zone and per-weather authoring has to reach the geometry, not only the
-        // shading: the sea state multiplies the lift, and waves off is flat water.
+        // shading: the sea state multiplies the lift, and waves off is flat water. So does the
+        // quality ladder, through the same argument rather than a second one: a level below the
+        // mesh's own train count hands BuildGeometryWaves `false` and the surface stays a flat
+        // sheet no matter what the zone authored, which is what makes level 0 cheap in the
+        // vertex stage too and not only in the pixel one.
         Require(code.find("BuildGeometryWaves(geometryWavePercent,\n"
-                            "                waveMotion.ScalePercent(),seaAgitation,geometryWavesEnabled,wavesEnabled)")
+                            "                waveMotion.ScalePercent(),seaAgitation,\n"
+                            "                geometryWavesEnabled&&qualityPlan.geometryTrains>=renderer::water::kGeometryTrainCount,\n"
+                            "                wavesEnabled)")
                     !=std::string::npos,
                 "the geometry waves are lifted by the same sea state the shading is");
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
@@ -1069,6 +1150,146 @@ int main() try
         Require(mirror.find("* (sharpness + 2.f) * fresnel") != std::string::npos
                 && mirror.find(".17f / (phaseDen * std::sqrt(phaseDen))") != std::string::npos,
                 "the CPU preview carries both normalizations, so it stays a mirror");
+
+        // ---- WATER QUALITY: one level, one ladder, two shader stages that read it ----
+        // Every other water number in this tree is a LOOK. This one says how much of the look
+        // is evaluated, which makes it the only water control whose value is a cost, so the
+        // cost is pinned as numbers rather than described in a comment: a level is monotone
+        // (a player hunting for frames only ever moves down, and never has to know what a step
+        // buys), level 0 is the flat sheet, and level 6 is the sea that shipped before the
+        // slider existed. The header is read as text too, because the ladder has to be written
+        // down in exactly one place for both stages to mean the same thing by a level.
+        const std::string ladder=stripComments(ReadAlongside("../src/Water/WaterQuality.h"));
+        Require(ladder.size()>2048,"the quality ladder header is readable");
+        Require(kQualityMin==0&&kQualityMax==10&&kQualityDefault==7,
+                "water quality is eleven levels, 0 to 10, and ships at 7");
+        for (int level=kQualityMin;level<=kQualityMax;++level) {
+            const QualityPlan plan=QualityPlanFor(level);
+            Require(plan.level==level,"a level in range resolves to itself");
+            Require(plan.ssrSteps>=0&&plan.ssrSteps<=12&&plan.lightSteps>=0&&plan.lightSteps<=12,
+                    "no level asks a ray march for more steps than the loop is written against");
+            Require(plan.localLights>=0&&plan.localLights<=8,
+                    "no level reflects more emitters than the local-light constant cache holds");
+            Require(plan.chopOctaves>=0&&plan.chopOctaves<=3,
+                    "no level shades more chop octaves than the wave field has");
+            Require(plan.geometryTrains>=0&&plan.geometryTrains<=kGeometryTrainCountMax,
+                    "no level displaces more trains than the swell table has");
+            Require(plan.waves==(level>=kQualityWaves)&&plan.shore==(level>=kQualityShore)
+                    &&plan.midWaves==(level>=kQualityMidWaves)&&plan.midGeometry==(level>=kQualityMidGeometry)
+                    &&plan.foamGlow==(level>=kQualityFoamGlow),
+                    "every resolved gate is its own level, so the CPU and the shader cannot disagree");
+            if (level>kQualityMin) {
+                const QualityPlan below=QualityPlanFor(level-1);
+                Require(plan.ssrSteps>=below.ssrSteps&&plan.lightSteps>=below.lightSteps
+                        &&plan.localLights>=below.localLights&&plan.chopOctaves>=below.chopOctaves
+                        &&plan.geometryTrains>=below.geometryTrains,
+                        "the ladder is monotone in cost: raising the level only ever adds work");
+                Require(plan.waves>=below.waves&&plan.shore>=below.shore&&plan.midWaves>=below.midWaves
+                        &&plan.midGeometry>=below.midGeometry&&plan.foamGlow>=below.foamGlow,
+                        "the ladder is monotone in features: raising the level only ever adds detail");
+            }
+        }
+        Require(QualityPlanFor(-9).level==kQualityMin&&QualityPlanFor(99).level==kQualityMax,
+                "an absurd authored level clamps into the ladder instead of indexing past it");
+        Require(std::string(QualityName(0))=="FLAT"&&std::string(QualityName(6))=="HIGH"
+                &&std::string(QualityName(kQualityDefault))=="ENHANCED"&&std::string(QualityName(10))=="MAX"
+                &&std::string(QualityName(99))=="MAX",
+                "every level has a name a log line can print, including the clamped ones");
+        {
+            const QualityPlan flat=QualityPlanFor(0), shipped=QualityPlanFor(6), enhanced=QualityPlanFor(7);
+            Require(IsFlat(flat)&&!flat.waves&&flat.ssrSteps==0&&flat.lightSteps==0&&flat.localLights==0
+                    &&flat.chopOctaves==0&&flat.geometryTrains==0,
+                    "level 0 is the flat sheet: no waves, no octaves, no marches, no emitter reflections");
+            Require(!IsFlat(shipped)&&shipped.ssrSteps==8&&shipped.lightSteps==8&&shipped.localLights==8
+                    &&shipped.chopOctaves==2&&shipped.geometryTrains==kGeometryTrainCount&&!shipped.midWaves
+                    &&!shipped.midGeometry&&!shipped.foamGlow,
+                    "level 6 is the sea this renderer shipped before the slider existed");
+            Require(enhanced.chopOctaves==3&&enhanced.midWaves&&enhanced.geometryTrains==kGeometryTrainCount
+                    &&!enhanced.midGeometry&&enhanced.ssrSteps==8&&enhanced.lightSteps==8,
+                    "level 7 adds the mid-wave octave and the shore work at the shipped march budget");
+            Require(QualityPlanFor(kQualityMax).midGeometry&&QualityPlanFor(kQualityMax).foamGlow
+                    &&QualityPlanFor(kQualityMax).geometryTrains==kGeometryTrainCountMax
+                    &&QualityPlanFor(kQualityMax).ssrSteps==12&&QualityPlanFor(kQualityMax).lightSteps==12,
+                    "level 10 is everything: displaced mid waves, twelve-step marches, the backlit veil");
+        }
+        // The shore back-flow's run-up inherits WAVE HEIGHT instead of authoring a second
+        // scale, which is what makes it correct in a pond and in a gale without a new number.
+        Require(SwashYards(QualityPlanFor(6),3.f)==0.f,
+                "no run-up below the level that has one, whatever the waves are authored to do");
+        Require(SwashYards(QualityPlanFor(7),0.f)==0.f,
+                "water authored flat has no crest arriving, so nothing runs up it");
+        Require(std::fabs(SwashYards(QualityPlanFor(7),1.f)-1.35f)<1e-6f,
+                "the run-up is the arriving crest's own height, scaled once");
+        Require(SwashYards(QualityPlanFor(7),1e9f)<=2.5f+1e-6f&&SwashYards(QualityPlanFor(7),-4.f)==0.f,
+                "an absurd wave height cannot drain a harbour, and a negative one cannot either");
+        Require(SwashYards(QualityPlanFor(7),std::nanf("x"))==0.f,
+                "a NaN wave height cannot reach the shore masks as a NaN run-up");
+        // The gates reach the pixel stage as ONE number rather than as a pile of resolved
+        // booleans, and the stage compares it against the midpoints this header spells -
+        // `level - .5` - so a level can never sit on a boundary and a float rounding on the way
+        // through a driver cannot flip a feature. The literals are derived from GateFor rather
+        // than typed again here, which is the only way the two halves stay one ladder.
+        const auto gateSpelling=[](int level) {
+            char buffer[16];
+            std::snprintf(buffer,sizeof(buffer),"%g",double(GateFor(level)));
+            return std::string(buffer);
+        };
+        Require(gateSpelling(kQualityChop)=="1.5"&&gateSpelling(kQualityChopFine)=="3.5"
+                &&gateSpelling(kQualityShore)=="3.5"&&gateSpelling(kQualityMidWaves)=="6.5"
+                &&gateSpelling(kQualityFoamGlow)=="9.5",
+                "the ladder's gates are spelled as midpoints, so no level sits on a boundary");
+        for (int gate : {kQualityChop,kQualityChopFine,kQualityMidWaves,kQualityFoamGlow})
+            Require(pixel.find("qualityLevel>="+gateSpelling(gate))!=std::string::npos,
+                    "the pixel stage gates its octaves, lace and veil on the ladder's own midpoint");
+        Require(pixel.find("step("+gateSpelling(kQualityShore)+",qualityLevel)")!=std::string::npos&&
+                pixel.find("step("+gateSpelling(kQualityFoamGlow)+",qualityLevel)")!=std::string::npos,
+                "the shore band and the contact line ask the same midpoint as a 0/1, not as a branch");
+        Require(pixel.find("float qualityLevel=waveFlow.z;")!=std::string::npos&&
+                code.find("controls[46]=float(qualityPlan.level)")!=std::string::npos,
+                "the level rides one constant lane to the pixel stage instead of a register of booleans");
+        Require(code.find("controls[17]=float(qualityPlan.ssrSteps)")!=std::string::npos&&
+                code.find("controls[18]=float(qualityPlan.lightSteps)")!=std::string::npos&&
+                code.find("controls[47]=wavesEnabled&&qualityPlan.waves?1.f:0.f")!=std::string::npos&&
+                code.find("controls[74]=renderer::water::SwashYards(qualityPlan,geometry.amplitude)")
+                    !=std::string::npos,
+                "the ladder reaches the pixel stage as constants: both marches, the wave gate, the run-up");
+        Require(vertex.find("float midGate=waveGroupPhase.z;")!=std::string::npos&&
+                code.find("qualityPlan.midGeometry?1.f:0.f")!=std::string::npos&&
+                code.find("wave.swellPhase[0],wave.swellPhase[1],wave.swellPhase[2],0.f")!=std::string::npos,
+                "the mesh displaces the mid wave on a gate and gets its phase, so a low level pays for two trains");
+        // A level that removes a march has to remove the REASON for the scene copy as well, or
+        // it pays the full-resolution capture to feed a loop that no longer runs. That is what
+        // makes level 0 cheap rather than merely simpler.
+        Require(code.find("reflectionsEnabled&&qualityPlan.ssrSteps>0")!=std::string::npos&&
+                code.find("sunGlintEnabled&&qualityPlan.lightSteps>0")!=std::string::npos,
+                "a level with no marches stops asking for the scene copy it would not read");
+        Require(code.find("unsigned count=std::min<unsigned>(unsigned(std::max(qualityPlan.localLights,0))")
+                    !=std::string::npos&&
+                occurrences(code,"cache.localLights")!=std::string::npos,
+                "a level clamps the emitter reflections on the CPU, where the lights are transformed");
+        // The slider and the ini are the two places a player and a supporter set the level, and
+        // both have to agree with the header's own bounds, or the overlay offers a level the
+        // renderer does not resolve.
+        {
+            const std::string ini=ReadAlongside("../GraphicsEffects.ini");
+            Require(ini.find("Quality=7")!=std::string::npos,
+                    "the shipped ini asks for the default level, so an untouched install gets level 7");
+            const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
+            Require(overlay.find("L\"Water\",L\"Quality\"")!=std::string::npos&&
+                    overlay.find("WATER QUALITY (0 FLAT 6 HIGH 10 MAX)\",0,10,1,7}")!=std::string::npos,
+                    "water quality is an eleven-position slider in F7, bounded and defaulted by the ladder");
+        }
+        // And the CPU mirror resolves the SAME ladder rather than inventing its own gates, so a
+        // published frame at a level is a picture of what the renderer draws at that level.
+        Require(mirror.find("const QualityPlan plan = QualityPlanFor(c.quality);") != std::string::npos
+                && mirror.find("const float swashYards = SwashYards(plan, geometry.amplitude);") != std::string::npos
+                && mirror.find("const NoiseSample rippleMid = plan.chopOctaves >= 3") != std::string::npos
+                && mirror.find("plane.x * .46f - field.ripplePhase[0] * .87f") != std::string::npos,
+                "the CPU preview resolves the same ladder and mirrors the mid octave it adds");
+        Require(mirror.find("const float lace = plan.midWaves") != std::string::npos
+                && mirror.find("const float backwash = plan.midWaves") != std::string::npos
+                && mirror.find("const float beach = 1.f - Saturate(bottomSlope * 1.6f - .32f)") != std::string::npos,
+                "the CPU preview mirrors the foam lace, the backwash and the shore shape read off the bed");
     }
     return 0;
 }

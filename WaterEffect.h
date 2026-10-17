@@ -26,6 +26,7 @@
 #include "src/Water/WaveField.h"
 #include "src/Water/WaterSeaState.h"
 #include "src/Water/WaveMotion.h"
+#include "src/Water/WaterQuality.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 // Backend readiness, NOT the user's switch. Keep shaders/hooks available even
@@ -82,6 +83,12 @@ renderer::water::WaveMotion waveMotion;
 renderer::water::DrawAnchor lastWaveAnchor;
 renderer::FrameClock seaFrameClock;
 void AdvanceSea(float dt);
+// WATER QUALITY, 0..10, and the plan it resolves to. The level is the authored number; the
+// plan is everything both shader stages and this file are allowed to ask about it, and it is
+// resolved once per tuning reload rather than per tile, because the ladder lives in
+// src/Water/WaterQuality.h and a per-draw lookup would be a per-draw way to disagree with it.
+int waterQuality=renderer::water::kQualityDefault;
+renderer::water::QualityPlan qualityPlan=renderer::water::QualityPlanFor(renderer::water::kQualityDefault);
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
@@ -108,6 +115,10 @@ struct LocalLightConstantCache {
     std::uint64_t frameIndex=0,selectionSignature=0;
     float intensityScale=0,reflection=0;
     bool managerEnabled=false,reflections=false,cameraValid=false,viewValid=false,valid=false;
+    // WATER QUALITY's emitter cap is part of the cached payload's identity: a level change has
+    // to invalidate it, or the tiles of the next frame keep mirroring the light count the
+    // previous level asked for until something else happens to invalidate the entry.
+    int localLights=-1;
     float values[68]{};
 };
 LocalLightConstantCache localLightConstantCache;
@@ -159,8 +170,14 @@ inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
 inline bool shaderCreationFailed = false;
 inline bool NeedsScene() {
+    // WATER QUALITY can remove the reason to take the copy at all: below level 2 there is no
+    // screen-space reflection march and below level 3 no celestial occlusion march, so at
+    // those levels the two features stop asking for a full-resolution scene/depth capture they
+    // would never read. Refraction, depth absorption and foam still ask - the shore, the shoal
+    // and the back-flow are all read out of that depth buffer at every level that has them.
     return enabled && active && effectEnabled && renderer::water::NeedsScene(
-        reflectionsEnabled, refractionEnabled, depthEnabled, foamEnabled, sunGlintEnabled);
+        reflectionsEnabled&&qualityPlan.ssrSteps>0, refractionEnabled, depthEnabled, foamEnabled,
+        sunGlintEnabled&&qualityPlan.lightSteps>0);
 }
 bool showStatus=false;
 unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0;
@@ -191,6 +208,9 @@ float4 waveLattice:register(c201);
 // Sharing those numbers is what keeps a displaced crest and the light on it on the same
 // wave, and because each is reduced into a period of its own train, the wrap costs this
 // stage nothing - the displacement needs no anchor of its own.
+// z=the phase of swell train C, the twenty yard wave WATER QUALITY 8 and above also lifts,
+// in the same units and the same wrap - it is c217.x, the phase the pixel stage shades that
+// train with, so a crest this stage lifts is the crest the pixels light. w unused.
 float4 wavePhase:register(c202);
 // xy=the camera anchor for the low-frequency, world-anchored wave warp. Its
 // phase is reduced in the warp noise's own frequency/period, not borrowed from
@@ -201,6 +221,9 @@ float4 waveWarpPhase:register(c203);
 // and gradient through the spare lanes of TEXCOORD4/TEXCOORD7 instead, which is what keeps a
 // set of waves nailed to the terrain while costing the pixel shader one multiply and no
 // interpolant register (see Output below for why there is no twelfth one).
+// z=the mid-wave gate: 1 when the mesh lifts train C as well as the two longest, 0 when it
+// carries the two it has always carried. It is a multiplier rather than a branch because it
+// has to scale the renormalization below at the same time as the train it lets in.
 float4 waveGroupPhase:register(c204);
 // The low-frequency warp and the grouping envelope use the same bounded value-noise
 // hash as the pixel stage. This compact vertex copy keeps lifted crests on the same
@@ -218,21 +241,26 @@ float3 noiseGradient(float2 p) {
     return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
                   du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
 }
-// The two longest swell trains, spelled exactly as src/Water/WaveField.h carries them:
-// unit directions in lattice space, k = 2pi over the wavelength in cells, the share of
-// the authored amplitude each one lifts, and the train's own start in cells. The four
-// shorter trains are shaded but NOT displaced - the client's liquid grid is about four
-// yards apart, and lifting a wave shorter than a handful of facets on it is what
-// facets - so the pixel stage carries eight trains and this stage carries the two the
-// mesh can actually hold.
+// The swell trains this stage displaces, spelled exactly as src/Water/WaveField.h carries
+// them: unit directions in lattice space, k = 2pi over the wavelength in cells, the share of
+// the authored amplitude each one lifts, and the train's own start in cells. The two longest
+// are always displaced; train C - the twenty yard wave - is displaced at WATER QUALITY 8 and
+// above, and is the shortest wave the client's liquid grid (about four yards apart) can carry
+// without faceting, at five facets to a crest. Everything shorter is shaded but NOT displaced:
+// lifting a wave on fewer facets than that is what facets, which is why the pixel stage
+// carries eight trains and this stage carries at most three.
 static const float2 kDirA=float2(1.0,0.0);
 static const float2 kDirB=float2(0.8290376,-0.5591929);
+static const float2 kDirC=float2(0.9335804,0.3583679);
 static const float kRadA=0.39269908;
 static const float kRadB=0.54636394;
+static const float kRadC=0.78539816;
 static const float kWeightA=1.0;
 static const float kWeightB=0.62;
+static const float kWeightC=0.34;
 static const float kStartA=0.0;
 static const float kStartB=4.255;      // .37 of train B's own wavelength
+static const float kStartC=5.68;       // .71 of train C's own wavelength
 // The grouping envelope, in the same units the pixel stage multiplies with: base plus
 // depth times the noise value, and the gradient already scaled by depth and frequency
 // (kGroupFrequency*kGroupDepth) so the pixels can use it as a product rule directly.
@@ -315,15 +343,42 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
     float sinA,cosA,sinB,cosB;
     sincos(thetaA,sinA,cosA);
     sincos(thetaB,sinB,cosB);
+    // MID-WAVES: train C, the twenty yard wave, at WATER QUALITY 8 and above. It is evaluated
+    // from the same wrapped phase the pixel stage shades that train with (c217.x), on the same
+    // warped cell and inside the same grouping envelope, so the crest this stage lifts is the
+    // crest those pixels light - the property the two long trains were packed into UV lanes
+    // for, and the one a mid-scale wave has to keep or it reads as a second unrelated sea
+    // moving under the first. It is the scale the eye reads as "waves" rather than as swell or
+    // as texture: with only A and B displaced, the silhouette against a shore, a hull or the
+    // horizon stays flat while the shading on it moves, which is the tell that a sea is a
+    // picture. Train D (fourteen and a half yards) is why this stops at three - below four
+    // mesh facets to a crest, a displaced wave is a staircase no normal map can hide.
+    float midGate=waveGroupPhase.z;
+    float thetaC=kRadC*(dot(kDirC,swellCell)+wavePhase.z+kStartC);
+    float sinC,cosC;
+    sincos(thetaC,sinC,cosC);
+    // WAVE HEIGHT is a peak lift in yards, so letting a third train in has to add SHAPE and
+    // not SIZE. Dividing the combined lift and slide by the displaced weight sum, times the
+    // two-train sum, leaves both the peak height and the Gerstner slide/lift ratio exactly
+    // what they were, and makes the fold budget smaller rather than larger: three trains now
+    // share the one authored height. See kMeshPinchMax in src/Water/WaveField.h, which is the
+    // number the fold clamp is written against.
+    float meshScale=(kWeightA+kWeightB)/(kWeightA+kWeightB+midGate*kWeightC);
     // These two trig pairs used to be evaluated a second time per pixel. Pack
     // them into spare UV lanes; the pixel stage normalizes the interpolated
     // pairs, combines them with the six shorter trains and applies the shared
-    // chain/product rule. The aggregate remains here only for mesh lift.
-    float longSwell=kWeightA*sinA+kWeightB*sinB;
+    // chain/product rule. The aggregate remains here only for mesh lift. Train C
+    // has no spare lane left (there are exactly eleven, and the envelope already
+    // lives in two of them), so it is evaluated in both stages instead - which
+    // costs the pixels nothing they were not already spending, because C is one
+    // of the six trains the shading has always evaluated for itself.
+    float longSwell=(kWeightA*sinA+kWeightB*sinB+midGate*kWeightC*sinC)*meshScale;
     float lift=waveControl.x*longSwell*gain;
     float2 warpedDirA=kDirA+6.5*dot(kDirA,float2(.6,.8))*warpGradient;
     float2 warpedDirB=kDirB+6.5*dot(kDirB,float2(.6,.8))*warpGradient;
-    float2 slide=waveControl.y*(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB)*gain;
+    float2 warpedDirC=kDirC+6.5*dot(kDirC,float2(.6,.8))*warpGradient;
+    float2 slide=waveControl.y*meshScale*gain
+        *(kWeightA*cosA*warpedDirA+kWeightB*cosB*warpedDirB+midGate*kWeightC*cosC*warpedDirC);
     // slide is in lattice axes; waveControl.w turns the scaled lattice rows back into the
     // unit world directions they were built from, and the same three axes carry the result
     // into view space. Displacement happens after the view transform and along the world
@@ -378,7 +433,12 @@ float4 lightColor:register(c202);
 // x=depth unpack A,y=depth unpack B with the viewport MaxZ folded in, so a
 // captured depth costs one subtraction and one divide; z,w=screen scale.
 float4 reflectionProjection:register(c203);
-// x=SSR strength
+// x=SSR strength, y=screen-space reflection march steps, z=celestial occlusion march
+// steps. Both counts come from the WATER QUALITY ladder in src/Water/WaterQuality.h and
+// are trip counts, not gates: 0 skips the loop through the same test that already
+// stopped it, and the loops are written against 12 so a level can hand them any count
+// up to that without a second compiled shader. w=the capture's depth range, uploaded
+// with the block and not read by this stage.
 float4 reflectionControl:register(c204);
 // x=environment strength,y=max trace distance,z=base thickness,w=capture valid
 float4 reflectionStyle:register(c205);
@@ -398,9 +458,14 @@ float4 waveLattice:register(c209);
 // those two already-evaluated long trains through spare UV lanes instead of
 // spending the same sin/cos work again for every covered pixel.
 float4 wavePhase:register(c210);
-// xy=drift of the client's detail map in its uv, z=the phase of swell train C (same
-// units as c210.zw), w=the wave gate: 0 with WAVES off, so no slope, no distortion, no
-// roughness and no foam survives a switch that is supposed to remove the waves.
+// xy=drift of the client's detail map in its uv, z=WATER QUALITY (0..10), w=the wave gate:
+// 0 with WAVES off - and 0 at quality FLAT, which is the same thing asked for from the
+// other direction - so no slope, no distortion, no roughness and no foam survives a switch
+// that is supposed to remove the waves. The quality lane is the level itself rather than a
+// pile of resolved booleans: this stage compares it against the gates in
+// src/Water/WaterQuality.h, spelled there as `level - .5` so a level can never sit on a
+// boundary, and one lane is why the block the CPU saves, uploads and restores per tile did
+// not have to grow by a register to get a quality slider.
 float4 waveFlow:register(c211);
 // xyz=world up in view space, taken from THIS draw's own matrix (a frame-captured camera
 // is a frame behind, and the client's reflection pass is a different camera entirely),
@@ -424,9 +489,11 @@ float4 absorbTint:register(c216);
 // the four projections of one batch in a single instruction: a float4 the shader can
 // swizzle whole is cheaper than three the shader has to gather.
 float4 waveSwell:register(c217);
-// xy=the phase of swell trains G and H, in the same units as c217; zw unused. The two
-// shortest trains get their own register for the same reason C-F share one: a phase has
-// to arrive contiguous to be added to a batch of projections in one instruction.
+// xy=the phase of swell trains G and H, in the same units as c217; z=the shore back-flow
+// run-up in yards, 0 with the feature off (which is how every gate that reads it also reads
+// "no", so a level below it cannot move a shoreline); w unused. The two shortest trains get
+// their own register for the same reason C-F share one: a phase has to arrive contiguous to
+// be added to a batch of projections in one instruction.
 float4 waveSwell2:register(c218);
 float3 safeNormalize(float3 v) {return v*rsqrt(max(dot(v,v),1e-8));}
 // Analytic value noise on one rotated lattice, evaluated for all four corner
@@ -536,10 +603,15 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // spelled out on the vertex stage's Output struct.
     float gain=kGroupBase+kGroupDepth*waveWarp.w;
     float2 footprint=fwidth(plane);
+    // The pixel's own size in lattice cells, squared. The chop fade below reads it as a
+    // fade; the shore block further down reads the SAME number as the pixel's footprint in
+    // world yards, which is what turns a per-pixel depth difference into a bed slope that
+    // does not move with the resolution or the camera. Two derivatives, computed once.
+    float footprintSquared=dot(footprint,footprint);
     // Fade the unresolved octave by the pixel's own footprint. The swell is never
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
-    float filter=rsqrt(1+flowControl.x*dot(footprint,footprint));
+    float filter=rsqrt(1+flowControl.x*footprintSquared);
     // The vertex stage has already evaluated A/B while displacing the mesh.
     // uv0.zw contains their sines and uv1.zw their cosines. Renormalize both
     // interpolated pairs back onto the unit circle together; this retains the
@@ -577,10 +649,26 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // envelope as well, because the tallest crest of a set is also the pinched one.
     float pinch=controls.x*gain*(dot(kWgt01*kRad01,sin01)+dot(kWgt4*kRad4,sin4)+dot(kWgt2*kRad2,sin2));
     float jacobian=max(1.0-pinch,.3);
+    // WATER QUALITY: one uniform level, resolved on the CPU by src/Water/WaterQuality.h,
+    // which owns the ladder this stage only compares against. Each gate below is that
+    // header's `GateFor(level)` - the level minus a half - so a level can never sit on a
+    // boundary and the two halves of the renderer cannot disagree about what a level means.
+    // Every gate is a comparison against a constant register, so a whole tile takes the same
+    // branch: what a level removes is work the GPU never does, not work hidden behind
+    // per-pixel divergence. The octaves are the expensive part of the wave field - a noise
+    // evaluation is a four-corner hash and a bicubic - and they are the first thing a level
+    // gives up, because a sea read from a distance is a silhouette and a colour long before
+    // it is a texture.
+    float qualityLevel=waveFlow.z;
     // The chop rides the swell instead of scrolling over it: sampling the noise at a
     // coordinate the swell itself offsets is what ties the small ripples to the big
     // forms, so they travel together and the surface reads as one body of water.
-    float3 ripple=noiseGradient(plane+wavePhase.xy+swell*float2(.62,.33));
+    // Skipped below FLAT/LOW: with no octave there is no chop slope, and the analytic
+    // swell alone still shades - the .5 value it is seeded with is the neutral one every
+    // consumer of the sample already treats as "no chop here".
+    float3 ripple=float3(.5,0,0);
+    [branch] if(qualityLevel>=1.5)
+        ripple=noiseGradient(plane+wavePhase.xy+swell*float2(.62,.33));
     // A second, finer chop octave, sampled at a little over twice the base frequency
     // on a phase that runs the other way around the lattice. One noise octave is a
     // texture; two incommensurate ones are weather - the fine octave is what stops
@@ -588,12 +676,32 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // distance where neither is quite resolvable. It fades with the SQUARE of the
     // footprint filter, so it is gone before it can alias, and it rides the swell
     // further than the base octave does, which keeps it glued to the same crests.
-    float3 rippleFine=noiseGradient(plane*2.17+float2(wavePhase.y,-wavePhase.x)*1.31+swell*float2(.9,.47));
-    // waveFlow.w is the wave gate. With WAVES off there is no slope, no refraction
-    // distortion, no roughness and no foam, whatever the field would have said.
+    float3 rippleFine=float3(.5,0,0);
+    [branch] if(qualityLevel>=3.5)
+        rippleFine=noiseGradient(plane*2.17+float2(wavePhase.y,-wavePhase.x)*1.31+swell*float2(.9,.47));
+    // MID-WAVES: the band between the shortest analytic train (a 4.9 yard wavelength) and
+    // the base chop (one 2.5 yard cell) is where a sea carries the texture a player reads
+    // as "waves", and the analytic band alone leaves that band regular - eight sines
+    // interfere, but each one is still a smooth rounded form, and smooth rounded forms at a
+    // fixed scale are what the eye groups back into lines. A third noise octave at just
+    // under half the base frequency (5.4 yard lumps), counter-phased against the base
+    // octave the way the fine one is and riding the swell between the two, breaks that
+    // regularity at exactly the scale that was missing. It fades with `filter` rather than
+    // with its square: at half the base frequency it stays resolvable about twice as far as
+    // the fine octave does, and fading it as early would remove it from the middle distance
+    // where it is the only thing standing between the swell and corduroy. The weight is
+    // authored against the octave's own coordinate, like the fine octave's .30 is, so the
+    // two numbers mean the same thing.
+    float3 rippleMid=float3(.5,0,0);
+    [branch] if(qualityLevel>=6.5)
+        rippleMid=noiseGradient(plane*.46+float2(-wavePhase.x,wavePhase.y)*.87+swell*float2(.40,.66));
+    // waveFlow.w is the wave gate. With WAVES off - or WATER QUALITY at FLAT, which zeroes
+    // it from the other direction - there is no slope, no refraction distortion, no
+    // roughness and no foam, whatever the field would have said.
     // The chop is inside the same envelope as the swell it rides: a patch of sea that is
     // carrying no set has no wind texture either, which is what a calm spot looks like.
-    float2 slopes=((ripple.yz*.72*filter+rippleFine.yz*.30*filter*filter)*gain+swellSlope)*waveFlow.w;
+    float2 slopes=((ripple.yz*.72*filter+rippleFine.yz*.30*filter*filter
+        +rippleMid.yz*.40*filter)*gain+swellSlope)*waveFlow.w;
     // The chop's sampled VALUE fades with the footprint too, not only its slope:
     // unresolved value noise aliases into a fixed screen-aligned grid, which is what
     // read as square patterns on distant water. The swell keeps its value, so crest
@@ -646,10 +754,38 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
     float column=min(effectiveDepth,400.0);
+    // SHORE UNDERSTANDING: the captured depth buffer is the only geometry this pass can
+    // read, so its slope is the only description of a shore available to it - and a slope
+    // measured PER PIXEL is not a slope. It halves when the resolution doubles and halves
+    // again when the camera steps back, which is why the shoal foam below used to exist
+    // only within a few yards of the water's edge and disappear on a bar seen from the
+    // beach above it. The lattice footprint this stage already took for the chop fade is
+    // the pixel's own size in world yards - one lattice cell is `cellYards`, and the lattice
+    // rows are unit world directions scaled by 1/cell - so dividing by it turns a
+    // screen-space difference into the dimensionless bed slope it was always meant to be:
+    // the same number at any resolution and any distance, and the same number the CPU mirror
+    // measures in world space, which is the reading the look was tuned against. It carries
+    // the view angle's 1/cos, because the separation this pass can read is along the view
+    // axis rather than vertical; that is a property of the camera and not of the resolution,
+    // and the authored gain absorbs it.
+    float bedSlope=length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))
+        /max(sqrt(footprintSquared)*rsqrt(max(dot(waveLattice.xy,waveLattice.xy),1e-8)),1e-3);
+    // A gentle beach and a rock wall both read as "the bottom comes up fast", and they are
+    // not the same water: a beach carries a wide swash zone with sheets running up it and
+    // draining back out, a wall carries a narrow bright contact line and nothing that can
+    // run up it. One number separates them - about twelve degrees of bed is a beach, about
+    // forty is a wall - and it is the only shore shape this pass can know.
+    float beach=1-saturate(bedSlope*1.6-.32);
     // Shallow water barely bends the world; the deeper the column, the further the
     // refracted sample is pulled. This is what keeps a bar and a shoreline crisp
     // while open water shimmers.
-    float bend=waterStyle.x*saturate(column*.05+.25);
+    // SOFT CONTACT, at WATER QUALITY 10: the last inches of a waterline are a meniscus, not
+    // a step. Pulling the refracted sample by the full wave slope right at the contact line
+    // is what leaves a hard bright seam along every shore and every rock standing in it;
+    // fading the offset over the first yard lets the bottom come up through undisturbed
+    // water instead. One lerp on a uniform gate, so a level below it is untouched.
+    float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));
+    float bend=waterStyle.x*saturate(column*.05+.25)*contact;
     float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
     // Reject distortion across foreground silhouettes, rather than pulling
     // a bridge/character into the water. Missing depth keeps the native body.
@@ -685,7 +821,27 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Both gates matter: facing away from the light, or in a trough, there is no glow.
     float backlit=saturate(-vDotL*1.7-.45)*saturate(detail.y*1.7-.45);
     inScatter*=1+2.2*backlit;
-    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
+    // BACK FLOW: the sheet that runs up a beach and drains back out again. The driver is the
+    // longest swell train this pixel is standing in - the same analytic train A the vertex
+    // stage lifted the mesh with, arriving through the same interpolated sine/cosine pair -
+    // so the run-up comes in with the crest a player can already see coming, and the drain
+    // follows it back out at the speed the sea is really travelling. No second clock and no
+    // new phase: sin01.x is that crest's height here and cos01.x its rate of change, which is
+    // positive while the water is rising and negative while it is leaving.
+    //
+    // Depth is the shoreline's own coordinate - "up the beach" is "less water over the
+    // bottom" - so the whole effect is a shift of the depth the shore masks are built from,
+    // and it needs no shore normal this pass has no way to read. It moves the shore and foam
+    // edges ONLY: the absorption column, the refraction and the in-scattering above still
+    // measure the water that is really there, because a sheet running up a beach is thin
+    // water, and thin water is exactly what those terms describe.
+    float runUp=waveSwell2.z*beach;   // yards of waterline travel, 0 with the feature off
+    float draining=step(.0001,waveSwell2.z)*saturate(-cos01.x*1.8);
+    // A beach spreads its shore band wider than a wall does, because the sheet that runs up
+    // one keeps running: the same bed slope that says "beach" says how far up it goes.
+    float swashWidth=1+beach*1.4*step(3.5,qualityLevel);
+    float swashDepth=max(effectiveDepth-sin01.x*runUp,0);
+    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1)*swashWidth,swashDepth);
     float shore=depthValid*shallowEdge;
     // Foam lives on the crest of a wave and in the chop that breaks it, so it is gated on
     // the swell's own height rather than on a slope projected down one arbitrary direction.
@@ -709,12 +865,46 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float foamThreshold=.82+(1-foamPattern)*.14;
     float whitecap=smoothstep(foamThreshold,foamThreshold+.14,capBand);
     // Foam where the bottom comes up fast is the one cue available for a river hitting a
-    // rock: the depth buffer is the only geometry this pass can read.
-    float shoal=saturate(length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))*bodyStyle.w-.3);
+    // rock: the depth buffer is the only geometry this pass can read. It reads the bed slope
+    // above rather than a per-pixel depth difference, so it is the same foam at any
+    // resolution and at any distance instead of a term that only existed close to the camera;
+    // it needs a real floor to be a shoal at all, and it stops twenty yards down, because a
+    // cliff face under deep water is not water breaking over a bar. Both gates are what the
+    // CPU mirror has always measured - it reads the world-space bed slope and gates it the
+    // same way, and the published frames were tuned against that reading.
+    float shoal=depthValid*saturate(bedSlope*bodyStyle.w*2.0-.3)*saturate(1-column*.05);
     float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter)
         *(.35+.65*foamPattern);
-    float foamAmount=saturate((shore*waterStyle.z*(.35+.65*foamWind)
-        +(crestMask*.45+whitecap*1.15+shoal*.6)*foamWind*foreverStyle.w)*crest);
+    // FOAM LACE, at WATER QUALITY 7: a mask decides WHERE foam is and says nothing about
+    // what it looks like, and one scalar of coverage can only ever be a grey sheet - which is
+    // what "the foam is nice but flat" was. Real foam is a lace: bright filaments with dark,
+    // water-filled gaps between them, at three scales at once. All three are already sampled
+    // for the surface itself, so this costs arithmetic and no noise evaluation - the fine
+    // chop is the fleck, the mid octave is the lump a fleck sits on, and the broad warp is
+    // the tongue both are torn out of. It multiplies the crest terms whole, because a whitecap
+    // IS a broken streak, and only .45 of the shore term, because a sheet running up a beach
+    // is continuous in a way a cap on a crest is not.
+    float lace=1;
+    [branch] if(qualityLevel>=6.5) {
+        float fleck=saturate(rippleFine.x*1.7-.35);
+        float lump=saturate(rippleMid.x*1.6-.30);
+        lace=saturate(.30+.80*fleck+.48*lump);
+    }
+    // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline, in streaks
+    // the next sheet pushes up and the drain pulls back out. Contours of the captured depth
+    // are the shoreline's own coordinate, so a band in depth is a band along the shore, and
+    // moving that band with the arriving swell is the retreat the eye reads as back flow -
+    // the water going back out, taking the foam with it. The chop value tears the bands into
+    // flecks so they can never read as rings painted on the water, `shallowEdge` keeps them
+    // inside the swash zone they belong to, and `draining` is what makes them a backwash
+    // rather than a run-up: the streaks are only there while the sheet is leaving.
+    float backwash=0;
+    [branch] if(qualityLevel>=6.5)
+        backwash=saturate(.55+.45*sin(swashDepth*2.4-sin01.x*2.1))*(.30+.70*foamPattern)
+            *saturate(shallowEdge*2.2)*draining;
+    float foamAmount=saturate((shore*waterStyle.z*(.35+.65*foamWind)*lerp(1,lace,.45)*(1+.45*draining)
+        +(crestMask*.45+whitecap*1.15+shoal*.6)*foamWind*foreverStyle.w*lace
+        +backwash*waterStyle.z*lace)*crest);
     // Foam is not a decal on the water, it is a different surface: it does not mirror the
     // sky and it does not carry the sun road. Adding it to the roughness here spreads the
     // reflection toward the sky term and widens the glint lobe, and the two multipliers
@@ -730,19 +920,41 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float3 sky=lerp(fogColor.rgb,fogColor.rgb*.5+float3(.015,.045,.11)*saturate(sunElev*2+.25),
                     rayUp*rayUp);
     sky+=lightPos*pow(saturate(dot(ray,l)),160)*waterTint.a;
+    // Real Schlick with water's index of refraction (F0 = 0.02). This is the term
+    // that decides whether water reads as glass or as a mirror, and the hand-tuned
+    // curve it replaces was the one thing that could not be authored per body. It is
+    // evaluated BEFORE the march below because the march's whole result is multiplied
+    // by it on the way to the screen, and that product is the only honest answer to
+    // "is this pixel worth twelve depth reads".
+    float3 H=safeNormalize(v+l);
+    float NoV=max(dot(wave,v),1e-4);
+    float foreverFresnel=saturate(1-NoV);
+    float fresnel=(.02+.98*pow(foreverFresnel,5.0))*foreverStyle.z;
     // 2. Screen-space reflections against the pre-water copy, perturbed by the
-    // wave normal. Eight steps: the extra four bought a marginally sharper hit
-    // and cost the whole frame budget of two other terms.
+    // wave normal. WATER QUALITY hands this loop its trip count - 0 skips it through
+    // the same test that already stopped it, 12 is the ceiling the loop is written
+    // against, 8 is what this shader always ran. Fewer steps is a coarser hit, and a
+    // coarse hit on a surface this rough is indistinguishable from a sharp one once
+    // the roughness mix below has spread it back toward the sky.
     float3 environment=sky;
     float3 reflected=environment;
     float hit=0;
     // The wave offset is the same on every step of the march: evaluate it
     // once instead of eight times.
     float3 waveSample=wave*.15;
-    if(reflectionStyle.w>.5 && reflectionControl.x>.001) {
+    int ssrSteps=(int)reflectionControl.y;
+    // The budget test is the march's OWN output expression rather than a guess about it:
+    // whatever the loop finds is multiplied by fresnel before it can reach the screen, so at
+    // near-normal incidence - looking straight down into water, which is most of the covered
+    // pixels in a harbour - the whole march could only ever have contributed under half a
+    // percent of the reflection mix. Bounded by the same two constants that mix uses, so the
+    // skip is a statement about this shader's arithmetic and not a tuning judgement.
+    float reflectionBudget=fresnel*(reflectionStyle.x*.5+reflectionControl.x*1.5);
+    if(reflectionStyle.w>.5 && reflectionControl.x>.001 && ssrSteps>0 && reflectionBudget>.004) {
         float3 hitColor=environment;
-        [loop] for(int stepIndex=0;stepIndex<8 && hit<1.0;++stepIndex) {
-            float q=(stepIndex+1)/8.0;
+        float invSteps=1.0/float(ssrSteps);
+        [loop] for(int stepIndex=0;stepIndex<12 && stepIndex<ssrSteps && hit<1.0;++stepIndex) {
+            float q=float(stepIndex+1)*invSteps;
             float traceDistance=.45+q*q*reflectionStyle.y;
             float3 samplePosition=viewPos+waveSample+ray*traceDistance;
             // Pre-compute reciprocal Z once: the two UV components share the
@@ -778,13 +990,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // sharp screen-space hit back toward the smooth sky by the wave's own roughness
     // is the cheap stand-in for the blurred mip chain this pass cannot sample.
     reflected=lerp(reflected,environment,saturate(rough*1.6));
-    // Real Schlick with water's index of refraction (F0 = 0.02). This is the term
-    // that decides whether water reads as glass or as a mirror, and the hand-tuned
-    // curve it replaces was the one thing that could not be authored per body.
-    float3 H=safeNormalize(v+l);
-    float NoV=max(dot(wave,v),1e-4);
-    float foreverFresnel=saturate(1-NoV);
-    float fresnel=(.02+.98*pow(foreverFresnel,5.0))*foreverStyle.z;
     // One GGX lobe, widened by the sun's own angular disc. That widening is what
     // stretches a low sun into the long shimmering band in the reference while a
     // high sun keeps a short tight one - and it costs nothing per step. This shader
@@ -804,11 +1009,17 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // March from this water point toward the sun/moon through the captured
     // pre-water depth buffer. Buildings and terrain suppress direct glint,
     // while ambient sky reflection remains visible under cover.
+    // WATER QUALITY hands this march its trip count the same way it hands the reflection
+    // march one: 0 skips it and leaves the glint unoccluded (which is what the level is for
+    // - a sun road that ignores buildings costs nothing to draw), 12 answers the question at
+    // every step the reflection march is allowed to take.
     float lightVisibility=1.0;
     float3 waveLight=wave*.18;
-    if(reflectionStyle.w>.5 && celestialPath>.00005) {
-        [loop] for(int lightStep=0;lightStep<8 && lightVisibility>0;++lightStep) {
-            float q=(lightStep+1)/8.0;
+    int lightSteps=(int)reflectionControl.z;
+    if(reflectionStyle.w>.5 && celestialPath>.00005 && lightSteps>0) {
+        float invLightSteps=1.0/float(lightSteps);
+        [loop] for(int lightStep=0;lightStep<12 && lightStep<lightSteps && lightVisibility>0;++lightStep) {
+            float q=float(lightStep+1)*invLightSteps;
             float traceDistance=1.5+q*q*110.0;
             float3 lightSample=viewPos+waveLight+l*traceDistance;
             // Pre-compute reciprocal Z once: the two UV components share the
@@ -890,7 +1101,22 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     rgb+=sheenColor*pathEnergy*(.35+.65*fresnel);
     // Lit with a wrapped diffuse, so foam on the shaded side of a crest is still visible
     // against the water it sits on, and scaled by the authored foam brightness.
-    rgb+=(deepTint.rgb*.3+float3(.42,.48,.43))*foamAmount*(.55+.45*saturate(NoL+.25))*deepTint.a;
+    // At WATER QUALITY 7 the colour is a ramp on the coverage the masks already produced
+    // instead of one flat white: a thick cap scatters everything back and reads as the bright
+    // end, a thin veil over a crest lets the water through and reads darker and greener, which
+    // is what the lace above is a picture of. Below that level the colour is the shipped one
+    // exactly, so the ramp cannot move the look of a machine that did not ask for it.
+    float3 foamColour=deepTint.rgb*.3+float3(.42,.48,.43);
+    [branch] if(qualityLevel>=6.5)
+        foamColour=lerp(deepTint.rgb*.55+float3(.28,.34,.32),foamColour,saturate(foamAmount*1.35));
+    rgb+=foamColour*foamAmount*(.55+.45*saturate(NoL+.25))*deepTint.a;
+    // And at WATER QUALITY 10 the veil glows when the source is behind it: foam is air and
+    // water, and a thin one lit from behind is translucent in exactly the way the crest above
+    // is, which is the same cue the in-scattering lobe gives the body of the water. It uses
+    // the one dot the lobe already computed, so it costs a gate and a multiply.
+    [branch] if(qualityLevel>=9.5)
+        rgb+=foamColour*(1-saturate(foamAmount*1.35))*foamAmount*saturate(-vDotL*1.4-.35)
+            *saturate(sunElev*2.+.2)*.55*deepTint.a;
     if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
@@ -921,6 +1147,14 @@ void ReloadTuning(){
     wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",1)!=0;
     reflectionsEnabled=ReadTuning(L"ReflectionsEnabled",1)!=0;refractionEnabled=ReadTuning(L"RefractionEnabled",1)!=0;
     depthEnabled=ReadTuning(L"DepthEnabled",1)!=0;foamEnabled=ReadTuning(L"FoamEnabled",1)!=0;sunGlintEnabled=ReadTuning(L"SunGlintEnabled",1)!=0;
+    // WATER QUALITY owns how much work the surface is allowed to take; every other number in
+    // this block owns how it looks. It is read before them because both the capture decision
+    // above and the constants this file uploads come out of the plan it resolves to, and the
+    // ladder itself lives in one place - src/Water/WaterQuality.h - so a level means the same
+    // thing here, in the two shader stages and in the F7 menu.
+    waterQuality=std::clamp(ReadTuning(L"Quality",renderer::water::kQualityDefault),
+        renderer::water::kQualityMin,renderer::water::kQualityMax);
+    qualityPlan=renderer::water::QualityPlanFor(waterQuality);
     strength=std::clamp(ReadTuning(L"RipplePermille",18),0,50)*.001f;
     normalStrength=std::clamp(ReadTuning(L"NormalPercent",28),0,60)*.01f;
     specularStrength=std::clamp(ReadTuning(L"SpecularPercent",115),0,400)*.01f;
@@ -975,7 +1209,8 @@ void ReloadTuning(){
         // on (see the chain's own timing line in ModernWoWRenderer.cpp). The text is
         // unchanged, so an existing log still reads the same way.
         std::ostringstream row;
-        row<<"tuning enabled="<<effectEnabled<<" master="<<active<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
+        row<<"tuning enabled="<<effectEnabled<<" master="<<active<<" quality="<<waterQuality
+            <<'('<<renderer::water::QualityName(waterQuality)<<')'<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
         static std::string lastRow;
         if(lastRow!=row.str()){lastRow=row.str();std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<lastRow;}
     }
@@ -1301,6 +1536,13 @@ struct Scope {
             controls[15]=haveCapture?reflectionData[3]:1.f;
             controls[19]=depthRange;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
+            // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
+            // Zero skips the loop through the same test that already stopped it, and the loops
+            // themselves are written against twelve, so a level can hand them any count up to
+            // that without a second compiled shader - one source, one bytecode cache entry,
+            // one CreatePixelShader, whatever the level is.
+            controls[17]=float(qualityPlan.ssrSteps);
+            controls[18]=float(qualityPlan.lightSteps);
             controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=haveCapture?1.f:0.f;
             // x=anti-alias gain for the wave octave. yz=refraction offset, in uv:
             // the wave slope is unitless, the captured scene is in pixels, so the
@@ -1356,7 +1598,9 @@ struct Scope {
             // being displaced, because the crest sharpening and the whitecap mask are
             // properties of the sea and not of the toggle.
             const auto geometry=renderer::water::BuildGeometryWaves(geometryWavePercent,
-                waveMotion.ScalePercent(),seaAgitation,geometryWavesEnabled,wavesEnabled);
+                waveMotion.ScalePercent(),seaAgitation,
+                geometryWavesEnabled&&qualityPlan.geometryTrains>=renderer::water::kGeometryTrainCount,
+                wavesEnabled);
             controls[0]=geometry.sigma;
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
             controls[38]=wave.lattice[2];controls[39]=wave.lattice[3];
@@ -1368,7 +1612,13 @@ struct Scope {
             // a batch of projections in one instruction.
             controls[42]=wave.swellPhase[0];controls[43]=wave.swellPhase[1];
             controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
-            controls[47]=wavesEnabled?1.f:0.f;
+            // c211.z: the WATER QUALITY level itself. Both stages compare it against the gates
+            // in src/Water/WaterQuality.h, which spells each one as `level - .5`, so the level
+            // can never sit on a boundary and the shader cannot disagree with the plan above
+            // by one. w is the wave gate, and FLAT quality closes it the same way WAVES off
+            // does: no slope, no distortion, no roughness and no foam survive either switch.
+            controls[46]=float(qualityPlan.level);
+            controls[47]=wavesEnabled&&qualityPlan.waves?1.f:0.f;
             // Per-body authoring. The up axis comes from the draw's own matrix, so the sky
             // gradient, the sun elevation and the wind term point the right way for this
             // draw - including a reflected water pass, which runs under the reflection
@@ -1421,17 +1671,28 @@ struct Scope {
             // the chop lives at - the pair that stops the surviving crest families
             // from regrouping into lines at range.
             controls[72]=wave.swellPhase[6];controls[73]=wave.swellPhase[7];
-            // Both stages share the swell phases of the trains they both carry. The
-            // vertex stage also samples the low-frequency warp and the grouping envelope
-            // from this anchor and interpolates both to pixels, keeping the lifted crest
-            // irregular and grouped without re-hashing noise per pixel.
+            // c218.z: the shore back-flow run-up, in yards. It is built from the same geometry
+            // amplitude the mesh lifts by - a run-up is an arriving crest spending its height
+            // on the slope - so it inherits WAVE HEIGHT, WAVE SIZE, the zone's own sea state and
+            // the WAVES switch without a second authoring path, and it is zero on water that was
+            // authored flat or at a level below the feature, where nothing arrives to run up.
+            controls[74]=renderer::water::SwashYards(qualityPlan,geometry.amplitude);
+            // Both stages share the swell phases of the trains they both carry - and at WATER
+            // QUALITY 8 and above that is three trains, not two: c202.z carries train C's own
+            // wrapped phase, the same number c217.x gives the pixel stage, so the mid-scale
+            // crest this stage lifts is the crest those pixels light. The vertex stage also
+            // samples the low-frequency warp and the grouping envelope from this anchor and
+            // interpolates both to pixels, keeping the lifted crest irregular and grouped
+            // without re-hashing noise per pixel.
             // Registers: c200 control, c201 lattice, c202 swell phase, c203 warp, c204 grouping.
+            // c204.z is the mid-wave gate: a multiplier rather than a branch, because it has to
+            // scale the renormalization that keeps WAVE HEIGHT the same peak lift at every level.
             float vertexControls[20]={geometry.amplitude,geometry.lateral,geometry.sigma,
                 geometry.cellYards,
                 wave.lattice[0],wave.lattice[1],wave.lattice[2],wave.lattice[3],
-                wave.swellPhase[0],wave.swellPhase[1],0.f,0.f,
+                wave.swellPhase[0],wave.swellPhase[1],wave.swellPhase[2],0.f,
                 wave.warpPhase[0],wave.warpPhase[1],0.f,0.f,
-                wave.groupPhase[0],wave.groupPhase[1],0.f,0.f};
+                wave.groupPhase[0],wave.groupPhase[1],qualityPlan.midGeometry?1.f:0.f,0.f};
             if(cachedShaderDevice != d) {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
@@ -1530,10 +1791,17 @@ struct Scope {
                    cache.selectionSignature!=signature||cache.intensityScale!=intensity||
                    cache.reflection!=reflectionStrength||cache.managerEnabled!=manager.Enabled()||
                    cache.reflections!=reflectionsEnabled||cache.cameraValid!=frame.cameraValid||
-                   cache.viewValid!=frame.viewRawValid) {
+                   cache.viewValid!=frame.viewRawValid||cache.localLights!=qualityPlan.localLights) {
                     std::fill(cache.values,cache.values+68,0.f);
                     if(reflectionsEnabled&&manager.Enabled()&&frame.cameraValid&&frame.viewRawValid){
-                        const auto& selected=manager.Selected();unsigned count=std::min<unsigned>(8,unsigned(selected.size()));
+                        // WATER QUALITY caps how many emitters this surface mirrors, and it caps
+                        // them HERE rather than in the shader: the transform below is per light
+                        // per frame, and the shader's loop already breaks on the count it is
+                        // given, so a low level skips both the eight matrix transforms and the
+                        // eight pow(,64) lobes instead of computing them and throwing them away.
+                        const auto& selected=manager.Selected();
+                        unsigned count=std::min<unsigned>(unsigned(std::max(qualityPlan.localLights,0)),
+                                                          unsigned(selected.size()));
                         for(unsigned i=0;i<count;++i){const auto& light=selected[i];const auto& m=frame.viewRaw.m;
                             for(int axis=0;axis<3;++axis)cache.values[i*4+axis]=light.position.x*m[0][axis]+light.position.y*m[1][axis]+light.position.z*m[2][axis]+m[3][axis];
                             cache.values[i*4+3]=light.radius;cache.values[(8+i)*4]=light.color.x;cache.values[(8+i)*4+1]=light.color.y;cache.values[(8+i)*4+2]=light.color.z;cache.values[(8+i)*4+3]=light.intensity*intensity;
@@ -1543,7 +1811,8 @@ struct Scope {
                     cache.frameIndex=frame.frameIndex;cache.selectionSignature=signature;
                     cache.intensityScale=intensity;cache.reflection=reflectionStrength;
                     cache.managerEnabled=manager.Enabled();cache.reflections=reflectionsEnabled;
-                    cache.cameraValid=frame.cameraValid;cache.viewValid=frame.viewRawValid;cache.valid=true;
+                    cache.cameraValid=frame.cameraValid;cache.viewValid=frame.viewRawValid;
+                    cache.localLights=qualityPlan.localLights;cache.valid=true;
                 }
                 // Preserve c197..c199 from the saved block, splice in the cached
                 // lights and water controls, then upload c180..c218 in one call.

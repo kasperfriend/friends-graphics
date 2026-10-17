@@ -1,5 +1,188 @@
 # Water rendering audit
 
+## Full rework round 5: the quality ladder, mid waves, shore and back flow (2026-10-17)
+
+Round 4 left a sea that reads as a body of water, and a problem no look-setting could answer: the
+only way to buy frames back from it was to switch features off one at a time, and nothing in the
+tree said how much the water cost. This round adds the missing third kind of control - one level
+that trades the whole set of expensive terms at once - and spends the room it creates on three
+things the reference has and this renderer did not: waves in the band between the swell and the
+chop, a shoreline that knows a beach from a rock wall, and water that goes back out again.
+
+### Why a ladder and not eleven switches
+
+A slider with eleven positions is a promise that each position is worth something, and the only way
+to keep that promise cheaply is to make the level the single input. `src/Water/WaterQuality.h` is
+the one place the ladder is written down. `WaterEffect.h` resolves a level into a `QualityPlan`
+once per tuning reload, uploads the plan as constants, and both shader stages compare the level they
+were handed against that header's own gate midpoints (`GateFor(level) = level - .5`), so a level can
+never sit on a boundary and the CPU and the GPU cannot disagree about what a level means. Eleven
+compiled shader variants would have been the alternative; one shader with a uniform gate is what
+ships, and the two ray marches take a *trip count* from a register rather than a branch, so a level
+can hand them any count between 0 and the 12 their loops are written against without recompiling.
+
+| level | name | what it evaluates |
+|---|---|---|
+| 0 | FLAT | no procedural sea at all: no wave gate, no chop, no marches, no emitter reflections |
+| 1 | MINIMAL | the analytic swell shaded on a flat sheet, sky reflection only |
+| 2 | LOW | the mesh lifts, the base chop octave, a 3-step reflection march |
+| 3 | FAIR | 4-step marches; sun-road occlusion returns |
+| 4 | MEDIUM | the second chop octave, bed-slope shore understanding, 6-step marches |
+| 5 | GOOD | 7-step marches |
+| 6 | HIGH | **the sea that shipped before this key existed** - 8-step marches, 8 emitters |
+| 7 | ENHANCED | mid-wave octave, foam lace, shore back flow (**shipped default**) |
+| 8 | VERY HIGH | the mesh also lifts the 20-yard mid wave, 10-step marches |
+| 9 | ULTRA | 12-step marches |
+| 10 | MAX | backlit foam veil, soft refracted contact line |
+
+Two rules the ladder keeps, both pinned in `tools/WaterRegression.cpp`:
+
+* **A level never changes the authored look of the water it keeps.** WAVE HEIGHT is the same peak
+  lift at 0 and at 10, and CLARITY, FOAM AMOUNT and GLINT STRENGTH are the same numbers. The one
+  place that could have broken it is the displaced mid wave - a third Gerstner train would have made
+  the same authored height taller - so the vertex stage renormalizes by
+  `(kWeightA+kWeightB)/(kWeightA+kWeightB+midGate*kWeightC)`, applied to the lift *and* the slide
+  together. The mesh keeps its peak height and its slide-to-lift ratio at every level; the fold
+  budget gets smaller rather than larger (`kMeshPinchMax = .825274`, still inside the eight-train
+  `kMaxPinch` the shading clamp assumes).
+* **A level is monotone.** Raising it can only add work and add detail, so the slider has no
+  surprises in it and a player looking for frames only moves down.
+
+Level 0 is cheap in a way that matters beyond the shader: with no reflection march and no sun-road
+march there is nothing left that reads the pre-water copy for those two features, so
+`NeedsScene()` stops asking for the capture they would not read. Refraction, absorption and foam
+still ask for it, because the shore, the shoal and the back flow are all read out of that depth
+buffer at every level that has them.
+
+### Mid waves
+
+The shortest analytic train is 4.9 yards and the base chop is one 2.5-yard cell; between them the
+sea carried nothing but smooth rounded forms at a fixed scale, which is exactly what the eye groups
+back into lines - the round-4 comb, one band higher. A third noise octave at just under half the
+base frequency (5.4-yard lumps), counter-phased against the base octave the way the fine one is and
+riding the swell between the two, breaks the regularity at the scale that was missing. It fades
+with `filter` rather than with its square: at half the base frequency it stays resolvable about
+twice as far as the fine octave, and fading it as early would remove it from the middle distance,
+which is the only place it was added for.
+
+Above level 8 the *mesh* also lifts the 20-yard train C, which is the shortest wave the client's
+roughly four-yard liquid grid can carry without faceting (five facets to a crest). It is a ceiling,
+not a step on the way to something shorter.
+
+### Shore understanding
+
+The shoal foam was a per-pixel depth difference, and a difference measured per pixel is not a slope:
+it halves when the resolution doubles and halves again when the camera steps back, which is why the
+foam over a bar existed only within a few yards of the water's edge and vanished from the beach above
+it. The lattice footprint the pixel stage already takes for the chop fade is that pixel's own size in
+world yards, so dividing by it turns the screen-space difference into the dimensionless bed slope it
+was always meant to be - the same number at any resolution and any distance, and the same number
+`tools/WaterPreview.cpp` measures in world space with `FieldSlope`, which is the reading the
+published frames were tuned against. It carries the view angle's `1/cos`, because the separation this
+pass can read is along the view axis rather than vertical.
+
+One number then separates the two shores that look the same to a depth buffer: about twelve degrees
+of bed is a beach, about forty is a wall. A beach gets a wide swash zone and sheets running up it; a
+wall gets a narrow bright contact line and nothing that can run up it. At level 10 the same slope
+buys a soft contact - the last inches of a waterline are a meniscus, not a step, so the refracted
+sample's offset fades in over the first yard instead of pulling the bottom by the full wave slope
+right at the seam.
+
+### Back flow
+
+Nothing in the renderer moved water back out of a beach, so a shoreline could only ever arrive. The
+driver is the longest swell train the pixel is standing in - the same analytic train A the vertex
+stage lifted the mesh with, arriving through the same interpolated sine/cosine pair - so the run-up
+comes in with a crest the player can already see coming, and the drain follows it back out at the
+speed the sea is really travelling. No second clock and no new phase: `sin01.x` is that crest's
+height here and `cos01.x` its rate of change, positive while the water is rising and negative while
+it is leaving.
+
+Depth is the shoreline's own coordinate - "up the beach" is "less water over the bottom" - so the
+whole effect is a shift of the depth the shore masks are built from, and it needs no shore normal
+this pass has no way to read. It moves the shore and foam edges **only**: the absorption column, the
+refraction and the in-scattering still measure the water that is really there, because a sheet
+running up a beach is thin water, and thin water is exactly what those terms describe. The run-up in
+yards is `SwashYards(plan, geometry.amplitude)` - the arriving crest's own height, scaled once and
+capped at 2.5 yards - so it inherits WAVE HEIGHT, WAVE SIZE, the zone's sea state and the WAVES
+switch without a second authoring path, and it is zero on water that was authored flat.
+
+The foam that goes back out with it is a band in depth moving with the swell, torn into flecks by
+the chop value so it can never read as rings painted on the water, kept inside the swash zone by
+`shallowEdge`, and gated on `draining` - the streaks are only there while the sheet is leaving,
+which is what makes them a backwash rather than a second run-up.
+
+### Foam
+
+Coverage was one scalar, and one scalar can only ever be a grey sheet - which is what "the foam is
+nice but flat" meant. Real foam is a lace: bright filaments with dark, water-filled gaps between
+them, at three scales at once. All three samples already exist for the surface itself, so the lace
+costs arithmetic and no noise evaluation - the fine chop is the fleck, the mid octave is the lump a
+fleck sits on, and the broad warp is the tongue both are torn out of. It multiplies the crest terms
+whole, because a whitecap *is* a broken streak, and only `.45` of the shore term, because a sheet
+running up a beach is continuous in a way a cap on a crest is not.
+
+At the same level the colour becomes a ramp on the coverage the masks already produced instead of
+one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
+crest, a thin veil lets the water's own tint through and reads as the grey-green lace underneath it.
+That ramp is what lets the two coexist on one wave. At level 10 the veil also glows when the source
+is behind it, on the same `vDotL` the in-scatter lobe already computed, weighted by what the ramp
+left over so the thick caps that already scatter everything back are not double-lit.
+
+### Registers, slots and the interpolant ceiling
+
+No register, no interpolant and no texture was added, which is the only reason this round could
+happen at all: the Output struct is still eleven fields and the pixel stage still takes ten inputs,
+against the eleven-`o#`/ten-`v#` ceiling round 4 documented. The ladder rides lanes that were
+already travelling:
+
+| lane | contents, as of round 5 |
+|---|---|
+| `c202.z` (VS) | the mid wave's phase, one of the three trains the mesh can now lift |
+| `c204.z` (VS) | the mid-wave gate, a multiplier rather than a branch so it can scale the renormalization |
+| `c204.y` / `c204.z` (PS) | reflection march steps, sun-road march steps (`controls[17]`, `controls[18]`) |
+| `c211.z` (PS) | the quality level itself (`controls[46]`), which the stage compares against the ladder's midpoints |
+| `c211.w` (PS) | the wave gate, now also zero at level 0 - the same thing asked from the other direction |
+| `c218.z` (PS) | the shore back-flow run-up in yards, 0 with the feature off (`controls[74]`) |
+
+`controls` is 75 floats of the 156 the saved `c180..c218` span holds, so the save/restore window,
+the single `SetPixelShaderConstantF(180, …, 39)` upload and the untouched `c197..c199` gap are all
+unchanged; `c204.w` and `c218.w` are still spare. The pixel stage is estimated to grow by roughly
+eighty slots (the third octave, the bed slope and shore shape, the swash and lace and backwash, the
+colour ramp and veil, against the two marches now costing less on average and the Fresnel term
+hoisted above the march it gates), which puts it near 720 of the measured-only count round 4 left in
+place. Cards reporting a `MaxPixelShader30InstructionSlots` under that keep native water exactly as
+before - and levels 0-1 exist precisely so such a card can be given a procedural sea instead of
+losing it, which is the first time this renderer has had a fallback that is still this renderer.
+
+### Verification
+
+* `tools/WaterRegression.cpp` walks every level: each plan is in range, every resolved gate *is* its
+  level, both ladders are monotone in cost and in features, absurd levels clamp instead of indexing
+  past the tables, level 0 is flat, level 6 is the shipped sea, level 7 adds the mid octave and the
+  shore work at the shipped march budget, and level 10 is everything. The shader's gate literals are
+  derived from `GateFor()` rather than typed again, so the two halves cannot drift by one. The
+  three-train fold is pinned against `kMeshPinchMax` and the renormalization against
+  `MeshNormalization()`, and train C's coefficients moved from the "shading-only" literal set to the
+  "both stages assemble the displaced trains from the same coefficients" one.
+* Both stages were re-parsed with a portable HLSL parser (the sandbox has no `fxc`); the modified
+  pixel stage parses clean against the same harness the pre-change source does, and the vertex
+  stage's only diagnostic is the pre-existing `Vertex shader must output a position` semantic note
+  about `gl_Position`. Final instruction counts remain a Windows CI and live-client check.
+* `tools/WaterPreview.cpp` resolves the *same* header rather than inventing its own gates, and
+  gained `--quality`, `--shore-foam-width` and probe lines for every intermediate the round adds
+  (`bedSlope`, `beach`, `runUp`, `draining`, `swashDepth`, `lace`, `backwash`, `foamColour`,
+  `veil`), so a level can be audited one pixel at a time:
+
+  ```
+  build/waterpreview --scene coast --quality 7 --probe 274 220 --time 22
+      shore bedSlope 0.0357  beach 1  runUp 1.31625  draining 1  swashDepth 3.31377
+      foam lace 0.338764  backwash 0.265436  colour 0.310196 0.430588 0.406274  veil 0
+  ```
+
+  The same pixel at `--quality 6` prints `runUp 0  draining 0  lace 1  backwash 0`, and the run-up
+  travels the waterline between 2.7 and 5.0 yards across a swell period, which is the back flow.
+
 ## Water-heavy-area performance pass (2026-10-15)
 
 Booty Bay exposed both halves of the water cost: a large number of liquid tiles
@@ -999,9 +1182,17 @@ the reporting player's machine. In-game confirmation still matters.
   combinations, and target-size policy tests (included in Linux CI). It also pins the packed
   long-wave dataflow, zero-contribution branches, profile-query cache, batched constant windows,
   volume-only MRT gate, and the in-scatter/sun-glint normalizations as production shader text -
-  plus the look formulas in the CPU mirror - so an optimization cannot quietly cut the look.
+  plus the look formulas in the CPU mirror - so an optimization cannot quietly cut the look. Since
+  round 5 it also holds the WATER QUALITY ladder to itself: every level resolves in range and to its
+  own gates, both ladders are monotone in cost and in features, level 0 is flat and level 6 is the
+  previously shipped sea, the shader's gate literals are derived from `GateFor()` rather than typed
+  twice, the marches take their trip counts from registers, a level with no marches stops asking for
+  the scene copy, the three-train fold is bounded by `kMeshPinchMax`, and the F7 slider and the ini
+  key agree with the header's own bounds.
 - `tools/WaterPreview.cpp`: not a test, but the thing the look was tuned against (see "Looking at
   changes without a GPU"). It needs no device and builds with the same compiler invocation.
+  `--quality N` renders a level, and `--probe X Y` prints the shore and foam intermediates that
+  level adds, so a ladder step can be audited one pixel at a time without a GPU.
 - `tools/Test-Water.cmd`: builds a D3D9 regression executable using the actual
   water Scope and capture code. It checks shader installation, rendered magenta
   debug pixels, no-capture color, the complete batched constant span (including
