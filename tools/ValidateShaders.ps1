@@ -53,8 +53,16 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
-    'precipitationHLSL'      = 496 # Weather must fit baseline PS3 hardware too
-    # Water is measured and reported but deliberately not capped - see $measureOnly below.
+    # 512 is the ps_3_0 floor every baseline card must support, so weather
+    # still fits them all. It was 496; the rain phase-split (the fix for
+    # long-session float32 banding) added its per-layer split+wrap slots.
+    'precipitationHLSL'      = 512
+    # Water pixel stage, capped on explicit request: 2048 is ~3x the slots
+    # it actually uses (642 measured 2026-10-14, ~580 after the 2026-10-17
+    # CSE pass; see docs/water-rendering.md), so the ceiling guards against
+    # a pathological edit (an unrolled march, a forgotten constant array)
+    # rather than acting as a design input on wave-train quality.
+    'source'                 = 2048
     'volumePixelSource'     = 512
     'kLocalFogFieldSource'   = 512
     'kIntegrateSource'       = 512
@@ -65,23 +73,24 @@ $budgets = @{
     'kAmbientOcclusionApplySource' = 512
 }
 
-# Measured, reported, not capped. The water pixel stage used to sit in $budgets at 621 (597 slots
-# measured plus 24 of compiler margin), and by the six-train round that ceiling had stopped being a
-# guard and become a design input: the cheap way to fit 642 was to let the four short wave trains lose
-# their slopes, which is precisely the visible difference between crests crossing at six angles and a
-# comb of parallel ones. A ceiling cannot weigh that trade, so it is gone - the shader costs what the
-# sea needs, and the count is still annotated on every run, which is where the restraint comes from
-# now: a change that moves it by tens of slots is visible in the Checks tab of that pull request for a
-# human to weigh, instead of failing a job on a number nobody chose on purpose. The list is not empty
-# policy: a shader whose cost cannot be read still fails the job, below.
+# Measured, reported, not capped. This used to hold the water pixel stage: it sat in $budgets at
+# 621 (597 slots measured plus 24 of compiler margin), and by the six-train round that ceiling had
+# stopped being a guard and become a design input - the cheap way to fit 642 was to let the four
+# short wave trains lose their slopes, which is precisely the visible difference between crests
+# crossing at six angles and a comb of parallel ones. A ceiling that tight cannot weigh that trade.
+# The cap has since been re-added on explicit request at 2048 (~3x the measured count, 642 before
+# the 2026-10-17 CSE pass): wide enough
+# to never steer wave-train quality, tight enough to catch a pathological edit. Shaders added to
+# this list are still annotated with their count on every run, which is where the restraint comes
+# from: a change that moves it by tens of slots is visible in the Checks tab of that pull request
+# for a human to weigh.
 #
 # Nothing here claims to protect a device. The real limit is D3DCAPS9.MaxPixelShader30InstructionSlots
 # (a ps_3_0 device must report at least 512 and may report up to 32768), fxc enforces neither the floor
 # nor the ceiling, and a card that cannot fit the shader fails CreatePixelShader and keeps native
-# water - WaterEffect.h logs the reported caps when that happens. That fallback is what makes an
-# uncapped authored shader safe to ship; this one was already past the 512-slot floor before the round
-# that removed the ceiling.
-$measureOnly = @('source')
+# water - WaterEffect.h logs the reported caps when that happens. Water at 2048 still leaves every
+# baseline card (512 floor) its native-water fallback for the authored stage.
+$measureOnly = @()
 
 # Workflow annotations: the run log is not always reachable (log retention,
 # restricted networks, forks), but annotations come back from the API, so the

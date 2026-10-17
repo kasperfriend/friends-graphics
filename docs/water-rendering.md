@@ -200,10 +200,11 @@ texture on compute shaders, samples a mip-blurred reflection chain, and shades w
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
 state without spending a render pass, and no ceiling on how many instruction slots the water pixel
 stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
-run, and lets it be (fxc /O3 put the current shader at 642 slots on Windows CI on 2026-10-14; it had
+run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14 and the
+2026-10-17 CSE pass brought it to about 580 under an explicit 2048 cap; it had
 been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
 which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
-than re-negotiating it. The count is still the number to argue about, and the reason to keep measuring
+than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom instead). The count is still the number to argue about, and the reason to keep measuring
 at all is Round 3: it estimated 608, the shader measured 633, and instead of a zero-margin budget or
 cut visible shading the broad warp moved to the vertex stage and is interpolated to pixels - the slot
 count came down by changing *where* the work happens, not by removing work. Earlier rounds, the device
@@ -780,6 +781,46 @@ The budget still does its original job for this shader - growth must be argued i
 a diff - and the other enforced budgets are untouched.
 
 
+## The 2048 cap and the CSE pass (2026-10-17)
+
+On explicit request the water pixel stage went back into `$budgets` in
+`tools/ValidateShaders.ps1`, at **2048**: about three times the count it
+actually uses, so the ceiling guards against a pathological edit (an
+unrolled march, a forgotten constant array) instead of acting as a design
+input on wave-train quality. `$measureOnly` is empty again; the device
+fallback is unchanged - a card that reports fewer slots than the stage
+needs fails `CreatePixelShader` and keeps native water.
+
+The same request asked for the effect to be optimised as far as possible
+without any visual sacrifice. The two raymarch loops (the eight-step SSR
+and the eight-step light march) hold the bulk of the 642 measured slots,
+and their step count *is* the quality: fewer steps is a visible change, so
+they are untouched. What is removable without changing a single output bit:
+
+* The wave offsets `wave*.15` (SSR) and `wave*.18` (light march) were
+  recomputed on every step although the wave normal does not move inside
+  either loop. Hoisting them out removes four multiplies per step of each
+  march - 48 across both - and the hoisted product is the same
+  instruction, so the values are bit-identical.
+* `dot(wave,l)` was evaluated twice (the body modulation and the glint
+  term). One `NoL` serves both.
+* `max(lightColor.rgb,0)` was evaluated three times (in-scatter, the sky
+  disc, the sheen colour). One `lightPos` serves all three.
+* `dot(-v,l)` and `-dot(v,l)` were the same dot from two sign conventions
+  (the HG phase denominator and the backlit gate). `dot(-v,l)` is
+  `-dot(v,l)` bit-exactly - sign flips and the `ps_3_0` dot are exact - so
+  one `vDotL` serves both, with the denominator written
+  `1+g*g+2*g*vDotL`, which is the original expression to the last rounding
+  step.
+
+The estimate from that arithmetic is roughly 580 slots; the first Windows
+run after this pass is authoritative, and any movement larger than the
+estimate is visible in the Checks tab for the same reason every other
+budget movement is. The look pins in `tools/WaterRegression.cpp`
+(the normalized HG lobe, the glint's width compensation, the neutral-at-
+0x808080 tint multiply) and the portable HLSL-spelling guard all pass
+against the edited source, and none of the pinned texts changed.
+
 ## Additional safety sweep (2026-10-14)
 
 Four further defects were found in code:
@@ -944,11 +985,11 @@ the reporting player's machine. In-game confirmation still matters.
 ## Tests
 
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
-  compile, if the water instruction count cannot be read, or if any *budgeted* shader - the volume
-  and cloud raymarches and weather - exceeds its ceiling. The water pixel stage is measured and
-  annotated but not capped. Its pre-optimization baseline was 642 slots on Windows CI on
-  2026-10-14; the first Windows run of this performance pass is the authoritative new count
-  (the former 621 cap is described under "Full rework round 4").
+  compile, or if any *budgeted* shader - the volume and cloud raymarches, weather, and the water
+  pixel stage (2048, see "The 2048 cap and the CSE pass" above) - exceeds its ceiling. The water
+  pixel stage's pre-optimization baseline was 642 slots on Windows CI on 2026-10-14; the
+  2026-10-17 CSE pass is estimated at about 580, and the first Windows run after that pass is the
+  authoritative new count (the former 621 cap is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
