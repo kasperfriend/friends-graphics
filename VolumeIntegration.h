@@ -293,7 +293,7 @@ void ReloadTuning() {
     density = std::clamp(ReadTuning(L"DensityPermille", 4), 0, 20) * .001f;
     strength = std::clamp(ReadTuning(L"ShaftPercent", 160), 0, 500) * .01f;
     variation = std::clamp(ReadTuning(L"VariationPercent", 135), 0, 250) * .01f;
-    moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 35), 0, 100) * .01f;
+    moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 60), 0, 100) * .01f;
     lowLayer = std::clamp(ReadTuning(L"LowLayerPercent", 35), 0, 150) * .01f;
     // Ground mist: low, dense, tightly height-limited - a second fog layer
     // stacked on top of the broad distance haze above, not a replacement.
@@ -1261,6 +1261,11 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(3, D3DSAMP_SRGBTEXTURE, FALSE));
         float cloudMask[4] = {frameCtx.cloudTexture ? 1.f : 0.f, 0, 0, 0};
         check(d->SetPixelShaderConstantF(14, cloudMask, 1));
+        // Ray look (see rayLook in volumePixelSource): sunward glow spread,
+        // glow floor, and gain. Gain 0.35 is the calibrated level of the new
+        // whole-frame mask (equal to the GodRayPreview "0.45" over the old 1.28).
+        float rayLook[4] = { 6.f, 0.f, 0.35f, 0.f };
+        check(d->SetPixelShaderConstantF(15, rayLook, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
         check(d->SetTexture(3, nullptr));
 
@@ -1277,7 +1282,10 @@ bool Composite(IDirect3DDevice9* d) {
         // read into rayFalloff but never actually consumed by this pass.
         // Wired up now: higher rayFalloff -> faster per-sample decay ->
         // visibly shorter rays, matching what the slider already claimed.
-        float radialReach = .88f;
+        // Gather the whole path to the source (GodRayCore.h RadialLook).
+        // The old .88 reach stopped short of the source and left the rays
+        // confined to the disc.
+        float radialReach = 1.f;
         float radialDecay = pow(.975f, std::max(rayFalloff, .3f));
         float radial[4] = { constants[2][0], constants[2][1], radialReach, radialDecay };
         check(d->SetPixelShaderConstantF(0, radial, 1));
