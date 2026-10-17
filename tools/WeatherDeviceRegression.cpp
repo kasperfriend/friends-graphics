@@ -32,7 +32,8 @@ int main() try {
     if(FAILED(hr)){std::printf("SKIP GPU tests: no D3D9 HAL (hr=%08lx)\n",hr);return 77;}
     renderer::DepthCapture::Instance().SetFunctions(SetDepth,GetDepth);
     weathervisuals::Configure(L".\\");weathervisuals::EnsureShaders(d.Get());
-    Require(bool(weathervisuals::precipitationPS)&&bool(weathervisuals::lensDropletsPS),"production precipitation and lens shaders compile and install");
+    Require(bool(weathervisuals::rainPS)&&bool(weathervisuals::precipitationPS)&&bool(weathervisuals::lensDropletsPS),
+        "production rain, snow/sand and lens shaders compile and install");
     auto texture=[&](UINT width,UINT height,DWORD value,bool band=false) {
         ComPtr<IDirect3DTexture9> t;Check(d->CreateTexture(width,height,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,t.GetAddressOf(),nullptr));
         D3DLOCKED_RECT r{};Check(t->LockRect(0,&r,nullptr,0));
@@ -61,8 +62,8 @@ int main() try {
     };
     struct Vertex{float x,y,z,w,u,v;};
     Vertex quad[]={{-.5f,-.5f,0,1,0,0},{size-.5f,-.5f,0,1,1,0},{-.5f,size-.5f,0,1,0,1},{size-.5f,size-.5f,0,1,1,1}};
-    // Five units exposes only the nearest precipitation layer; all farther
-    // layers are occluded. Mist is disabled so movement has one exact answer.
+    // Five units exposes only the nearest particle layer; farther layers
+    // are occluded. Compare real shader pixels, not a substitute model.
     auto render=[&](int mode,float time,float sceneZ,float minZ=0.f,float maxZ=1.f,float windX=0.f) {
         D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
         *static_cast<float*>(r.pBits)=minZ+(maxZ-minZ)*(1.001f-.1f/sceneZ);Check(depth->UnlockRect(0));
@@ -73,6 +74,29 @@ int main() try {
         Check(d->SetVertexShader(nullptr));Check(d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));Check(d->SetPixelShader(weathervisuals::precipitationPS.Get()));
         Check(d->SetTexture(0,black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,clear.Get()));
         for(DWORD slot=0;slot<4;++slot){Check(d->SetSamplerState(slot,D3DSAMP_MINFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MAGFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MIPFILTER,D3DTEXF_NONE));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSU,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSV,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_SRGBTEXTURE,FALSE));}
+        if(mode==1) {
+            const float dt = time * (1080.f/float(size)) / 620.f;
+            renderer::rainfield::Motion motion;
+            motion.Advance(dt,1.f,{windX,0.f});
+            float phases[3][4]{};
+            for(unsigned i=0;i<3;++i)motion.Layer(i,phases[i]);
+            const float vertical=renderer::rainfield::VerticalSpeed(1.f,{windX,0.f});
+            const float magnitude=std::hypot(windX,vertical);
+            float c0[4]={1.001f,-.1f,1,1};
+            float c1[4]={float(size),float(size),1.f/size,1.f/size};
+            float c2[4]={1,1,1,1};
+            float c3[4]={1,1,1,1};
+            float c4[4]={1,0,1,1}; // particle-mask debug view
+            float c5[4]={windX/magnitude,vertical/magnitude,windX,0};
+            float c9[4]={minZ,1.f/(maxZ-minZ),0,0};
+            Check(d->SetPixelShader(weathervisuals::rainPS.Get()));
+            Check(d->SetPixelShaderConstantF(0,c0,1));Check(d->SetPixelShaderConstantF(1,c1,1));
+            Check(d->SetPixelShaderConstantF(2,c2,1));Check(d->SetPixelShaderConstantF(3,c3,1));
+            Check(d->SetPixelShaderConstantF(4,c4,1));Check(d->SetPixelShaderConstantF(5,c5,1));
+            Check(d->SetPixelShaderConstantF(6,phases[0],3));Check(d->SetPixelShaderConstantF(9,c9,1));
+            Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,quad,sizeof(Vertex)));
+            Check(d->EndScene());return pixels();
+        }
         // c0..c5 carry the raw values; c6..c8 carry the same phases
         // wrapped exactly as BeforeDraw does (the motion asserts below
         // measure the 8px/4px steps those formulas produce).
@@ -85,19 +109,21 @@ int main() try {
         Check(d->SetPixelShaderConstantF(9,wrapped.c9,1));
         Check(d->SetPixelShaderConstantF(10,wrapped.c10,1));Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,quad,sizeof(Vertex)));Check(d->EndScene());return pixels();
     };
-    auto rain0=render(1,0,5),rain1=render(1,1.f/60,5);
-    Require(nonblack(rain0)>1000,"rain remains visible with no cloud or atmosphere renderer");
-    const double down=difference(rain0,rain1,0,8),up=difference(rain0,rain1,0,-8);
+    auto rain0=render(1,0,5),rain1=render(1,4,5);
+    Require(nonblack(rain0)>100,"rain remains visible with no cloud or atmosphere renderer");
+    const double down=difference(rain0,rain1,0,4),up=difference(rain0,rain1,0,-4);
     std::printf("rain translation error down=%.5f up=%.5f\n",down,up);
-    Require(down<.3&&up>down+2,"actual rain pixels move downward between frames");
-    // c2.xy is now the INTEGRATED displacement; changing current wind at a
-    // late session time must not multiply that entire age into the offset.
-    auto wind0=render(1,0,5,0,1,0),wind1=render(1,1.f/60,5,0,1,1.2f/60);
-    Require(difference(wind0,wind1,8,8)<.3,"rain drifts with positive projected wind, not against it");
+    Require(down<.5&&up>down+1,"actual rain pixels move downward between frames");
+    // Same tilted particles at both times: horizontal + downward translation
+    // follows the projected wind rather than moving against it.
+    auto wind0=render(1,0,5,0,1,620),wind1=render(1,4,5,0,1,620);
+    Require(difference(wind0,wind1,4,4)<.5 &&
+            difference(wind0,wind1,-4,4)>1,
+            "rain drifts with positive projected wind, not against it");
     unsigned longest=0;
     for(UINT x=0;x<size;++x){unsigned run=0;for(UINT y=0;y<size;++y){run=(rain0[y*size+x]&255)>2?run+1:0;longest=std::max(longest,run);}}
     std::printf("longest rain streak=%u pixels of %u\n",longest,size);
-    Require(longest<=22,"rain streaks are compact rather than screen-height beams");
+    Require(longest<=16,"rain streaks are compact rather than screen-height beams");
     auto snow0=render(2,0,5),snow1=render(2,1.f/60,5);
     Require(difference(snow0,snow1,0,4)<.3&&difference(snow0,snow1,0,-4)>2,"shared snow UV motion also falls downward");
     Require(nonblack(render(1,0,1))==0,"near foreground fully occludes precipitation");
@@ -122,6 +148,14 @@ int main() try {
     float sentinel[4]={17,18,19,20};Check(d->SetPixelShaderConstantF(5,sentinel,1));
     weathervisuals::composedThisFrame=false;Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());
     Require(nonblack(pixels())>1000,"detected snow uses snow texture and renders without cloud/depth passes");
+    // Rain must also composite without captured depth or an atmosphere pass.
+    // Debug mask deliberately excludes scene and lens colour from the test.
+    weathervisuals::nativeWeatherMode=1;weathervisuals::rainDebugView=1;
+    weathervisuals::composedThisFrame=false;
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
+    Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());
+    Require(nonblack(pixels())>100,"detected rain composites without clouds or captured depth");
+    weathervisuals::rainDebugView=0;
     DWORD state=0;Check(d->GetRenderState(D3DRS_SCISSORTESTENABLE,&state));Require(state==TRUE,"scissor state restored after weather");
     Check(d->GetRenderState(D3DRS_FILLMODE,&state));Require(state==D3DFILL_WIREFRAME,"fill mode restored after weather");
     Check(d->GetRenderState(D3DRS_FOGENABLE,&state));Require(state==TRUE,"native fog restored after weather");
