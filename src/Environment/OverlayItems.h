@@ -67,6 +67,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"EvolutionPercent","CLOUD EVOLUTION",0,400,10,100},
  {KIND_SLIDER,L"VolumetricClouds",L"CoveragePercent","CLOUD COVERAGE",0,100,2,50},
  {KIND_SLIDER,L"VolumetricClouds",L"DensityPercent","CLOUD DENSITY",10,400,5,100},
+ {KIND_SLIDER,L"VolumetricClouds",L"OpacityPercent","CLOUD OPACITY",0,300,5,100},
  {KIND_SLIDER,L"VolumetricClouds",L"CloudTypePercent","CLOUD TYPE (-100 FLAT 100 TOWERING)",-100,100,5,0},
  {KIND_SLIDER,L"VolumetricClouds",L"BaseAltitude","CLOUD HEIGHT",100,20000,50,850},
  {KIND_SLIDER,L"VolumetricClouds",L"Thickness","CLOUD THICKNESS",100,12000,50,2150},

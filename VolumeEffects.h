@@ -319,19 +319,15 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         float visibility=4*transmission*(1-transmission);
         ray.rgb*=visibility;
     }
-    // The radial blur begins at an open-sky source, but its taps cross
-    // foreground silhouettes in screen space. Clip its output to sky as
-    // well: otherwise a moon's circular halo/shafts are additively painted
-    // over walls and characters that should occlude the source.
-    float raw=tex2D(sceneDepth,uv).r;
-    // Geometry maps to <=MaxZ while the clear remains 1. The midpoint test
-    // blocks radial taps on walls for every viewport depth range.
-    float sky=step((depthInfo.x+1)*.5,raw);
+    // Radial beams are an overlay: they may fall across clouds, characters,
+    // buildings and trees instead of being clipped to open sky. The source
+    // mask above already keeps the origin on the sun/moon disc; the blur is
+    // allowed to land on any pixel so the rays read as beams in front of
+    // the world rather than only in the gaps between silhouettes.
     // Last quantization before the additive blend onto the 8-bit scene:
     // half a level of fixed dither keeps the ray falloff from banding into
     // rings around the source (signed, so the blend can round either way).
     ray.rgb+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
-    ray.rgb*=sky;
     return ray;
 }
 )HLSL";

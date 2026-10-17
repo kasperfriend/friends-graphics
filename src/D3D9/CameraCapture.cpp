@@ -391,8 +391,25 @@ namespace renderer
                 hasWorldTranslation = true;
         }
 
-        // Prefer a candidate carrying world translation if one arrives, otherwise keep the skybox rotation.
-        if (!m_fallbackCandidateValid || hasWorldTranslation || !m_fallbackHasTranslation)
+        // Prefer a candidate carrying world translation if one arrives, but
+        // still follow a genuine rotation of the skybox transform. Otherwise
+        // the fallback freezes on the first translated view and the clouds
+        // stay stuck to (and drift with) the camera when looking around,
+        // including straight up.
+        bool rotationChanged = false;
+        if (m_fallbackCandidateValid)
+        {
+            float lowest = 1.f;
+            for (int r = 0; r < 3; ++r)
+            {
+                float dot = m_fallbackView.m[r][0] * view.m[r][0] +
+                            m_fallbackView.m[r][1] * view.m[r][1] +
+                            m_fallbackView.m[r][2] * view.m[r][2];
+                lowest = std::min(lowest, dot);
+            }
+            rotationChanged = lowest < 0.999f;
+        }
+        if (!m_fallbackCandidateValid || hasWorldTranslation || !m_fallbackHasTranslation || rotationChanged)
         {
             m_fallbackView = view;
             m_fallbackProj = proj;
