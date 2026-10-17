@@ -247,7 +247,7 @@ float Depth(float raw)
     return projection.y / min(d-projection.x, -.000001);
 }
 float Particle(float2 pixel, float2 cellSize, float4 phase, float seed,
-               float lengthPx, float widthPx, float occupancy)
+               float lengthPx, float widthPx, float occupancy, float pixelFootprint)
 {
     float2 grid = pixel / cellSize - phase.xz;
     float2 id = floor(grid) - phase.yw;
@@ -266,10 +266,15 @@ float Particle(float2 pixel, float2 cellSize, float4 phase, float seed,
     float halfLength = min(lengthPx * lerp(.65,1.15,b) * .5,
         min((cellSize.x*.5-abs(center.x*cellSize.x)-width-1.0)/max(abs(axis.x),.01),
             (cellSize.y*.5-abs(center.y*cellSize.y)-width-1.0)/max(abs(axis.y),.01)));
-    // Pixel-footprint coverage, rather than a blur halo. Taper the tips.
-    float body = 1.0-smoothstep(width-.45,width+.45,across);
-    float ends = 1.0-smoothstep(halfLength-1.25,halfLength+.45,abs(along));
-    return body * ends * lerp(.5,1.0,a/max(occupancy,.001));
+    // The leading (downwind) head catches more light; the trailing end is
+    // thinner and less bright. Coverage is integrated across ONE output
+    // pixel in reference units, so 720p rain doesn't break into hard dots
+    // and 4K rain doesn't turn into blurry ribbons.
+    float head = saturate(.5 + .5*along/max(halfLength,1.0));
+    float taperedWidth = width * lerp(.58,1.0,head);
+    float body = saturate((taperedWidth-across)/pixelFootprint + .5);
+    float ends = saturate((halfLength-abs(along))/pixelFootprint + .5);
+    return body * ends * lerp(.68,1.08,head) * lerp(.55,1.0,a/max(occupancy,.001));
 }
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
@@ -277,6 +282,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float z = Depth(tex2D(depthMap,uv).r);
     float scale = screen.y / 1080.0;
     float2 pixel = uv * screen.xy / scale; // reference 1080p pixels
+    float pixelFootprint = max(.25,1.0/scale);
     float coverage = 0.0;
     float visibility = 0.0;
     float3 weights = float3(.44,.33,.23);
@@ -291,7 +297,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             ? smoothstep(distances[i]-.8,distances[i]+.8,z) : 1.0;
         float drop = Particle(pixel,cells[i],phases[i],float(i)*127.13,
             lengths[i]*shape.y,widths[i]*shape.z,
-            saturate(shape.x * (.30 + float(i)*.025)));
+            saturate(shape.x * (.30 + float(i)*.025)),pixelFootprint);
         coverage += drop * weights[i] * visible;
         visibility += weights[i] * visible;
     }
@@ -307,9 +313,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         return float4(lerp(float3(.08,.015,.015),direction*.35,blocked) + coverage.xxx,scene.a);
     }
     if (control.w > .5) return float4(coverage.xxx,scene.a);
-    // Thin cool-white streaks, modest brightness; no foggy screen wash.
-    float3 tint = float3(.77,.84,.91) * (.55 + .45 * saturate(light.rgb));
-    return float4(lerp(scene.rgb,tint,coverage*.62),scene.a);
+    // A wet streak scatters cool daylight on dark scenery but gently
+    // refracts (rather than painting white over) a bright WoW sky. This
+    // preserves contrast without a gray rain curtain or neon zone tint.
+    float3 scatter = float3(.68,.73,.80) * (.60 + .40*saturate(light.rgb));
+    float sceneLuma = dot(scene.rgb,float3(.2126,.7152,.0722));
+    float3 refracted = scene.rgb*.55 + scatter*.45;
+    float3 rainColor = lerp(scatter,refracted,smoothstep(.25,.85,sceneLuma));
+    return float4(lerp(scene.rgb,rainColor,coverage*.70),scene.a);
 }
 )HLSL";
 

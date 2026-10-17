@@ -84,7 +84,8 @@ int main() try {
             reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=(band&&(y<height/4||y>height*3/4))?0:value;
         Check(t->UnlockRect(0));return t;
     };
-    auto black=texture(1,1,0xff000000),clear=texture(1,1,0),drop=texture(16,128,0xffffffff,true);
+    auto black=texture(1,1,0xff000000),bright=texture(1,1,0xffffffff),
+         clear=texture(1,1,0),drop=texture(16,128,0xffffffff,true);
     ComPtr<IDirect3DTexture9> depth;
     Check(d->CreateTexture(1,1,1,0,D3DFMT_R32F,D3DPOOL_MANAGED,depth.GetAddressOf(),nullptr));
     ComPtr<IDirect3DSurface9> back,readback;Check(d->GetRenderTarget(0,back.GetAddressOf()));
@@ -107,7 +108,8 @@ int main() try {
     Vertex quad[]={{-.5f,-.5f,0,1,0,0},{size-.5f,-.5f,0,1,1,0},{-.5f,size-.5f,0,1,0,1},{size-.5f,size-.5f,0,1,1,1}};
     // Five units exposes only the nearest particle layer; farther layers
     // are occluded. Compare real shader pixels, not a substitute model.
-    auto render=[&](int mode,float time,float sceneZ,float minZ=0.f,float maxZ=1.f,float windX=0.f) {
+    auto render=[&](int mode,float time,float sceneZ,float minZ=0.f,float maxZ=1.f,
+                    float windX=0.f,bool debugMask=true,bool brightScene=false) {
         D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
         *static_cast<float*>(r.pBits)=minZ+(maxZ-minZ)*(1.001f-.1f/sceneZ);Check(depth->UnlockRect(0));
         Check(d->SetRenderTarget(0,back.Get()));D3DVIEWPORT9 vp{0,0,size,size,0,1};Check(d->SetViewport(&vp));
@@ -115,7 +117,7 @@ int main() try {
             D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_SRGBWRITEENABLE,D3DRS_CLIPPLANEENABLE})Check(d->SetRenderState(state,FALSE));
         Check(d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));Check(d->SetRenderState(D3DRS_FILLMODE,D3DFILL_SOLID));Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,15));
         Check(d->SetVertexShader(nullptr));Check(d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));Check(d->SetPixelShader(weathervisuals::precipitationPS.Get()));
-        Check(d->SetTexture(0,black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,clear.Get()));
+        Check(d->SetTexture(0,brightScene?bright.Get():black.Get()));Check(d->SetTexture(1,depth.Get()));Check(d->SetTexture(2,drop.Get()));Check(d->SetTexture(3,clear.Get()));
         for(DWORD slot=0;slot<4;++slot){Check(d->SetSamplerState(slot,D3DSAMP_MINFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MAGFILTER,slot==1?D3DTEXF_POINT:D3DTEXF_LINEAR));Check(d->SetSamplerState(slot,D3DSAMP_MIPFILTER,D3DTEXF_NONE));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSU,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_ADDRESSV,slot<2?D3DTADDRESS_CLAMP:D3DTADDRESS_WRAP));Check(d->SetSamplerState(slot,D3DSAMP_SRGBTEXTURE,FALSE));}
         if(mode==1) {
             const float dt = time * (1080.f/float(size)) / 620.f;
@@ -129,7 +131,7 @@ int main() try {
             float c1[4]={float(size),float(size),1.f/size,1.f/size};
             float c2[4]={1,1,1,1};
             float c3[4]={1,1,1,1};
-            float c4[4]={1,0,1,1}; // particle-mask debug view
+            float c4[4]={1,0,1,debugMask?1.f:0.f}; // particle mask or final scene composite
             float c5[4]={windX/magnitude,vertical/magnitude,windX,0};
             float c9[4]={minZ,1.f/(maxZ-minZ),0,0};
             Check(d->SetPixelShader(weathervisuals::rainPS.Get()));
@@ -167,6 +169,18 @@ int main() try {
     for(UINT x=0;x<size;++x){unsigned run=0;for(UINT y=0;y<size;++y){run=(rain0[y*size+x]&255)>2?run+1:0;longest=std::max(longest,run);}}
     std::printf("longest rain streak=%u pixels of %u\n",longest,size);
     Require(longest<=16,"rain streaks are compact rather than screen-height beams");
+    // Visual mode must scatter light against darkness, yet leave bright sky
+    // bright rather than overlaying it with opaque white or a gray sheet.
+    const auto darkRain=render(1,0,5,0,1,0,false,false);
+    const auto skyRain=render(1,0,5,0,1,0,false,true);
+    unsigned brightened=0,subtleSky=0;
+    for(size_t i=0;i<darkRain.size();++i) {
+        brightened+=(darkRain[i]&255)>3;
+        const unsigned sky=skyRain[i]&255;
+        subtleSky+=sky<255&&sky>200;
+    }
+    Require(brightened>100&&subtleSky>100,
+        "rain has readable dark-scene highlights and restrained sky refraction");
     auto snow0=render(2,0,5),snow1=render(2,1.f/60,5);
     Require(difference(snow0,snow1,0,4)<.3&&difference(snow0,snow1,0,-4)>2,"shared snow UV motion also falls downward");
     Require(nonblack(render(1,0,1))==0,"near foreground fully occludes precipitation");
