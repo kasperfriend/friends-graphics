@@ -1,3 +1,6 @@
+// Windows-specific regression tests that test DX9 and Win32.
+// On non-Windows platforms, run overlay-test, location-tuning-cache-test, and crossing-test.
+#ifdef _WIN32
 // Render the actual F7 menu through setter hooks, then check BOTH the D3D9
 // device and the software mirror. A state-block-only/unhooked test misses the
 // regression: Apply normally does not call the device's public Set* vtable.
@@ -167,9 +170,80 @@ void TestGlobalScope() {
     editGlobal=false;editZone=false;layout.SelectTab(0);
     std::printf("PASS Global scope selection, persistence, clearing and reset behavior\n");
 }
+void TestInheritGlobalScope() {
+    using namespace tuningoverlay;
+    using namespace renderer::locationtuning;
+    const auto directory=std::filesystem::absolute("build/overlay-inherit-global");
+    std::filesystem::create_directories(directory);
+    std::filesystem::remove(directory/L"LocationGraphics.ini");
+    std::filesystem::remove(directory/L"GraphicsEffects.ini");
+    const auto base=directory.wstring()+L"\\";
+    Sync(base,{571,65,4164,true},true);
+    Configure(base);
+
+    // In Location scope (Area), verify CanInheritGlobalTab and toggling
+    Require(SelectScope(1)&&!editGlobal&&!editZone,"Area scope active");
+    layout.SelectTab(0);
+    Require(CanInheritGlobalTab(),"CanInheritGlobalTab is true in Area scope");
+    Require(!HasActiveTabInheritGlobal(),"Initially tab does not have inherit global enabled");
+
+    auto& item=items[Tabs()[0].begin];
+    Require(!HasInheritGlobal(item.section,item.key),"Initial item inherit global is false");
+
+    // Toggle individual item
+    Require(ToggleInheritGlobalItem(item),"ToggleInheritGlobalItem turns inherit on");
+    Require(HasInheritGlobal(item.section,item.key),"Item inherit is now true");
+    Require(ToggleInheritGlobalItem(item),"ToggleInheritGlobalItem turns inherit off");
+    Require(!HasInheritGlobal(item.section,item.key),"Item inherit is now false again");
+
+    // Toggle entire tab
+    Require(ToggleInheritGlobalActiveTab(),"ToggleInheritGlobalActiveTab turns tab inherit on");
+    Require(HasActiveTabInheritGlobal(),"All items in tab have inherit enabled");
+    for(int idx=Tabs()[0].begin;idx<Tabs()[0].end;++idx) {
+        Require(HasInheritGlobal(items[idx].section,items[idx].key),"Item in tab has inherit enabled");
+    }
+
+    Require(ToggleInheritGlobalActiveTab(),"ToggleInheritGlobalActiveTab turns tab inherit off");
+    Require(!HasActiveTabInheritGlobal(),"Tab inherit is now off");
+    for(int idx=Tabs()[0].begin;idx<Tabs()[0].end;++idx) {
+        Require(!HasInheritGlobal(items[idx].section,items[idx].key),"Item in tab has inherit disabled");
+    }
+
+    // Check interaction with global values:
+    // 1. Set global value for item
+    Require(SelectScope(2)&&editGlobal,"Switch to Global scope");
+    item.value=item.lo;
+    Require(Save(item)&&HasGlobalValue(item.section,item.key),"Saved global override");
+    // 2. Set area value to something different
+    Require(SelectScope(1)&&!editGlobal,"Switch back to Area scope");
+    item.value=item.hi;
+    Require(Save(item),"Saved area value");
+    // When inherit is off: ReadEditorInt and ReadString return area value
+    Require(ReadEditorInt(item.section,item.key,defaults[Tabs()[0].begin],ini.c_str())==static_cast<UINT>(item.hi),
+        "Area editor reads area value when inherit is off");
+    // When inherit is on: ReadEditorInt and ReadString return global value
+    Require(ToggleInheritGlobalItem(item),"Toggle inherit on");
+    Require(ReadEditorInt(item.section,item.key,defaults[Tabs()[0].begin],ini.c_str())==static_cast<UINT>(item.lo),
+        "Area editor reads global override when inherit is on");
+    wchar_t readStr[64]{};
+    ReadString(item.section,item.key,L"",readStr,64,ini.c_str());
+    Require(std::stoi(readStr)==item.lo,"ReadString resolves to global override when inherit is on");
+
+    // CanInheritGlobalTab should be false in Global scope and in Image & Color tab
+    Require(SelectScope(2),"Switch to Global scope");
+    Require(!CanInheritGlobalTab(),"CanInheritGlobalTab is false in Global scope");
+    Require(SelectScope(1),"Switch back to Area scope");
+    layout.SelectTab(int(Tabs().size())-1);
+    Require(!CanInheritGlobalTab(),"CanInheritGlobalTab is false for Image & Color tab");
+
+    layout.SelectTab(0);
+    editGlobal=false;editZone=false;
+    std::printf("PASS Inherit global toggle per-item, per-tab, and scope resolution\n");
+}
 int main() try {
     TestResetDefaults();
     TestGlobalScope();
+    TestInheritGlobalScope();
     wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path, L"\\d3d9.dll");
     auto runtime = LoadLibraryW(path); Require(runtime != nullptr, "system D3D9 loaded");
     auto create = reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(runtime, "Direct3DCreate9"));
@@ -229,3 +303,10 @@ int main() try {
     std::puts("PASS F7 open/closed/reopened: actual GPU and tracked state survive hooked menu drawing");
     return 0;
 } catch (const std::exception& error) { std::fprintf(stderr, "FAIL %s\n", error.what()); return 1; }
+#else
+#include <cstdio>
+int main() {
+    std::puts("SKIP OverlayStateRegression requires Windows and Direct3D9");
+    return 0;
+}
+#endif

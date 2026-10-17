@@ -88,6 +88,7 @@ struct OverlayLayout {
     Box Content() const {return {panel.x+240,panel.y+240,panel.w-270,float(VisibleRows())*rowHeight};}
     Box ResetButton() const {const auto c=Content();return {c.x+c.w-142,panel.y+202,142,26};}
     Box ClearOverridesButton() const {auto b=ResetButton();b.x-=166;b.w=158;return b;}
+    Box InheritGlobalTabButton() const {auto b=ResetButton();b.x-=166;b.w=158;return b;}
     int VisibleRows() const {return std::max(1,int((panel.h-276)/rowHeight));}
     int MaxScroll(int tab) const {return std::max(0,Tabs()[tab].end-Tabs()[tab].begin-VisibleRows());}
     void SelectTab(int tab) {if(tab>=0&&tab<int(Tabs().size())){activeTab=tab;Cancel();}}
@@ -97,6 +98,7 @@ struct OverlayLayout {
     }
     Box Slider(int index) const {auto b=Row(index);return {b.x+b.w-146,b.y+8,136,20};}
     Box Toggle(int index) const {auto b=Row(index);return {b.x+b.w-68,b.y+6,58,24};}
+    Box InheritToggle(int index) const {auto b=Row(index);return {b.x+b.w-260,b.y+6,52,24};}
     Box ScrollTrack() const {auto b=Content();return {b.x+b.w+8,b.y,8,b.h};}
     Box ScrollThumb() const {
         auto b=ScrollTrack();const int count=Tabs()[activeTab].end-Tabs()[activeTab].begin;

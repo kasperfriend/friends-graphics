@@ -507,6 +507,41 @@ inline bool ClearGlobalValue(LPCWSTR section,LPCWSTR key) {
     if(cleared)InvalidateScopedKeys();
     return cleared;
 }
+inline std::wstring InheritKey(LPCWSTR section,LPCWSTR key) {
+    return LowerKeyName((std::wstring(section)+L"."+key).c_str());
+}
+inline bool HasInheritGlobalAtLevel(LPCWSTR section,LPCWSTR key,unsigned level) {
+    if(localFile.empty()||!editable)return false;
+    const std::wstring scope=Scope(level)+L".inheritglobal";
+    const auto* values=ScopedValuesFor(scope);
+    if(!values)return false;
+    const auto found=values->find(InheritKey(section,key));
+    if(found==values->end())return false;
+    return found->second!=L"0"&&found->second!=L"false";
+}
+inline bool HasInheritGlobal(LPCWSTR section,LPCWSTR key) {
+    if(localFile.empty()||!editable)return false;
+    const unsigned top=editZone||!active.areaId?1:2;
+    for(int level=top;level>=1;--level) {
+        const std::wstring scope=Scope(level)+L".inheritglobal";
+        const auto* values=ScopedValuesFor(scope);
+        if(!values)continue;
+        const auto found=values->find(InheritKey(section,key));
+        if(found!=values->end())
+            return found->second!=L"0"&&found->second!=L"false";
+    }
+    return false;
+}
+inline bool SetInheritGlobal(LPCWSTR section,LPCWSTR key,bool inherit) {
+    if(localFile.empty()||!editable||IsGlobal(section))return false;
+    const std::wstring scope=Scope(editZone||!active.areaId?1:2)+L".InheritGlobal";
+    const std::wstring fullKey=std::wstring(section)+L"."+key;
+    const bool written=inherit
+        ? WritePrivateProfileStringW(scope.c_str(),fullKey.c_str(),L"1",localFile.c_str())!=0
+        : WritePrivateProfileStringW(scope.c_str(),fullKey.c_str(),nullptr,localFile.c_str())!=0;
+    if(written)InvalidateScopedKeys();
+    return written;
+}
 inline bool Sync(const std::wstring& base,const LocationContext& location,bool verified) {
     const bool changed=!active.SamePlace(location)||editable!=(location.valid&&verified)||baseFile!=base+L"GraphicsEffects.ini";
     const std::wstring nextBase=base+L"GraphicsEffects.ini",nextLocal=base+L"LocationGraphics.ini";
@@ -773,6 +808,21 @@ inline uint64_t ScopedFingerprint(const LocationContext& location) {
                     }
                 }
             }
+            // Mix in inheritance flags so toggling "Inherit global" marks the tuning in force as changed.
+            for(int level=top;level>=1;--level) {
+                const std::wstring inheritSection=LowerKeyName((Scope(level)+L".inheritglobal").c_str());
+                const SectionValues* inhValues=ProfileSection(file,localFile,inheritSection.c_str());
+                if(inhValues&&!inhValues->empty()) {
+                    std::vector<std::pair<const std::wstring*,const std::wstring*>> sortedInh;
+                    for(const auto& [k,v]:*inhValues) sortedInh.emplace_back(&k,&v);
+                    std::sort(sortedInh.begin(),sortedInh.end(),
+                        [](const auto& a,const auto& b){return *a.first<*b.first;});
+                    FingerprintMix(hash,inheritSection);
+                    for(const auto& [k,v]:sortedInh) {
+                        FingerprintMix(hash,*k);FingerprintMix(hash,*v);
+                    }
+                }
+            }
         }
     }
     if(!provable) {active=previous;return 0;}
@@ -824,16 +874,19 @@ inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR out
 }
 inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
     // Explicit global edits outrank every location, even without a verified location.
-    if(!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
+    // In verified location mode, a setting only inherits global when explicitly opted in.
+    if(!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key)&&(!editable||HasInheritGlobal(section,key)))
         return ReadProfileString(GlobalScope(section).c_str(),key,fallback,output,size,localFile.c_str());
     return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1);
 }
 inline UINT ReadEditorInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
-    // Location editors deliberately show their own layer, not the global mask.
+    // Location editors show their own layer, or the inherited global override when opted in.
     wchar_t value[128]{};
     if((editGlobal||!editable)&&!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
         ReadProfileString(GlobalScope(section).c_str(),key,L"",value,128,localFile.c_str());
     else if(editGlobal)ReadProfileString(section,key,L"",value,128,path);
+    else if(!IsGlobal(section)&&editable&&path&&baseFile==path&&HasInheritGlobal(section,key)&&HasGlobalValue(section,key))
+        ReadProfileString(GlobalScope(section).c_str(),key,L"",value,128,localFile.c_str());
     else ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
@@ -846,7 +899,7 @@ inline UINT ReadInt(LPCWSTR section, LPCWSTR key, INT fallback, LPCWSTR path) {
 // global file - and the water colours need the distinction: a shipped per-zone
 // colour replaces the global default, but never a player's own scoped override.
 inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
-    if(HasGlobalValue(section,key))return true;
+    if(HasGlobalValue(section,key)&&(!editable||HasInheritGlobal(section,key)))return true;
     if(!editable||localFile.empty())return false;
     const std::wstring wanted=LowerKeyName(key);
     for(int level=active.areaId?2:1;level>=0;--level) {

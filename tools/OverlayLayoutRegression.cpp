@@ -21,8 +21,10 @@ static void ReachEverySetting(OverlayLayout& l) {
         if(scope<2)assert(b.x+b.w<=l.Scope(scope+1).x);
     }
     const auto clear=l.ClearOverridesButton(),reset=l.ResetButton();
+    const auto inheritTab=l.InheritGlobalTabButton();
     assert(l.panel.Contains(clear.x,clear.y));
     assert(clear.x>=l.Content().x&&clear.x+clear.w<reset.x);
+    assert(inheritTab.x==clear.x&&inheritTab.y==clear.y&&inheritTab.w==clear.w&&inheritTab.h==clear.h);
     assert(l.HitItem(clear.x+1,clear.y+1)==-1);
     assert(!l.Begin(clear.x+1,clear.y+1));
     std::set<int> seen;
@@ -50,6 +52,10 @@ static void ReachEverySetting(OverlayLayout& l) {
                 assert(items[i].kind!=KIND_HEADER);
                 const auto control=items[i].kind==KIND_SLIDER?l.Slider(i):l.Toggle(i);
                 assert(l.HitItem(control.x+1,control.y+1)==i);
+                const auto inh=l.InheritToggle(i);
+                assert(l.HitItem(inh.x+1,inh.y+1)==i);
+                assert(row.Contains(inh.x+1,inh.y+1));
+                assert(inh.x+inh.w<=control.x);
                 seen.insert(i);
             }
             auto content=l.Content();
@@ -150,6 +156,14 @@ int main() {
         const auto b=l.ScrollButton(down);
         assert(l.HitItem(b.x+1,b.y+1)==-1);
         assert(!l.ResizeGrip().Contains(b.x+b.w-1,b.y+b.h-1));
+    }
+    // The inherit toggle and the value control must not overlap
+    for(int i=0;i<int(items.size());++i)if(items[i].kind!=KIND_HEADER) {
+        OverlayLayout l;l.Fit(1920,1080,1.f);
+        const auto inh=l.InheritToggle(i);
+        const auto c=items[i].kind==KIND_SLIDER?l.Slider(i):l.Toggle(i);
+        assert(inh.x+inh.w<=c.x);
+        assert(l.Row(i).Contains(inh.x,inh.y));
     }
     std::cout<<"F7 overlay: all "<<keys.size()<<" settings reachable; tab, move, resize, scroll, scale and slider regressions passed\n";
 }
