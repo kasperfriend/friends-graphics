@@ -133,46 +133,50 @@ fleck sits on, and the broad warp is the tongue both are torn out of. It multipl
 whole, because a whitecap *is* a broken streak, and only `.45` of the shore term, because a sheet
 running up a beach is continuous in a way a cap on a crest is not.
 
-The lace reads those octaves' **values**, and getting that right took two attempts. The first read
-them raw, which is what the chop fade elsewhere in the stage exists to prevent - a value noise a
-pixel cannot resolve aliases into a fixed screen-aligned grid - so each octave now enters through the
-same fade its own slope uses (the fine one squared, the mid one to the first power), and the lace
-itself fades toward 1, no lace, on `saturate(filter*2-.2)`; without that second fade the octaves'
-neutral `.5` seed would leave a flat `.94` on distant water and darken every distant crest.
+The lace reads sampled **values**, not slopes. The first implementation clipped a threshold ramp
+inside the noise range (21.9% of fine cells and 20.2% of mid cells hit the low plateau; the completed
+lace was flat at 1.0 for 43.1% of sampled cells). Replacing that with a smooth complement product
+removed the artificial plateau, but a second in-game report showed the grid still present. That
+proved the plateau was not the whole cause, and the earlier claim that the camera-moving grid was
+fixed was premature.
 
-That was aimed at the wrong mechanism, and disproving it was cheap. With **WAVE FADE** at 0 the fade
-is off everywhere and the reported checkerboard did not change at all, while **WATER QUALITY** 6 -
-which has neither the lace nor the mid octave - removed it completely. So the grid was not aliasing at
-distance; it was the *shape of the mix*. The first version read `saturate(v*1.7-.35)` and
-`saturate(v*1.6-.30)`, and a saturate whose ramp sits **inside** the noise's own value range clips.
-Measured over the lattice: 21.9% of cells landed flat on the low plateau and 19.0% on the high one for
-the fleck, 20.2% and 17.4% for the lump, and **43.1% of the finished lace sat exactly on 1.0**. Value
-noise is one blob per lattice cell, so a clipped blob is a flat square one cell across - 1.15 yards
-for the fine octave, 5.4 for the mid - and 43% of the foam was paved with them. That is a checkerboard
-at every distance and every angle, it crawls when the camera moves because the lattice is world-anchored
-and the projection of it is not, and no distance fade can touch it.
-
-The lace is therefore a product of the two octaves' complements:
+The remaining quality-7 input was the per-pixel **mid octave** itself: level 6 removes that octave
+and the artifact, level 7 adds it. Its world lattice is a useful wave-slope input, but it does not
+need to modulate foam coverage. The lace now combines the fine per-pixel fleck with the broad warp
+already interpolated across the liquid mesh:
 
 ```
-lace = 1 - .70 * (1 - fine) * (1 - mid)
+lace = 1 - .70 * (1 - fine) * (1 - broad)
 ```
 
-which has no plateau anywhere inside the range - it reaches 1 only where an octave reaches its own
-maximum, a set of measure zero for a continuous field - and is darkest only where both octaves agree
-the water is open, which is what a water-filled gap between two filaments actually is. It keeps the
-look it replaces: mean **0.817** against **0.805**, minimum **0.307** against **0.300**, and **0.0%**
-of cells on a plateau instead of 43.1%. A probe sweep across a coast panel no longer returns an exact
-`1` anywhere at level 7, where two of eight points did before. `tools/WaterRegression.cpp` pins the
-product form in both halves of the renderer and requires the clipped spellings to be gone.
-
-The lesson is worth more than the lace: **on this renderer's value noise, a `saturate` whose ramp does
-not span the whole value range prints the lattice onto the screen.** Any new term that shapes an
-octave's value should either use the full range or use a curve with no plateau in it.
+The mid octave continues to shape the wave surface; only its value is removed from the foam lace.
+The broad field is evaluated in the vertex stage and shared across adjacent pixels/tiles, avoiding a
+mid-frequency per-pixel lattice in the bright foam mask. The CPU preview mirrors the same formula.
+Regression pins require the mid-value input to stay out of the lace and the clipped threshold forms
+to stay gone. This is the first change aimed at the quality-7 input itself; the game capture remains
+the acceptance check for the reported camera-moving grid.
 
 At the same level the colour becomes a ramp on the coverage the masks already produced instead of
 one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
 crest, a thin veil lets the water's own tint through and reads as the grey-green lace underneath it.
+
+### Looking up through the water
+
+The surface is a two-sided interface, but a two-sided normal alone is not a two-sided optical model.
+When the camera is below the surface, the view ray travels from water toward air. At angles beyond
+water's critical angle, no transmitted ray exists: the interface is totally internally reflecting.
+The shader now retains the camera-side bit before orienting the normal, adds a narrow smooth TIR ramp
+around `cos(theta_c)=sqrt(1-(1/1.333)^2) ~= .661`, and uses the same interface Fresnel for the
+reflection mix. It also attenuates the camera-to-surface ray by the authored per-channel
+Beer-Lambert coefficients and converges it toward the body's deep tint. This uses ray length, not
+view-Z, so an oblique underwater view does not artificially shorten the water column. Above water,
+the camera-side blend is exactly identity and the new reflection term is gated off.
+
+The user-reported seam after swimming underwater remains a runtime acceptance case: adjacent liquid
+tiles must keep continuous foam and optics through the camera-side transition. The attachment supplied
+so far was `NativeShadowDiagnostics.log`, not the water draw capture, so it contains no evidence about
+water shader selection; don't widen the liquid whitelist based on that file. A water capture is still
+needed to diagnose a draw that truly falls back to native rendering.
 That ramp is what lets the two coexist on one wave. At level 10 the veil also glows when the source
 is behind it, on the same `vDotL` the in-scatter lobe already computed, weighted by what the ramp
 left over so the thick caps that already scatter everything back are not double-lit.

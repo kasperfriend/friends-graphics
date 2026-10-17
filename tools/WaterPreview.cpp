@@ -291,7 +291,7 @@ struct WaveState
 {
     V3 normal{ 0, 0, 1 };
     V2 slopes{};
-    float detail = .5f, swell01 = .5f, foamPattern = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
+    float detail = .5f, swell01 = .5f, foamPattern = .5f, broadValue = .5f, height = 0.f, rippleEnergy = 0.f, filter = 1.f;
     // The two chop values the foam lace reads that `detail` does not already carry: the fine
     // octave's own value and the mid octave's. Both sit at the shader's neutral .5 when the
     // quality level does not sample them, which is exactly what the shader's seeded samples
@@ -383,6 +383,7 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // their edges into smaller, moving flecks. Both fields are already sampled
     // for the warped swell and normal, so the preview mirrors the shader exactly.
     w.foamPattern = Saturate(.45f * warp.noiseValue + .55f * w.detail);
+    w.broadValue = warp.noiseValue;
     w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
@@ -866,25 +867,17 @@ int main(int argc, char** argv)
                     // whitecap IS a broken streak, and only .45 of the shore term, because a sheet
                     // running up a beach is continuous in a way a cap on a crest is not.
                     //
-                    // Both octaves enter through the same footprint fade their slopes use, and the
-                    // lace itself fades toward "no lace" on that filter: a value noise a pixel
-                    // cannot resolve aliases into a screen-aligned grid, which on a term that
-                    // multiplies bright foam reads as a checkerboard crawling with the camera. The
-                    // mirror measures its chop on a world lattice at the same footprint the shader
-                    // does, so it shows the same artefact and needs the same fade.
-                    //
-                    // And the two are combined as a product of their COMPLEMENTS, never through a
-                    // saturate whose ramp sits inside the noise's own range - that clips, and value
-                    // noise is one blob per lattice cell, so a clipped blob is a flat square one cell
-                    // across printed onto the foam. Measured over the lattice the clipped form put
-                    // 43.1% of the lace exactly on 1.0; this form puts 0.0% on any plateau at the
-                    // same mean (0.817 against 0.805) and the same floor (0.307 against 0.300). The
-                    // mirror carries the identical formula so the frame it publishes is the frame the
-                    // shader draws, plateaus and all - which is how the squares showed up here too.
+                    // The previous two iterations incorrectly blamed either distant aliasing or
+                    // the clipped saturate. The user's latest underwater capture still showed the
+                    // grid after both changes. Quality 7 is the switch that introduces the mid
+                    // octave, and that octave's value was still being read by the lace even after the
+                    // threshold was fixed. Keep the continuous fine fleck, but use the broad warp
+                    // already interpolated from vertices as the other lace scale: unlike per-pixel
+                    // mid value noise it cannot print a cell grid onto foam or split at mesh tiles.
                     const float laceFine = Mix(.5f, wave.fineValue, wave.filter * wave.filter);
-                    const float laceMid = Mix(.5f, wave.midValue, wave.filter);
+                    const float laceBroad = Mix(.5f, wave.broadValue, wave.filter);
                     const float lace = plan.midWaves
-                        ? Mix(1.f, 1.f - .70f * (1.f - laceFine) * (1.f - laceMid),
+                        ? Mix(1.f, 1.f - .70f * (1.f - laceFine) * (1.f - laceBroad),
                             Saturate(wave.filter * 2.f - .2f))
                         : 1.f;
                     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline,

@@ -857,24 +857,20 @@ int main() try
                 pixel.find("rippleMid.yz*.40*filter*filter")==std::string::npos,
                 "the mid octave rides the swell and fades on the first power of the footprint filter");
         // The foam checkerboard, which took two attempts and is pinned in both directions because the
-        // first fix was aimed at the wrong mechanism. The lace reads the chop octaves' VALUES, and the
-        // obvious reading of "a grid that crawls with the camera" is unresolved value noise aliasing -
-        // so the octaves were faded by the footprint filter, exactly like `detail` has always been. The
-        // pattern stayed on the screen, and WAVE FADE at 0 left it unchanged, which is what proved the
-        // fade was not the mechanism: the real one is that a saturate whose ramp sits INSIDE the noise's
-        // own value range CLIPS, and value noise is one blob per lattice cell, so a clipped blob is a
-        // flat square one cell across - 1.15 yards for the fine octave, 5.4 for the mid. Measured over
-        // the lattice, 43.1% of the old lace sat exactly on 1.0. That is the lattice printed onto the
-        // foam, at every distance, which is why a distance fade could not remove it. A product of the
-        // two octaves' complements has no plateau in range at the same mean and the same floor.
+        // The player's latest capture still has the grid after both earlier changes. Level 7 is the
+        // switch that adds rippleMid, and that per-pixel value was still feeding the lace. Keep the
+        // mid octave for its wave slope; use the vertex-interpolated broad warp as the second foam
+        // scale instead, so its lattice cannot be printed onto the coverage. Also pin the old clipped
+        // thresholds out of both implementations.
         Require(pixel.find("float fine=lerp(.5,rippleFine.x,filter*filter);")!=std::string::npos&&
-                pixel.find("float mid=lerp(.5,rippleMid.x,filter);")!=std::string::npos&&
-                pixel.find("lace=lerp(1,1-.70*(1-fine)*(1-mid),saturate(filter*2-.2));")!=std::string::npos&&
+                pixel.find("float broad=lerp(.5,waveWarp.x,filter);")!=std::string::npos&&
+                pixel.find("lace=lerp(1,1-.70*(1-fine)*(1-broad),saturate(filter*2-.2));")!=std::string::npos&&
+                pixel.find("rippleMid.x",pixel.find("float lace=1;"))==std::string::npos&&
                 pixel.find("*1.7-.35)")==std::string::npos&&
                 pixel.find("*1.6-.30)")==std::string::npos&&
-                mirror.find("1.f - .70f * (1.f - laceFine) * (1.f - laceMid)")!=std::string::npos&&
-                mirror.find("laceFleck")==std::string::npos,
-                "the foam lace is a product of complements, so no lattice cell can clip flat into a square");
+                mirror.find("1.f - .70f * (1.f - laceFine) * (1.f - laceBroad)")!=std::string::npos&&
+                mirror.find("laceMid")==std::string::npos,
+                "the quality-7 mid octave no longer feeds foam coverage; the lace uses fine and broad fields only");
         // The black shape inside the waves at surface height. `controls.z` is normalStrength times the
         // sea's agitation and reaches 2.5, so the body multiplier goes NEGATIVE on a face turning away
         // from the light, and nothing saturates rgb between there and the output - the render target
@@ -890,6 +886,12 @@ int main() try
         Require(mirror.find("Mix(.22f, .78f, Saturate(-Dot(toCamera, light) * 1.7f - .45f))")!=std::string::npos&&
                 mirror.find("rgb = Mul(rgb, std::max(1.f + normalResponse")!=std::string::npos,
                 "the CPU mirror floors its body shading identically");
+        Require(pixel.find("float underwater=1-step(-1e-4,cameraSide);")!=std::string::npos&&
+                pixel.find("float totalInternal=1-smoothstep(.63,.69,NoV);")!=std::string::npos&&
+                pixel.find("fresnel=max(fresnel,underwater*totalInternal*foreverStyle.z);")!=std::string::npos&&
+                pixel.find("float cameraColumn=min(length(viewPos),250.0);")!=std::string::npos&&
+                pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos,
+                "the underside uses a water-to-air critical-angle reflection and attenuates light along the camera-side water column");
         Require(pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
                 pixel.find("max(max(sqrt(footprintSquared),kBedSlopeSpanYards)")!=std::string::npos&&
                 mirror.find("const float e = 1.5f;")!=std::string::npos,

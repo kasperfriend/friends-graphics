@@ -727,7 +727,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // which is what this line used to do - lit every wave face as though it leaned the
     // other way, so highlights sat in the troughs. Invisible while the surface was
     // flat, obvious the moment the geometry started lifting crests.
-    float flip=dot(n,v)<0?-1:1;
+    float cameraSide=dot(n,v);
+    // This draw is being viewed from the water side when the un-oriented normal points
+    // away from the camera. Keep that fact after flipping the normal: flipping alone makes
+    // the lighting two-sided, but it does not give an underwater view its different optical
+    // path or the water-to-air critical angle.
+    float underwater=1-step(-1e-4,cameraSide);
+    float flip=cameraSide<0?-1:1;
     n*=flip;
     float2 tilt=-slopes*(controls.z/jacobian)*flip;
     float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
@@ -947,8 +953,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float lace=1;
     [branch] if(qualityLevel>=6.5) {
         float fine=lerp(.5,rippleFine.x,filter*filter);
-        float mid=lerp(.5,rippleMid.x,filter);
-        lace=lerp(1,1-.70*(1-fine)*(1-mid),saturate(filter*2-.2));
+        // The mid octave is deliberately NOT a foam input. It is the level-7 value that
+        // brought the visible lattice back even after the clipped saturate was removed;
+        // its screen projection is exactly the grid reported at quality 7 and above.
+        // The broad warp is interpolated from vertices and is continuous across the liquid
+        // mesh, so use it as the second lace scale instead of per-pixel mid value noise.
+        float broad=lerp(.5,waveWarp.x,filter);
+        lace=lerp(1,1-.70*(1-fine)*(1-broad),saturate(filter*2-.2));
     }
     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline, in streaks
     // the next sheet pushes up and the drain pulls back out. Contours of the captured depth
@@ -990,6 +1001,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float NoV=max(dot(wave,v),1e-4);
     float foreverFresnel=saturate(1-NoV);
     float fresnel=(.02+.98*pow(foreverFresnel,5.0))*foreverStyle.z;
+    // Water-to-air rays from below undergo total internal reflection above the critical
+    // angle (cos(theta_c)=sqrt(1-(1/1.333)^2) ~= .661). A Schlick curve alone tops out
+    // below one, so it incorrectly kept showing the sky/terrain through a grazing underside.
+    // Smooth only across a narrow angular band to avoid a visible branch boundary.
+    float totalInternal=1-smoothstep(.63,.69,NoV);
+    fresnel=max(fresnel,underwater*totalInternal*foreverStyle.z);
     // 2. Screen-space reflections against the pre-water copy, perturbed by the
     // wave normal. WATER QUALITY hands this loop its trip count - 0 skips it through
     // the same test that already stopped it, 12 is the ceiling the loop is written
@@ -1126,6 +1143,17 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // shader and requires 128 back, which is where that doubling showed up as 255.
     waterBody*=waterTint.rgb;
     rgb=waterBody;
+    // Looking up through the interface is still looking through a water column: the camera
+    // is on the water side, so the path to this surface must attenuate the view even when
+    // the captured depth belongs to terrain a long way above or the depth capture is absent.
+    // Use the actual camera-to-fragment ray length, not view-Z (which shortens the column at
+    // grazing angles), and the same per-channel Beer-Lambert coefficient as the bottom path.
+    // With the camera above water this is an exact identity; underwater it converges toward
+    // the authored deep colour as the surface gets farther away.
+    float cameraColumn=min(length(viewPos),250.0);
+    float3 cameraTransmittance=exp(-bodyStyle.x*waterStyle.y*cameraColumn*absorbTint.rgb);
+    float3 underwaterBody=rgb*cameraTransmittance+deepTint.rgb*(1-cameraTransmittance);
+    rgb=lerp(rgb,underwaterBody,underwater);
     // Direct reflection of actual local emitters on the same wave normal.
     // This does not depend on SSR finding an opaque flame in scene depth.
     float3 localReflection=0;
