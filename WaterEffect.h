@@ -523,7 +523,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // work in the shader — for every distant pixel the player cannot see.
     // The mask and surface-depth outputs remain correct so the atmosphere pass
     // still knows this is water and at what depth.
-    [branch] if(fog>=0.999) {
+    if(fog>=0.999) {
         float a=saturate(color.a*base.a);
         result_.color=float4(fogColor.rgb,a);
         result_.mask.a=a;
@@ -650,7 +650,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float absorption=0;
     float3 inScatter=0;
     float3 refracted=0;
-    [branch] if(captureValid>.5) {
+    if(captureValid>.5) {
     float depthScale=1/max(viewPos.z,.05);
     float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z*depthScale,
                            .5-.5*viewPos.y*reflectionProjection.w*depthScale);
@@ -680,7 +680,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // a bridge/character into the water. Missing depth keeps the native body.
     // The rejection fetch is a no-op when depthValid=0 (refractUV == screenUV),
     // so skip the texture read for open-water pixels that carry no distortion.
-    [branch] if(depthValid) {
+    if(depthValid) {
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
     refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
     } else { refractUV=screenUV; }
