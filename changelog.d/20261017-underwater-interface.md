@@ -1,6 +1,6 @@
 ---
 area: renderer
-type: improved
+type: changed
 audience: players
 title: Underwater views now treat the water surface as a real optical boundary
 ---
