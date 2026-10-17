@@ -102,7 +102,12 @@ $measureOnly = @()
 # compiler diagnostics have to end up in one.
 function Write-Annotation([string]$level, [string]$title, [string]$message) {
     $flat = ($message -replace "`r`n", "`n") -replace "`n", '%0A'
-    Write-Output "::$level title=$title::$flat"
+    # A workflow command's fields are comma-separated, so an unescaped comma simply ends the title:
+    # "fxc failed (postProcessPixelSource, ps_3_0)" came back from the API as "fxc failed
+    # (postProcessPixelSource", which is the one part of the diagnostic that says WHICH profile was
+    # being compiled. Escape it the same way the message's newlines are escaped.
+    $safeTitle = $title -replace ',', '%2C'
+    Write-Output "::$level title=$safeTitle::$flat"
 }
 
 $temp = Join-Path $env:TEMP 'modern-wow-renderer-shaders'

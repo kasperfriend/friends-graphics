@@ -531,7 +531,13 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 c=tex2D(scene,uv);
     float3 col=c.rgb;
     float aaEdge=0;
-    [branch] if(aaParams.x>.5)col=AntiAlias(uv,renderSize.xy,c.rgb,aaEdge);
+    // No [branch] here, and that is not an oversight. Forcing a dynamic branch around a body that
+    // samples with an implicit LOD is rejected outright by fxc on ps_3_0 - X3528, "can't force
+    // branch with gradients on non-inputs" - because derivatives are undefined inside flow control,
+    // and all eight taps in there are tex2D. A plain if costs nothing in this case anyway: the
+    // condition is a shader constant, so it is uniform across the whole frame and the compiler is
+    // free to branch on it itself, which is what the sharpening if below has always done.
+    if(aaParams.x>.5)col=AntiAlias(uv,renderSize.xy,c.rgb,aaEdge);
     if(postParams.w>.005) {
         float2 off=renderSize.xy;
         float3 up=tex2D(scene,uv+float2(0,-off.y)).rgb;
