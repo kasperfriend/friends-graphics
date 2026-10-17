@@ -164,6 +164,35 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float surfR2=step(rawR2,.99990)*step(1e-20,dot(uvR2-uv,uvR2-uv));
  float surfU2=step(rawU2,.99990)*step(1e-20,dot(uvU2-uv,uvU2-uv));
  float surfD2=step(rawD2,.99990)*step(1e-20,dot(uvD2-uv,uvD2-uv));
+ // locallighting::ReconstructNormal, horizon-flight veto. The window is a
+ // fixed UV span, but its world size depends on the ray: the sideways taps
+ // land a world window away, while the up tap of a steep down-look is the
+ // same ray barely above the horizon, which lands tens of yards out and
+ // turns the up-axis tangent into a long chord of the terrain - its
+ // direction is the relief's average over that span, not the local slope.
+ // That is a soft wrong-light band around everything the pool lights, and
+ // it grows with LIGHT SMOOTHING, because smoothing is exactly what widens
+ // the UV window until it erases the ray's down-angle. The test is per
+ // axis: sideways taps are closer than along-ray taps by construction, so a
+ // tap is only foreign to the window when it outruns its own partner - and
+ // it must outrun the receiver's own view depth: a tap further out than the
+ // receiver is a ray skimming the horizon, while a tap that merely outruns
+ // its partner can be one hitting a nearby relief bump (both taps within
+ // the receiver's depth, and both are measured).
+ {
+  float vz=max(z,.25);
+  float dL=length(pL-p),dR=length(pR-p),dU=length(pU-p),dD=length(pD-p);
+  if(surfL>0&&surfR>0)
+  {
+   if(dL>2.5*dR&&dL>vz) surfL=0.;
+   else if(dR>2.5*dL&&dR>vz) surfR=0.;
+  }
+  if(surfU>0&&surfD>0)
+  {
+   if(dU>2.5*dD&&dU>vz) surfU=0.;
+   else if(dD>2.5*dU&&dD>vz) surfD=0.;
+  }
+ }
  float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);
  float iU=1./max(zU,.001),iD=1./max(zD,.001);
  float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);
@@ -171,6 +200,29 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 wx=AxisWeights(iL,iR,iC,iL2,iR2,absolute,surfL,surfR,surfL2,surfR2);
  float2 wy=AxisWeights(iU,iD,iC,iU2,iD2,absolute,surfU,surfD,surfU2,surfD2);
  float wL=wx.x,wR=wx.y,wU=wy.x,wD=wy.y;
+ // locallighting::ReconstructNormal, near-object gate. The step test above
+ // reads DEPTH only: an object standing beside the receiver has a depth like
+ // the terrain a few yards away - the same jump, the same second difference
+ // - and passes it as terrain, its tap steering the tangent and the pool
+ // painting a shape-copy of the object. Wide smoothing windows make both
+ // sides contest, so the copies grow with smoothing. Whatever the depth
+ // says, a standing body is a metre or more off the local ground plane, and
+ // a plane - however sloped - has exactly zero second difference in world
+ // height. inv1 is the camera's sky direction; a side whose height second
+ // difference AND whose own height both clear the window's relief scale is
+ // foreign and slides to zero. A dead tap counts as the receiver's own
+ // level, so the gate still fires when the foreign side is the only one
+ // that measured a surface.
+ float hL=surfL>0?dot(pL-p,inv1.xyz):0.,hR=surfR>0?dot(pR-p,inv1.xyz):0.;
+ float hU=surfU>0?dot(pU-p,inv1.xyz):0.,hD=surfD>0?dot(pD-p,inv1.xyz):0.;
+ float liveW=surfL+surfR+surfU+surfD;
+ float spread=(surfL*length(pL-p)+surfR*length(pR-p)+surfU*length(pU-p)+surfD*length(pD-p))/max(liveW,1.);
+ float gtol=.1+.1*spread;
+ float curvX=abs(hL+hR),curvY=abs(hU+hD);
+ wL*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hL));
+ wR*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hR));
+ wU*=1.-smoothstep(gtol,gtol*2,curvY)*smoothstep(gtol,gtol*2,abs(hU));
+ wD*=1.-smoothstep(gtol,gtol*2,curvY)*smoothstep(gtol,gtol*2,abs(hD));
  // locallighting::ReconstructNormal: weighted central difference. With all
  // four weights at one this is exactly (far-near)/2 on both axes, i.e. the
  // central difference the pool had before; where a side is off-surface the
