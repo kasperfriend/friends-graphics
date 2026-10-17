@@ -514,21 +514,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     // uv0.zw/uv1.zw carry long-wave values; native texture addressing remains xy.
     float4 base=tex2D(baseTexture,uv0.xy);
-    // ---- optimization: early-out for fully fogged pixels ----
-    // When fog reaches 1 the pixel colour is exactly fogColor regardless of
-    // every wave, noise, reflection and lighting term below.  Skipping them
-    // saves two noise evaluations, six sincos, the SSR march (8 depth + colour
-    // fetches), the light-visibility march (8 depth fetches), the local-light
-    // loop, the depth/refraction section and Beer-Lambert — the most expensive
-    // work in the shader — for every distant pixel the player cannot see.
-    // The mask and surface-depth outputs remain correct so the atmosphere pass
-    // still knows this is water and at what depth.
-    if(fog>=0.999) {
-        float a=saturate(color.a*base.a);
-        result_.color=float4(fogColor.rgb,a);
-        result_.mask.a=a;
-        return result_;
-    }
     // One world-anchored lattice carries every scale. The swell is analytic - rounded
     // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
     // crest and the light on it cannot drift apart - and only the chop on top of it is
