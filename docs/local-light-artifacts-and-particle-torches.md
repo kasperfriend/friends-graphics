@@ -85,3 +85,55 @@ and grain now falls as the buffer gets finer instead of rising. On undulating
 ground at a grazing angle: 5.2-5.7 degrees (was 64). The composite's largest
 per-pixel step near the camera is 0.009 of the local level (was 2.6) and a
 silhouette base keeps its own light to within 15% (was 344%).
+
+## Dynamic light copies: the object beside the player, painted in the pool
+
+2026-10-17: player report - near characters and objects the light pass drew
+illusionary shape-copies of them, dark slabs floating beside the real geometry,
+and F7 "LIGHT SMOOTHING" (`NormalSpreadPercent`) only softened them. The pass
+has no temporal history, so this was never ghosting: it was the pool's normal
+being steered by the object's own depth.
+
+Root cause, from a CPU reconstruction over an eye-level scene with undulating
+ground, a character-like capsule and a crate a few yards away: when the normal
+window straddles an object's silhouette at a grazing angle, the window's own
+slope step across the ground is comparable to the object's depth jump. The old
+edge test compared the two-sided disagreement (which is exactly the jump - the
+plane's slope cancels out of it) against the window's one-sided changes (which
+are that slope), so the jump slid under the band and the object's tap kept
+steering the tangent. Even when the band fired, the close was partial and the
+outlier slide was scaled by the same drowned comparison, leaving about half of
+the object's tap in the tangent. Half of a point many yards off the surface is
+enough to paint the object into the pool. Everything the tests could see was
+flat ground, where the one-sided changes are exactly zero and the bug cannot
+occur - which is why the suite never caught it.
+
+Fixed, in `LocalLightingCore.h` and the ps_3_0 surface pass that mirrors it
+(pinned in `tools/LocalLightingRegression.cpp` by a scene that reproduces the
+report):
+
+- the window carries outer taps at twice the tangent distance. A per-side
+  second difference over (outer, inner, receiver) is slope-independent and -
+  unlike a three-tap window, where the slope step and the jump trade off
+  exactly - names WHICH side of the window the step is on. The side is chosen
+  by that signal alone: a rule keyed on the deviation gap guesses wrong the
+  moment a jump is smaller than the slope step and pins the tangent onto the
+  object, painting dark streaks out of it;
+- the edge test fires at once instead of sliding its old [.30,.85] band open,
+  and it fires against both scales the window knows - the yard noise floor, and
+  the window's own one-sided changes, which are the terrain's own relief. The
+  relief comparison is what keeps real ground (whose curvature lives at that
+  scale) on the central difference;
+- a tap that snapped onto the receiver's own texel - the frame clamp of an
+  off-frame window - measures nothing and is marked like the sky, instead of
+  reading as the flattest possible neighbour and taking over the axis at the
+  frame edge.
+
+Measured on the report scene, error against true normals on ground within a
+band of every silhouette: 0.118 at the shipped smoothing (was 0.203 with the
+old weighting) and 0.028 at 25% (was 0.040); at 400% every window near an
+object is contested and the pool is soft and wrong in both versions - the pin
+there is parity. Flat ground and the grazing far field are unchanged from the
+shipped look; undulating ground at a grazing angle now measures 6.8-7.2 degrees
+(was 5.2-5.7 with the old weighting, 64 before the reconstruction fixes), the
+cost of dropping one side at genuine relief creases.

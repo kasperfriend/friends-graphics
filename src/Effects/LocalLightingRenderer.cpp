@@ -20,10 +20,8 @@ namespace renderer
 namespace
 {
 // Line-by-line mirror of src/Effects/LocalLightingCore.h: Footprint,
-// TapWeights, ReconstructNormal and PoolShade. The relative edge band
-// (.30/.85) is NormalTuning::relativeEdgeLow/High at their shipped defaults -
-// the only part of that struct the shader spells out instead of receiving.
-// Change it in both places in the same commit.
+// TapWeights, ReconstructNormal and PoolShade. Change it in both places in
+// the same commit.
 const char* kSurfaceSource = R"HLSL(
 sampler2D depthMap:register(s0);
 // s1 is read through a LINEAR filter: the water gate must not inherit the
@@ -50,28 +48,43 @@ float3 World(float2 uv,float raw) {
  return cameraPos.xyz+v.x*inv0.xyz+v.y*inv1.xyz+v.z*inv2.xyz;
 }
 // locallighting::TapWeights, one axis, in inverse depth. .x is the weight of
-// the side the offset points away from, .y the other side.
-float2 AxisWeights(float dA,float dB,float curv,float absolute,float surfA,float surfB) {
- float edge=smoothstep(absolute,absolute*4,curv)*smoothstep(.30,.85,curv/max(dA+dB,absolute));
- // Normalized by the larger side, not by their sum: the sum saturates, so a
- // side four times further off the surface than its partner kept a third of the
- // weight and dragged the tangent onto the occluder behind it.
- float asym=(dA-dB)/max(max(dA,dB),1e-4);
- // locallighting::TapVetoRange: a side standing this much further from the
- // receiver than its partner is on something else and does not get to steer the
- // tangent. Measured against the partner, because the partner is what proves
- // the window is on a surface - over ground at a grazing angle both sides take
- // in many yards of depth per pixel, and they do it together - while an
- // occluder's edge is exactly the asymmetry this catches.
- float veto=6*min(dA,dB)+absolute;
- float2 w=float2(surfA*(dA<=veto)*(1-edge*smoothstep(0,1,asym)),surfB*(dB<=veto)*(1-edge*smoothstep(0,1,-asym)));
- // A side that measured nothing - off the frame, or the sky beyond it - was
- // zeroed above; left to the edge test it reads as total disagreement and takes
- // the surviving side with it, which collapses the tangent and the normal to
- // zero. One surviving side is the whole axis.
- if(w.x<=0&&w.y>0) w=float2(0,1);
- if(w.y<=0&&w.x>0) w=float2(1,0);
- return w;
+// the side the offset points away from, .y the other side. i1X are the inner
+// taps (the tangent distance), i2X the outer taps at twice the distance (the
+// step test's other point).
+float2 AxisWeights(float iL,float iR,float iC,float iL2,float iR2,float absolute,
+                   float surfL,float surfR,float surf2L,float surf2R) {
+ // locallighting::SideStep: a per-side second difference - the plane's own
+ // slope cancels out of it, so it is exactly |J|, the depth jump of whatever
+ // foreign surface that side reached onto, and it says WHICH side that is. A
+ // three-tap window cannot: the slope step and the jump trade off exactly, and
+ // a rule keyed on their comparison - or on the sign of the deviation gap -
+ // guesses wrong the moment a nearby object's jump comes up small against the
+ // grazing slope. That is what painted shape-copies of nearby characters and
+ // objects into the pool, and dark streaks where the guess flipped.
+ // Named `drop`, not `step`: `step` is an HLSL intrinsic.
+ // Does this window straddle a step at all: the two-sided disagreement
+ // (exactly a foreign tap's jump - the plane's slope cancels out of it)
+ // against BOTH scales the window knows - the yard noise floor, and the
+ // window's own one-sided changes, which are the terrain's own relief. The
+ // relief comparison keeps the pool following real ground; the band closes
+ // over a step at once instead of the old [.30,.85] slide that left half of a
+ // nearby object's tap steering the tangent - the shape-copies.
+ float curv=abs(iL+iR-2*iC);
+ float disagreements=abs(iL-iC)+abs(iR-iC);
+ float fire=smoothstep(absolute,absolute*4,curv)*smoothstep(.25,.55,curv/max(disagreements,absolute));
+ // Which side carried the step: a per-side second difference
+ // (locallighting::SideStep). A step stands alone on its side; a genuine
+ // curve shows up on both sides alike. Named `drop`, not `step`.
+ float qL=surf2L>0?abs(iL2-2*iL+iC):0.;
+ float qR=surf2R>0?abs(iR2-2*iR+iC):0.;
+ float dropL=fire*smoothstep(.7,.9,qL/max(qL+qR,absolute));
+ float dropR=fire*smoothstep(.7,.9,qR/max(qL+qR,absolute));
+ // locallighting::TapWeights: a side that measured nothing - the frame clamp
+ // of an off-frame window (surf is 0 for a tap that snapped onto the
+ // receiver's own texel), or the sky beyond it - hands the axis to the other
+ // side whole. The drops only arbitrate between two measured sides.
+ if(surfL<=0||surfR<=0) return float2(surfL>0?1.:0.,surfR>0?1.:0.);
+ return float2(1-dropL,1-dropR);
 }
 // locallighting::SnapUv. tex2D is POINT, so a tap returns the texel centre's
 // depth; reconstructing that depth along the requested uv puts the point off
@@ -106,9 +119,16 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // border texel's depth with a ray that never touched it.
  float2 uvL=Snap(uv-float2(spread.x,0)),uvR=Snap(uv+float2(spread.x,0));
  float2 uvU=Snap(uv-float2(0,spread.y)),uvD=Snap(uv+float2(0,spread.y));
+ // The outer taps at twice the distance feed the step test only - no world
+ // point is reconstructed from them.
+ float2 uvL2=Snap(uv-float2(spread.x*2,0)),uvR2=Snap(uv+float2(spread.x*2,0));
+ float2 uvU2=Snap(uv-float2(0,spread.y*2)),uvD2=Snap(uv+float2(0,spread.y*2));
  float rawL=tex2D(depthMap,uvL).r,rawR=tex2D(depthMap,uvR).r;
  float rawU=tex2D(depthMap,uvU).r,rawD=tex2D(depthMap,uvD).r;
+ float rawL2=tex2D(depthMap,uvL2).r,rawR2=tex2D(depthMap,uvR2).r;
+ float rawU2=tex2D(depthMap,uvU2).r,rawD2=tex2D(depthMap,uvD2).r;
  float zL=Linear(rawL),zR=Linear(rawR),zU=Linear(rawU),zD=Linear(rawD);
+ float zL2=Linear(rawL2),zR2=Linear(rawR2),zU2=Linear(rawU2),zD2=Linear(rawD2);
  float3 pL=World(uvL,rawL),pR=World(uvR,rawR);
  float3 pU=World(uvU,rawU),pD=World(uvD,rawD);
  float3 toEye=normalize(cameraPos.xyz-p);
@@ -117,10 +137,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // surface itself steps yards per pixel, so the old test read "edge" across
  // the whole far field and quietly degraded into a one-sided difference of
  // the terrain relief - an independent decision per pixel, which is what made
- // the pool read as noise. An edge is a window whose two sides disagree with
- // EACH OTHER more than with the surface's own slope; both halves are
- // continuous, so the tangent slides from central to one-sided instead of
- // switching.
+ // the pool read as noise. The step test is a per-side second difference over
+ // the outer taps (locallighting::SideStep): slope-independent, and it names
+ // the side the step is on instead of leaving the two sides to be guessed
+ // apart. Both halves are continuous, so the tangent slides from central to
+ // one-sided instead of switching.
  //
  // locallighting::InverseDepth: the test runs in 1/z, where every plane is
  // flat. In yards a flat road at the horizon is yards of depth per pixel and
@@ -131,12 +152,24 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  //
  // The depth map also says which taps found a surface at all: a clear value is
  // the far plane, so a tap that reads it is the sky, not a neighbour. Handing
- // that ray to the tangent is what aimed lamp light along the horizon.
+ // that ray to the tangent is what aimed lamp light along the horizon. So does
+ // a tap that snapped onto the receiver's own texel: the frame clamp of an
+ // off-frame window returns that texel's depth with zero deviation, which
+ // reads as the flattest possible neighbour - locallighting::TapSurvival.
+ float surfL=step(rawL,.99990)*step(1e-20,dot(uvL-uv,uvL-uv));
+ float surfR=step(rawR,.99990)*step(1e-20,dot(uvR-uv,uvR-uv));
+ float surfU=step(rawU,.99990)*step(1e-20,dot(uvU-uv,uvU-uv));
+ float surfD=step(rawD,.99990)*step(1e-20,dot(uvD-uv,uvD-uv));
+ float surfL2=step(rawL2,.99990)*step(1e-20,dot(uvL2-uv,uvL2-uv));
+ float surfR2=step(rawR2,.99990)*step(1e-20,dot(uvR2-uv,uvR2-uv));
+ float surfU2=step(rawU2,.99990)*step(1e-20,dot(uvU2-uv,uvU2-uv));
+ float surfD2=step(rawD2,.99990)*step(1e-20,dot(uvD2-uv,uvD2-uv));
  float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);
  float iU=1./max(zU,.001),iD=1./max(zD,.001);
+ float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);
  float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);
- float2 wx=AxisWeights(abs(iL-iC),abs(iR-iC),abs(iL+iR-2*iC),absolute,step(rawL,.99990),step(rawR,.99990));
- float2 wy=AxisWeights(abs(iU-iC),abs(iD-iC),abs(iU+iD-2*iC),absolute,step(rawU,.99990),step(rawD,.99990));
+ float2 wx=AxisWeights(iL,iR,iC,iL2,iR2,absolute,surfL,surfR,surfL2,surfR2);
+ float2 wy=AxisWeights(iU,iD,iC,iU2,iD2,absolute,surfU,surfD,surfU2,surfD2);
  float wL=wx.x,wR=wx.y,wU=wy.x,wD=wy.y;
  // locallighting::ReconstructNormal: weighted central difference. With all
  // four weights at one this is exactly (far-near)/2 on both axes, i.e. the
