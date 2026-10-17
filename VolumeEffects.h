@@ -27,6 +27,9 @@ float4 directColor:register(c11);
 float4 rayTuning:register(c12);
 // Second, independent height-fog layer (ground mist): x=height,y=falloff,z=density
 float4 groundMist:register(c13);
+// God-ray look (src/Effects/GodRayCore.h): x=sunward glow spread (per screen-height^2),
+// y=glow floor in open sky, z=gain on the whole-frame mask, w=unused
+float4 rayLook:register(c15);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     // INTZ contains viewport-mapped depth. Normalize for the projection
@@ -62,7 +65,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // band ended the mask abruptly enough that the radial blur below
         // smeared the cut into a visible ring around the disc.
         float discCutoff=1.0-smoothstep(0.08,0.22,sunDist);
-        float sunMask=discFalloff*discCutoff;
+        // Whole-frame god-ray source (GodRayCore.h SourceWeight): a sunward
+        // sky glow reaches across the frame, so the gather below draws beams
+        // away from the source. Trees, walls, characters and ground have
+        // openness 0 and cut those beams; cloud alpha thins them. The disc
+        // core is kept inside the max, so the source itself stays brightest.
+        float glow=rayLook.y+(1-rayLook.y)*exp(-sunDist*sunDist*rayLook.x);
+        float sunMask=(sun.x<-.5) ? 0.0 : max(discFalloff*discCutoff,glow)*rayLook.z;
         // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
         // "100%" default) - it used to only nudge this by +-0.35 around a
         // fixed 0.62 floor, so dragging it to 0 barely dimmed the blob at
@@ -314,9 +323,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     float4 ray=tex2D(rays,uv);
     if(fogLink.x>.5&&fogLink.y<.5) {
         float transmission=saturate(1-tex2D(resolvedFog,uv).a);
-        // Shared integrated medium: clear air has little scatter; opaque banks
-        // extinguish rays. Maximum visibility occurs at intermediate thickness.
-        float visibility=4*transmission*(1-transmission);
+        // Shared integrated medium: opaque banks extinguish rays, and maximum
+        // visibility occurs at intermediate thickness. The atmosphere's sky
+        // optical depth is analytically ~0 above the horizon (horizon^2 in the
+        // integrate pass), so looking at the sun through clear sky gives T~1 and
+        // the bell curve alone would erase exactly the rays this pass draws.
+        // depthInfo.y is the clear-air floor: it keeps those rays while banks
+        // still extinguish them, since the floor scales with T^2 and vanishes
+        // in thick fog.
+        float clearFloor=depthInfo.y;
+        float visibility=max(4*transmission*(1-transmission),clearFloor*transmission*transmission);
         ray.rgb*=visibility;
     }
     // Radial beams are an overlay: they may fall across clouds, characters,
@@ -339,7 +355,9 @@ float4 radial:register(c0);
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     // 28 taps (was 16): smoother falloff/less banding on long reaches,
     // still cheap at half-res.
-    static const int kSamples=28;
+    // 48 taps reach the whole segment to the source at this spacing; the old 28
+    // covered only the last ~12% of the path, which is why rays never left the disc.
+    static const int kSamples=48;
     float2 stepUv=(radial.xy-uv)*(radial.z/float(kSamples));
     // Every pixel used to march at exactly the same 28 phases toward the
     // sun, so the taps landed on the same half-res texels in lockstep and

@@ -45,7 +45,7 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 
 ### Atmosphere and volumetric lighting
 
-- Depth-aware sun and moon shafts use the client's scene depth and tracked celestial direction.
+- Sun and moon god rays are a whole-frame, depth-aware gather toward the tracked celestial source: sky shows as beams, while trees, characters and buildings cast visible shadows along them and clouds break them into gaps. The math lives in `src/Effects/GodRayCore.h`; `tools/GodRayPreview.cpp` renders a reference frame and `tools/GodRayRegression.cpp` checks it.
 - Height fog, aerial haze, ground mist, and animated terrain-relative local fog are integrated in world space.
 - Local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
 - Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.

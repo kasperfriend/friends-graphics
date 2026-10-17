@@ -472,7 +472,7 @@ int main() try {
  ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
  Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));
  Check(d->CreatePixelShader((DWORD*)rayLinkCode->GetBufferPointer(),rayLinkShader.GetAddressOf()));
- auto linkedRay=[&](int opacity,bool available,bool debug,float rawDepth,float maxZ){
+ auto linkedRay=[&](int opacity,bool available,bool debug,float rawDepth,float maxZ,float clearFloor=0.f){
   fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);fillFloat(depth.Get(),rawDepth);
   Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
   Check(d->BeginScene());
@@ -481,11 +481,13 @@ int main() try {
   d->SetSamplerState(2,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(2,D3DSAMP_SRGBTEXTURE,FALSE);
   d->SetSamplerState(2,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(2,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
   d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
-  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0},depthInfo[4]={maxZ,0,0,0};
+  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0},depthInfo[4]={maxZ,clearFloor,0,0};
   d->SetPixelShaderConstantF(0,link,1);d->SetPixelShaderConstantF(1,depthInfo,1);
   struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
   Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());return pixel()&255;};
- Require(linkedRay(0,true,false,1.f,1.f)==0,"clear medium suppresses linked rays");
+ Require(linkedRay(0,true,false,1.f,1.f)==0,"clear medium suppresses linked rays with no clear-air floor");
+ Require(linkedRay(0,true,false,1.f,1.f,.6f)>60,"clear sky keeps the ray floor when the atmosphere is linked");
+ Require(linkedRay(250,true,false,1.f,1.f,.6f)<15,"thick banks still extinguish rays despite the clear-air floor");
  Require(linkedRay(128,true,false,1.f,1.f)>120,"moderate fog reveals rays");
  Require(linkedRay(250,true,false,1.f,1.f)<15,"dense banks extinguish linked rays");
  Require(linkedRay(0,false,false,1.f,1.f)==128,"missing current fog preserves unlinked fallback");
@@ -523,6 +525,8 @@ int main() try {
   d->SetPixelShaderConstantF(0,projection,1);d->SetPixelShaderConstantF(1,medium,1);
   d->SetPixelShaderConstantF(2,sun,1);d->SetPixelShaderConstantF(8,mode,1);
   d->SetPixelShaderConstantF(12,rayTuning,1);d->SetPixelShaderConstantF(14,cloudMask,1);
+  // Unit gain keeps the disc-centre expectations below; the shipped gain is 0.35.
+  float rayLook[4]={6.f,0.f,1.f,0.f};d->SetPixelShaderConstantF(15,rayLook,1);
   struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
   Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());
   d->SetTexture(1,nullptr);d->SetTexture(3,nullptr);return pixel()&255;};

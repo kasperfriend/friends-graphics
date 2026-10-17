@@ -577,7 +577,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // is the pipeline that actually renders the sun halo and the composited
  // fog now, so it must be the one reading them, not the retired full-res
  // analytic shader these keys used to belong to.
- m_settings.sunGlowStrength=std::clamp(read(L"SunGlowPercent",80),0,300)*.01f;
+ m_settings.sunGlowStrength=std::clamp(read(L"SunGlowPercent",80),0,400)*.01f;
  // Deliberately NOT the old "FogWashPercent" key - that one is still on
  // disk in deployed GraphicsEffects.ini copies at values tuned for the
  // retired full-res analytic shader (e.g. 8), which would read here as

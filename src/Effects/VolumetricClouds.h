@@ -89,7 +89,9 @@ namespace renderer
         bool groundShadows = true;
         float groundShadowStrength = .55f;
         float groundShadowExtent = 24000.f;
-        bool sunRays = true;
+        // Cloud-filtered beams are off by default: the visible sun rays are the
+        // object-occluded god rays. The F7 toggle still turns them back on.
+        bool sunRays = false;
         float sunRayStrength = .8f;
         // Overall opacity of the cloud material (0..3). Multiplies the
         // base extinction so the deck can be made more opaque without
