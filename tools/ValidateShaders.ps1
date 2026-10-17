@@ -35,7 +35,7 @@ $jobs = @(
     @{ File = 'VolumeEffects.h'; Names = @('volumePixelSource', 'volumeBlurPixelSource', 'volumeCopyPixelSource', 'volumeTemporalPixelSource', 'contactShadowPixelSource', 'rayCompositePixelSource', 'solarRadialPixelSource', 'localLightPixelSource', 'celestialMarkerPixelSource', 'postProcessPixelSource') },
     @{ File = 'WaterEffect.h'; Names = @('source', 'vertexSource') },
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
-    @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
+    @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'rainHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
     @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
     @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') }
@@ -53,10 +53,10 @@ $jobs = @(
 # have to say so here, in a diff, rather than discover it on a player's
 # machine.
 $budgets = @{
-    # 512 is the ps_3_0 floor every baseline card must support, so weather
-    # still fits them all. It was 496; the rain phase-split (the fix for
-    # long-session float32 banding) added its per-layer split+wrap slots.
+    # 512 is the ps_3_0 floor every baseline card must support.
+    # Keep snow/sand continuity and the analytical rain field within it.
     'precipitationHLSL'      = 512
+    'rainHLSL'               = 512
     # Water pixel stage, capped on explicit request: 2048 is ~3x the slots
     # it actually uses (642 measured 2026-10-14, ~580 after the 2026-10-17
     # CSE pass; see docs/water-rendering.md), so the ceiling guards against

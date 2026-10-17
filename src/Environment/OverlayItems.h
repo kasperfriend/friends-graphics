@@ -45,6 +45,14 @@ inline std::vector<Item> items={
  // Intensity is also the shared native-weather input for clouds, wind and
  // sea; turning off WEATHER RENDERING/F10 does not turn off detection.
  {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","STORM INTENSITY (AFFECTS WIND CLOUDS WAVES)",0,300,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainFallSpeedPercent","RAIN FALL SPEED (%)",10,400,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainDensityPercent","RAIN DENSITY (%)",0,250,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainLengthPercent","RAIN STREAK LENGTH (%)",30,160,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainWidthPercent","RAIN STREAK WIDTH (%)",40,180,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainOpacityPercent","RAIN OPACITY (%)",0,200,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainWindInfluencePercent","RAIN WIND INFLUENCE (%)",0,200,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainParallaxPercent","RAIN CAMERA PARALLAX (%)",0,150,5,70},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainDebugView","RAIN DEBUG (0 OFF / 1 MASK / 2 WIND)",0,2,1,0},
 
  // === SHARED WIND (simulation only; no visible wind effect) ===
  {KIND_HEADER,nullptr,nullptr,"--- WIND ---",0,0,0,0},

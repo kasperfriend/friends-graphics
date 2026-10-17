@@ -263,7 +263,7 @@ int main() try
     Require(Near(shadow.SunShadow(receiver,light),shadow.SunShadow(atBase,light),2e-5),
             "shadow sampling is anchored to the actual visible cloud altitude");
     const auto weatherSource=Read("WeatherVisuals.h");
-    const auto detected=weatherSource.find("const int detected = exactRain");
+    const auto detected=weatherSource.find("const int detected = ClassifyNativeWeather(primitiveCount, desc.Width, desc.Height,");
     const auto observed=weatherSource.find("nativeWeatherSeenThisFrame = detected",detected);
     const auto replacement=weatherSource.find("EnsureShaders(device)",detected);
     Require(detected!=std::string::npos&&observed<replacement&&

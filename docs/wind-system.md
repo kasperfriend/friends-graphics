@@ -2,8 +2,8 @@
 
 Wind is an **internal world-space value**, not a particle effect or a visible volume.
 One frame-boundary simulation drives cloud drift and water waves; the optional
-camera-relative precipitation continuity layer also follows it. Native WoW
-particles still use the game's own motion, and nothing in the world geometry
+camera-relative rain field and snow/sand continuity also follow it. Native snow
+and sand particles still use the game's own motion, and nothing in the world geometry
 moves with it - no grass, plant, bush or tree sway. Local fog is not connected.
 
 ## F7 controls
@@ -15,7 +15,7 @@ settings without resetting the wind, its gust phases, or the effect phases.
 
 | Control / INI key | Default | Meaning |
 | --- | --- | --- |
-| Shared wind / `Enabled` | 1 | Connect the shared wind. Off restores legacy authored water/cloud motion and removes added continuity-layer rain drift; it does not disable the effects. |
+| Shared wind / `Enabled` | 1 | Connect the shared wind. Off restores legacy authored water/cloud motion and removes added rain drift; it does not disable the effects. |
 | Time variation / `Dynamic` | 1 | Slowly choose new compass targets and vary strength over time. Off holds the selected direction and removes gust variation; weather can still change strength. |
 | Base direction / `Direction` | 1 (NE) | Compass bearing the wind comes **from**: `0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW`. The slider displays names. In dynamic mode this is the starting bearing; editing it requests a smooth turn. |
 | Base strength / `StrengthPercent` | 100 | 0–200%. 100% is a reference breeze; 0 remains calm even in a storm. Live strength is bounded to 300% after weather/gust response. |
@@ -40,7 +40,7 @@ For a steady test wind, set **Time variation OFF**, **Weather response 0**, sele
 a direction and strength, and allow the response to settle. At 0% strength clouds
 stop wind-driven drift/lean; independent cloud evolution and weather-driven
 coverage can continue. Water eases down to residual swell, with no wind-driven
-foam (even if its sea-energy response is 0); continuity rain still falls but
+foam (even if its sea-energy response is 0); rain still falls but
 stops drifting. Wave speed 0 stops wave travel/turning (energy can still respond
 to wind); Water's wave switch removes the waves entirely.
 
@@ -63,10 +63,14 @@ to wind); Water's wave switch removes the waves entirely.
   foam limits and the existing sea-state easing remain in effect. Waves have
   additional directional inertia; the HUD calls this out rather than claiming
   that a heavy sea turns instantaneously with the air.
-- The precipitation continuity layer (not the game's native particle motion)
-  projects the same downwind vector into camera space; its visual tilt is 35%
-  at reference strength. `RainSpeedPercent` controls fall speed; speed and wind
-  phases are integrated, so F7/F12 edits do not teleport drops. Old
+- The new rain field projects the shared downwind velocity into the camera
+  basis and adds gravity. `RainFallSpeedPercent` controls fall speed;
+  `RainWindInfluencePercent` scales wind without introducing another bearing.
+  `RainParallaxPercent` controls how much camera translation shifts nearby
+  drops relative to distant ones; 0 disables it. F7 also exposes density,
+  streak shape, opacity and mask/direction debug views. Motion is integrated,
+  so edits and teleports do not rephase particles. Native
+  rain draws are hidden only once the replacement can render. Old
   `[WeatherVisuals] WindAngle` / `WindStrengthPercent` settings are ignored.
 - Cloud/water rendering switches and F10 do not stop the wind simulation. F11
   still gates the graphics package. Weather detection is independent of native
@@ -113,10 +117,10 @@ simulation time; no unverified in-game time-of-day memory is read.
   Each draw still uses its **own** rigid model/view anchor, including reflected
   cameras. Moving the camera alone does not move the field. With no valid
   camera/pivot, turns wait rather than rotating around a fabricated origin.
-- `src/Effects/PrecipitationMotion.h` projects the same world velocity through
-  the captured camera-right/up basis. The continuity layer integrates fall and
-  downwind phases once per UI boundary; missing views keep rain falling without
-  guessing a heading. Native precipitation remains the client's own draw.
+- `src/Effects/RainField.h` projects the same world velocity through the
+  captured camera-right/up basis. Its double-precision rain motion integrates
+  once per UI boundary; missing views keep gravity without inventing a heading.
+  `PrecipitationMotion.h` retains the snow/sand continuity motion.
 - GPU resets drop only GPU resources/obsolete camera anchors, not wind, sea,
   cloud or precipitation phase history. Invalid/negative/non-finite deltas
   advance nothing; long pauses advance at most 0.1 seconds. No catch-up storm
@@ -189,8 +193,8 @@ In-client acceptance checks (require Windows and the Ascension client):
    the deck and wave geometry stay aligned with its shading.
 3. Observe native rain/snow/sand onset and clearing, with precipitation
    replacement both enabled and disabled. No duplicate storm amplification.
-   Camera-relative continuity rain should tilt downwind as the camera turns;
-   the game's native particles are not redirected.
+   Rain streaks should move downwind as the camera turns; native snow/sand
+   particle motion remains the game's own.
 4. Change wind speed, heading and rain fall speed after a long session. No
    cloud, wave or continuity-drop phase teleport. Test F7 close/open, F12,
    location overrides, loading and Alt+Tab/device reset; verify graphics
