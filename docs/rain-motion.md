@@ -60,3 +60,71 @@ layer. Check downward, short streaks at normal and high RainSpeedPercent, with
 zero wind and positive/negative wind angles. Compare F10 on/off (weather only),
 then restore lens droplets/clouds. Also check under cover, Auto snow, F7 and
 Alt+Tab. Full depth occlusion requires in-game Multisampling 1x and camera capture.
+
+# Long-session full-screen rain overflow (2026-10-17)
+
+## Cause
+
+The pixel stage builds each layer's grid as `(uv * cells - PHASE)`, where the
+phases are integrated in double on the CPU, uploaded as float, and run
+unbounded for the whole rain. The stage is float32, and subtracting a phase
+of a few thousand cells from a uv term below a hundred cells is a
+cancellation: the grid quantizes to the ulp of the phase. The distinct
+vertical levels collapse (measured at 1080p for the nearest layer: 1016 at
+start, 512 after 10 minutes, 128 after an hour, 16 after six), and the drops
+merge into screen-wide horizontal bands of rain - the reported "the screen
+overflows with rain particles". Snow (about 4.6 h) and the sandstorm (about
+5.2 h) share the bug; 4K degrades faster, 720p slower.
+
+## Fix
+
+A phase split, computed in exact double in `PrecipitationMotion.h`:
+`PHASE = N + f`, with `f` in [0, 1) and `N` wrapped into the layer's own
+lattice period, uploaded as five float4s (c6-c10). The float conversion of
+the fraction can round up to exactly 1.0 - either from a fraction above
+`1 - 2^-25`, or from a phase a hair negative, which is what the wind
+projections sitting on the camera axis produce; in that case the one moves
+into `N` instead, so the stage always receives a genuine `[0,1)` fraction.
+(The `tools/WindRegression.cpp` suite integrates the production split for a
+six-hour session and pins exactly this.) The pixels subtract only
+`f` - small minus small, no cancellation - so the pixel levels stay exactly
+as fine as at t=0 for any session length, and `N` only shifts the cell
+index, which the cell hash wraps by the same period. The wrap is seamless
+(the hash is periodic in the period, and the split makes the pattern a pure
+translation), and the layers' periods are deliberately non-commensurate
+(rain: x 32768, y 32768/16384/8192; snow and sand have their own tables), so
+each layer's pattern repeats on its own 8-50 minute cycle and the combined
+pattern effectively never repeats. The snow/sand gust sines wrap their
+arguments at 2pi, and the mist keeps only its [0,1) drift parts.
+
+## Verification
+
+- A float32-faithful CPU emulation of the stage (scratch, not shipped)
+  proves: the per-layer distinct pixel-level counts are identical for
+  N = 0, N = P/2 and N = P-1 over a full f sweep at every resolution
+  720p-4K, so sharpness is independent of session age (previously
+  collapsing to single digits after a few hours); the split cell index
+  matches the original unsplit cell at 0/114,288 sampled (phase, row)
+  pairs over six-plus hours including the wrap crossing; and the very
+  first frame rendered (t = 0) is pixel-identical to the old shader at
+  0/1,555,200 mismatches. After the first frame the drops come from the
+  periodic [0, P) window of the same hash - same distribution, so the
+  rain statistics are unchanged.
+- `tools/WeatherDeviceRegression.cpp` drives the production stage with
+  phases from `ComputeWrappedPhases` (the same call `BeforeDraw` makes) and
+  pins the 8 px fall / 4 px snow / 8 px wind translations, so the CPU
+  formulas and the shader grids cannot drift apart.
+
+The precipitation shader budget moved from 496 to 512 slots in
+`tools/ValidateShaders.ps1` - 512 is the ps_3_0 floor every baseline card
+must support, so the pass still fits them all; the split's per-layer
+split+wrap slots needed the difference.
+
+## In-game check
+
+Sit through a long heavy-rain session (an hour or more at moderate-to-high
+RainSpeedPercent, with and without wind) and confirm the rain stays fine and
+staggered - no screen-wide horizontal bands of rain forming as the session
+ages. Check Auto snow and sandstorm the same way. The near layer's pattern
+repeats every ~19 minutes; because the other two layers never realign with
+it, the combined rain should look unchanging rather than repeating.
