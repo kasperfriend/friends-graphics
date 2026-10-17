@@ -66,8 +66,10 @@ to wind); Water's wave switch removes the waves entirely.
 - The new rain field projects the shared downwind velocity into the camera
   basis and adds gravity. `RainFallSpeedPercent` controls fall speed;
   `RainWindInfluencePercent` scales wind without introducing another bearing.
-  F7 also exposes density, streak shape, opacity and mask/direction debug
-  views. Motion is integrated, so edits do not teleport particles. Native
+  `RainParallaxPercent` controls how much camera translation shifts nearby
+  drops relative to distant ones; 0 disables it. F7 also exposes density,
+  streak shape, opacity and mask/direction debug views. Motion is integrated,
+  so edits and teleports do not rephase particles. Native
   rain draws are hidden only once the replacement can render. Old
   `[WeatherVisuals] WindAngle` / `WindStrengthPercent` settings are ignored.
 - Cloud/water rendering switches and F10 do not stop the wind simulation. F11

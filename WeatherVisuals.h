@@ -44,6 +44,7 @@ inline float speed = 1.2f; // snow/sand continuity only
 inline renderer::rainfield::Motion rainMotion;
 inline float rainFallSpeed = 1.f, rainDensity = 1.f, rainLength = 1.f;
 inline float rainWidth = 1.f, rainOpacity = 1.f, rainWindInfluence = 1.f;
+inline float rainParallax = .7f;
 inline int rainDebugView = 0;
 inline renderer::PrecipitationMotion precipitationMotion;
 inline bool depthOcclusion = true;
@@ -230,6 +231,9 @@ float4 phase0 : register(c6);
 float4 phase1 : register(c7);
 float4 phase2 : register(c8);
 float4 depthRange : register(c9);
+float4 rainAxis0 : register(c10); // per-depth apparent motion, unit XY
+float4 rainAxis1 : register(c11);
+float4 rainAxis2 : register(c12);
 
 float Hash(float2 id)
 {
@@ -246,7 +250,7 @@ float Depth(float raw)
     float d = saturate((raw-depthRange.x)*depthRange.y);
     return projection.y / min(d-projection.x, -.000001);
 }
-float Particle(float2 pixel, float2 cellSize, float4 phase, float seed,
+float Particle(float2 pixel, float2 cellSize, float4 phase, float2 axis, float seed,
                float lengthPx, float widthPx, float occupancy, float pixelFootprint)
 {
     float2 grid = pixel / cellSize - phase.xz;
@@ -259,7 +263,6 @@ float Particle(float2 pixel, float2 cellSize, float4 phase, float seed,
     // Seeded center is inset so no line is clipped at a cell boundary.
     float2 center = float2((b-.5)*.36, (c-.5)*.22);
     float2 delta = (local-center)*cellSize;
-    float2 axis = travel.xy;
     float along = dot(delta,axis);
     float across = abs(dot(delta,float2(axis.y,-axis.x)));
     float width = max(.35,widthPx * lerp(.75,1.25,c));
@@ -288,16 +291,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float3 weights = float3(.44,.33,.23);
     float3 distances = float3(4.0, 11.0, 25.0);
     float4 phases[3] = {phase0,phase1,phase2};
-    float2 cells[3] = {float2(38,60),float2(28,48),float2(22,38)};
-    float lengths[3] = {18.0,11.0,7.0};
-    float widths[3] = {1.15,.95,.75};
+    float2 axes[3] = {rainAxis0.xy,rainAxis1.xy,rainAxis2.xy};
+    // A few longer, legible foreground streaks and many fine distant drops:
+    // RDR2-like depth rhythm, restrained for WoW's brighter stylized scenes.
+    float2 cells[3] = {float2(60,88),float2(34,58),float2(22,38)};
+    float lengths[3] = {34.0,18.0,8.0};
+    float widths[3] = {1.20,.96,.72};
     [unroll] for (int i=0;i<3;++i)
     {
         float visible = light.w > .5 && control.z > .5
             ? smoothstep(distances[i]-.8,distances[i]+.8,z) : 1.0;
-        float drop = Particle(pixel,cells[i],phases[i],float(i)*127.13,
+        float drop = Particle(pixel,cells[i],phases[i],axes[i],float(i)*127.13,
             lengths[i]*shape.y,widths[i]*shape.z,
-            saturate(shape.x * (.30 + float(i)*.025)),pixelFootprint);
+            saturate(shape.x * (i==0 ? .50 : (i==1 ? .36 : .30))),pixelFootprint);
         coverage += drop * weights[i] * visible;
         visibility += weights[i] * visible;
     }
@@ -612,6 +618,7 @@ inline void ReloadTuning()
     rainWidth = std::clamp(ReadTuningInt(L"RainWidthPercent", 100), 40, 180) * .01f;
     rainOpacity = std::clamp(ReadTuningInt(L"RainOpacityPercent", 100), 0, 200) * .01f;
     rainWindInfluence = std::clamp(ReadTuningInt(L"RainWindInfluencePercent", 100), 0, 200) * .01f;
+    rainParallax = std::clamp(ReadTuningInt(L"RainParallaxPercent", 70), 0, 150) * .01f;
     rainDebugView = std::clamp(ReadTuningInt(L"RainDebugView", 0), 0, 2);
     depthOcclusion = ReadTuningInt(L"DepthOcclusion", 1) != 0;
     lensDroplets = ReadTuningInt(L"LensDroplets", 1) != 0;
@@ -635,6 +642,7 @@ inline void Reset(IDirect3DDevice9* device)
 {
     precipitationPS.Reset();
     rainPS.Reset();
+    rainMotion.ForgetCamera(); // keep phases, not a stale pre-reset camera
     lensDropletsPS.Reset();
     nativeParticlePS.Reset();
     sceneCopyTex.Reset();
@@ -848,6 +856,21 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     const auto rainWind = renderer::rainfield::Project(frame.wind, viewRight, viewUp,
         frame.cameraValid && frame.viewRawValid, rainWindInfluence);
     rainMotion.Advance(dt, rainFallSpeed, rainWind);
+    renderer::rainfield::Camera rainCamera{};
+    rainCamera.valid = renderMode == 1 && frame.cameraValid && frame.viewRawValid &&
+        frame.width != 0 && frame.height != 0;
+    rainCamera.position[0] = frame.cameraPosition.x;
+    rainCamera.position[1] = frame.cameraPosition.y;
+    rainCamera.position[2] = frame.cameraPosition.z;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        rainCamera.right[axis] = frame.viewRaw.m[axis][0];
+        rainCamera.up[axis] = frame.viewRaw.m[axis][1];
+    }
+    rainCamera.projectionX = frame.projUnpack[2];
+    rainCamera.projectionY = frame.projUnpack[3];
+    rainCamera.aspect = frame.height ? float(frame.width)/float(frame.height) : 1.f;
+    rainMotion.TrackCamera(rainCamera, rainParallax, dt);
     precipitationMotion.Advance(dt, speed, frame.wind,
         {frame.viewRaw.m[0][0], frame.viewRaw.m[1][0]},
         {frame.viewRaw.m[0][1], frame.viewRaw.m[1][1]},
@@ -974,10 +997,14 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     {
         float phases[3][4]{};
         for (unsigned i = 0; i < 3; ++i) rainMotion.Layer(i, phases[i]);
-        const float verticalSpeed = renderer::rainfield::VerticalSpeed(rainFallSpeed, rainWind);
-        const float magnitude = std::hypot(rainWind.x, verticalSpeed);
-        const float rainTravel[4] = {rainWind.x / std::max(magnitude,1.f),
-            verticalSpeed / std::max(magnitude,1.f),rainWind.x,rainWind.y};
+        float rainAxes[3][4]{};
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            const auto direction = rainMotion.Direction(i, rainWind, rainFallSpeed);
+            rainAxes[i][0] = direction.x;
+            rainAxes[i][1] = direction.y;
+        }
+        const float rainTravel[4] = {rainAxes[0][0],rainAxes[0][1],rainWind.x,rainWind.y};
         const float rainShape[4] = {rainDensity,rainLength,rainWidth,rainOpacity};
         const float rainControl[4] = {intensity * frame.environment[renderer::Weather],
             smoothedIndoor,depthOcclusion ? 1.f : 0.f,float(rainDebugView)};
@@ -989,6 +1016,7 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
         device->SetPixelShaderConstantF(5, rainTravel, 1);
         device->SetPixelShaderConstantF(6, phases[0], 3);
         device->SetPixelShaderConstantF(9, depthConst, 1);
+        device->SetPixelShaderConstantF(10, rainAxes[0], 3);
     }
     device->SetPixelShader(renderMode == 1 ? rainPS.Get() : precipitationPS.Get());
     device->SetTexture(0, sceneCopyTex ? sceneCopyTex.Get() : nullptr);

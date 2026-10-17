@@ -51,6 +51,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"WeatherVisuals",L"RainWidthPercent","RAIN STREAK WIDTH (%)",40,180,5,100},
  {KIND_SLIDER,L"WeatherVisuals",L"RainOpacityPercent","RAIN OPACITY (%)",0,200,5,100},
  {KIND_SLIDER,L"WeatherVisuals",L"RainWindInfluencePercent","RAIN WIND INFLUENCE (%)",0,200,5,100},
+ {KIND_SLIDER,L"WeatherVisuals",L"RainParallaxPercent","RAIN CAMERA PARALLAX (%)",0,150,5,70},
  {KIND_SLIDER,L"WeatherVisuals",L"RainDebugView","RAIN DEBUG (0 OFF / 1 MASK / 2 WIND)",0,2,1,0},
 
  // === SHARED WIND (simulation only; no visible wind effect) ===

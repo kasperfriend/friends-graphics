@@ -138,7 +138,13 @@ int main() try {
             Check(d->SetPixelShaderConstantF(0,c0,1));Check(d->SetPixelShaderConstantF(1,c1,1));
             Check(d->SetPixelShaderConstantF(2,c2,1));Check(d->SetPixelShaderConstantF(3,c3,1));
             Check(d->SetPixelShaderConstantF(4,c4,1));Check(d->SetPixelShaderConstantF(5,c5,1));
+            float axes[3][4]{};
+            for(unsigned i=0;i<3;++i) {
+                const auto axis=motion.Direction(i,{windX,0.f},1.f);
+                axes[i][0]=axis.x;axes[i][1]=axis.y;
+            }
             Check(d->SetPixelShaderConstantF(6,phases[0],3));Check(d->SetPixelShaderConstantF(9,c9,1));
+            Check(d->SetPixelShaderConstantF(10,axes[0],3));
             Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,quad,sizeof(Vertex)));
             Check(d->EndScene());return pixels();
         }
@@ -156,6 +162,8 @@ int main() try {
     };
     auto rain0=render(1,0,5),rain1=render(1,4,5);
     Require(nonblack(rain0)>100,"rain remains visible with no cloud or atmosphere renderer");
+    Require(nonblack(render(1,0,100))>nonblack(rain0),
+        "fine distant drops add depth behind the sparse foreground streaks");
     const double down=difference(rain0,rain1,0,4),up=difference(rain0,rain1,0,-4);
     std::printf("rain translation error down=%.5f up=%.5f\n",down,up);
     Require(down<.2&&up>down+.35,"actual rain pixels move downward between frames");
@@ -168,7 +176,7 @@ int main() try {
     unsigned longest=0;
     for(UINT x=0;x<size;++x){unsigned run=0;for(UINT y=0;y<size;++y){run=(rain0[y*size+x]&255)>2?run+1:0;longest=std::max(longest,run);}}
     std::printf("longest rain streak=%u pixels of %u\n",longest,size);
-    Require(longest<=16,"rain streaks are compact rather than screen-height beams");
+    Require(longest<=28,"rain streaks are compact rather than screen-height beams");
     // Visual mode must scatter light against darkness, yet leave bright sky
     // bright rather than overlaying it with opaque white or a gray sheet.
     const auto darkRain=render(1,0,5,0,1,0,false,false);

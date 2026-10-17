@@ -407,6 +407,45 @@ static void TestPrecipitationMotion()
                   "six-hour rain phase remains exact and bounded in each layer");
         }
     }
+    // Camera translation gives close drops stronger world-relative parallax;
+    // turning in place, a teleport, and a reset cannot move the lattice.
+    rainfield::Motion cameraRain;
+    rainfield::Camera camera{};
+    camera.valid=true;camera.right[0]=1;camera.up[1]=1;
+    camera.projectionX=1;camera.projectionY=1;camera.aspect=1;
+    cameraRain.TrackCamera(camera,.7f);
+    camera.position[0]=.2;camera.position[1]=.2;
+    cameraRain.TrackCamera(camera,.7f);
+    for (unsigned i=0;i<3;++i) {
+        float phase[4]{}; cameraRain.Layer(i,phase);
+        const double x=WindWrap(-75.6/rainfield::layerDepth[i]/rainfield::cellWidth[i],rainfield::latticePeriod);
+        const double y=WindWrap( 75.6/rainfield::layerDepth[i]/rainfield::cellHeight[i],rainfield::latticePeriod);
+        Check(Near(double(phase[0])+phase[1],x,1e-4) &&
+              Near(double(phase[2])+phase[3],y,1e-4),
+              "close rain has stronger opposite-camera motion than distant rain");
+    }
+    const auto nearAxis=cameraRain.Direction(0,{},1.f);
+    const auto farAxis=cameraRain.Direction(2,{},1.f);
+    Check(nearAxis.x<farAxis.x && nearAxis.y>0 && farAxis.y>0,
+          "camera movement slants near streaks more than far streaks while rain falls");
+    float beforeCamera[4]{}; cameraRain.Layer(0,beforeCamera);
+    camera.right[0]=0;camera.right[1]=1;
+    cameraRain.TrackCamera(camera,.7f); // rotation alone
+    camera.position[0]+=1000;
+    cameraRain.TrackCamera(camera,.7f); // teleport rebase
+    cameraRain.ForgetCamera();
+    camera.position[0]+=1;
+    cameraRain.TrackCamera(camera,.7f); // reset rebase
+    camera.position[1]+=1;
+    cameraRain.TrackCamera(camera,0.f); // explicit parallax opt-out
+    float afterCamera[4]{};cameraRain.Layer(0,afterCamera);
+    for(int i=0;i<4;++i)Check(afterCamera[i]==beforeCamera[i],
+        "rotation, teleport, reset and zero parallax do not jump rain");
+    camera.valid=false;cameraRain.TrackCamera(camera,.7f);
+    camera.position[0]+=1;camera.valid=true;cameraRain.TrackCamera(camera,.7f);
+    cameraRain.Layer(0,afterCamera);
+    for(int i=0;i<4;++i)Check(afterCamera[i]==beforeCamera[i],
+        "missing camera sample rebases without a catch-up streak");
     for (int mode : {2,3}) {
         const auto m = ComputeWrappedPhases(motion.Fall(),motion.WindX(),motion.WindY(),mode);
         Check(m.c9[0] >= 0 && m.c9[0] < 6.29f && m.c10[0] >= 0 && m.c10[0] < 1,
@@ -571,6 +610,7 @@ static void TestConfigurationAndWiring()
     Check(weatherIni.find("RainSpeedPercent=") == weatherIni.npos &&
           weatherIni.find("RainFallSpeedPercent=100\n") != weatherIni.npos &&
           weatherIni.find("RainDensityPercent=100\n") != weatherIni.npos &&
+          weatherIni.find("RainParallaxPercent=70\n") != weatherIni.npos &&
           weatherIni.find("RainDebugView=0\n") != weatherIni.npos,
           "old rain speed retired; new rain controls and debug ship with defaults");
     for (const auto& item : tuningoverlay::items) {
@@ -593,6 +633,8 @@ static void TestConfigurationAndWiring()
           weatherSource.find("ReadTuningInt(L\"WindAngle\"") == weatherSource.npos &&
           weatherSource.find("ReadTuningInt(L\"WindStrengthPercent\"") == weatherSource.npos &&
           weatherSource.find("rainMotion.Advance(dt, rainFallSpeed, rainWind);") != weatherSource.npos &&
+          weatherSource.find("rainMotion.TrackCamera(rainCamera, rainParallax, dt);") != weatherSource.npos &&
+          weatherSource.find("device->SetPixelShaderConstantF(10, rainAxes[0], 3);") != weatherSource.npos &&
           weatherSource.find("float2 id = floor(grid) - phase.yw;") != weatherSource.npos &&
           weatherSource.find("device->SetPixelShader(renderMode == 1 ? rainPS.Get() : precipitationPS.Get());") != weatherSource.npos &&
           weatherSource.find("weatherParams.x * weatherParams.w") == weatherSource.npos &&
@@ -610,8 +652,10 @@ static void TestConfigurationAndWiring()
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
               .find("precipitationMotion") == std::string::npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
-              .find("rainMotion") == std::string::npos,
-          "device recovery retains precipitation phases while dropping GPU resources");
+              .find("rainMotion.ForgetCamera()") != std::string::npos &&
+          weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)
+              .find("rainMotion =") == std::string::npos,
+          "device recovery retains precipitation phases but rebases camera parallax");
     std::map<std::wstring, int> readDefaults;
     const auto defaults = SettingValues(ReadWindSettings([&](const wchar_t* key, int value) { readDefaults[key] = value; return value; }));
     Check(defaults == SettingValues(WindSettings{}) && defaults == readDefaults, "configuration defaults match simulation defaults");
