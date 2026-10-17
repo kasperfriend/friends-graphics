@@ -639,18 +639,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     rgb*=1+controls.z*(1.9*(dot(wave,l)-dot(n,l))+.75*(dot(wave,upWind.xyz)-dot(n,upWind.xyz)));
     // The captured pre-water colour and depth allow shallow refraction and a
     // depth transition without changing the original map or liquid data.
-    // When no scene capture exists all depth-dependent terms collapse to their
-    // identity (transmittance=1, absorption=0, inScatter=0, depthValid=0) and
-    // the three texture fetches plus exp() are pure waste.  Gate the whole
-    // section so uncaptured tiles pay nothing.
     float captureValid=reflectionStyle.w;
-    float depthValid=0;
-    float effectiveDepth=0;
-    float3 transmittance=float3(1,1,1);
-    float absorption=0;
-    float3 inScatter=0;
-    float3 refracted=0;
-    if(captureValid>.5) {
     float depthScale=1/max(viewPos.z,.05);
     float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z*depthScale,
                            .5-.5*viewPos.y*reflectionProjection.w*depthScale);
@@ -659,7 +648,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Foreground geometry is not a deep seabed. Never turn negative
     // separation into absorption/foam on the wrong side of a shoreline.
     float waterDepth=max(behindZ-viewPos.z,0);
-    depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
+    float depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
     // Open ocean has no seafloor within the depth buffer at all (behindRaw
     // reads as sky), so depthValid was 0 here - which used to zero every
     // absorption/tint term below AND still sample sceneTexture unmodified
@@ -669,7 +658,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // gated to zero regardless of the slider. No floor found means this is
     // genuinely deep, not "not water" - treat it as maximum depth instead.
     float openOcean=step(99999,behindZ);
-    effectiveDepth=lerp(waterDepth,9999.0,openOcean);
+    float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
     float column=min(effectiveDepth,400.0);
     // Shallow water barely bends the world; the deeper the column, the further the
     // refracted sample is pulled. This is what keeps a bar and a shoreline crisp
@@ -678,19 +667,15 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
     // Reject distortion across foreground silhouettes, rather than pulling
     // a bridge/character into the water. Missing depth keeps the native body.
-    // The rejection fetch is a no-op when depthValid=0 (refractUV == screenUV),
-    // so skip the texture read for open-water pixels that carry no distortion.
-    if(depthValid) {
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
     refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
-    } else { refractUV=screenUV; }
-    refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
+    float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
     // Beer-Lambert per channel, with the authored deep colour as the asymptote:
     // "clear mountain lake" and "murky swamp" are then one number apart (Clarity)
     // instead of a re-tune of every term. Red dies first, which is why a deep pool
     // reads teal rather than as a darker grey.
-    transmittance=exp(-bodyStyle.x*waterStyle.y*column*absorbTint.rgb);
-    absorption=captureValid*(1-transmittance.g);
+    float3 transmittance=exp(-bodyStyle.x*waterStyle.y*column*absorbTint.rgb);
+    float absorption=captureValid*(1-transmittance.g);
     // Light scattering back out of the column is what makes a crest glow when the
     // source is behind it. Without it water is a surface pasted onto the world;
     // a Henyey-Greenstein lobe forwards that glow into the sun, which is where the
@@ -701,7 +686,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // function peaks at 18x on a face turned toward the sun, and the CPU preview showed what
     // that did to a whole sea - one flat pale wash. The 3/2 exponent is the HG function's
     // own, and .17 (1.2/4pi, folded) puts the forward peak near 1.3 and the side lobe near .08.
-    inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
+    float3 inScatter=(deepTint.rgb*1.7+waterTint.rgb*.12)*absorption*(1-g*g)*.17/(phaseDen*sqrt(phaseDen))
         *saturate(sunElev*2.5+.2)*max(lightColor.rgb,0);
     // A crest thin enough to see through glows when the source is behind it. The lobe
     // above scatters in every direction; this is the half of it that needs a swell to
@@ -710,7 +695,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Both gates matter: facing away from the light, or in a trough, there is no glow.
     float backlit=saturate(-dot(v,l)*1.7-.45)*saturate(detail.y*1.7-.45);
     inScatter*=1+2.2*backlit;
-    } // end capture gate
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
     // Foam lives on the crest of a wave and in the chop that breaks it, so it is gated on
