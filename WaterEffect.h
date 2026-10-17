@@ -563,14 +563,6 @@ static const float kSwellToUnit=0.20550760;
 // multiplied the noise by them, and as src/Water/WaveField.h declares them.
 static const float kGroupBase=0.52;
 static const float kGroupDepth=0.62;
-// The shortest baseline the bed slope may be measured over, in world yards. A per-pixel depth
-// difference divided by a per-pixel world footprint is a slope, but only while that footprint is
-// wide enough to be measuring the bed rather than the depth buffer's own quantization - and at
-// the water's edge one pixel is a few inches. 1.5 yards is the span tools/WaterPreview.cpp's
-// FieldSlope samples (+-1.5 yd), so the shader and the mirror the look was tuned against read
-// the same baseline; it is a floor, so any coarser pixel keeps its own footprint and distant
-// water is untouched.
-static const float kBedSlopeSpanYards=1.5;
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
 // already sitting in the main depth buffer - water doesn't write that).
@@ -772,44 +764,29 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // separation into absorption/foam on the wrong side of a shoreline.
     float waterDepth=max(behindZ-viewPos.z,0);
     float depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
-    // Open ocean has no seafloor within the depth buffer at all (behindRaw
-    // reads as sky), so depthValid was 0 here - which used to zero every
-    // absorption/tint term below AND still sample sceneTexture unmodified
-    // at screenUV as "refracted", i.e. literally paint raw sky colour onto
-    // the water. That is exactly what read as "the sea looks transparent"
-    // no matter how high DepthAbsorptionPercent was set: absorption was
-    // gated to zero regardless of the slider. No floor found means this is
-    // genuinely deep, not "not water" - treat it as maximum depth instead.
+    // Keep the optical column and contact refraction in view-depth units below. Foam
+    // coverage is different: it belongs to the world, not to the camera ray or pixel grid.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
     float column=min(effectiveDepth,400.0);
-    // SHORE UNDERSTANDING: the captured depth buffer is the only geometry this pass can
-    // read, so its slope is the only description of a shore available to it - and a slope
-    // measured PER PIXEL is not a slope. It halves when the resolution doubles and halves
-    // again when the camera steps back, which is why the shoal foam below used to exist
-    // only within a few yards of the water's edge and disappear on a bar seen from the
-    // beach above it. The lattice footprint this stage already took for the chop fade is
-    // the pixel's own size in world yards - one lattice cell is `cellYards`, and the lattice
-    // rows are unit world directions scaled by 1/cell - so dividing by it turns a
-    // screen-space difference into the dimensionless bed slope it was always meant to be:
-    // the same number at any resolution and any distance, and the same number the CPU mirror
-    // measures in world space, which is the reading the look was tuned against. It carries
-    // the view angle's 1/cos, because the separation this pass can read is along the view
-    // axis rather than vertical; that is a property of the camera and not of the resolution,
-    // and the authored gain absorbs it.
-    // The divisor has a floor of kBedSlopeSpanYards, and the floor is the whole point of it:
-    // `ddx(depth)` is a difference over ONE pixel, so dividing by a pixel footprint that is a
-    // fifth of a yard - which is what a shoreline looks like from the water's edge - measures
-    // the depth buffer's own quantization and dither, not the bed, and reports it as an
-    // enormous slope. That number then drives the shoal foam, the beach/wall split and the
-    // swash band width, so near the camera it read as a checkerboard of foam on the bottom that
-    // crawled with the view. One and a half yards is the span the CPU mirror has always
-    // measured its bed slope over (FieldSlope samples +-1.5 yd), so this floor also puts the
-    // two halves of the renderer on the same baseline: the shader reads a coarser, calmer slope
-    // up close and the same slope everywhere else.
-    float bedSlope=length(float2(ddx(effectiveDepth),ddy(effectiveDepth)))
-        /max(max(sqrt(footprintSquared),kBedSlopeSpanYards)
-            *rsqrt(max(dot(waveLattice.xy,waveLattice.xy),1e-8)),1e-3);
+    // Reconstruct the captured seabed point in this draw's view space. screenUV is the
+    // inverse projection of viewPos, so the same pixel ray at behindZ gives the actual
+    // world point under this water fragment. Projecting the point-to-point vector onto
+    // world up yields vertical water depth; unlike view-Z separation it does not change
+    // when the camera pitches or moves.
+    float3 bottomView=float3((2*screenUV.x-1)*behindZ/max(reflectionProjection.z,1e-6),
+                             (1-2*screenUV.y)*behindZ/max(reflectionProjection.w,1e-6),behindZ);
+    float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);
+    float foamDepth=max(foamDepthSigned,0);
+    float foamDepthValid=captureValid*step(behindZ,99999)*step(0,foamDepthSigned);
+    // Recover the seabed's plane normal from reconstructed neighbouring world points,
+    // then measure its inclination to world-up. ddx/ddy are only the sampling stencil;
+    // their screen orientation, pixel size and camera tilt cancel out in this ratio.
+    // This matches the CPU preview's world-space bed slope and keeps shoal/beach foam
+    // attached to the terrain instead of crawling as the view pans, zooms or rotates.
+    float3 bedNormal=cross(ddx(bottomView),ddy(bottomView));
+    float bedNormalUp=dot(bedNormal,upWind.xyz);
+    float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);
     // A gentle beach and a rock wall both read as "the bottom comes up fast", and they are
     // not the same water: a beach carries a wide swash zone with sheets running up it and
     // draining back out, a wall carries a narrow bright contact line and nothing that can
@@ -880,9 +857,9 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // A beach spreads its shore band wider than a wall does, because the sheet that runs up
     // one keeps running: the same bed slope that says "beach" says how far up it goes.
     float swashWidth=1+beach*1.4*step(3.5,qualityLevel);
-    float swashDepth=max(effectiveDepth-sin01.x*runUp,0);
+    float swashDepth=max(foamDepth-sin01.x*runUp,0);
     float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1)*swashWidth,swashDepth);
-    float shore=depthValid*shallowEdge;
+    float shore=foamDepthValid*shallowEdge;
     // Foam lives on the crest of a wave and in the chop that breaks it, so it is gated on
     // the swell's own height rather than on a slope projected down one arbitrary direction.
     float crest=saturate(.42+detail.y*.6+detail.x*.3);
@@ -912,7 +889,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // cliff face under deep water is not water breaking over a bar. Both gates are what the
     // CPU mirror has always measured - it reads the world-space bed slope and gates it the
     // same way, and the published frames were tuned against that reading.
-    float shoal=depthValid*saturate(bedSlope*bodyStyle.w*2.0-.3)*saturate(1-column*.05);
+    float shoal=foamDepthValid*saturate(bedSlope*bodyStyle.w*2.0-.3)*saturate(1-foamDepth*.05);
     float crestMask=smoothstep(.60,.94,detail.y+length(ripple.yz)*.05*filter)
         *(.35+.65*foamPattern);
     // FOAM LACE, at WATER QUALITY 7: a mask decides WHERE foam is and says nothing about

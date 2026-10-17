@@ -816,6 +816,17 @@ the reflection (`*(1 - foam*0.85)`) and the sun road (`*(1 - foam)`) with it, an
 own colour, lifted toward the light but softened at `NoL = -0.25` so a shaded face still carries its
 cap.
 
+The camera-moving foam patch was traced to the shoal/shore inputs, not the wave-noise lattice: the
+shader estimated bed slope from `ddx/ddy` of view-Z depth and scaled it by a projected pixel footprint.
+That is a view-space derivative, so camera pitch and depth precision could change the foam boundary
+and make it crawl even when the world-anchored wave coordinates were correct. Foam now reconstructs
+the seabed point on the sampled pixel ray, uses its vertical separation from the water surface for
+shore/backwash depth, and derives bed slope from the reconstructed 3D normal relative to this draw's
+world-up vector. This keeps foam coverage attached to the terrain across camera translation and
+rotation. Optical column depth and refraction remain in view space; only foam placement uses the
+world-space measures. The existing footprint fade remains as an anti-aliasing LOD, not as a motion
+coordinate.
+
 ### Settings, and what a player sees
 
 `GeometryWavesEnabled` ships on now, with `[Water] GeometryWavePercent` re-authored as a height in

@@ -43,12 +43,48 @@ void Require(bool value, const char* name)
     std::printf("PASS %s\n", name);
 }
 
+static std::array<float,3> RotateView(const std::array<float,3>& v,float yaw,float pitch,float roll)
+{
+    const float cr=std::cos(roll),sr=std::sin(roll),cp=std::cos(pitch),sp=std::sin(pitch),cy=std::cos(yaw),sy=std::sin(yaw);
+    const std::array<float,3> r={v[0],cr*v[1]-sr*v[2],sr*v[1]+cr*v[2]};
+    const std::array<float,3> p={cp*r[0]+sp*r[2],r[1],-sp*r[0]+cp*r[2]};
+    return {cy*p[0]-sy*p[1],sy*p[0]+cy*p[1],p[2]};
+}
+
+static float WorldPlaneSlope(const std::array<float,3>& normal,const std::array<float,3>& up)
+{
+    const float upLength=std::sqrt(up[0]*up[0]+up[1]*up[1]+up[2]*up[2]);
+    const std::array<float,3> u={up[0]/upLength,up[1]/upLength,up[2]/upLength};
+    const float vertical=normal[0]*u[0]+normal[1]*u[1]+normal[2]*u[2];
+    const float hx=normal[0]-u[0]*vertical,hy=normal[1]-u[1]*vertical,hz=normal[2]-u[2]*vertical;
+    return std::sqrt(hx*hx+hy*hy+hz*hz)/std::max(std::fabs(vertical),1e-6f);
+}
+
 int main() try
 {
     const float validFog[4]={-.001f,1.f,1.f,0.f}, invalidFog[4]={0.f,0.f,0.f,0.f};
     const float nanFog[4]={std::numeric_limits<float>::quiet_NaN(),0.f,1.f,0.f};
     Require(HasFogCurve(validFog)&&!HasFogCurve(invalidFog)&&!HasFogCurve(nanFog),
             "water c4 accepts only a finite fog-curve shape; malformed camera variants use the no-fog fallback");
+    {
+        const std::array<float,3> up={0.f,0.f,1.f},normal={-.31f,.22f,1.f};
+        const float expected=std::hypot(.31f,.22f);
+        for(const auto angles: {std::array<float,3>{0.f,0.f,0.f},
+                                std::array<float,3>{.7f,.4f,-.3f},
+                                std::array<float,3>{-1.1f,.9f,.6f},
+                                std::array<float,3>{2.2f,-.65f,1.4f}}) {
+            const auto viewUp=RotateView(up,angles[0],angles[1],angles[2]);
+            const float measured=WorldPlaneSlope(RotateView(normal,angles[0],angles[1],angles[2]),viewUp);
+            Require(std::fabs(measured-expected)<2e-5f,
+                    "foam bed slope is unchanged by camera orientation when computed from the world-up normal");
+            const auto surface=RotateView({5.f,-8.f,12.f},angles[0],angles[1],angles[2]);
+            const auto bed=RotateView({5.f,-8.f,4.f},angles[0],angles[1],angles[2]);
+            const float verticalDepth=(surface[0]-bed[0])*viewUp[0]
+                +(surface[1]-bed[1])*viewUp[1]+(surface[2]-bed[2])*viewUp[2];
+            Require(std::fabs(verticalDepth-8.f)<2e-5f,
+                    "shore foam depth is the same world vertical distance under every camera orientation");
+        }
+    }
     Require(IsMaterialLayout(8,64,512,512), "canonical liquid material accepted");
     Require(!IsMaterialLayout(8,64,64,64), "weather ripple LUT alone is not water");
     Require(!IsMaterialLayout(512,512,8,64), "swapped slots are not the supported shader ABI");
@@ -902,10 +938,20 @@ int main() try
                 pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos&&
                 pixel.find("surfaceAlpha=max(surfaceAlpha,reflectionAmount);")!=std::string::npos,
                 "the underside uses a water-to-air critical-angle reflection, camera-side absorption and coverage that does not double-blend the scene");
-        Require(pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
-                pixel.find("max(max(sqrt(footprintSquared),kBedSlopeSpanYards)")!=std::string::npos&&
+        // Foam placement must not be evaluated in view-depth units: that makes a fixed seabed
+        // look shallower/steeper as the camera pitches. Reconstruct the bed point on its screen
+        // ray, use vertical world separation for shore bands, and derive slope from a normal.
+        Require(pixel.find("float3 bottomView=float3((2*screenUV.x-1)*behindZ/max(reflectionProjection.z,1e-6),")!=std::string::npos&&
+                pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")!=std::string::npos&&
+                pixel.find("float3 bedNormal=cross(ddx(bottomView),ddy(bottomView));")!=std::string::npos&&
+                pixel.find("float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);")!=std::string::npos&&
+                pixel.find("float swashDepth=max(foamDepth-sin01.x*runUp,0);")!=std::string::npos&&
+                pixel.find("float shore=foamDepthValid*shallowEdge;")!=std::string::npos&&
+                pixel.find("float shoal=foamDepthValid*saturate(bedSlope*bodyStyle.w*2.0-.3)*saturate(1-foamDepth*.05);")!=std::string::npos&&
+                pixel.find("ddx(effectiveDepth)")==std::string::npos&&
+                pixel.find("float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));")!=std::string::npos&&
                 mirror.find("const float e = 1.5f;")!=std::string::npos,
-                "the bed slope is measured over the mirror's own 1.5 yard baseline, never over one pixel");
+                "shore, shoal and backwash foam use camera-invariant world depth and bed slope while optical depth remains unchanged");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
