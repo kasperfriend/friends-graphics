@@ -1164,7 +1164,8 @@ inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
     }
     keyDown = down;
 
-    UpdateWeatherObservation(GetTickCount(), focused, preserveDetection);
+    const DWORD now = GetTickCount();
+    UpdateWeatherObservation(now, focused, preserveDetection);
 
     // COVER ESTIMATE, run after the state machine above because it needs `weatherSuspended` to have
     // already decided whether absence of a native draw means anything this frame.
