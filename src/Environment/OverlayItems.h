@@ -76,7 +76,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"SunIntensityPercent","CLOUD SUNLIGHT",0,400,5,130},
  {KIND_SLIDER,L"VolumetricClouds",L"AerialPerspectivePercent","CLOUD HAZE",0,100,5,60},
  {KIND_SLIDER,L"VolumetricClouds",L"GroundShadowPercent","CLOUD SHADOWS",0,100,5,55},
- {KIND_TOGGLE,L"VolumetricClouds",L"SunRaysEnabled","CLOUD SUN RAYS",0,1,1,1},
+ {KIND_TOGGLE,L"VolumetricClouds",L"SunRaysEnabled","CLOUD SUN RAYS",0,1,1,0},
  {KIND_SLIDER,L"VolumetricClouds",L"SunRayPercent","CLOUD RAY STRENGTH",0,200,5,80},
  {KIND_SLIDER,L"VolumetricClouds",L"ResolutionPercent","CLOUD RESOLUTION (%)",20,100,5,25},
  {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD MARCH QUALITY (0 LOW 3 ULTRA)",0,3,1,2},
