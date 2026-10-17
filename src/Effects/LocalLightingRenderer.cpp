@@ -216,8 +216,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float hL=surfL>0?dot(pL-p,inv1.xyz):0.,hR=surfR>0?dot(pR-p,inv1.xyz):0.;
  float hU=surfU>0?dot(pU-p,inv1.xyz):0.,hD=surfD>0?dot(pD-p,inv1.xyz):0.;
  float liveW=surfL+surfR+surfU+surfD;
- float spread=(surfL*length(pL-p)+surfR*length(pR-p)+surfU*length(pU-p)+surfD*length(pD-p))/max(liveW,1.);
- float gtol=.1+.1*spread;
+ // The window's own spread is already named `spread` (in uv); this is the
+ // mean world distance of the surviving taps, which sizes the gate.
+ float gateSpread=(surfL*length(pL-p)+surfR*length(pR-p)+surfU*length(pU-p)+surfD*length(pD-p))/max(liveW,1.);
+ float gtol=.1+.1*gateSpread;
  float curvX=abs(hL+hR),curvY=abs(hU+hD);
  wL*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hL));
  wR*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hR));
