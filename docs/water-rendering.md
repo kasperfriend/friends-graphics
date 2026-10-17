@@ -147,13 +147,26 @@ already travelling:
 
 `controls` is 75 floats of the 156 the saved `c180..c218` span holds, so the save/restore window,
 the single `SetPixelShaderConstantF(180, …, 39)` upload and the untouched `c197..c199` gap are all
-unchanged; `c204.w` and `c218.w` are still spare. The pixel stage is estimated to grow by roughly
-eighty slots (the third octave, the bed slope and shore shape, the swash and lace and backwash, the
-colour ramp and veil, against the two marches now costing less on average and the Fresnel term
-hoisted above the march it gates), which puts it near 720 of the measured-only count round 4 left in
-place. Cards reporting a `MaxPixelShader30InstructionSlots` under that keep native water exactly as
-before - and levels 0-1 exist precisely so such a card can be given a procedural sea instead of
-losing it, which is the first time this renderer has had a fallback that is still this renderer.
+unchanged; `c204.w` and `c218.w` are still spare.
+
+The slot count is the one estimate in this round that was wrong, and it is worth recording exactly
+how wrong. This document estimated "roughly eighty"; Windows CI measured the pixel stage at **890**
+slots against **713** on the commit it branched from - **+177**, and the vertex stage 169 to **188**
+(+19) for the third train. That is round 3 and round 4's lesson a third time: the price per term is
+invisible to a reader counting terms. What actually cost it is that a noise octave is a four-corner
+hash plus a bicubic, so the mid octave alone is worth dozens of slots before the shore shape, the
+swash, the lace, the backwash, the colour ramp and the veil are counted, and the two marches giving
+back steps gave back *time*, which is not the same currency - with `[loop]` the instruction count is
+static, so cutting steps buys time per pixel and nothing at all in slots.
+
+Which is also the correction this round owes about the ladder itself: **a level buys time per pixel,
+not slots.** `[branch]` gates still compile, so every level pays the same 890 and a level cannot
+rescue a card whose `MaxPixelShader30InstructionSlots` is under it - such a card fails
+`CreatePixelShader` and keeps native water at level 0 exactly as at level 10, which is what it did
+at 713 too. The band that changed is only a hypothetical card reporting between 713 and 889; the
+512-slot floor cards were already outside the shader before this round. The 2048 cap still holds at
+about 2.3x headroom rather than the 3x it was written against, and the count is still the number a
+change like this one has to answer for.
 
 ### Verification
 
@@ -383,13 +396,14 @@ texture on compute shaders, samples a mip-blurred reflection chain, and shades w
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
 state without spending a render pass, and no ceiling on how many instruction slots the water pixel
 stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
-run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14 and the
-2026-10-17 CSE pass brought it to about 580 under an explicit 2048 cap, which round 5's quality
-ladder is estimated to raise by roughly eighty at the top level while the marches now cost less on
-average; it had
+run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14, at 713
+on 2026-10-17 after the CSE pass, and at **890** after round 5's quality ladder added the mid
+octave and the shore work - the estimate for that round was "roughly eighty" and the measured
+answer was +177, under the same explicit 2048 cap; it had
 been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
 which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
-than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom instead). The count is still the number to argue about, and the reason to keep measuring
+than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom, now about 2.3x).
+The count is still the number to argue about, and the reason to keep measuring
 at all is Round 3: it estimated 608, the shader measured 633, and instead of a zero-margin budget or
 cut visible shading the broad warp moved to the vertex stage and is interpolated to pixels - the slot
 count came down by changing *where* the work happens, not by removing work. Earlier rounds, the device
@@ -1172,9 +1186,9 @@ the reporting player's machine. In-game confirmation still matters.
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
   compile, or if any *budgeted* shader - the volume and cloud raymarches, weather, and the water
   pixel stage (2048, see "The 2048 cap and the CSE pass" above) - exceeds its ceiling. The water
-  pixel stage's pre-optimization baseline was 642 slots on Windows CI on 2026-10-14; the
-  2026-10-17 CSE pass is estimated at about 580, and the first Windows run after that pass is the
-  authoritative new count (the former 621 cap is described under "Full rework round 4").
+  pixel stage measured 642 slots on Windows CI on 2026-10-14, 713 after the CSE pass, and **890**
+  after round 5's quality ladder; the vertex stage measures 188. Both counts are annotated on every
+  run (the former 621 cap is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
