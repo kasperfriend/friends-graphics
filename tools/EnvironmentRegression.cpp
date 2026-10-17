@@ -27,12 +27,14 @@ void TestGlobalOverrides(const std::wstring& base) {
  Require(ReadInt(L"Water",L"Enabled",1,path.c_str())==0&&!HasGlobalValue(L"Water",L"Enabled"),"Global edit leaves other keys untouched");
  editGlobal=false;editZone=true;
  Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==90,"zone editor remains independent of Global mask");
- Require(Save(L"Atmosphere",L"ShaftPercent",95)&&runtime()==0,"zone edit cannot beat Global override");
+ Require(Save(L"Atmosphere",L"ShaftPercent",95),"save zone edit");
+ Require(SetInheritGlobal(L"Atmosphere",L"ShaftPercent",true)&&HasInheritGlobal(L"Atmosphere",L"ShaftPercent"),"zone also opts into Global override");
+ Require(runtime()==0,"zone edit cannot beat Global override when inheriting");
  editZone=false;
- Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==170,"area editor remains independent of Global mask");
+ Require(ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,path.c_str())==0,"area editor shows inherited Global override when inherit toggle is on");
  Require(Save(L"Atmosphere",L"ShaftPercent",175)&&runtime()==0,"area edit cannot beat Global override");
  Sync(base,{619,4494,4623,true},true);
- Require(runtime()==0,"Global override survives map changes");
+ Require(SetInheritGlobal(L"Atmosphere",L"ShaftPercent",true)&&runtime()==0,"Global override survives map changes when inheriting");
  Sync(base,{},false);
  Require(runtime()==0&&ReadEditorInt(L"Atmosphere",L"ShaftPercent",60,path.c_str())==0,"Global override works without location verification");
  Require(Save(L"Atmosphere",L"ShaftPercent",5)&&runtime()==5,"unverified fallback edits existing Global override instead of masked baseline");
