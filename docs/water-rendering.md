@@ -384,7 +384,9 @@ GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, 
 state without spending a render pass, and no ceiling on how many instruction slots the water pixel
 stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
 run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14 and the
-2026-10-17 CSE pass brought it to about 580 under an explicit 2048 cap; it had
+2026-10-17 CSE pass brought it to about 580 under an explicit 2048 cap, which round 5's quality
+ladder is estimated to raise by roughly eighty at the top level while the marches now cost less on
+average; it had
 been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
 which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
 than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom instead). The count is still the number to argue about, and the reason to keep measuring
