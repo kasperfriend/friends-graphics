@@ -1,16 +1,16 @@
 # F7 overlay verification
 
-The overlay has twelve left-side category tabs: Atmosphere & God Rays, Local
+The overlay has eleven left-side category tabs: Atmosphere & God Rays, Local
 Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
-Local Lighting, Global Illumination, Dynamic Shadows, Ambient Occlusion,
-AI Materials & Relief, and Image & Color.
-`OverlayItems.h` holds all 106 controls with their keys, defaults, ranges and
-save semantics - the original 69 plus the wind, cloud-resolution, water,
-ambient-occlusion and global-illumination controls added since, less the eleven
-vegetation-sway rows that were removed with that feature. `OverlayLayout.h` is
-platform-independent and supplies the
-rectangles used by both Direct3D drawing and Win32 hit testing, including the
-scrollbar and resize handle. Window geometry and tab scroll positions last for
+Local Lighting, Dynamic Shadows, Ambient Occlusion, AI Materials & Relief, and
+Image & Color.
+`OverlayItems.h` holds all 96 controls with their keys, defaults, ranges and
+save semantics - the original 69 plus the wind, cloud-resolution, water and
+ambient-occlusion controls added since, less the eleven vegetation-sway rows and
+the eleven global-illumination rows that were removed with those features.
+`OverlayLayout.h` is platform-independent and supplies the rectangles used by
+both Direct3D drawing and Win32 hit testing, including the scrollbar and resize
+handle. Window geometry and tab scroll positions last for
 the client session; they are not written to the graphics preset.
 
 ## Automated regressions
@@ -67,7 +67,7 @@ workflow for the full DLL.
 
 These runtime checks cannot be completed in the Linux development sandbox:
 
-1. Open F7 in windowed and fullscreen modes. Visit all ten tabs and scroll
+1. Open F7 in windowed and fullscreen modes. Visit every tab and scroll
    Clouds to its last setting. Confirm labels, values and hints are legible and
    no hidden row receives clicks.
 2. Drag the title in all directions, including beyond the client edges. Release

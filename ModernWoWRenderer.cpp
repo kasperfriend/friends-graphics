@@ -34,7 +34,6 @@
 #include "NativeShadowDiagnostics.h"
 #include "src/Materials/MaterialCacheManager.h"
 #include "src/Lighting/LocalLightManager.h"
-#include "src/Effects/GlobalIllumination.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Environment/WindTuning.h"
@@ -420,7 +419,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         // that reads a few cached numbers costs single-digit microseconds, and a
         // timer that cannot see that is a timer that says 16 ms for every stage
         // and 47 ms for a chain that costs two.
-        std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tGlobal=0,tWeather=0;
+        std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
         const auto stage=[&mark,reloadFrequency](std::int64_t& out){const std::int64_t nowTick=renderer::PerformanceCounter();out=nowTick-mark;mark=nowTick;};
         // What the settings reads behind this apply actually did, so the next report
         // can answer the one question a stall asks: was the cost in the reads, and
@@ -435,13 +434,12 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         nativeshadowdiag::ReloadEnhancement();stage(tShadow);
         renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);stage(tMaterial);
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
-        renderer::GlobalIllumination::Instance().ReloadTuning();stage(tGlobal);
         weathervisuals::ReloadTuning();stage(tWeather);
         const auto micros=[reloadFrequency](std::int64_t ticks){return ticks*1000000/reloadFrequency;};
         char reloadLine[512]{};
         std::snprintf(reloadLine,sizeof(reloadLine),
             "Location tuning reloaded in %lld us (wind %lld water %lld fog %lld volume %lld celestial %lld shadow %lld "
-            "material %lld lights %lld global %lld weather %lld) - the place was seen %lld ms before this line, and the "
+            "material %lld lights %lld weather %lld) - the place was seen %lld ms before this line, and the "
             "settings behind it answered %llu read(s) from memory with %llu whole-file parse(s), after %u settled "
             "place(s) that needed nothing re-read",
             static_cast<long long>(micros(renderer::PerformanceCounter()-reloadBegan)),
@@ -449,7 +447,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             static_cast<long long>(micros(tFog)),static_cast<long long>(micros(tVolume)),
             static_cast<long long>(micros(tCelestial)),static_cast<long long>(micros(tShadow)),
             static_cast<long long>(micros(tMaterial)),static_cast<long long>(micros(tLights)),
-            static_cast<long long>(micros(tGlobal)),static_cast<long long>(micros(tWeather)),
+            static_cast<long long>(micros(tWeather)),
             static_cast<long long>(now-g_placeChangedAt),
             static_cast<unsigned long long>(renderer::locationtuning::profileReads-readsBefore),
             static_cast<unsigned long long>(renderer::locationtuning::profileParses-parsesBefore),
@@ -471,7 +469,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;
-        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();renderer::GlobalIllumination::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
@@ -1188,7 +1186,6 @@ void Initialize()
     renderer::MaterialCacheManager::Instance().Configure(g_basePath);
     renderer::LocalLightManager::Instance().Configure(g_basePath);
     renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
-    renderer::GlobalIllumination::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     const std::wstring modernIni=g_basePath+L"ModernWoWRenderer.ini";
     unified=renderer::locationtuning::ReadCachedInt(modernIni.c_str(),L"Graphics",L"UnifiedToggle",0)!=0;

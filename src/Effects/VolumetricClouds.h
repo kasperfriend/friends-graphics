@@ -116,13 +116,6 @@ namespace renderer
         // the first frame that renders clouds (or loads from the cache file).
         bool FieldsReady() const { return m_fieldsReady; }
         void ApplyQualityPreset(uint32_t quality);
-        // Live overcast for consumers that dim with the sky (global
-        // illumination): authored coverage plus the smoothed storm amount.
-        // 0 is a clear sky, 1 a solid lid.
-        float OvercastFactor() const
-        {
-            return std::clamp(m_settings.coverage * .75f + m_dynamics.WeatherAmount() * .6f, 0.f, 1.f);
-        }
 
     private:
         VolumetricClouds() = default;
