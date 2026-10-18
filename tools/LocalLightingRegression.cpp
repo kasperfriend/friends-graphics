@@ -1376,9 +1376,10 @@ int main()
         Check(atmosphere.find("if(debugMode==13)return float4(localLightSum,1);") != std::string::npos &&
               atmosphere.find("localLightDebug.x") == std::string::npos &&
               atmosphere.find("if(li>=(int)localLightInfo.x) break;") != std::string::npos &&
-              atmosphere.find("if(perpendicular2>=radius*radius) continue;") != std::string::npos &&
+              atmosphere.find("if(perpendicular2<radius2&&interval>0) {") != std::string::npos &&
+              atmosphere.find("if(localRayPower>0.f){") != std::string::npos &&
               settings.find("13 local dynamic-light scattering") != std::string::npos,
-              "volumetric lamp diagnostics have their own mode and zero ray strength skips the light loop");
+              "volumetric diagnostics expose mode 13 and cull zero-power or missed lamp rays");
         Check(manager.find("light.stableId = StableManifestId(block);") != std::string::npos &&
               manager.find("std::isfinite(position.x)") != std::string::npos &&
               manager.find("(!slot.enabled &&") != std::string::npos &&

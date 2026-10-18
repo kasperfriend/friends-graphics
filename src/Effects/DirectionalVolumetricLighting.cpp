@@ -304,28 +304,29 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // Clipping the interval to scene depth keeps foreground walls opaque.
  [loop] for(int li=0;li<8;++li) {
    if(li>=(int)localLightInfo.x) break;
-   if(localLightColorPower[li].w<=0) continue;
    float3 toLight=localLightPosRadius[li].xyz-cameraPos.xyz;
-   float radius=max(localLightPosRadius[li].w,.01);
+   float radius=max(localLightPosRadius[li].w,.01),radius2=radius*radius;
    float along=dot(toLight,ray);
-   if(along+radius<=0||along-radius>=marchDistance) continue;
    float perpendicular2=max(0,dot(toLight,toLight)-along*along);
-   if(perpendicular2>=radius*radius) continue;
-   float halfChord=sqrt(radius*radius-perpendicular2);
+   float halfChord=sqrt(max(0,radius2-perpendicular2));
    float begin=max(0,along-halfChord),end=min(marchDistance,along+halfChord);
    float interval=max(0,end-begin);
-   if(interval<=0) continue;
-   float closest=clamp(along,begin,max(begin,end));
-   float3 p=cameraPos.xyz+ray*closest;
-   float2 floor=Ground(p,ground);
-   // Thin ambient aerosol also exists above the ground banks. Its small
-   // optical depth is only visible near a real emitter, not as screen wash.
-   float medium=layerEnable.x*ambientAerial.w+localFog.x*localFog.y*.06;
-   medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-floor.x-localFog.z)*localFog.w);
-   float edge=saturate(1-perpendicular2/(radius*radius));
-   float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
-   float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
-   localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   // One combined ray/sphere-and-depth gate keeps texture fetches and
+   // exponentials out of the common miss path without stacking several
+   // continue branches in this instruction-budgeted ps_3_0 loop.
+   if(perpendicular2<radius2&&interval>0) {
+     float closest=clamp(along,begin,end);
+     float3 p=cameraPos.xyz+ray*closest;
+     float2 floor=Ground(p,ground);
+     // Thin ambient aerosol also exists above the ground banks. Its small
+     // optical depth is only visible near a real emitter, not as screen wash.
+     float medium=layerEnable.x*ambientAerial.w+localFog.x*localFog.y*.06;
+     medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-floor.x-localFog.z)*localFog.w);
+     float edge=1-perpendicular2/radius2;
+     float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
+     float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
+     localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   }
  }
  float optical=max(0,globalOptical+heightOptical+localOptical)*directExtinction.w;
  float T=exp(-optical); float fogAmount=1-T;
@@ -820,8 +821,23 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   // loop entirely instead of doing sphere intersections for zero radiance.
   const float localRayPower=localManager.IntensityScale()*f.environment[Lighting]*
       std::sqrt(std::max(0.f,localManager.RayScale()));
-  const int localCount=localRayPower>0.f?std::min<int>(8,int(localLights.size())):0;
-  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=LinearizeAtmosphereColor(localLights[li].color.x);localColorPower[li][1]=LinearizeAtmosphereColor(localLights[li].color.y);localColorPower[li][2]=LinearizeAtmosphereColor(localLights[li].color.z);localColorPower[li][3]=localLights[li].intensity*localRayPower;}
+  int localCount=0;
+  if(localRayPower>0.f){
+   for(const auto& light:localLights){
+    if(localCount>=8)break;
+    const float power=light.intensity*localRayPower;
+    if(!std::isfinite(power)||power<=0.f)continue;
+    localPosRadius[localCount][0]=light.position.x;
+    localPosRadius[localCount][1]=light.position.y;
+    localPosRadius[localCount][2]=light.position.z;
+    localPosRadius[localCount][3]=light.radius;
+    localColorPower[localCount][0]=LinearizeAtmosphereColor(light.color.x);
+    localColorPower[localCount][1]=LinearizeAtmosphereColor(light.color.y);
+    localColorPower[localCount][2]=LinearizeAtmosphereColor(light.color.z);
+    localColorPower[localCount][3]=power;
+    ++localCount;
+   }
+  }
   float localLightInfo[4]={float(localCount),0,0,0};
   // Keep the authored distance/height atmosphere and the local bank as
   // independent layers.  Day/night factors only tint the medium; they never
