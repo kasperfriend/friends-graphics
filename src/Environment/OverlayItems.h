@@ -142,7 +142,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"DynamicLighting",L"IntensityPercent","LIGHT INTENSITY",0,250,5,100},
  {KIND_SLIDER,L"DynamicLighting",L"RayPercent","LIGHT RAYS",0,200,5,75},
  {KIND_SLIDER,L"DynamicLighting",L"Quality","LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)",0,2,1,1},
- {KIND_SLIDER,L"DynamicLighting",L"NormalSpreadPercent","LIGHT SMOOTHING",25,400,25,100},
+ {KIND_SLIDER,L"DynamicLighting",L"NormalSpreadPercent","LIGHT SMOOTHING",0,400,25,100},
  {KIND_SLIDER,L"DynamicLighting",L"DebugMode","LIGHT DEBUG",0,4,1,0},
 
  // === DYNAMIC SHADOWS ===

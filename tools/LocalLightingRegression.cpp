@@ -757,6 +757,22 @@ int main()
                     farGrainLegacy[q] / std::max(farGrain[q], 1e-9f), farNormal[q], farNormalLegacy[q]);
     }
 
+    {
+        const NormalTuning zeroFloorTuning = DefaultNormalTuning(0.f);
+        const Pool zeroFloorPool = EvaluatePool(scene, 1.f, projection, inverseView, lamp, zeroFloorTuning, false, false);
+        const Composite zeroFloorOnScreen = CompositePool(scene, zeroFloorPool, projection, compositeTuning, false);
+        const float zeroNearGrain = HighFrequency(zeroFloorOnScreen.luminance, nearFlat);
+        const float zeroFarGrain = HighFrequency(zeroFloorOnScreen.luminance, flatPlain);
+        const float zeroUndulatingNormal = NormalError(zeroFloorPool, farGround, 1.f);
+        std::printf("     0%% optional spread: near grain %.5f, far grain %.5f, undulating normal %.2f deg\n",
+                    zeroNearGrain, zeroFarGrain, zeroUndulatingNormal);
+        Check(zeroNearGrain <= nearGrain[2] + 0.001f && zeroFarGrain <= farGrain[2] + 0.01f,
+              "removing the optional world floor does not materially increase flat-ground grain");
+        Check(zeroUndulatingNormal <= undulatingNormal[2],
+              "the one-texel minimum still follows undulating relief at zero optional spread");
+        Pass("zero optional spread preserves measured ground smoothness and relief");
+    }
+
     auto worst = [](const float* v) { return std::max(std::max(v[0], v[1]), v[2]); };
 
     // The flat apron near the camera is where a light-space number means what it
@@ -1311,13 +1327,21 @@ int main()
             return n ? float(sum / double(n)) : 0.f;
         };
 
-        // LIGHT SMOOTHING is the artistic window scale; the copies were
-        // reported at every setting with the worst at the shipped one.
+        // LIGHT SMOOTHING scales only the optional world-space floor. Zero
+        // still keeps the depth-texel minimum and distance growth in Footprint.
+        const NormalTuning zeroSpread = DefaultNormalTuning(0.f);
+        const Vec2 depthTexel{ 1.f / float(kWidth), 1.f / float(kHeight) };
+        const Vec2 zeroFootprint = TapOffset(Footprint(0.f, depthTexel, nearProj, zeroSpread), depthTexel);
+        Check(Near(zeroSpread.minWorldSpread, 0.f, 1e-6f) &&
+              Near(zeroFootprint.x, depthTexel.x, 1e-6f) &&
+              Near(zeroFootprint.y, depthTexel.y, 1e-6f),
+              "zero smoothing removes only the world-space floor, never the mandatory depth texel");
         struct SmoothRow { const char* name; float scale; };
-        const SmoothRow smooths[] = { { "25% ", .25f }, { "100%", 1.f }, { "400%", 4.f } };
-        float shipped[3] = {}, drowned[3] = {}, cameraUpGate[3] = {};
+        const SmoothRow smooths[] = { { "0%   ", 0.f }, { "25% ", .25f },
+                                      { "100%", 1.f }, { "400%", 4.f } };
+        float shipped[4] = {}, drowned[4] = {}, cameraUpGate[4] = {};
         const Vec3 cameraUp{ nUp[0], nUp[1], nUp[2] };
-        for (int s = 0; s < 3; ++s)
+        for (int s = 0; s < 4; ++s)
         {
             const NormalTuning tuning = DefaultNormalTuning(smooths[s].scale);
             const Pool truth = evaluateNear(.75f, tuning, true, false, kWorldUp);
@@ -1340,13 +1364,15 @@ int main()
         // farther across the silhouette. World +Z keeps the copy error bounded
         // at every slider setting; the previous slope-drowned depth weighting
         // remains as a separate baseline for the shipped setting and maximum.
-        Check(drowned[1] > 1.25f * shipped[1] && drowned[2] > 1.25f * shipped[2],
+        Check(drowned[2] > 1.25f * shipped[2] && drowned[3] > 1.25f * shipped[3],
               "slope-drowned step detection paints more than the corrected pool");
-        Check(shipped[0] < 0.04f && shipped[1] < 0.12f,
+        Check(shipped[0] < 0.02f,
+              "zero world-space spread preserves the texel minimum and bounds silhouette copies");
+        Check(shipped[1] < 0.04f && shipped[2] < 0.12f,
               "a nearby silhouette paints no copy into the pool at ordinary smoothing");
-        Check(shipped[2] < 0.12f,
+        Check(shipped[3] < 0.12f,
               "maximum smoothing stays bounded when height is measured in world-up");
-        Check(cameraUpGate[2] > 4.f * cameraUpGate[1] && cameraUpGate[2] > 4.f * shipped[2],
+        Check(cameraUpGate[3] > 4.f * cameraUpGate[2] && cameraUpGate[3] > 4.f * shipped[3],
               "camera-up height lets the nearby-object copies grow with strong smoothing");
         Pass("nearby characters and objects no longer paint copies into the pool");
     }
@@ -1363,6 +1389,7 @@ int main()
         const std::string managerHeader = ReadFile("src/Lighting/LocalLightManager.h");
         const std::string water = ReadFile("WaterEffect.h");
         const std::string settings = ReadFile("GraphicsEffects.ini");
+        const std::string overlay = ReadFile("src/Environment/OverlayItems.h");
         Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
               surface.find("sourceDebug+=contribution;") != std::string::npos &&
               surface.find("float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;") != std::string::npos &&
@@ -1385,6 +1412,18 @@ int main()
               manager.find("(!slot.enabled &&") != std::string::npos &&
               manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos,
               "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
+        Check(manager.find(")), 0, 400) * 0.01f;") != std::string::npos &&
+              overlay.find("L\"NormalSpreadPercent\",\"LIGHT SMOOTHING\",0,400,25,100") != std::string::npos &&
+              settings.find("NormalSpreadPercent=100") != std::string::npos,
+              "F7 and the ini expose a zero optional spread floor without changing the 100% default");
+        Check(manager.find("attached_selected=") != std::string::npos &&
+              manager.find("manifest_selected=") != std::string::npos &&
+              manager.find("normal_spread=") != std::string::npos &&
+              manager.find("Selected source detail:") != std::string::npos &&
+              manager.find(" id=") != std::string::npos &&
+              manager.find(" position=(") != std::string::npos &&
+              manager.find(" score=") != std::string::npos,
+              "the periodic diagnostic records selected source identities, positions, scores and spread");
         Check(manager.find("m_selectionSignature = 0;") != std::string::npos &&
               manager.find("m_selectionSignature = local_light_detail::SelectionSignature(m_selected);") != std::string::npos &&
               managerHeader.find("SelectionSignature() const { return m_selectionSignature; }") != std::string::npos &&

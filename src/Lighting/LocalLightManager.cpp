@@ -63,7 +63,7 @@ namespace renderer
         m_intensityScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
         m_rayScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
         m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
-        m_normalSpread = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"NormalSpreadPercent", 100, m_iniPath.c_str())), 25, 400) * 0.01f;
+        m_normalSpread = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"NormalSpreadPercent", 100, m_iniPath.c_str())), 0, 400) * 0.01f;
         m_debugMode = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
     }
 
@@ -395,14 +395,43 @@ namespace renderer
             }
             const float nearest = std::sqrt(nearestSquared);
             size_t nativeSelected = 0;
+            size_t manifestSelected = 0;
+            size_t attachedSelected = 0;
             for (const auto& light : m_selected)
+            {
                 if (light.flags & LocalLightNative) ++nativeSelected;
+                if (light.flags & LocalLightManifest) ++manifestSelected;
+                if (light.flags & LocalLightAttached) ++attachedSelected;
+            }
             Log("Source diagnostic: native_slots=" + std::to_string(m_nativeLights.size()) +
                 " selected=" + std::to_string(m_selected.size()) +
-                " native_selected=" + std::to_string(nativeSelected) + " attached=" + std::to_string(m_attached.size()) +
+                " native_selected=" + std::to_string(nativeSelected) +
+                " manifest_selected=" + std::to_string(manifestSelected) +
+                " attached_selected=" + std::to_string(attachedSelected) +
+                " attached=" + std::to_string(m_attached.size()) +
+                " quality=" + std::to_string(m_quality) +
+                " normal_spread=" + std::to_string(m_normalSpread * 100.f) +
                 " camera=(" + std::to_string(cameraPosition.x) + "," +
                 std::to_string(cameraPosition.y) + "," + std::to_string(cameraPosition.z) +
                 ") nearest_manifest=" + std::to_string(nearest));
+
+            std::string selectedDetails = "Selected source detail:";
+            for (size_t index = 0; index < m_selected.size(); ++index)
+            {
+                const auto& light = m_selected[index];
+                const char* kind = (light.flags & LocalLightAttached) ? "attached" :
+                    (light.flags & LocalLightManifest) ? "manifest" :
+                    (light.flags & LocalLightNative) ? "native" : "other";
+                selectedDetails += " [" + std::to_string(index) + "] kind=" + kind +
+                    " id=" + std::to_string(light.stableId) +
+                    " flags=" + std::to_string(light.flags) +
+                    " position=(" + std::to_string(light.position.x) + "," +
+                    std::to_string(light.position.y) + "," + std::to_string(light.position.z) + ")" +
+                    " radius=" + std::to_string(light.radius) +
+                    " intensity=" + std::to_string(light.intensity) +
+                    " score=" + std::to_string(light.score);
+            }
+            Log(selectedDetails);
         }
     }
 

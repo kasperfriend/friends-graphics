@@ -76,8 +76,11 @@ Fixed, in `LocalLightingCore.h` and the two ps_3_0 passes that mirror it:
 - the highlight is gated by how much of the window survived, and the composite
   blends a 1.5-texel tent with a continuity floor.
 
-`NormalSpreadPercent` (F7 "LIGHT SMOOTHING", 25-400%) scales that window, for
-players who want a sharper or a softer pool than the shipped 100%.
+`NormalSpreadPercent` (F7 "LIGHT SMOOTHING", 0-400%) scales the optional
+world-space floor of that window, for players who want a sharper or softer pool
+than the shipped 100%. At 0 the extra world-space floor is removed, but the
+normal still uses at least one depth-buffer texel and grows its footprint with
+distance; this is not a fully unfiltered normal.
 
 Measured, quality 1/0.75/0.5 on flat ground: mean normal error 0.00 degrees
 (was 64-71), high-frequency content of the light 0.0002-0.002 (was 0.8-2.1),
@@ -150,8 +153,10 @@ it.
 The gate now measures height along WoW world +Z in both the CPU core and the
 surface shader. The local-light regression renders the same character/crate
 scene with a 30-degree downward camera and compares the correct world-up result
-to the former camera-up result at 25%, 100% and 400% smoothing. At 400%, the
-camera-up version's near-silhouette error is 0.455 versus 0.093 with world-up;
+to the former camera-up result at 0%, 25%, 100% and 400% smoothing. Zero optional
+world spread lowers the modeled near-silhouette copy error to 0.008, compared
+with 0.022 at 25% and 0.040 at 100%; the mandatory one-texel footprint remains.
+At 400%, the camera-up version's error is 0.455 versus 0.093 with world-up;
 the fixed result stays under the regression's 0.12 ceiling.
 
 ## Dynamic-light activation, selection and diagnostics
@@ -180,3 +185,8 @@ layered emitters at one position remain distinct. Persistent D3D lights stay
 eligible while the device still reports them enabled; draw-scoped enables keep
 the existing short grace window. Reaching the attached-torch cap skips only
 additional emitters instead of aborting observation of the remaining batch.
+Every 300 selection frames, `LocalLighting.log` now records the selected counts
+by source type, active normal-spread percentage and each selected source's type,
+ID, position, radius, intensity and score. This makes it possible to tell
+whether nearby flame captures are competing as separate lights instead of
+inferring from the total attached-emitter count alone.

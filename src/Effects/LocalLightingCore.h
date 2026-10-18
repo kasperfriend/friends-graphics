@@ -133,12 +133,11 @@ inline Vec3 WorldPosition(float u, float v, float raw, const Projection& p,
 // -------------------------------------------------------------- footprint ---
 struct NormalTuning
 {
-    // Smallest world-space window WIDTH (both taps together) the normal is
-    // fitted over. Near the
-    // camera one buffer texel is a fraction of an inch of ground, so the fit
-    // would follow the terrain's own micro-relief and the pool would dapple;
-    // this floor averages several relief features instead. It only binds
-    // close up - at range a single texel already spans yards.
+    // Optional smallest world-space window WIDTH (both taps together) the
+    // normal is fitted over. Zero disables this extra world-space floor; the
+    // actual footprint still uses at least one depth texel and grows with
+    // distance. A positive value averages more near-camera relief, but a wide
+    // fit can also reach across nearby geometry and paint its shape into a pool.
     float minWorldSpread = 0.35f;
     // Extra window growth per yard of view depth, on top of the buffer texel.
     // At range the depth buffer undersamples the terrain's own relief, so the
@@ -158,16 +157,17 @@ struct NormalTuning
 };
 
 // The shipped tuning, with the F7 LIGHT SMOOTHING slider (ini
-// `[DynamicLighting] NormalSpreadPercent`, 100 = shipped) applied to the one
-// value that is an artistic trade: how much ground the normal averages over.
-// Raising it smooths a pool further and rounds off small geometry; lowering
-// it keeps every facet and brings the grain back with it. The edge scales are
-// deliberately not part of the slider - they are a correctness property of the
-// window, and a player should not be able to turn silhouette detection off.
+// `[DynamicLighting] NormalSpreadPercent`, 100 = shipped) applied to the
+// optional world-space floor of the normal window. At 0, the mandatory
+// depth-texel footprint and its distance growth remain. Wider settings average
+// more ground, which can soften relief and reach across nearby geometry. The
+// edge scales are deliberately not part of the slider - they are a correctness
+// property of the window, and a player should not be able to turn silhouette
+// detection off.
 inline NormalTuning DefaultNormalTuning(float spreadScale = 1.f)
 {
     NormalTuning tuning;
-    const float scale = std::isfinite(spreadScale) ? std::clamp(spreadScale, 0.25f, 4.f) : 1.f;
+    const float scale = std::isfinite(spreadScale) ? std::clamp(spreadScale, 0.f, 4.f) : 1.f;
     tuning.minWorldSpread *= scale;
     return tuning;
 }
