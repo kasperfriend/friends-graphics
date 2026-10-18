@@ -36,7 +36,7 @@ float4 projection:register(c1); // x=A,y=B,z=P00,w=P11
 float4 inv0:register(c2); float4 inv1:register(c3); float4 inv2:register(c4);
 float4 texel:register(c5);        // xy=full-res texel, zw=THIS buffer's texel
 float4 tuning:register(c6);       // x=intensity, y=debug, z=count
-float4 normalTuning:register(c7); // x=min window width (world), y=edge floor, z=edge slope, w=growth per yard
+float4 normalTuning:register(c7); // x=edge floor, y=edge slope, z=growth per yard
 float4 lightPosRadius[8]:register(c8);
 float4 lightColorPower[8]:register(c16);
 float4 lightDirectionCone[8]:register(c24);
@@ -100,15 +100,15 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float raw=tex2D(depthMap,uv).r;
  if(raw>=.99990||tex2D(waterMask,uv).r>.25) return float4(0,0,0,0);
  float z=Linear(raw);
+ // Screen-space visibility was deliberately removed to avoid duplicate
+ // shadows. Its debug view is therefore black; return before reconstructing
+ // normals or visiting any lights.
+ if(tuning.y>2.5&&tuning.y<3.5) return float4(0,0,0,z);
  float3 p=World(uv,raw);
- // locallighting::Footprint. One texel of the buffer being shaded, so the
- // normal is a resolvable estimate for the pixel it lights: a window pinned
- // to the FULL-resolution grid is narrower than a 0.75x texel, so the normal
- // field was undersampled against its own grid and its high-frequency part
- // aliased into grain. The world floor keeps the window off the terrain's
- // micro-relief close to the camera, where one texel is a fraction of an
- // inch of ground and the pool used to dapple with it.
- float2 spread=max(texel.zw*(1+max(z,0)*normalTuning.w),normalTuning.x*.5/max(z,.25)*projection.zw);
+ // locallighting::Footprint. Use exactly one texel of the buffer being
+ // shaded, plus the fixed range-growth term. A larger world-space floor used
+ // to blur together nearby geometry and caused shape copies in the light pool.
+ float2 spread=texel.zw*(1+max(z,0)*normalTuning.z);
  // locallighting::TapOffset: the window is a whole number of depth texels per
  // side, so the two taps mirror the receiver. A window that lands one texel one
  // way and two the other reads as a step in any second difference however flat
@@ -170,15 +170,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // same ray barely above the horizon, which lands tens of yards out and
  // turns the up-axis tangent into a long chord of the terrain - its
  // direction is the relief's average over that span, not the local slope.
- // That is a soft wrong-light band around everything the pool lights, and
- // it grows with LIGHT SMOOTHING, because smoothing is exactly what widens
- // the UV window until it erases the ray's down-angle. The test is per
- // axis: sideways taps are closer than along-ray taps by construction, so a
- // tap is only foreign to the window when it outruns its own partner - and
- // it must outrun the receiver's own view depth: a tap further out than the
- // receiver is a ray skimming the horizon, while a tap that merely outruns
- // its partner can be one hitting a nearby relief bump (both taps within
- // the receiver's depth, and both are measured).
+ // That can create a wrong-light band near the horizon even with a one-texel
+ // footprint. The test is per axis: sideways taps are closer than along-ray
+ // taps by construction, so a tap is only foreign when it outruns its own
+ // partner and the receiver's view depth. A tap further out than the receiver
+ // is a ray skimming the horizon, while a tap that merely outruns its partner
+ // can be one hitting a nearby relief bump (both taps within the receiver's
+ // depth, and both are measured).
  {
   float vz=max(z,.25);
   float dL=length(pL-p),dR=length(pR-p),dU=length(pU-p),dD=length(pD-p);
@@ -196,25 +194,22 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);
  float iU=1./max(zU,.001),iD=1./max(zD,.001);
  float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);
- float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);
+ float absolute=max(normalTuning.x,z*normalTuning.y)/max(z*z,.001);
  float2 wx=AxisWeights(iL,iR,iC,iL2,iR2,absolute,surfL,surfR,surfL2,surfR2);
  float2 wy=AxisWeights(iU,iD,iC,iU2,iD2,absolute,surfU,surfD,surfU2,surfD2);
  float wL=wx.x,wR=wx.y,wU=wy.x,wD=wy.y;
  // locallighting::ReconstructNormal, near-object gate. The step test above
- // reads DEPTH only: an object standing beside the receiver has a depth like
- // the terrain a few yards away - the same jump, the same second difference
- // - and passes it as terrain, its tap steering the tangent and the pool
- // painting a shape-copy of the object. Wide smoothing windows make both
- // sides contest, so the copies grow with smoothing. Whatever the depth
- // says, a standing body is a metre or more off the local ground plane, and
- // a plane - however sloped - has exactly zero second difference in world
- // height. inv1 is the camera's sky direction; a side whose height second
- // difference AND whose own height both clear the window's relief scale is
- // foreign and slides to zero. A dead tap counts as the receiver's own
- // level, so the gate still fires when the foreign side is the only one
- // that measured a surface.
- float hL=surfL>0?dot(pL-p,inv1.xyz):0.,hR=surfR>0?dot(pR-p,inv1.xyz):0.;
- float hU=surfU>0?dot(pU-p,inv1.xyz):0.,hD=surfD>0?dot(pD-p,inv1.xyz):0.;
+ // reads DEPTH only: an object standing beside the receiver can have a depth
+ // like the terrain a few yards away, so its tap can still steer the tangent
+ // and paint a shape-copy into the pool. A standing body is elevated along
+ // world +Z regardless of camera pitch/roll; inv1 is camera-up, not world-up,
+ // and projects standing height toward zero when the camera looks down. A side
+ // whose world-height second difference AND own height clear the window's
+ // relief scale is foreign and slides to zero. A dead tap counts as the
+ // receiver's own level, so the gate still fires when it alone found a surface.
+ float3 worldUp=float3(0,0,1);
+ float hL=surfL>0?dot(pL-p,worldUp):0.,hR=surfR>0?dot(pR-p,worldUp):0.;
+ float hU=surfU>0?dot(pU-p,worldUp):0.,hD=surfD>0?dot(pD-p,worldUp):0.;
  float liveW=surfL+surfR+surfU+surfD;
  // The window's own spread is already named `spread` (in uv); this is the
  // mean world distance of the surviving taps, which sizes the gate.
@@ -238,11 +233,20 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 n=dot(c,c)>1e-12?normalize(c):-toEye;
  if(dot(n,toEye)<0)n=-n;
  float intact=saturate((wL+wR+wU+wD)*.25);
- float3 sum=0,sourceDebug=0; float visibilityDebug=0; int count=(int)tuning.z;
+ // Mode 4 only needs the normal-fit confidence, so it also skips the
+ // per-light loop when the selected source list is empty or large.
+ if(tuning.y>3.5) return float4(intact.xxx,z);
+ float3 sum=0,sourceDebug=0; int count=(int)tuning.z;
  [loop] for(int i=0;i<8;++i) {
   if(i>=count) break;
-  float3 toL=lightPosRadius[i].xyz-p; float dist=length(toL); float radius=lightPosRadius[i].w;
-  float3 l=toL/max(dist,.001); float fall=saturate(1-dist/max(radius,.01));
+  float3 toL=lightPosRadius[i].xyz-p; float radius=max(lightPosRadius[i].w,.01);
+  float distanceSquared=dot(toL,toL);
+  // Outside the light's finite support all following diffuse, spot and
+  // specular work is multiplied by zero. Reject in squared space before a
+  // square root, normalization or pow in the common out-of-radius case.
+  if(distanceSquared>=radius*radius) continue;
+  float dist=sqrt(max(distanceSquared,0));
+  float3 l=toL/max(dist,.001); float fall=1-dist/radius;
   float attenuation=fall*fall/(1+dist*dist*.035);
   float cone=lightDirectionCone[i].w;
   if(cone>-0.5) attenuation*=smoothstep(cone,min(1.0,cone+.12),dot(-l,normalize(lightDirectionCone[i].xyz)));
@@ -253,16 +257,15 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
   // remove. `intact` is one on an untouched window, so flat ground is
   // unchanged. LIGHT DEBUG 4 shows it on its own.
   float spec=pow(saturate(dot(reflect(-l,n),toEye)),24)*.055*intact;
-  float visibility=1; // Preserve native shadows; no duplicate screen-depth shadows.
-  sum+=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation*visibility;
-  sourceDebug+=lightColorPower[i].rgb*lightColorPower[i].w*fall*fall;
-  visibilityDebug+=attenuation*(1-visibility);
+  float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;
+  // Mode 1 is the shaded/attenuated source before the user intensity and
+  // environment multipliers; mode 2 shows the final scaled direct term.
+  if(tuning.y>.5&&tuning.y<1.5) sourceDebug+=contribution;
+  else sum+=contribution;
  }
- sum*=tuning.x;
  if(tuning.y>.5&&tuning.y<1.5) return float4(sourceDebug,z);
+ sum*=tuning.x;
  if(tuning.y>1.5&&tuning.y<2.5) return float4(sum,z);
- if(tuning.y>2.5&&tuning.y<3.5) return float4(saturate(visibilityDebug).xxx,z);
- if(tuning.y>3.5) return float4(intact.xxx,z);
  return float4(min(sum,3.0),z);
 })HLSL";
 
@@ -426,7 +429,9 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     auto& manager = LocalLightManager::Instance();
     manager.SelectForFrame(f.cameraPosition, { f.inverseView.m[2][0], f.inverseView.m[2][1], f.inverseView.m[2][2] });
     const auto& lights = manager.Selected();
-    if (!manager.Enabled() || lights.empty() || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
+    const int debugMode = manager.DebugMode();
+    const bool debugView = locallighting::IsDebugView(debugMode);
+    if (!manager.Enabled() || (lights.empty() && !debugView) || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
     if (!m_retry.Open(GetTickCount64())) return false;
     D3DSURFACE_DESC desc{};
     if (!f.sceneSurface || FAILED(f.sceneSurface->GetDesc(&desc)) || !EnsureShaders(device) ||
@@ -468,19 +473,17 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const float inv[3][4] = { {f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0} };
     const int maxLights = manager.Quality() <= 0 ? 4 : 8;
     const int count = std::min<int>(maxLights, int(lights.size()));
-    const int occluded = std::min(count, manager.Quality() <= 0 ? 2 : 4);
     // zw are the texels of the buffer this pass is drawing into, not of the
     // scene: the normal's window is sized against them (locallighting::
     // Footprint), so the estimate always covers at least the pixel it lights.
     const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,1.f / m_lightWidth,1.f / m_lightHeight };
-    const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(manager.DebugMode()),
-        float(count),float(occluded) };
-    // One description of the normal's tuning, shared with the CPU mirror the
-    // regression test runs (src/Effects/LocalLightingCore.h). LIGHT SMOOTHING
-    // scales the world floor of the window; the edge scales stay fixed.
-    const locallighting::NormalTuning normal = locallighting::DefaultNormalTuning(manager.NormalSpread());
-    const float normalTuning[4] = { normal.minWorldSpread, normal.edgeFloor, normal.edgeSlope,
-        normal.distanceGrowth };
+    const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(debugMode),
+        float(count),0.f };
+    // One description of the fixed, edge-aware normal reconstruction, shared
+    // with the CPU mirror in LocalLightingCore.h. The shader has no artistic
+    // world-space smoothing floor.
+    const locallighting::NormalTuning normal = locallighting::DefaultNormalTuning();
+    const float normalTuning[4] = { normal.edgeFloor, normal.edgeSlope, normal.distanceGrowth, 0.f };
     // c8..c31 are contiguous in the shader (pos c8, color c16, direction
     // c24), so the whole light table is one constant call, not three.
     float lightData[24][4]{};
@@ -512,7 +515,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     // c0..c2 contiguous: one call.
     const float compositeData[3][4] = {
         { 1.f / m_lightWidth,1.f / m_lightHeight,1.f / m_width,1.f / m_height },
-        { (manager.DebugMode() >= 1 && manager.DebugMode() <= 3) ? 1.f : 0.f,0,0,0 },
+        { locallighting::IsDebugView(debugMode) ? 1.f : 0.f,0,0,0 },
         { projection[0], projection[1], projection[2], projection[3] } };
     device->SetPixelShaderConstantF(0, compositeData[0], 3);
     DrawQuad(device, desc.Width, desc.Height);

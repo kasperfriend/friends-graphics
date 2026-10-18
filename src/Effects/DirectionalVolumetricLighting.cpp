@@ -185,7 +185,7 @@ float4 depthInfo:register(c16); // viewport MaxZ for raw-depth sky classificatio
 float4 localShape:register(c17); // y=local range; wake is evaluated in the field pass
 float4 localLightPosRadius[8]:register(c18);
 float4 localLightColorPower[8]:register(c26);
-float4 localLightDebug:register(c34); // x=debug,y=light count
+float4 localLightInfo:register(c34); // x=selected light count
 float4 layerEnable:register(c35); // x=global enabled,y=density scale,z=daylight,w=moonlight
 float4 terrainOrigin:register(c36); // center XY, height origin, reciprocal extent
 float4 terrainControl:register(c37); // valid
@@ -303,25 +303,30 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // lantern must not vanish between the 4..8 samples of the world fog march.
  // Clipping the interval to scene depth keeps foreground walls opaque.
  [loop] for(int li=0;li<8;++li) {
-   if(li>=(int)localLightDebug.y) break;
+   if(li>=(int)localLightInfo.x) break;
    float3 toLight=localLightPosRadius[li].xyz-cameraPos.xyz;
-   float radius=max(localLightPosRadius[li].w,.01);
+   float radius=max(localLightPosRadius[li].w,.01),radius2=radius*radius;
    float along=dot(toLight,ray);
    float perpendicular2=max(0,dot(toLight,toLight)-along*along);
-   float halfChord=sqrt(max(0,radius*radius-perpendicular2));
+   float halfChord=sqrt(max(0,radius2-perpendicular2));
    float begin=max(0,along-halfChord),end=min(marchDistance,along+halfChord);
    float interval=max(0,end-begin);
-   float closest=clamp(along,begin,max(begin,end));
-   float3 p=cameraPos.xyz+ray*closest;
-   float2 floor=Ground(p,ground);
-   // Thin ambient aerosol also exists above the ground banks. Its small
-   // optical depth is only visible near a real emitter, not as screen wash.
-   float medium=layerEnable.x*ambientAerial.w+localFog.x*localFog.y*.06;
-   medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-floor.x-localFog.z)*localFog.w);
-   float edge=saturate(1-perpendicular2/(radius*radius));
-   float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
-   float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
-   localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   // One combined ray/sphere-and-depth gate keeps texture fetches and
+   // exponentials out of the common miss path without stacking several
+   // continue branches in this instruction-budgeted ps_3_0 loop.
+   if(perpendicular2<radius2&&interval>0) {
+     float closest=clamp(along,begin,end);
+     float3 p=cameraPos.xyz+ray*closest;
+     float2 floor=Ground(p,ground);
+     // Thin ambient aerosol also exists above the ground banks. Its small
+     // optical depth is only visible near a real emitter, not as screen wash.
+     float medium=layerEnable.x*ambientAerial.w+localFog.x*localFog.y*.06;
+     medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-floor.x-localFog.z)*localFog.w);
+     float edge=1-perpendicular2/radius2;
+     float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
+     float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
+     localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   }
  }
  float optical=max(0,globalOptical+heightOptical+localOptical)*directExtinction.w;
  float T=exp(-optical); float fogAmount=1-T;
@@ -367,7 +372,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  if(debugMode==6)return (noiseSum*invCount).xxxx;
  if(debugMode==7)return float4(ambientSum,1-T);
  if(debugMode==8)return float4(directSum,1-T);
- if(localLightDebug.x>3.5)return float4(localLightSum,1);
+ if(debugMode==13)return float4(localLightSum,1);
  return float4(ambientSum+directSum+localLightSum,1-T);
 })HLSL";
 
@@ -593,7 +598,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // defaulting off until that narrower version is confirmed safe across
  // more zones. The toggle in the overlay still works for testing it.
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
- m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
+ m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,13));
  const auto readLocal=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.localFogEnabled=readLocal(L"Enabled",1)!=0;
  m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",12),0,100)*.003f;
@@ -811,15 +816,35 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float c17[4]={0,65.f,0,0};
   float localPosRadius[8][4]{};float localColorPower[8][4]{};
   const auto& localManager=LocalLightManager::Instance();const auto& localLights=localManager.Selected();
-  const int localCount=std::min<int>(8,int(localLights.size()));
-  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=LinearizeAtmosphereColor(localLights[li].color.x);localColorPower[li][1]=LinearizeAtmosphereColor(localLights[li].color.y);localColorPower[li][2]=LinearizeAtmosphereColor(localLights[li].color.z);localColorPower[li][3]=localLights[li].intensity*localManager.IntensityScale()*f.environment[Lighting]*std::sqrt(std::max(0.f,localManager.RayScale()));}
-  float localDebug[4]={float(localManager.DebugMode()),float(localCount),0,0};
+  // Upload the common scale once. With LIGHT RAYS or scene lighting at zero,
+  // report a zero count so the per-pixel volume shader skips the eight-light
+  // loop entirely instead of doing sphere intersections for zero radiance.
+  const float localRayPower=localManager.IntensityScale()*f.environment[Lighting]*
+      std::sqrt(std::max(0.f,localManager.RayScale()));
+  int localCount=0;
+  if(localRayPower>0.f){
+   for(const auto& light:localLights){
+    if(localCount>=8)break;
+    const float power=light.intensity*localRayPower;
+    if(!std::isfinite(power)||power<=0.f)continue;
+    localPosRadius[localCount][0]=light.position.x;
+    localPosRadius[localCount][1]=light.position.y;
+    localPosRadius[localCount][2]=light.position.z;
+    localPosRadius[localCount][3]=light.radius;
+    localColorPower[localCount][0]=LinearizeAtmosphereColor(light.color.x);
+    localColorPower[localCount][1]=LinearizeAtmosphereColor(light.color.y);
+    localColorPower[localCount][2]=LinearizeAtmosphereColor(light.color.z);
+    localColorPower[localCount][3]=power;
+    ++localCount;
+   }
+  }
+  float localLightInfo[4]={float(localCount),0,0,0};
   // Keep the authored distance/height atmosphere and the local bank as
   // independent layers.  Day/night factors only tint the medium; they never
   // decide whether it exists.
   float layerEnable[4]={globalFogEnabled?1.f:0.f,settings.densityScale,
                         f.daylightFactor,f.moonlightFactor};
-  d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,localPosRadius[0],8);d->SetPixelShaderConstantF(26,localColorPower[0],8);d->SetPixelShaderConstantF(34,localDebug,1);d->SetPixelShaderConstantF(35,layerEnable,1);
+  d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,localPosRadius[0],8);d->SetPixelShaderConstantF(26,localColorPower[0],8);d->SetPixelShaderConstantF(34,localLightInfo,1);d->SetPixelShaderConstantF(35,layerEnable,1);
   const auto& terrain=GroundSurfaceCapture::Instance();
   float terrainControl[4]={terrain.Texture()?1.f:0.f,0,0,0};
   d->SetTexture(4,terrain.Texture());d->SetPixelShaderConstantF(36,terrain.Origin(),1);d->SetPixelShaderConstantF(37,terrainControl,1);

@@ -34,13 +34,16 @@
 // an absolute "this window straddles an edge" threshold reads as an edge on
 // flat ground.
 #include "../src/Effects/LocalLightingCore.h"
+#include "../src/Lighting/LocalLightSelection.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -285,6 +288,7 @@ InverseView MakeInverseView()
 }
 
 const Vec3 kCameraWorld{ kCamera[0], kCamera[1], kCamera[2] };
+constexpr Vec3 kWorldUp{ 0.f, 0.f, 1.f }; // WoW world axes are +Z up.
 
 // ------------------------------------------------------------------- pool ---
 struct Pool
@@ -339,7 +343,7 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
             const float z = LinearDepth(raw, projection);
             const Vec3 p = WorldPosition(u, v, raw, projection, inverseView, kCameraWorld);
             const Vec2 spread = legacy ? sceneTexel
-                                      : TapOffset(Footprint(z, bufferTexel, projection, tuning), sceneTexel);
+                                      : TapOffset(Footprint(z, bufferTexel, tuning), sceneTexel);
 
             // Exactly what the shader does: the depth map is sampled with CLAMP
             // addressing, and a clear value reconstructs as the far plane, which
@@ -400,7 +404,7 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
                                           zLeft, zRight, zUp, zDown,
                                           zLeft2, zRight2, zUp2, zDown2,
                                           z, toEye, tuning, survives,
-                                          Normalize(Vec3{ kUp[0], kUp[1], kUp[2] }));
+                                          kWorldUp);
             }
 
             SurfaceFrame shaded = frame;
@@ -618,11 +622,36 @@ int main()
     // at, or a regression is impossible to diagnose from a CI log.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
+    Check(!ShouldActivate(false, 1.f, 0) && !ShouldActivate(false, 0.f, 4),
+          "disabling dynamic lighting disables normal and debug composite requests");
+    Check(!ShouldActivate(true, 0.f, 0) &&
+          !ShouldActivate(true, std::numeric_limits<float>::infinity(), 0),
+          "zero or non-finite intensity does not request an empty normal pass");
+    Check(ShouldActivate(true, 1.f, 0), "enabled direct lights independently request the volume composite");
+    Check(ShouldActivate(true, 0.f, 4) && IsDebugView(1) && IsDebugView(4) && !IsDebugView(5),
+          "all four light debug views run even with no selected light");
+    Pass("dynamic-light composite activation and debug policy");
+
+    {
+        struct LightIdentity { std::uint64_t stableId; };
+        const std::vector<LightIdentity> selected{{11}, {22}, {33}};
+        const std::vector<LightIdentity> unchanged{{11}, {22}, {33}};
+        const std::vector<LightIdentity> reordered{{33}, {11}, {22}};
+        const std::vector<LightIdentity> changed{{11}, {22}, {44}};
+        const std::uint64_t original = renderer::local_light_detail::SelectionSignature(selected);
+        Check(original == renderer::local_light_detail::SelectionSignature(unchanged) &&
+              original == renderer::local_light_detail::SelectionSignature(reordered),
+              "the selected-light signature is stable for an unchanged set and its reorderings");
+        Check(original != renderer::local_light_detail::SelectionSignature(changed),
+              "the selected-light signature changes when an emitter is replaced");
+        Pass("same-frame selected-light cache signature");
+    }
+
     const int kWidth = 480, kHeight = 270;
     const Scene scene = RenderScene(kWidth, kHeight);
     const Projection projection = MakeProjection(scene);
     const InverseView inverseView = MakeInverseView();
-    const NormalTuning tuning = DefaultNormalTuning(1.f);
+    const NormalTuning tuning = DefaultNormalTuning();
     const CompositeTuning compositeTuning;
 
     LightSample lamp;
@@ -630,6 +659,18 @@ int main()
     lamp.radius = 70.f;
     lamp.intensity = 1.f;
     lamp.color = { 1.f, .78f, .48f };
+    {
+        LightSample outside = lamp;
+        outside.position = { 100.f, 0.f, 0.f };
+        outside.radius = 10.f;
+        SurfaceFrame flat;
+        flat.normal = { 0.f, 0.f, 1.f };
+        const Vec3 contribution = PoolShade(outside, {}, flat, { 0.f, 0.f, 10.f });
+        Check(Near(contribution.x, 0.f, 1e-7f) && Near(contribution.y, 0.f, 1e-7f) &&
+              Near(contribution.z, 0.f, 1e-7f),
+              "a light outside its finite radius contributes exactly zero");
+        Pass("out-of-radius light contribution is zero");
+    }
 
     // ------------------------------------------------- depth round trip ----
     for (float z : { 1.f, 3.f, 10.f, 40.f, 120.f })
@@ -716,6 +757,22 @@ int main()
                     farGrainLegacy[q] / std::max(farGrain[q], 1e-9f), farNormal[q], farNormalLegacy[q]);
     }
 
+    {
+        const NormalTuning fixedTuning = DefaultNormalTuning();
+        const Pool fixedPool = EvaluatePool(scene, 1.f, projection, inverseView, lamp, fixedTuning, false, false);
+        const Composite fixedOnScreen = CompositePool(scene, fixedPool, projection, compositeTuning, false);
+        const float fixedNearGrain = HighFrequency(fixedOnScreen.luminance, nearFlat);
+        const float fixedFarGrain = HighFrequency(fixedOnScreen.luminance, flatPlain);
+        const float fixedUndulatingNormal = NormalError(fixedPool, farGround, 1.f);
+        std::printf("     fixed texel footprint: near grain %.5f, far grain %.5f, undulating normal %.2f deg\n",
+                    fixedNearGrain, fixedFarGrain, fixedUndulatingNormal);
+        Check(fixedNearGrain <= nearGrain[2] + 0.001f && fixedFarGrain <= farGrain[2] + 0.01f,
+              "the fixed texel footprint keeps flat-ground grain bounded");
+        Check(fixedUndulatingNormal <= undulatingNormal[2],
+              "the fixed texel footprint still follows undulating relief");
+        Pass("fixed texel footprint preserves measured ground smoothness and relief");
+    }
+
     auto worst = [](const float* v) { return std::max(std::max(v[0], v[1]), v[2]); };
 
     // The flat apron near the camera is where a light-space number means what it
@@ -778,7 +835,7 @@ int main()
             const int x = std::clamp(int(u * float(scene.width)), 0, scene.width - 1);
             const int y = std::clamp(int(v * float(scene.height)), 0, scene.height - 1);
             const Vec2 spread = TapOffset(Footprint(reference.depth[size_t(y) * kWidth + x],
-                                                    Vec2{ 1.f / kWidth, 1.f / kHeight }, projection, tuning),
+                                                    Vec2{ 1.f / kWidth, 1.f / kHeight }, tuning),
                                           depthTexel);
             for (int k = 0; k < 4; ++k)
             {
@@ -917,12 +974,12 @@ int main()
     // close ("go nearby"), the pool painted illusionary copies of characters
     // and objects - dark shape-copies floating beside them - and LIGHT
     // SMOOTHING only softened it. The scene is the regime that produces them:
-    // an eye-level camera over undulating ground at a grazing angle, so the
-    // window's own slope step is large, and a character-like capsule and a
-    // crate only a few yards away, so a silhouette's depth jump j is
-    // comparable to that slope. Flat ground measures s = 0 along a scanline
-    // and never enters the regime - which is why the suite above never caught
-    // it.
+    // a pitched camera over undulating ground, with a character-like capsule
+    // and a crate only a few yards away. A tap can land on the object's raised
+    // surface while also shifting forward/back along camera-up; that component
+    // can cancel the object's standing height. Flat ground and a near-level
+    // camera do not expose the old screen-up gate, which is why those earlier
+    // regressions missed the copy at strong smoothing.
     {
         // Material ids: 0 sky, 1 ground, 2 character (capsule+head), 3 crate.
         auto relief = [](float x, float y) {
@@ -985,14 +1042,17 @@ int main()
             return Normalize(Vec3{ g[0], g[1], g[2] });
         };
 
-        const float nCamera[3] = { 0.f, -2.6f, 1.75f };
-        // The probe's exact LookAt basis (the scene that reproduces the
-        // report): look at the character and the crate from just above the
-        // ground, close to level - the grazing regime where the window's own
-        // slope step is large and every silhouette is a nearby object.
-        const float nForward[3] = { 0.06207f, 0.99311f, -0.04136f };
-        const float nRight[3] = { 0.99311f, -0.06207f, 0.f };
-        const float nUp[3] = { 0.00257f, 0.04128f, 0.99914f };
+        const float nCamera[3] = { 0.f, -2.6f, 4.f };
+        // A 30-degree downward view aimed at the character and crate. The
+        // camera-up vector is visibly not world-up: a standing height can
+        // partly cancel against a tap's forward/back displacement when
+        // measured along the screen-up axis. This is the missing orientation
+        // case that let the former gate leave a copy beside nearby silhouettes.
+        const float yawX = 0.06225f, yawY = 0.99806f;
+        const float pitchSin = 0.5f, pitchCos = 0.86603f;
+        const float nForward[3] = { yawX * pitchCos, yawY * pitchCos, -pitchSin };
+        const float nRight[3] = { yawY, -yawX, 0.f };
+        const float nUp[3] = { yawX * pitchSin, yawY * pitchSin, pitchCos };
 
         Scene near;
         near.width = kWidth;
@@ -1052,7 +1112,8 @@ int main()
         // the grazing slope) and scaled the outlier slide by the deviation
         // gap (drowned the same way). Kept here so the numbers this prints
         // stay honest about what the fix bought.
-        auto evaluateNear = [&](float scale, const NormalTuning& tuning, bool trueNormals, bool drowned) {
+        auto evaluateNear = [&](float scale, const NormalTuning& tuning, bool trueNormals, bool drowned,
+                                const Vec3& gateUp) {
             Pool pool;
             pool.width = std::max(1, int(float(kWidth) * scale));
             pool.height = std::max(1, int(float(kHeight) * scale));
@@ -1076,7 +1137,7 @@ int main()
                     if (raw >= .99990f) continue;
                     const float z = LinearDepth(raw, nearProj);
                     const Vec3 p = WorldPosition(u, v, raw, nearProj, nearInv, nearCamera);
-                    const Vec2 spread = TapOffset(Footprint(z, bufferTexel, nearProj, tuning), sceneTexel);
+                    const Vec2 spread = TapOffset(Footprint(z, bufferTexel, tuning), sceneTexel);
                     auto tap = [&](float du, float dv, float& depthOut, float* rawOut = nullptr) {
                         const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
                         const float sample = near.At(tapUv.x, tapUv.y);
@@ -1183,7 +1244,7 @@ int main()
                                                   zLeft, zRight, zUp, zDown,
                                                   zLeft2, zRight2, zUp2, zDown2,
                                                   z, toEye, tuning, survives,
-                                                  Normalize(Vec3{ nUp[0], nUp[1], nUp[2] }));
+                                                  gateUp);
                     }
                     const Vec3 lit = PoolShade(nearLamp, p, frame, nearCamera);
                     pool.luminance[index] = lit.x * .3f + lit.y * .5f + lit.z * .2f;
@@ -1266,39 +1327,23 @@ int main()
             return n ? float(sum / double(n)) : 0.f;
         };
 
-        // LIGHT SMOOTHING is the artistic window scale; the copies were
-        // reported at every setting with the worst at the shipped one.
-        struct SmoothRow { const char* name; float scale; };
-        const SmoothRow smooths[] = { { "25% ", .25f }, { "100%", 1.f }, { "400%", 4.f } };
-        float shipped[3] = {}, drowned[3] = {};
-        for (int s = 0; s < 3; ++s)
-        {
-            const NormalTuning tuning = DefaultNormalTuning(smooths[s].scale);
-            const Pool truth = evaluateNear(.75f, tuning, true, false);
-            const Pool current = evaluateNear(.75f, tuning, false, false);
-            const Pool previous = evaluateNear(.75f, tuning, false, true);
-            const Composite truthOnScreen = CompositePool(near, truth, nearProj, compositeTuning, false);
-            const Composite currentOnScreen = CompositePool(near, current, nearProj, compositeTuning, false);
-            const Composite previousOnScreen = CompositePool(near, previous, nearProj, compositeTuning, false);
-            shipped[s] = copyError(currentOnScreen, truthOnScreen);
-            drowned[s] = copyError(previousOnScreen, truthOnScreen);
-            std::printf("     smoothing %s: near-silhouette copy error %.4f (was %.4f)\n",
-                        smooths[s].name, shipped[s], drowned[s]);
-        }
-        // The copy is a shape-scale error, not a rim: the previous weighting
-        // left whole slabs of wrong light beside every silhouette at the
-        // shipped smoothing. That is the regression this pins - at the
-        // settings where the copies were reported. The near-object gate plus
-        // the horizon-flight veto keep the residual below the old ceiling at
-        // every setting, maximum smoothing included: a tap that outran the
-        // receiver's own depth no longer chords the relief across the horizon,
-        // so the copies no longer grow with smoothing.
-        Check(drowned[0] > 1.25f * shipped[0] && drowned[1] > 1.25f * shipped[1],
-              "the slope-drowned step detection is what painted the copies (the regression this pins)");
-        Check(shipped[0] < 0.04f && shipped[1] < 0.12f,
-              "a nearby silhouette paints no copy into the pool at ordinary smoothing");
-        Check(shipped[2] < 0.26f && shipped[2] < drowned[2],
-              "at maximum smoothing the pool is better than the weighting it replaced");
+        // The runtime now always uses the no-extra-spread footprint. Snap the
+        // zero-depth case to verify that the shader still has the one-texel
+        // minimum needed to form a finite-difference normal.
+        const NormalTuning fixedTuning = DefaultNormalTuning();
+        const Vec2 depthTexel{ 1.f / float(kWidth), 1.f / float(kHeight) };
+        const Vec2 minimumTap = TapOffset(Footprint(0.f, depthTexel, fixedTuning), depthTexel);
+        Check(Near(minimumTap.x, depthTexel.x, 1e-6f) &&
+              Near(minimumTap.y, depthTexel.y, 1e-6f),
+              "the fixed normal fit retains exactly one depth texel at the near plane");
+        const Pool truth = evaluateNear(1.f, fixedTuning, true, false, kWorldUp);
+        const Pool current = evaluateNear(1.f, fixedTuning, false, false, kWorldUp);
+        const Composite truthOnScreen = CompositePool(near, truth, nearProj, compositeTuning, false);
+        const Composite currentOnScreen = CompositePool(near, current, nearProj, compositeTuning, false);
+        const float silhouetteCopyError = copyError(currentOnScreen, truthOnScreen);
+        std::printf("     fixed footprint: near-silhouette copy error %.4f\n", silhouetteCopyError);
+        Check(silhouetteCopyError < 0.02f,
+              "the fixed one-texel footprint bounds nearby-object copies");
         Pass("nearby characters and objects no longer paint copies into the pool");
     }
 
@@ -1308,14 +1353,64 @@ int main()
         // These are the lines that carry the fix; a change to either side has
         // to move them together.
         const std::string surface = ReadFile("src/Effects/LocalLightingRenderer.cpp");
-        Check(surface.find("float2 spread=max(texel.zw*(1+max(z,0)*normalTuning.w),normalTuning.x*.5/max(z,.25)*projection.zw);") != std::string::npos,
-              "the surface pass sizes its window against the buffer's own texel");
+        const std::string volume = ReadFile("VolumeIntegration.h");
+        const std::string atmosphere = ReadFile("src/Effects/DirectionalVolumetricLighting.cpp");
+        const std::string manager = ReadFile("src/Lighting/LocalLightManager.cpp");
+        const std::string managerHeader = ReadFile("src/Lighting/LocalLightManager.h");
+        const std::string water = ReadFile("WaterEffect.h");
+        const std::string settings = ReadFile("GraphicsEffects.ini");
+        const std::string overlay = ReadFile("src/Environment/OverlayItems.h");
+        Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
+              surface.find("sourceDebug+=contribution;") != std::string::npos &&
+              surface.find("float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;") != std::string::npos &&
+              surface.find("if(tuning.y>2.5&&tuning.y<3.5) return float4(0,0,0,z);") != std::string::npos &&
+              surface.find("if(tuning.y>3.5) return float4(intact.xxx,z);") != std::string::npos,
+              "out-of-radius lights skip expensive shading and mode 1 reports the real attenuated source");
+        Check(surface.find("locallighting::IsDebugView(debugMode) ? 1.f : 0.f") != std::string::npos &&
+              volume.find("locallighting::ShouldActivate(") != std::string::npos &&
+              volume.find("dynamicLightDebugView || (dynamicLightingActive && !otherEffectsActive)") != std::string::npos,
+              "the four direct-light debug modes are isolated and activate the compositor on their own");
+        Check(atmosphere.find("if(debugMode==13)return float4(localLightSum,1);") != std::string::npos &&
+              atmosphere.find("localLightDebug.x") == std::string::npos &&
+              atmosphere.find("if(li>=(int)localLightInfo.x) break;") != std::string::npos &&
+              atmosphere.find("if(perpendicular2<radius2&&interval>0) {") != std::string::npos &&
+              atmosphere.find("if(localRayPower>0.f){") != std::string::npos &&
+              settings.find("13 local dynamic-light scattering") != std::string::npos,
+              "volumetric diagnostics expose mode 13 and cull zero-power or missed lamp rays");
+        Check(manager.find("light.stableId = StableManifestId(block);") != std::string::npos &&
+              manager.find("std::isfinite(position.x)") != std::string::npos &&
+              manager.find("(!slot.enabled &&") != std::string::npos &&
+              manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos,
+              "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
+        Check(settings.find("NormalSpreadPercent") == std::string::npos &&
+              overlay.find("NormalSpreadPercent") == std::string::npos &&
+              manager.find("NormalSpreadPercent") == std::string::npos,
+              "the extra normal-spread control is removed from settings, F7 and runtime");
+        Check(settings.find("Quality=2") != std::string::npos &&
+              overlay.find("L\"Quality\",\"LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)\",0,2,1,2") != std::string::npos &&
+              manager.find("L\"Quality\", 2,") != std::string::npos,
+              "local-light quality defaults to full-resolution in the ini, F7 and runtime");
+        Check(manager.find("attached_selected=") != std::string::npos &&
+              manager.find("manifest_selected=") != std::string::npos &&
+              manager.find("quality=") != std::string::npos &&
+              manager.find("Selected source detail:") != std::string::npos &&
+              manager.find(" id=") != std::string::npos &&
+              manager.find(" position=(") != std::string::npos &&
+              manager.find(" score=") != std::string::npos,
+              "the periodic diagnostic records selected source identities, positions, scores and quality");
+        Check(manager.find("m_selectionSignature = 0;") != std::string::npos &&
+              manager.find("m_selectionSignature = local_light_detail::SelectionSignature(m_selected);") != std::string::npos &&
+              managerHeader.find("SelectionSignature() const { return m_selectionSignature; }") != std::string::npos &&
+              water.find("manager.SelectionSignature()") != std::string::npos,
+              "the manager preserves the water-cache signature state and its production caller");
+        Check(surface.find("float2 spread=texel.zw*(1+max(z,0)*normalTuning.z);") != std::string::npos,
+              "the surface pass uses only its buffer texel and fixed distance growth");
         Check(surface.find("spread=max(round(spread/texel.xy),1)*texel.xy;") != std::string::npos &&
               Near(TapOffset({ 0.0304f, 0.0296f }, { 1.f / 480.f, 1.f / 270.f }).x, 15.f / 480.f, 1e-6f) &&
               Near(TapOffset({ 0.0001f, 0.0040f }, { 1.f / 480.f, 1.f / 270.f }).x, 1.f / 480.f, 1e-6f),
               "the surface pass rounds its window to whole depth texels");
         Check(surface.find("float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);") != std::string::npos &&
-              surface.find("float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);") != std::string::npos,
+              surface.find("float absolute=max(normalTuning.x,z*normalTuning.y)/max(z*z,.001);") != std::string::npos,
               "the surface pass runs the edge test in inverse depth");
         Check(surface.find("float zL2=Linear(rawL2),zR2=Linear(rawR2),zU2=Linear(rawU2),zD2=Linear(rawD2);") != std::string::npos &&
               surface.find("float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);") != std::string::npos,
@@ -1344,10 +1439,11 @@ int main()
               surface.find("if(dL>2.5*dR&&dL>vz) surfL=0.;") != std::string::npos &&
               surface.find("if(dU>2.5*dD&&dU>vz) surfU=0.;") != std::string::npos,
               "the surface pass hands a horizon-flying tap to its partner");
-        Check(surface.find("float hL=surfL>0?dot(pL-p,inv1.xyz):0.,hR=surfR>0?dot(pR-p,inv1.xyz):0.;") != std::string::npos &&
+        Check(surface.find("float3 worldUp=float3(0,0,1);") != std::string::npos &&
+              surface.find("float hL=surfL>0?dot(pL-p,worldUp):0.,hR=surfR>0?dot(pR-p,worldUp):0.;") != std::string::npos &&
               surface.find("float curvX=abs(hL+hR),curvY=abs(hU+hD);") != std::string::npos &&
               surface.find("wL*=1.-smoothstep(gtol,gtol*2,curvX)*smoothstep(gtol,gtol*2,abs(hL));") != std::string::npos,
-              "the surface pass gates a tap that stands off the local ground plane");
+              "the surface pass gates standing geometry against world +Z, independent of the camera");
         Check(Near(SideStep(0.12f, 0.11f, 0.10f, true), 0.f, 1e-6f) &&
               Near(SideStep(0.14f, 0.13f, 0.10f, true), 0.02f, 1e-6f) &&
               SideStep(0.5f, 0.2f, 0.1f, false) == 0.f,

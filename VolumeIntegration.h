@@ -20,7 +20,9 @@
 #include "src/Effects/VolumetricClouds.h"
 #include "src/Effects/AmbientOcclusion.h"
 #include "src/Effects/GroundSurfaceCapture.h"
+#include "src/Effects/LocalLightingCore.h"
 #include "src/Effects/LocalLightingRenderer.h"
+#include "src/Lighting/LocalLightManager.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/CelestialStability.h"
@@ -37,6 +39,7 @@ bool cloudsEffectEnabled=true;
 renderer::CloudWeather cloudWeather=renderer::CloudWeather::Clear;
 float cloudWeatherStrength=1.f;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,temporalShaftsEnabled=false;
+constexpr bool kAllowScreenSpaceContactShadow = false;
 bool postProcessEffectEnabled=true;
 // Anti-aliasing has its own switch instead of riding the grade master above, because the two answer
 // different questions and a player needs to be able to answer them separately: the master is "do I
@@ -447,18 +450,32 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
     return renderer::DepthCapture::Instance().HookGetDepth(d, out);
 }
 
-inline bool HasActiveEffects() {
-    bool hasContact = (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0);
-    bool hasFog = (!shaftDebug && (fogEffectEnabled ||
-        (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)));
-    bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
-    bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
-    bool hasClouds = (!shaftDebug && cloudsEffectEnabled && renderer::VolumetricClouds::Instance().Settings().enabled);
-    bool hasPost = (postProcessEffectEnabled &&
+inline bool HasOtherActiveEffects() {
+    const auto& atmosphere = renderer::DirectionalVolumetricLighting::Instance().Settings();
+    const bool hasContact = kAllowScreenSpaceContactShadow && !shaftDebug &&
+        shadowsEffectEnabled && contactShadowStrength > 0;
+    const bool hasFog = !shaftDebug && (fogEffectEnabled || atmosphere.localFogEnabled ||
+        atmosphere.edgeFogEnabled);
+    const bool hasVolumetric = shaftsEffectEnabled && atmosphere.enabled;
+    const bool hasGlare = sunGlareEnabled && shaftsEffectEnabled &&
+        (constants[2][2] > 0.001f || shaftDebug);
+    const bool hasClouds = !shaftDebug && cloudsEffectEnabled &&
+        renderer::VolumetricClouds::Instance().Settings().enabled;
+    const bool hasPost = (postProcessEffectEnabled &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) ||
         antiAliasingEnabled;
-    bool hasAO = !shaftDebug && renderer::AmbientOcclusion::Instance().IsActive();
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO;
+    const bool hasAO = !shaftDebug && renderer::AmbientOcclusion::Instance().IsActive();
+    const bool hasLightScatteringDebug = atmosphere.enabled &&
+        atmosphere.debugMode == renderer::VolumetricDebugMode::LocalLightScattering;
+    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
+           hasLightScatteringDebug;
+}
+
+inline bool HasActiveEffects() {
+    const auto& localLights = renderer::LocalLightManager::Instance();
+    const bool hasDynamicLighting = renderer::locallighting::ShouldActivate(
+        localLights.Enabled(), localLights.IntensityScale(), localLights.DebugMode());
+    return HasOtherActiveEffects() || hasDynamicLighting;
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
@@ -897,10 +914,43 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
-    if (!HasActiveEffects()) return true;
+    const auto& localLightManager = renderer::LocalLightManager::Instance();
+    const bool dynamicLightDebugView = localLightManager.Enabled() &&
+        renderer::locallighting::IsDebugView(localLightManager.DebugMode());
+    const bool dynamicLightingActive = renderer::locallighting::ShouldActivate(
+        localLightManager.Enabled(), localLightManager.IntensityScale(), localLightManager.DebugMode());
+    const bool otherEffectsActive = HasOtherActiveEffects();
+    if (!dynamicLightingActive && !otherEffectsActive) return true;
 
     renderer::ScopedCpuTimer totalTimer(renderer::PerfStage::TotalInjectedFrame);
     renderer::ScopedCpuTimer compTimer(renderer::PerfStage::LegacyComposite);
+
+    // Isolated local-light diagnostics and a dynamic-light-only composite do
+    // not need the atmosphere's noise, temporal buffers or legacy shader set.
+    // Copy just the scene texture that the surface pass samples, render it,
+    // and return before unrelated full-screen work can tint the result.
+    if (dynamicLightDebugView || (dynamicLightingActive && !otherEffectsActive)) {
+        D3DSURFACE_DESC sceneDesc{};
+        if (!target || FAILED(target->GetDesc(&sceneDesc))) return true;
+        const UINT rayWidth = std::max<UINT>(1, sceneDesc.Width / 2);
+        const UINT rayHeight = std::max<UINT>(1, sceneDesc.Height / 2);
+        if (!legacyTargets.Ensure(d, sceneDesc.Width, sceneDesc.Height, sceneDesc.Format,
+                                  rayWidth, rayHeight)) return true;
+        if (FAILED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(),
+                                  nullptr, D3DTEXF_NONE))) return true;
+        auto& debugFrame = renderer::FrameContext::Current();
+        debugFrame.sceneColor = legacyTargets.scene.Get();
+        debugFrame.sceneSurface = legacyTargets.sceneSurface.Get();
+        struct InternalGuard {
+            bool& flag;
+            bool previous;
+            ~InternalGuard() { flag = previous; }
+        } internalGuard{internal, internal};
+        internal = true;
+        if (!renderer::LocalLightingRenderer::Instance().Render(d, debugFrame)) return true;
+        d->StretchRect(debugFrame.sceneSurface, nullptr, target.Get(), nullptr, D3DTEXF_NONE);
+        return true;
+    }
 
     if (!EnsureNoise(d)) return false;
     if (!legacyShaders.Ensure(d)) return false;
@@ -1161,7 +1211,6 @@ bool Composite(IDirect3DDevice9* d) {
     // as diagnostic-only until re-scoped to ~0.5-2 unit contact range per
     // the Phase 5 plan, layered on top of WoW's native shadows rather than
     // replacing them.
-    constexpr bool kAllowScreenSpaceContactShadow = false;
     if (kAllowScreenSpaceContactShadow && !shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
         renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
         check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
@@ -1240,8 +1289,9 @@ bool Composite(IDirect3DDevice9* d) {
     // Dedicated low-resolution atmosphere. This replaces the old full-res
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
     bool atmosphereRendered = false;
-    if (!shaftDebug && (fogEffectEnabled ||
-        (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)))
+    const auto& atmosphereSettings = renderer::DirectionalVolumetricLighting::Instance().Settings();
+    if (!shaftDebug && (fogEffectEnabled || atmosphereSettings.localFogEnabled ||
+        atmosphereSettings.edgeFogEnabled || atmosphereSettings.debugMode == renderer::VolumetricDebugMode::LocalLightScattering))
         atmosphereRendered = renderer::DirectionalVolumetricLighting::Instance().Render(
             d, renderer::FrameContext::Current(), target.Get(), fogEffectEnabled);
     if (localLightingRendered && !atmosphereRendered)

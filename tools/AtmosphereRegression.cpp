@@ -195,8 +195,19 @@ int main() try {
  Require(fabsf(unchanged[2]-actorMoved[2])<.02f,"frame counter wrap cannot displace ground state");
  f.cameraPosition={0,0,0};fog.Reset(d.Get());encode(120,.94f);
  auto& manager=LocalLightManager::Instance();
- auto lamp=[&](float y){manager.Reset();D3DLIGHT9 l{};l.Type=D3DLIGHT_POINT;l.Position={0,y,0};l.Range=12;l.Diffuse={1,.65f,.25f,1};for(int n=0;n<8;++n)manager.OnSetLight(0,&l);manager.OnLightEnable(0,TRUE);manager.SelectForFrame({0,0,0},{0,1,0});Require(!manager.Selected().empty(),"test world light selected");};
- encode(120,.94f);DWORD noLight=render(true);lamp(40);DWORD glow=render(true);Require(diff(noLight,glow)>2,"small lamp between world march samples produces halo");
+ auto lamp=[&](float y){manager.Reset();D3DLIGHT9 l{};l.Type=D3DLIGHT_POINT;l.Position={0,y,0};l.Range=12;l.Diffuse={1,.65f,.25f,1};manager.OnSetLight(0,&l);manager.OnLightEnable(0,TRUE);manager.SelectForFrame({0,0,0},{0,1,0});Require(!manager.Selected().empty(),"test world light selected");};
+ lamp(40);Sleep(400);manager.SelectForFrame({0,0,0},{0,1,0});
+ Require(!manager.Selected().empty(),"a persistently enabled D3D light survives without another SetLight call");
+ manager.OnLightEnable(0,FALSE);manager.SelectForFrame({0,0,0},{0,1,0});
+ Require(manager.Selected().empty(),"a one-shot D3D light is removed once the device disables it");
+ manager.Reset();D3DLIGHT9 transient{};transient.Type=D3DLIGHT_POINT;transient.Position={0,40,0};transient.Range=12;transient.Diffuse={1,.65f,.25f,1};
+ manager.OnSetLight(0,&transient);manager.OnLightEnable(0,TRUE);manager.OnLightEnable(0,FALSE);
+ manager.SelectForFrame({0,0,0},{0,1,0});
+ Require(manager.Selected().empty(),"a one-draw transient light does not become a world source");
+ for(int n=0;n<5;++n)manager.OnSetLight(0,&transient);
+ manager.OnLightEnable(0,TRUE);manager.OnLightEnable(0,FALSE);manager.SelectForFrame({0,0,0},{0,1,0});
+ Require(!manager.Selected().empty(),"a repeatedly observed draw-scoped light survives the short grace window");
+ manager.Reset();encode(120,.94f);DWORD noLight=render(true);lamp(40);DWORD glow=render(true);Require(diff(noLight,glow)>2,"small lamp between world march samples produces halo");
  encode(20,.94f);DWORD blocked=render(true);manager.Reset();Require(diff(blocked,render(true))==0,"foreground wall occludes lamp volume");
 
  // User's low Light Rays=15 must still show a visible halo, even with global
@@ -209,11 +220,38 @@ int main() try {
  printf("lamp halo rays0=%08lx rays15=%08lx\n",haloZero,haloLow);
  Require(diff(haloZero,haloLow)>8,"Light Rays 15 produces visible lamp scattering at zero global wash");
  manager.Reset();Require(diff(haloZero,render(false))<=1,"Light Rays zero removes lamp scattering completely");
- settings=savedFog;f.daylightFactor=1;manager.Configure(L".\\");
+ settings=savedFog;f.daylightFactor=1;manager.Reset();manager.Configure(L".\\");
+ const auto savedDebugMode=settings.debugMode;const bool savedLocalFogEnabled=settings.localFogEnabled;
+ const float savedLocalFogDensity=settings.localFogDensity;
+ settings.localFogEnabled=true;settings.localFogDensity=.3f;
+ settings.debugMode=VolumetricDebugMode::LocalLightScattering;
+ encode(120,.94f);DWORD noLocalScatter=render(false);lamp(40);DWORD localScatter=render(false);
+ Require(diff(noLocalScatter,localScatter)>8,
+         "AtmosphereDebugMode 13 isolates selected local-light scattering");
+ settings.debugMode=savedDebugMode;settings.localFogEnabled=savedLocalFogEnabled;
+ settings.localFogDensity=savedLocalFogDensity;manager.Reset();manager.Configure(L".\\");
+ const Vec3 layeredAt{-10356.1462f,-3977.764f,-72.8417f};
+ manager.SelectForFrame(layeredAt,{0,0,1});uint64_t wideLayerId=0,narrowLayerId=0;
+ for(const auto& source:manager.Selected())if(Length(source.position-layeredAt)<.01f){
+  if(source.radius>8.f)wideLayerId=source.stableId;
+  if(source.radius<6.f)narrowLayerId=source.stableId;
+ }
+ Require(wideLayerId!=0&&narrowLayerId!=0&&wideLayerId!=narrowLayerId,
+         "colocated manifest emitters with different radii retain distinct selection identities");
+ manager.Reset();
  auto& lighting=LocalLightingRenderer::Instance();lamp(52);
  auto surface=[&](float maxZ){lamp(52);encode(60,maxZ);f.sceneColor=scene.Get();f.sceneSurface=sceneSurface.Get();Check(d->BeginScene());Require(lighting.Render(d.Get(),f),"production surface light render");Check(d->EndScene());Check(d->StretchRect(lighting.GetLitSurface(),nullptr,back.Get(),nullptr,D3DTEXF_NONE));return pixel();};
  DWORD light1=surface(1),light94=surface(.94f);printf("surface standard=%08lx compressed=%08lx\n",light1,light94);
  Require(diff(light1,0xff202020)>2,"lamp illuminates world surface");Require(diff(light1,light94)<=2,"surface light viewport depth invariant");
+ std::filesystem::create_directories("build/light-debug-fixture");
+ {std::ofstream cfg("build/light-debug-fixture/GraphicsEffects.ini");cfg<<"[DynamicLighting]\nEnabled=1\nIntensityPercent=0\nQuality=1\nDebugMode=4\n";}
+ manager.Reset();manager.Configure(L"build/light-debug-fixture/");lighting.Configure(L"build/light-debug-fixture/");
+ encode(60,.94f);f.sceneColor=scene.Get();f.sceneSurface=sceneSurface.Get();
+ Check(d->BeginScene());Require(lighting.Render(d.Get(),f),"normal-confidence debug renders with no selected light");Check(d->EndScene());
+ Require(manager.Selected().empty(),"normal-confidence debug fixture has no selected lights");
+ Check(d->StretchRect(lighting.GetLitSurface(),nullptr,back.Get(),nullptr,D3DTEXF_NONE));
+ Require((pixel()&255)>240,"empty-set mode 4 shows the fitted surface instead of the original scene");
+ manager.Reset();manager.Configure(L".\\");lighting.Configure(L".\\");
  auto unrelatedOccluder=[&](bool blocked){
   encode(60,.94f);manager.Reset();D3DLIGHT9 l{};l.Type=D3DLIGHT_POINT;l.Position={8,52,0};l.Range=24;l.Diffuse={2,1.3f,.5f,1};
   for(int n=0;n<8;++n)manager.OnSetLight(0,&l);manager.OnLightEnable(0,TRUE);

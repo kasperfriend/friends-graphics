@@ -1,9 +1,11 @@
 #include "../Environment/LocationTuning.h"
 #include "LocalLightManager.h"
+#include "LocalLightSelection.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <wrl/client.h>
 #include <cstring>
@@ -23,6 +25,20 @@ namespace renderer
         // slowly enough that unequipping a torch does not cause a hard pop.
         constexpr ULONGLONG kAttachedHoldMs = 1000;
         constexpr ULONGLONG kAttachedLifetimeMs = 3500;
+
+        uint64_t StableManifestId(const std::string& record)
+        {
+            // Position-only IDs collide for intentionally layered emitters at
+            // the same point. Hash the complete record so changes to radius,
+            // color, intensity or source cannot inherit stale smoothing state.
+            uint64_t hash = 14695981039346656037ull;
+            for (unsigned char byte : record)
+            {
+                hash ^= byte;
+                hash *= 1099511628211ull;
+            }
+            return 0x4d414e4900000000ull ^ hash;
+        }
     }
 
     LocalLightManager& LocalLightManager::Instance()
@@ -46,8 +62,7 @@ namespace renderer
         m_enabled = renderer::locationtuning::ReadInt(L"DynamicLighting", L"Enabled", 1, m_iniPath.c_str()) != 0;
         m_intensityScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
         m_rayScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
-        m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
-        m_normalSpread = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"NormalSpreadPercent", 100, m_iniPath.c_str())), 25, 400) * 0.01f;
+        m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 2, m_iniPath.c_str())), 0, 2);
         m_debugMode = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
     }
 
@@ -88,18 +103,29 @@ namespace renderer
                 char* tail = nullptr; const float value = std::strtof(block.c_str() + c + 1, &tail);
                 return tail == block.c_str() + c + 1 ? fallback : value;
             };
+            const Vec3 position = array3("world_position", {});
+            const Vec3 direction = array3("direction", { 0,0,-1 });
+            const Vec3 color = array3("color", { 1,.72f,.38f });
+            const float radius = number("radius", 12.f);
+            const float intensity = number("intensity", 1.f);
+            const float confidence = number("confidence", 1.f);
+            if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+                !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
+                !std::isfinite(color.x) || !std::isfinite(color.y) || !std::isfinite(color.z) ||
+                !std::isfinite(radius) || !std::isfinite(intensity) || !std::isfinite(confidence) ||
+                confidence < .75f)
+            {
+                pos = end + 1;
+                continue;
+            }
             LocalLightSource light;
-            light.position = array3("world_position", {});
-            light.direction = Normalize(array3("direction", { 0,0,-1 }));
-            light.color = array3("color", { 1,.72f,.38f });
-            light.radius = std::clamp(number("radius", 12.f), 1.f, 100.f);
-            light.intensity = std::clamp(number("intensity", 1.f), .01f, 8.f);
-            light.confidence = std::clamp(number("confidence", 1.f), 0.f, 1.f);
-            if (light.confidence < .75f) { pos = end + 1; continue; }
-            const uint64_t x = uint64_t(std::llround(light.position.x * 16.f));
-            const uint64_t y = uint64_t(std::llround(light.position.y * 16.f));
-            const uint64_t z = uint64_t(std::llround(light.position.z * 16.f));
-            light.stableId = 0x4d414e4900000000ull ^ (x * 0x9e3779b185ebca87ull) ^ (y << 21) ^ (z << 42);
+            light.position = position;
+            light.direction = Normalize(direction);
+            light.color = color;
+            light.radius = std::clamp(radius, 1.f, 100.f);
+            light.intensity = std::clamp(intensity, .01f, 8.f);
+            light.confidence = std::clamp(confidence, 0.f, 1.f);
+            light.stableId = StableManifestId(block);
             light.flags = LocalLightPoint | LocalLightManifest | LocalLightVolumetric;
             m_manifestLights.push_back(light);
             pos = end + 1;
@@ -203,8 +229,8 @@ namespace renderer
         if(SUCCEEDED(constants))for(size_t s=0;s<selCount;++s){const UINT index=selected[s];const BYTE* vertex=vertices+(index-(verticesUP?0:lo))*stride;
             UINT bi=rigid?vertex[bone]:0;if(bi>=75)continue;float v[3];memcpy(v,vertex+position,sizeof(v));
             Vec3 p;float* components=&p.x;for(UINT j=0;j<3;++j){const float* row=matrices[bi*3+j];components[j]=row[0]*v[0]+row[1]*v[1]+row[2]*v[2]+row[3];}
-            if(!std::isfinite(Length(p)))continue;
-            size_t cluster=0;while(cluster<centerCount&&Length(centers[cluster]-p)>1.5f)++cluster;
+            const float positionSquared=Dot(p,p);if(!std::isfinite(positionSquared))continue;
+            size_t cluster=0;while(cluster<centerCount){const Vec3 delta=centers[cluster]-p;if(Dot(delta,delta)<=2.25f)break;++cluster;}
             if(cluster==centerCount){if(centerCount>=32)continue;centers[centerCount]=p;centerCounts[centerCount++]=1;}
             else {UINT n=++centerCounts[cluster];centers[cluster]=centers[cluster]+(p-centers[cluster])*(1.f/n);}}
         if(lockedVertices)vb->Unlock();
@@ -216,10 +242,12 @@ namespace renderer
         const float viewPosition[3]={view.x,view.y,view.z};float worldPosition[3]{};
         ViewPositionToWorld(&f.viewRaw.m[0][0],camera,viewPosition,worldPosition);
         Vec3 world{worldPosition[0],worldPosition[1],worldPosition[2]};
-        if(!std::isfinite(Length(world))||Length(world-f.cameraPosition)>120)continue;
-        auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){return now-e.seen<kAttachedLifetimeMs&&Length(e.light.position-world)<1.5f;});
+        const Vec3 cameraDelta=world-f.cameraPosition;
+        const float worldSquared=Dot(world,world),cameraDistanceSquared=Dot(cameraDelta,cameraDelta);
+        if(!std::isfinite(worldSquared)||!std::isfinite(cameraDistanceSquared)||cameraDistanceSquared>14400.f)continue;
+        auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){const Vec3 delta=e.light.position-world;return now-e.seen<kAttachedLifetimeMs&&Dot(delta,delta)<2.25f;});
         if(found!=m_attached.end()){found->light.position=world;found->seen=now;continue;}
-        if(m_attached.size()>=64)return;
+        if(m_attached.size()>=64)continue;
         LocalLightSource light;light.stableId=0x544f524300000000ull|m_nextAttachedId++;light.position=world;
         light.color={1.f,.52f,.16f};light.radius=10;light.intensity=1.8f;
         light.flags=LocalLightPoint|LocalLightAttached|LocalLightVolumetric;m_attached.push_back({light,now});
@@ -231,6 +259,7 @@ namespace renderer
     {
         ++m_selectionFrame;
         m_selected.clear();
+        m_selectionSignature = 0;
         // Slot reuse gives every generation a fresh stableId, so the
         // smoothing map would otherwise grow without bound over a long
         // session (and cost more per frame as it did). A bounded flush
@@ -249,14 +278,21 @@ namespace renderer
             NativeSlot& slot = pair.second;
             // WoW enables many model/world lights only for the draw calls
             // which consume them and disables the slot again before our
-            // end-of-world composite.  Treat a recently enabled, repeatedly
-            // observed slot as alive for a short grace window instead of
-            // sampling only the final (usually disabled) state.
-            const bool recentlyEnabled = slot.enabled ||
-                (slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= 180);
+            // end-of-world composite. Keep a short grace window and repeated-
+            // observation filter for those draw-scoped enables, but honor a
+            // light that D3D still reports as enabled: SetLight state persists,
+            // so requiring another call every 350 ms made a valid one-shot
+            // static light silently disappear.
+            const bool recentlyEnabled = slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= 180;
             const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= 350;
-            if (!slot.valid || !recentlyEnabled || !recentlySeen || slot.stableFrames < 6) continue;
+            if (!slot.valid || (!slot.enabled &&
+                (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))) continue;
             const D3DLIGHT9& d = slot.light;
+            if (!std::isfinite(d.Position.x) || !std::isfinite(d.Position.y) || !std::isfinite(d.Position.z) ||
+                !std::isfinite(d.Diffuse.r) || !std::isfinite(d.Diffuse.g) || !std::isfinite(d.Diffuse.b) ||
+                (d.Type == D3DLIGHT_SPOT &&
+                    (!std::isfinite(d.Direction.x) || !std::isfinite(d.Direction.y) || !std::isfinite(d.Direction.z) ||
+                     !std::isfinite(d.Theta) || !std::isfinite(d.Phi)))) continue;
             LocalLightSource light;
             light.stableId = 0x4e41544900000000ull ^ uint64_t(index) ^ (uint64_t(slot.generation) << 24);
             light.position = { d.Position.x, d.Position.y, d.Position.z };
@@ -279,12 +315,14 @@ namespace renderer
             light.confidence = 1.0f;
 
             const Vec3 delta = light.position - cameraPosition;
-            const float distance = Length(delta);
-            if (!std::isfinite(distance) || distance > light.radius * 2.0f + 80.0f) continue;
+            const float distanceSquared = Dot(delta, delta);
+            const float maxDistance = light.radius * 2.0f + 80.0f;
+            if (!std::isfinite(distanceSquared) || distanceSquared > maxDistance * maxDistance) continue;
             const float forwardDistance = Dot(delta, cameraForward);
             if (forwardDistance < -light.radius) continue;
+            const float distance = std::sqrt(std::max(distanceSquared, 0.0f));
             const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.35f + 0.65f, 0.15f, 1.0f);
-            light.score = light.intensity * light.radius * light.radius * facing / std::max(4.0f, distance * distance);
+            light.score = light.intensity * light.radius * light.radius * facing / std::max(4.0f, distanceSquared);
 
             auto previous = m_smoothed.find(light.stableId);
             if (previous != m_smoothed.end())
@@ -300,64 +338,98 @@ namespace renderer
 
         const ULONGLONG emitterNow=GetTickCount64();
         std::erase_if(m_attached,[&](const AttachedEmitter& e){return emitterNow-e.seen>kAttachedLifetimeMs;});
-        for(auto& emitter:m_attached){auto light=emitter.light;float distance=Length(light.position-cameraPosition);
-            if(distance>100)continue;
+        for(auto& emitter:m_attached){auto light=emitter.light;const Vec3 delta=light.position-cameraPosition;
+            const float distanceSquared=Dot(delta,delta);
+            if(!std::isfinite(distanceSquared)||distanceSquared>10000.f)continue;
             const float age=float(emitterNow-emitter.seen);
             light.intensity*=age<=kAttachedHoldMs?1.f:std::clamp(1.f-(age-kAttachedHoldMs)/float(kAttachedLifetimeMs-kAttachedHoldMs),0.f,1.f);
-            light.score=4.f*light.intensity*light.radius*light.radius/std::max(4.f,distance*distance);candidates.push_back(light);}
+            light.score=4.f*light.intensity*light.radius*light.radius/std::max(4.f,distanceSquared);candidates.push_back(light);}
 
         for (auto light : m_manifestLights)
         {
             const Vec3 delta = light.position - cameraPosition;
-            const float distance = Length(delta);
+            const float distanceSquared = Dot(delta, delta);
+            const float maxDistance = light.radius * 2.f + 80.f;
             // Camera basis conventions differ between the fixed-function and
-            // shader paths in this client.  Distance is authoritative; the
-            // surface shader itself naturally rejects lights that cannot
-            // affect visible pixels.  A forward-dot gate was discarding even
-            // lamps visibly in front of the player in Goldshire.
-            if (!std::isfinite(distance) || distance > light.radius * 2.f + 80.f) continue;
-            light.score = light.intensity * light.radius * light.radius / std::max(4.f, distance * distance);
+            // shader paths in this client. Distance is authoritative; the
+            // surface shader naturally rejects lights that cannot affect
+            // visible pixels. Test the broad radius in squared space first so
+            // the 6,000+ authored sources do not each need a square root.
+            if (!std::isfinite(distanceSquared) || distanceSquared > maxDistance * maxDistance) continue;
+            light.score = light.intensity * light.radius * light.radius / std::max(4.f, distanceSquared);
             candidates.push_back(light);
         }
 
-        std::sort(candidates.begin(), candidates.end(), [](const LocalLightSource& a, const LocalLightSource& b) {
-            return a.score > b.score;
-        });
         const size_t limit = m_quality == 0 ? 4u : 8u;
-        if (candidates.size() > limit) candidates.resize(limit);
+        const auto byPriority = [](const LocalLightSource& a, const LocalLightSource& b) {
+            if (a.score != b.score) return a.score > b.score;
+            return a.stableId < b.stableId;
+        };
+        if (candidates.size() > limit)
+        {
+            // Only the best four/eight feed either the surface shader or the
+            // volume march. Sorting every nearby manifest source each frame
+            // was unnecessary work; partial_sort retains the same ordered top
+            // set with O(n log limit) comparisons.
+            std::partial_sort(candidates.begin(), candidates.begin() + limit, candidates.end(), byPriority);
+            candidates.resize(limit);
+        }
+        else
+        {
+            std::sort(candidates.begin(), candidates.end(), byPriority);
+        }
         m_selected.swap(candidates);
 
-        // The selection is a SET: the integrate shader sums over the lights,
-        // so the order they were picked in cannot change a single pixel.
-        // Folding the ids in pick order still made the signature flip
-        // whenever two equally-scored lamps swapped places as the player
-        // walked, and every flip threw the atmosphere's temporal history
-        // away - the low-resolution fog then comes back at full noise for a
-        // few frames, which is the distant fog flickering as you pass a lamp
-        // post. Hash each id, then combine them commutatively.
-        uint64_t signature = uint64_t(m_selected.size()) * 0x9e3779b97f4a7c15ull;
-        for (const auto& light : m_selected)
-        {
-            uint64_t id = light.stableId;
-            id ^= id >> 33; id *= 0xff51afd7ed558ccdull; id ^= id >> 33;
-            signature += id;
-        }
-        m_selectionSignature = signature;
+        // Water's per-frame constant cache needs to notice a changed emitter
+        // set even if another water surface draws in the same frame.
+        m_selectionSignature = local_light_detail::SelectionSignature(m_selected);
 
         if ((m_selectionFrame % 300) == 0)
         {
-            float nearest = 1e30f;
+            float nearestSquared = std::numeric_limits<float>::infinity();
             for (const auto& light : m_manifestLights)
-                nearest = std::min(nearest, Length(light.position - cameraPosition));
+            {
+                const Vec3 delta = light.position - cameraPosition;
+                nearestSquared = std::min(nearestSquared, Dot(delta, delta));
+            }
+            const float nearest = std::sqrt(nearestSquared);
             size_t nativeSelected = 0;
+            size_t manifestSelected = 0;
+            size_t attachedSelected = 0;
             for (const auto& light : m_selected)
+            {
                 if (light.flags & LocalLightNative) ++nativeSelected;
+                if (light.flags & LocalLightManifest) ++manifestSelected;
+                if (light.flags & LocalLightAttached) ++attachedSelected;
+            }
             Log("Source diagnostic: native_slots=" + std::to_string(m_nativeLights.size()) +
                 " selected=" + std::to_string(m_selected.size()) +
-                " native_selected=" + std::to_string(nativeSelected) + " attached=" + std::to_string(m_attached.size()) +
+                " native_selected=" + std::to_string(nativeSelected) +
+                " manifest_selected=" + std::to_string(manifestSelected) +
+                " attached_selected=" + std::to_string(attachedSelected) +
+                " attached=" + std::to_string(m_attached.size()) +
+                " quality=" + std::to_string(m_quality) +
                 " camera=(" + std::to_string(cameraPosition.x) + "," +
                 std::to_string(cameraPosition.y) + "," + std::to_string(cameraPosition.z) +
                 ") nearest_manifest=" + std::to_string(nearest));
+
+            std::string selectedDetails = "Selected source detail:";
+            for (size_t index = 0; index < m_selected.size(); ++index)
+            {
+                const auto& light = m_selected[index];
+                const char* kind = (light.flags & LocalLightAttached) ? "attached" :
+                    (light.flags & LocalLightManifest) ? "manifest" :
+                    (light.flags & LocalLightNative) ? "native" : "other";
+                selectedDetails += " [" + std::to_string(index) + "] kind=" + kind +
+                    " id=" + std::to_string(light.stableId) +
+                    " flags=" + std::to_string(light.flags) +
+                    " position=(" + std::to_string(light.position.x) + "," +
+                    std::to_string(light.position.y) + "," + std::to_string(light.position.z) + ")" +
+                    " radius=" + std::to_string(light.radius) +
+                    " intensity=" + std::to_string(light.intensity) +
+                    " score=" + std::to_string(light.score);
+            }
+            Log(selectedDetails);
         }
     }
 

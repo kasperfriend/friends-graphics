@@ -20,7 +20,9 @@ namespace renderer
         // Over water this must show the SURFACE distance, not the seabed -
         // if it still shows seabed distance, the water depth MRT write
         // isn't reaching this texture and the fix isn't actually engaging.
-        BoundaryDepth
+        BoundaryDepth,
+        // Isolated local-light scattering term (not the direct surface pool).
+        LocalLightScattering
     };
 
     struct VolumetricSettings

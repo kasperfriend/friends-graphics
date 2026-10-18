@@ -79,6 +79,17 @@ inline Vec3 Normalize(Vec3 a)
     return l > 1e-8f ? a * (1.f / l) : Vec3{};
 }
 inline float Saturate(float v) { return v < 0.f ? 0.f : v > 1.f ? 1.f : v; }
+
+// Dynamic-light debug views are renderable without a selected source (mode 4
+// visualizes receiver-normal confidence, and the source modes use black for an
+// empty light set). Keep this policy portable so the compositor, renderer and
+// regression suite cannot disagree about whether the pass should run.
+inline bool IsDebugView(int mode) noexcept { return mode >= 1 && mode <= 4; }
+inline bool ShouldActivate(bool enabled, float intensityScale, int debugMode) noexcept
+{
+    return enabled && ((std::isfinite(intensityScale) && intensityScale > 0.f) || IsDebugView(debugMode));
+}
+
 inline float Smoothstep(float e0, float e1, float x)
 {
     const float t = Saturate((x - e0) / std::max(e1 - e0, 1e-6f));
@@ -122,18 +133,10 @@ inline Vec3 WorldPosition(float u, float v, float raw, const Projection& p,
 // -------------------------------------------------------------- footprint ---
 struct NormalTuning
 {
-    // Smallest world-space window WIDTH (both taps together) the normal is
-    // fitted over. Near the
-    // camera one buffer texel is a fraction of an inch of ground, so the fit
-    // would follow the terrain's own micro-relief and the pool would dapple;
-    // this floor averages several relief features instead. It only binds
-    // close up - at range a single texel already spans yards.
-    float minWorldSpread = 0.35f;
-    // Extra window growth per yard of view depth, on top of the buffer texel.
-    // At range the depth buffer undersamples the terrain's own relief, so the
-    // one-texel window is measuring aliased heights; widening it low-passes
-    // that away. It is a fraction per yard because it must stay invisible
-    // close up, where a texel is already a fraction of an inch.
+    // The normal footprint grows slightly with view depth, on top of the
+    // light-buffer texel. At range a texel spans yards and the receiver depth
+    // is less precise; this bounded growth keeps the finite-difference estimate
+    // stable without adding a world-space smoothing floor that crosses objects.
     float distanceGrowth = 0.012f;
     // Absolute yard scales of the step test: a window whose two sides
     // disagree by less than Floor + viewZ * Slope is on one surface no matter
@@ -146,19 +149,12 @@ struct NormalTuning
     float edgeSlope = 0.004f;
 };
 
-// The shipped tuning, with the F7 LIGHT SMOOTHING slider (ini
-// `[DynamicLighting] NormalSpreadPercent`, 100 = shipped) applied to the one
-// value that is an artistic trade: how much ground the normal averages over.
-// Raising it smooths a pool further and rounds off small geometry; lowering
-// it keeps every facet and brings the grain back with it. The edge scales are
-// deliberately not part of the slider - they are a correctness property of the
-// window, and a player should not be able to turn silhouette detection off.
-inline NormalTuning DefaultNormalTuning(float spreadScale = 1.f)
+// Fixed, edge-aware reconstruction tuning. The depth window is the light-buffer
+// texel (with a small range-growth term); there is no extra world-space blur.
+// The edge scales are correctness tests, not artistic controls.
+inline NormalTuning DefaultNormalTuning()
 {
-    NormalTuning tuning;
-    const float scale = std::isfinite(spreadScale) ? std::clamp(spreadScale, 0.25f, 4.f) : 1.f;
-    tuning.minWorldSpread *= scale;
-    return tuning;
+    return {};
 }
 
 struct Vec2 { float x = 0, y = 0; };
@@ -207,13 +203,10 @@ inline Vec2 TapOffset(Vec2 spread, Vec2 depthTexel)
 }
 
 // Half-window in uv units for the four depth taps that build the normal.
-inline Vec2 Footprint(float viewZ, Vec2 bufferTexel, const Projection& p, const NormalTuning& tuning)
+inline Vec2 Footprint(float viewZ, Vec2 bufferTexel, const NormalTuning& tuning)
 {
-    const float depth = std::max(viewZ, 0.25f);
-    const float world = tuning.minWorldSpread * 0.5f / depth;
     const float growth = 1.f + std::max(viewZ, 0.f) * tuning.distanceGrowth;
-    return { std::max(bufferTexel.x * growth, world * p.p00),
-             std::max(bufferTexel.y * growth, world * p.p11) };
+    return { bufferTexel.x * growth, bufferTexel.y * growth };
 }
 
 // Mean world-space half-window that Footprint actually landed on: the depth
@@ -352,29 +345,28 @@ struct SurfaceFrame
     float intact = 1.f;
 };
 
-// `up` is the unit sky direction of the camera that owns this frame (the
-// inverse view's second row, which the surface pass has as a uniform); the
-// near-object gate below measures standing height against it.
+// `worldUp` is WoW's fixed world-vertical axis (+Z), not the camera's screen-up
+// vector. A character's standing height remains world-vertical when the camera
+// pitches or rolls; using camera-up makes the gate disappear at steep angles.
 inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Vec3& pRight,
                                       const Vec3& pUp, const Vec3& pDown,
                                       float zLeft, float zRight, float zUp, float zDown,
                                       float zLeft2, float zRight2, float zUp2, float zDown2,
                                       float zCentre, const Vec3& toEye,
                                       const NormalTuning& tuning, const TapSurvival& survives,
-                                      const Vec3& up)
+                                      const Vec3& worldUp)
 {
     // HORIZON-FLIGHT VETO. The window is a fixed UV span, but its world size
     // depends on the ray: the sideways taps (left/right) land a world window
     // away, while the up tap of a steep down-look is the same ray barely
     // above the horizon, which lands tens of yards out and turns the up-axis
     // tangent into a long chord of the terrain - its direction is the
-    // relief's average over that span, not the local slope. That is a soft
-    // wrong-light band around everything the pool lights, and it grows with
-    // LIGHT SMOOTHING, because smoothing is exactly what widens the UV
-    // window until it erases the ray's down-angle. The test must be per
-    // axis: sideways taps are closer than along-ray taps by construction, so
-    // a tap is only foreign to the window when it outruns its own partner
-    // on the same axis - and it must outrun the receiver's own view depth:
+    // relief's average over that span, not the local slope. That can create
+    // a wrong-light band near the horizon even with a one-texel footprint.
+    // The test must be per axis: sideways taps are closer than along-ray taps
+    // by construction, so a tap is only foreign to the window when it outruns
+    // its own partner on the same axis - and it must outrun the receiver's
+    // own view depth:
     // a tap further out than the receiver is a ray skimming the horizon,
     // while a tap that merely outruns its partner can be one hitting a
     // nearby relief bump (both taps are within the receiver's depth, and
@@ -407,22 +399,22 @@ inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Ve
     // shape-copy of the object beside it. At wide smoothing windows both
     // sides of the window reach the object and the arbitration is a coin
     // flip, which is why the copies grew with smoothing instead of shrinking.
-    // Whatever the depth says, a standing body is a metre or more off the
-    // local ground plane, and a plane - however sloped - has exactly zero
-    // second difference in world height. Each side's height h (against the
-    // camera's sky direction) therefore forms a height second difference
-    // with its partner side: a side whose second difference AND whose own
-    // height both clear the window's relief scale is foreign, and its weight
-    // slides to zero. Ground relief across a window is centimetres; a
-    // silhouette or object tap is decimetres to metres. A dead or vetoed
-    // tap counts as the receiver's own level, so the gate still fires when
-    // the foreign side is the only one that measured a surface.
+    // Whatever the depth says, a standing body is elevated along world +Z
+    // from the local ground plane, and a plane - however sloped - has no
+    // second difference in world height for a symmetric window. Each side's
+    // height h (measured on world +Z, not the camera's screen-up axis) therefore
+    // forms a height second difference with its partner: a side whose second
+    // difference AND whose own height both clear the window's relief scale is
+    // foreign, and its weight slides to zero. The height tolerance allows
+    // ordinary terrain relief without tying the test to camera orientation.
+    // A dead or vetoed tap counts as the receiver's own level, so the gate
+    // still fires when the foreign side is the only one that measured a surface.
     float left = x.left, right = x.right, upSide = y.left, down = y.right;
     {
-        const float hL = stays.left ? Dot(pLeft - p, up) : 0.f;
-        const float hR = stays.right ? Dot(pRight - p, up) : 0.f;
-        const float hU = stays.up ? Dot(pUp - p, up) : 0.f;
-        const float hD = stays.down ? Dot(pDown - p, up) : 0.f;
+        const float hL = stays.left ? Dot(pLeft - p, worldUp) : 0.f;
+        const float hR = stays.right ? Dot(pRight - p, worldUp) : 0.f;
+        const float hU = stays.up ? Dot(pUp - p, worldUp) : 0.f;
+        const float hD = stays.down ? Dot(pDown - p, worldUp) : 0.f;
         const float live = (stays.left ? 1.f : 0.f) + (stays.right ? 1.f : 0.f) +
                            (stays.up ? 1.f : 0.f) + (stays.down ? 1.f : 0.f);
         const float spread = ((stays.left ? 1.f : 0.f) * Length(pLeft - p) +
@@ -477,9 +469,15 @@ inline Vec3 PoolShade(const LightSample& light, const Vec3& p, const SurfaceFram
                       const Vec3& camera)
 {
     const Vec3 toLightVector = light.position - p;
-    const float distance = Length(toLightVector);
+    const float distanceSquared = Dot(toLightVector, toLightVector);
+    const float radius = std::max(light.radius, 0.01f);
+    // Outside the finite support, every diffuse/specular term is multiplied by
+    // zero. Reject in squared space before computing a square root, normalizing
+    // vectors or evaluating the specular power.
+    if (distanceSquared >= radius * radius) return {};
+    const float distance = std::sqrt(std::max(distanceSquared, 0.f));
     const Vec3 toLight = distance > 1e-4f ? toLightVector * (1.f / distance) : Vec3{ 0.f, 0.f, 1.f };
-    const float falloff = Saturate(1.f - distance / std::max(light.radius, 0.01f));
+    const float falloff = Saturate(1.f - distance / radius);
     float attenuation = falloff * falloff / (1.f + distance * distance * 0.035f);
     if (light.outerCone > -0.5f)
     {
