@@ -133,17 +133,10 @@ inline Vec3 WorldPosition(float u, float v, float raw, const Projection& p,
 // -------------------------------------------------------------- footprint ---
 struct NormalTuning
 {
-    // Optional smallest world-space window WIDTH (both taps together) the
-    // normal is fitted over. Zero disables this extra world-space floor; the
-    // actual footprint still uses at least one depth texel and grows with
-    // distance. A positive value averages more near-camera relief, but a wide
-    // fit can also reach across nearby geometry and paint its shape into a pool.
-    float minWorldSpread = 0.35f;
-    // Extra window growth per yard of view depth, on top of the buffer texel.
-    // At range the depth buffer undersamples the terrain's own relief, so the
-    // one-texel window is measuring aliased heights; widening it low-passes
-    // that away. It is a fraction per yard because it must stay invisible
-    // close up, where a texel is already a fraction of an inch.
+    // The normal footprint grows slightly with view depth, on top of the
+    // light-buffer texel. At range a texel spans yards and the receiver depth
+    // is less precise; this bounded growth keeps the finite-difference estimate
+    // stable without adding a world-space smoothing floor that crosses objects.
     float distanceGrowth = 0.012f;
     // Absolute yard scales of the step test: a window whose two sides
     // disagree by less than Floor + viewZ * Slope is on one surface no matter
@@ -156,20 +149,12 @@ struct NormalTuning
     float edgeSlope = 0.004f;
 };
 
-// The shipped tuning, with the F7 LIGHT SMOOTHING slider (ini
-// `[DynamicLighting] NormalSpreadPercent`, 100 = shipped) applied to the
-// optional world-space floor of the normal window. At 0, the mandatory
-// depth-texel footprint and its distance growth remain. Wider settings average
-// more ground, which can soften relief and reach across nearby geometry. The
-// edge scales are deliberately not part of the slider - they are a correctness
-// property of the window, and a player should not be able to turn silhouette
-// detection off.
-inline NormalTuning DefaultNormalTuning(float spreadScale = 1.f)
+// Fixed, edge-aware reconstruction tuning. The depth window is the light-buffer
+// texel (with a small range-growth term); there is no extra world-space blur.
+// The edge scales are correctness tests, not artistic controls.
+inline NormalTuning DefaultNormalTuning()
 {
-    NormalTuning tuning;
-    const float scale = std::isfinite(spreadScale) ? std::clamp(spreadScale, 0.f, 4.f) : 1.f;
-    tuning.minWorldSpread *= scale;
-    return tuning;
+    return {};
 }
 
 struct Vec2 { float x = 0, y = 0; };
@@ -218,13 +203,10 @@ inline Vec2 TapOffset(Vec2 spread, Vec2 depthTexel)
 }
 
 // Half-window in uv units for the four depth taps that build the normal.
-inline Vec2 Footprint(float viewZ, Vec2 bufferTexel, const Projection& p, const NormalTuning& tuning)
+inline Vec2 Footprint(float viewZ, Vec2 bufferTexel, const NormalTuning& tuning)
 {
-    const float depth = std::max(viewZ, 0.25f);
-    const float world = tuning.minWorldSpread * 0.5f / depth;
     const float growth = 1.f + std::max(viewZ, 0.f) * tuning.distanceGrowth;
-    return { std::max(bufferTexel.x * growth, world * p.p00),
-             std::max(bufferTexel.y * growth, world * p.p11) };
+    return { bufferTexel.x * growth, bufferTexel.y * growth };
 }
 
 // Mean world-space half-window that Footprint actually landed on: the depth
@@ -379,13 +361,12 @@ inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Ve
     // away, while the up tap of a steep down-look is the same ray barely
     // above the horizon, which lands tens of yards out and turns the up-axis
     // tangent into a long chord of the terrain - its direction is the
-    // relief's average over that span, not the local slope. That is a soft
-    // wrong-light band around everything the pool lights, and it grows with
-    // LIGHT SMOOTHING, because smoothing is exactly what widens the UV
-    // window until it erases the ray's down-angle. The test must be per
-    // axis: sideways taps are closer than along-ray taps by construction, so
-    // a tap is only foreign to the window when it outruns its own partner
-    // on the same axis - and it must outrun the receiver's own view depth:
+    // relief's average over that span, not the local slope. That can create
+    // a wrong-light band near the horizon even with a one-texel footprint.
+    // The test must be per axis: sideways taps are closer than along-ray taps
+    // by construction, so a tap is only foreign to the window when it outruns
+    // its own partner on the same axis - and it must outrun the receiver's
+    // own view depth:
     // a tap further out than the receiver is a ray skimming the horizon,
     // while a tap that merely outruns its partner can be one hitting a
     // nearby relief bump (both taps are within the receiver's depth, and

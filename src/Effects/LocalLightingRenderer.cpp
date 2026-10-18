@@ -36,7 +36,7 @@ float4 projection:register(c1); // x=A,y=B,z=P00,w=P11
 float4 inv0:register(c2); float4 inv1:register(c3); float4 inv2:register(c4);
 float4 texel:register(c5);        // xy=full-res texel, zw=THIS buffer's texel
 float4 tuning:register(c6);       // x=intensity, y=debug, z=count
-float4 normalTuning:register(c7); // x=min window width (world), y=edge floor, z=edge slope, w=growth per yard
+float4 normalTuning:register(c7); // x=edge floor, y=edge slope, z=growth per yard
 float4 lightPosRadius[8]:register(c8);
 float4 lightColorPower[8]:register(c16);
 float4 lightDirectionCone[8]:register(c24);
@@ -105,14 +105,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // normals or visiting any lights.
  if(tuning.y>2.5&&tuning.y<3.5) return float4(0,0,0,z);
  float3 p=World(uv,raw);
- // locallighting::Footprint. One texel of the buffer being shaded, so the
- // normal is a resolvable estimate for the pixel it lights: a window pinned
- // to the FULL-resolution grid is narrower than a 0.75x texel, so the normal
- // field was undersampled against its own grid and its high-frequency part
- // aliased into grain. The world floor keeps the window off the terrain's
- // micro-relief close to the camera, where one texel is a fraction of an
- // inch of ground and the pool used to dapple with it.
- float2 spread=max(texel.zw*(1+max(z,0)*normalTuning.w),normalTuning.x*.5/max(z,.25)*projection.zw);
+ // locallighting::Footprint. Use exactly one texel of the buffer being
+ // shaded, plus the fixed range-growth term. A larger world-space floor used
+ // to blur together nearby geometry and caused shape copies in the light pool.
+ float2 spread=texel.zw*(1+max(z,0)*normalTuning.z);
  // locallighting::TapOffset: the window is a whole number of depth texels per
  // side, so the two taps mirror the receiver. A window that lands one texel one
  // way and two the other reads as a step in any second difference however flat
@@ -174,15 +170,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  // same ray barely above the horizon, which lands tens of yards out and
  // turns the up-axis tangent into a long chord of the terrain - its
  // direction is the relief's average over that span, not the local slope.
- // That is a soft wrong-light band around everything the pool lights, and
- // it grows with LIGHT SMOOTHING, because smoothing is exactly what widens
- // the UV window until it erases the ray's down-angle. The test is per
- // axis: sideways taps are closer than along-ray taps by construction, so a
- // tap is only foreign to the window when it outruns its own partner - and
- // it must outrun the receiver's own view depth: a tap further out than the
- // receiver is a ray skimming the horizon, while a tap that merely outruns
- // its partner can be one hitting a nearby relief bump (both taps within
- // the receiver's depth, and both are measured).
+ // That can create a wrong-light band near the horizon even with a one-texel
+ // footprint. The test is per axis: sideways taps are closer than along-ray
+ // taps by construction, so a tap is only foreign when it outruns its own
+ // partner and the receiver's view depth. A tap further out than the receiver
+ // is a ray skimming the horizon, while a tap that merely outruns its partner
+ // can be one hitting a nearby relief bump (both taps within the receiver's
+ // depth, and both are measured).
  {
   float vz=max(z,.25);
   float dL=length(pL-p),dR=length(pR-p),dU=length(pU-p),dD=length(pD-p);
@@ -200,7 +194,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);
  float iU=1./max(zU,.001),iD=1./max(zD,.001);
  float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);
- float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);
+ float absolute=max(normalTuning.x,z*normalTuning.y)/max(z*z,.001);
  float2 wx=AxisWeights(iL,iR,iC,iL2,iR2,absolute,surfL,surfR,surfL2,surfR2);
  float2 wy=AxisWeights(iU,iD,iC,iU2,iD2,absolute,surfU,surfD,surfU2,surfD2);
  float wL=wx.x,wR=wx.y,wU=wy.x,wD=wy.y;
@@ -485,12 +479,11 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,1.f / m_lightWidth,1.f / m_lightHeight };
     const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(debugMode),
         float(count),0.f };
-    // One description of the normal's tuning, shared with the CPU mirror the
-    // regression test runs (src/Effects/LocalLightingCore.h). LIGHT SMOOTHING
-    // scales the world floor of the window; the edge scales stay fixed.
-    const locallighting::NormalTuning normal = locallighting::DefaultNormalTuning(manager.NormalSpread());
-    const float normalTuning[4] = { normal.minWorldSpread, normal.edgeFloor, normal.edgeSlope,
-        normal.distanceGrowth };
+    // One description of the fixed, edge-aware normal reconstruction, shared
+    // with the CPU mirror in LocalLightingCore.h. The shader has no artistic
+    // world-space smoothing floor.
+    const locallighting::NormalTuning normal = locallighting::DefaultNormalTuning();
+    const float normalTuning[4] = { normal.edgeFloor, normal.edgeSlope, normal.distanceGrowth, 0.f };
     // c8..c31 are contiguous in the shader (pos c8, color c16, direction
     // c24), so the whole light table is one constant call, not three.
     float lightData[24][4]{};

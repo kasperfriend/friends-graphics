@@ -62,8 +62,7 @@ namespace renderer
         m_enabled = renderer::locationtuning::ReadInt(L"DynamicLighting", L"Enabled", 1, m_iniPath.c_str()) != 0;
         m_intensityScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
         m_rayScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
-        m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
-        m_normalSpread = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"NormalSpreadPercent", 100, m_iniPath.c_str())), 0, 400) * 0.01f;
+        m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 2, m_iniPath.c_str())), 0, 2);
         m_debugMode = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
     }
 
@@ -410,7 +409,6 @@ namespace renderer
                 " attached_selected=" + std::to_string(attachedSelected) +
                 " attached=" + std::to_string(m_attached.size()) +
                 " quality=" + std::to_string(m_quality) +
-                " normal_spread=" + std::to_string(m_normalSpread * 100.f) +
                 " camera=(" + std::to_string(cameraPosition.x) + "," +
                 std::to_string(cameraPosition.y) + "," + std::to_string(cameraPosition.z) +
                 ") nearest_manifest=" + std::to_string(nearest));

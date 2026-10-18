@@ -76,11 +76,11 @@ Fixed, in `LocalLightingCore.h` and the two ps_3_0 passes that mirror it:
 - the highlight is gated by how much of the window survived, and the composite
   blends a 1.5-texel tent with a continuity floor.
 
-`NormalSpreadPercent` (F7 "LIGHT SMOOTHING", 0-400%) scales the optional
-world-space floor of that window, for players who want a sharper or softer pool
-than the shipped 100%. At 0 the extra world-space floor is removed, but the
-normal still uses at least one depth-buffer texel and grows its footprint with
-distance; this is not a fully unfiltered normal.
+The extra world-space smoothing floor has been removed. Local-light normals
+now use the light-buffer texel footprint with a small, fixed distance-growth
+term; there is no LIGHT SMOOTHING control. `Quality=2` (the new default) uses a
+full-resolution light buffer, while lower F7 quality levels trade resolution
+for performance.
 
 Measured, quality 1/0.75/0.5 on flat ground: mean normal error 0.00 degrees
 (was 64-71), high-frequency content of the light 0.0002-0.002 (was 0.8-2.1),
@@ -89,13 +89,32 @@ ground at a grazing angle: 5.2-5.7 degrees (was 64). The composite's largest
 per-pixel step near the camera is 0.009 of the local level (was 2.6) and a
 silhouette base keeps its own light to within 15% (was 344%).
 
+## Character facets, resolution and ray tracing
+
+A follow-up screenshot showed the local light exposing polygonal facets on a
+large character. Quality 2 now runs the light/normal pass at full screen
+resolution by default, reducing light-map upsampling. The pass still derives
+normals from scene depth, however; it cannot see WoW's interpolated mesh vertex
+normals, so flat-looking facets in the character's geometry can remain. Hiding
+them with a broad normal blur was the same tradeoff that produced object
+copies. A true smooth character response requires normals from the model draw
+(or a character normal buffer), which this D3D9 post-process does not have.
+
+The current effect is direct diffuse/specular lighting, not light bouncing.
+This client uses Direct3D 9 shader model 3 and the renderer does not own scene
+geometry or acceleration structures. It has no DXR/compute path for hardware
+ray tracing; a real path tracer would require replacing the render backend and
+integrating model geometry, not adding screen-space rays. No fake ray-tracing
+pass was added.
+
 ## Dynamic light copies: the object beside the player, painted in the pool
 
-2026-10-17: player report - near characters and objects the light pass drew
-illusionary shape-copies of them, dark slabs floating beside the real geometry,
-and F7 "LIGHT SMOOTHING" (`NormalSpreadPercent`) made them worse. The pass has
-no temporal history, so this was never ghosting: it was the pool's normal being
-steered by the object's own depth.
+2026-10-17: the player reported that near characters and objects the light pass
+drew illusionary shape-copies of them, dark slabs floating beside the real
+geometry. At the time, the F7 "LIGHT SMOOTHING" (`NormalSpreadPercent`) control
+made them worse; the control was later removed after a zero-setting A/B test.
+The pass has no temporal history, so this was never ghosting: it was the pool's
+normal being steered by the object's own depth.
 
 Root cause, from a CPU reconstruction over an eye-level scene with undulating
 ground, a character-like capsule and a crate a few yards away: when the normal
@@ -144,20 +163,19 @@ cost of dropping one side at genuine relief creases.
 ## Dynamic light copies under a tilted camera
 
 2026-10-18: a follow-up report showed that nearby-character copies still grew
-with LIGHT SMOOTHING when the camera was pitched. The near-object gate had
-measured standing height along inverse-view row 1 (camera-up), not world
-vertical. A forward/back tap displacement could cancel a character's height,
-so the foreign tap survived exactly when the wider smoothing window reached
-it.
+when the then-existing LIGHT SMOOTHING control was increased with the camera
+pitched. The near-object gate had measured standing height along inverse-view
+row 1 (camera-up), not world vertical. A forward/back tap displacement could
+cancel a character's height, so the foreign tap survived when the wider window
+reached it.
 
 The gate now measures height along WoW world +Z in both the CPU core and the
-surface shader. The local-light regression renders the same character/crate
-scene with a 30-degree downward camera and compares the correct world-up result
-to the former camera-up result at 0%, 25%, 100% and 400% smoothing. Zero optional
-world spread lowers the modeled near-silhouette copy error to 0.008, compared
-with 0.022 at 25% and 0.040 at 100%; the mandatory one-texel footprint remains.
-At 400%, the camera-up version's error is 0.455 versus 0.093 with world-up;
-the fixed result stays under the regression's 0.12 ceiling.
+surface shader. The pre-removal regression compared world-up with camera-up
+under the former slider's 0%, 25%, 100% and 400% scales. Zero world spread
+lowered modeled near-silhouette copy error to 0.008, compared with 0.022 at 25%
+and 0.040 at 100%; the mandatory one-texel footprint remains. At 400%, the
+camera-up version's error is 0.455 versus 0.093 with world-up; the fixed result
+stays under the regression's 0.12 ceiling.
 
 ## Dynamic-light activation, selection and diagnostics
 

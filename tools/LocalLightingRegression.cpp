@@ -343,7 +343,7 @@ Pool EvaluatePool(const Scene& scene, float scale, const Projection& projection,
             const float z = LinearDepth(raw, projection);
             const Vec3 p = WorldPosition(u, v, raw, projection, inverseView, kCameraWorld);
             const Vec2 spread = legacy ? sceneTexel
-                                      : TapOffset(Footprint(z, bufferTexel, projection, tuning), sceneTexel);
+                                      : TapOffset(Footprint(z, bufferTexel, tuning), sceneTexel);
 
             // Exactly what the shader does: the depth map is sampled with CLAMP
             // addressing, and a clear value reconstructs as the far plane, which
@@ -651,7 +651,7 @@ int main()
     const Scene scene = RenderScene(kWidth, kHeight);
     const Projection projection = MakeProjection(scene);
     const InverseView inverseView = MakeInverseView();
-    const NormalTuning tuning = DefaultNormalTuning(1.f);
+    const NormalTuning tuning = DefaultNormalTuning();
     const CompositeTuning compositeTuning;
 
     LightSample lamp;
@@ -758,19 +758,19 @@ int main()
     }
 
     {
-        const NormalTuning zeroFloorTuning = DefaultNormalTuning(0.f);
-        const Pool zeroFloorPool = EvaluatePool(scene, 1.f, projection, inverseView, lamp, zeroFloorTuning, false, false);
-        const Composite zeroFloorOnScreen = CompositePool(scene, zeroFloorPool, projection, compositeTuning, false);
-        const float zeroNearGrain = HighFrequency(zeroFloorOnScreen.luminance, nearFlat);
-        const float zeroFarGrain = HighFrequency(zeroFloorOnScreen.luminance, flatPlain);
-        const float zeroUndulatingNormal = NormalError(zeroFloorPool, farGround, 1.f);
-        std::printf("     0%% optional spread: near grain %.5f, far grain %.5f, undulating normal %.2f deg\n",
-                    zeroNearGrain, zeroFarGrain, zeroUndulatingNormal);
-        Check(zeroNearGrain <= nearGrain[2] + 0.001f && zeroFarGrain <= farGrain[2] + 0.01f,
-              "removing the optional world floor does not materially increase flat-ground grain");
-        Check(zeroUndulatingNormal <= undulatingNormal[2],
-              "the one-texel minimum still follows undulating relief at zero optional spread");
-        Pass("zero optional spread preserves measured ground smoothness and relief");
+        const NormalTuning fixedTuning = DefaultNormalTuning();
+        const Pool fixedPool = EvaluatePool(scene, 1.f, projection, inverseView, lamp, fixedTuning, false, false);
+        const Composite fixedOnScreen = CompositePool(scene, fixedPool, projection, compositeTuning, false);
+        const float fixedNearGrain = HighFrequency(fixedOnScreen.luminance, nearFlat);
+        const float fixedFarGrain = HighFrequency(fixedOnScreen.luminance, flatPlain);
+        const float fixedUndulatingNormal = NormalError(fixedPool, farGround, 1.f);
+        std::printf("     fixed texel footprint: near grain %.5f, far grain %.5f, undulating normal %.2f deg\n",
+                    fixedNearGrain, fixedFarGrain, fixedUndulatingNormal);
+        Check(fixedNearGrain <= nearGrain[2] + 0.001f && fixedFarGrain <= farGrain[2] + 0.01f,
+              "the fixed texel footprint keeps flat-ground grain bounded");
+        Check(fixedUndulatingNormal <= undulatingNormal[2],
+              "the fixed texel footprint still follows undulating relief");
+        Pass("fixed texel footprint preserves measured ground smoothness and relief");
     }
 
     auto worst = [](const float* v) { return std::max(std::max(v[0], v[1]), v[2]); };
@@ -835,7 +835,7 @@ int main()
             const int x = std::clamp(int(u * float(scene.width)), 0, scene.width - 1);
             const int y = std::clamp(int(v * float(scene.height)), 0, scene.height - 1);
             const Vec2 spread = TapOffset(Footprint(reference.depth[size_t(y) * kWidth + x],
-                                                    Vec2{ 1.f / kWidth, 1.f / kHeight }, projection, tuning),
+                                                    Vec2{ 1.f / kWidth, 1.f / kHeight }, tuning),
                                           depthTexel);
             for (int k = 0; k < 4; ++k)
             {
@@ -1137,7 +1137,7 @@ int main()
                     if (raw >= .99990f) continue;
                     const float z = LinearDepth(raw, nearProj);
                     const Vec3 p = WorldPosition(u, v, raw, nearProj, nearInv, nearCamera);
-                    const Vec2 spread = TapOffset(Footprint(z, bufferTexel, nearProj, tuning), sceneTexel);
+                    const Vec2 spread = TapOffset(Footprint(z, bufferTexel, tuning), sceneTexel);
                     auto tap = [&](float du, float dv, float& depthOut, float* rawOut = nullptr) {
                         const Vec2 tapUv = SnapUv({ u + du, v + dv }, sceneTexel);
                         const float sample = near.At(tapUv.x, tapUv.y);
@@ -1327,53 +1327,23 @@ int main()
             return n ? float(sum / double(n)) : 0.f;
         };
 
-        // LIGHT SMOOTHING scales only the optional world-space floor. Zero
-        // still keeps the depth-texel minimum and distance growth in Footprint.
-        const NormalTuning zeroSpread = DefaultNormalTuning(0.f);
+        // The runtime now always uses the no-extra-spread footprint. Snap the
+        // zero-depth case to verify that the shader still has the one-texel
+        // minimum needed to form a finite-difference normal.
+        const NormalTuning fixedTuning = DefaultNormalTuning();
         const Vec2 depthTexel{ 1.f / float(kWidth), 1.f / float(kHeight) };
-        const Vec2 zeroFootprint = TapOffset(Footprint(0.f, depthTexel, nearProj, zeroSpread), depthTexel);
-        Check(Near(zeroSpread.minWorldSpread, 0.f, 1e-6f) &&
-              Near(zeroFootprint.x, depthTexel.x, 1e-6f) &&
-              Near(zeroFootprint.y, depthTexel.y, 1e-6f),
-              "zero smoothing removes only the world-space floor, never the mandatory depth texel");
-        struct SmoothRow { const char* name; float scale; };
-        const SmoothRow smooths[] = { { "0%   ", 0.f }, { "25% ", .25f },
-                                      { "100%", 1.f }, { "400%", 4.f } };
-        float shipped[4] = {}, drowned[4] = {}, cameraUpGate[4] = {};
-        const Vec3 cameraUp{ nUp[0], nUp[1], nUp[2] };
-        for (int s = 0; s < 4; ++s)
-        {
-            const NormalTuning tuning = DefaultNormalTuning(smooths[s].scale);
-            const Pool truth = evaluateNear(.75f, tuning, true, false, kWorldUp);
-            const Pool current = evaluateNear(.75f, tuning, false, false, kWorldUp);
-            const Pool previous = evaluateNear(.75f, tuning, false, true, kWorldUp);
-            const Pool wrongUp = evaluateNear(.75f, tuning, false, false, cameraUp);
-            const Composite truthOnScreen = CompositePool(near, truth, nearProj, compositeTuning, false);
-            const Composite currentOnScreen = CompositePool(near, current, nearProj, compositeTuning, false);
-            const Composite previousOnScreen = CompositePool(near, previous, nearProj, compositeTuning, false);
-            const Composite wrongUpOnScreen = CompositePool(near, wrongUp, nearProj, compositeTuning, false);
-            shipped[s] = copyError(currentOnScreen, truthOnScreen);
-            drowned[s] = copyError(previousOnScreen, truthOnScreen);
-            cameraUpGate[s] = copyError(wrongUpOnScreen, truthOnScreen);
-            std::printf("     smoothing %s: near-silhouette copy error %.4f (was %.4f, camera-up %.4f)\n",
-                        smooths[s].name, shipped[s], drowned[s], cameraUpGate[s]);
-        }
-        // The old screen-up gate lets a character's vertical height cancel
-        // against a forward/back sample displacement. With the same depth and
-        // scene, that mistake grows sharply as the smoothing window reaches
-        // farther across the silhouette. World +Z keeps the copy error bounded
-        // at every slider setting; the previous slope-drowned depth weighting
-        // remains as a separate baseline for the shipped setting and maximum.
-        Check(drowned[2] > 1.25f * shipped[2] && drowned[3] > 1.25f * shipped[3],
-              "slope-drowned step detection paints more than the corrected pool");
-        Check(shipped[0] < 0.02f,
-              "zero world-space spread preserves the texel minimum and bounds silhouette copies");
-        Check(shipped[1] < 0.04f && shipped[2] < 0.12f,
-              "a nearby silhouette paints no copy into the pool at ordinary smoothing");
-        Check(shipped[3] < 0.12f,
-              "maximum smoothing stays bounded when height is measured in world-up");
-        Check(cameraUpGate[3] > 4.f * cameraUpGate[2] && cameraUpGate[3] > 4.f * shipped[3],
-              "camera-up height lets the nearby-object copies grow with strong smoothing");
+        const Vec2 minimumTap = TapOffset(Footprint(0.f, depthTexel, fixedTuning), depthTexel);
+        Check(Near(minimumTap.x, depthTexel.x, 1e-6f) &&
+              Near(minimumTap.y, depthTexel.y, 1e-6f),
+              "the fixed normal fit retains exactly one depth texel at the near plane");
+        const Pool truth = evaluateNear(1.f, fixedTuning, true, false, kWorldUp);
+        const Pool current = evaluateNear(1.f, fixedTuning, false, false, kWorldUp);
+        const Composite truthOnScreen = CompositePool(near, truth, nearProj, compositeTuning, false);
+        const Composite currentOnScreen = CompositePool(near, current, nearProj, compositeTuning, false);
+        const float silhouetteCopyError = copyError(currentOnScreen, truthOnScreen);
+        std::printf("     fixed footprint: near-silhouette copy error %.4f\n", silhouetteCopyError);
+        Check(silhouetteCopyError < 0.02f,
+              "the fixed one-texel footprint bounds nearby-object copies");
         Pass("nearby characters and objects no longer paint copies into the pool");
     }
 
@@ -1412,31 +1382,35 @@ int main()
               manager.find("(!slot.enabled &&") != std::string::npos &&
               manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos,
               "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
-        Check(manager.find(")), 0, 400) * 0.01f;") != std::string::npos &&
-              overlay.find("L\"NormalSpreadPercent\",\"LIGHT SMOOTHING\",0,400,25,100") != std::string::npos &&
-              settings.find("NormalSpreadPercent=100") != std::string::npos,
-              "F7 and the ini expose a zero optional spread floor without changing the 100% default");
+        Check(settings.find("NormalSpreadPercent") == std::string::npos &&
+              overlay.find("NormalSpreadPercent") == std::string::npos &&
+              manager.find("NormalSpreadPercent") == std::string::npos,
+              "the extra normal-spread control is removed from settings, F7 and runtime");
+        Check(settings.find("Quality=2") != std::string::npos &&
+              overlay.find("L\"Quality\",\"LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)\",0,2,1,2") != std::string::npos &&
+              manager.find("L\"Quality\", 2,") != std::string::npos,
+              "local-light quality defaults to full-resolution in the ini, F7 and runtime");
         Check(manager.find("attached_selected=") != std::string::npos &&
               manager.find("manifest_selected=") != std::string::npos &&
-              manager.find("normal_spread=") != std::string::npos &&
+              manager.find("quality=") != std::string::npos &&
               manager.find("Selected source detail:") != std::string::npos &&
               manager.find(" id=") != std::string::npos &&
               manager.find(" position=(") != std::string::npos &&
               manager.find(" score=") != std::string::npos,
-              "the periodic diagnostic records selected source identities, positions, scores and spread");
+              "the periodic diagnostic records selected source identities, positions, scores and quality");
         Check(manager.find("m_selectionSignature = 0;") != std::string::npos &&
               manager.find("m_selectionSignature = local_light_detail::SelectionSignature(m_selected);") != std::string::npos &&
               managerHeader.find("SelectionSignature() const { return m_selectionSignature; }") != std::string::npos &&
               water.find("manager.SelectionSignature()") != std::string::npos,
               "the manager preserves the water-cache signature state and its production caller");
-        Check(surface.find("float2 spread=max(texel.zw*(1+max(z,0)*normalTuning.w),normalTuning.x*.5/max(z,.25)*projection.zw);") != std::string::npos,
-              "the surface pass sizes its window against the buffer's own texel");
+        Check(surface.find("float2 spread=texel.zw*(1+max(z,0)*normalTuning.z);") != std::string::npos,
+              "the surface pass uses only its buffer texel and fixed distance growth");
         Check(surface.find("spread=max(round(spread/texel.xy),1)*texel.xy;") != std::string::npos &&
               Near(TapOffset({ 0.0304f, 0.0296f }, { 1.f / 480.f, 1.f / 270.f }).x, 15.f / 480.f, 1e-6f) &&
               Near(TapOffset({ 0.0001f, 0.0040f }, { 1.f / 480.f, 1.f / 270.f }).x, 1.f / 480.f, 1e-6f),
               "the surface pass rounds its window to whole depth texels");
         Check(surface.find("float iC=1./max(z,.001),iL=1./max(zL,.001),iR=1./max(zR,.001);") != std::string::npos &&
-              surface.find("float absolute=max(normalTuning.y,z*normalTuning.z)/max(z*z,.001);") != std::string::npos,
+              surface.find("float absolute=max(normalTuning.x,z*normalTuning.y)/max(z*z,.001);") != std::string::npos,
               "the surface pass runs the edge test in inverse depth");
         Check(surface.find("float zL2=Linear(rawL2),zR2=Linear(rawR2),zU2=Linear(rawU2),zD2=Linear(rawD2);") != std::string::npos &&
               surface.find("float iL2=1./max(zL2,.001),iR2=1./max(zR2,.001),iU2=1./max(zU2,.001),iD2=1./max(zD2,.001);") != std::string::npos,
