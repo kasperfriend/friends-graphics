@@ -453,10 +453,9 @@ float4 foreverStyle:register(c208);
 // about the world ORIGIN, which at ten thousand yards out is a translation of hundreds of
 // yards per second. Wave directions come from the trains below instead.
 float4 waveLattice:register(c209);
-// xy=chop phase in cells, wrapped into the noise lattice. zw still mirror the
-// vertex stage's A/B phases for ABI stability, but the pixel stage now receives
-// those two already-evaluated long trains through spare UV lanes instead of
-// spending the same sin/cos work again for every covered pixel.
+// xy=chop phase in cells, wrapped into the noise lattice; zw=the same-draw,
+// camera-compensated phase for the broad foam warp, wrapped in that field's own
+// frequency and period. Long swell A/B arrive through spare UV lanes.
 float4 wavePhase:register(c210);
 // xy=drift of the client's detail map in its uv, z=WATER QUALITY (0..10), w=the wave gate:
 // 0 with WAVES off - and 0 at quality FLAT, which is the same thing asked for from the
@@ -875,10 +874,18 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float foamWind=saturate(wind);
     float breaking=saturate(pinch*2.4);
     float capBand=detail.y*1.06+breaking*.30+(detail.x-.5)*.26;
+    // Sample the broad foam field at this pixel, not from the vertex-interpolated
+    // warp used to bend the swell. Linear interpolation across liquid triangles
+    // exposed polygon seams in large bright foam patches, and those seams shifted
+    // on screen as the camera changed the projected mesh. The same wrapped phase
+    // and world lattice keep this exact sample nailed to the terrain; the existing
+    // footprint filter below handles unresolved detail without triangle facets.
+    float2 foamWarpCoord=float2(plane.x*.8253356+plane.y*.5646425,
+                                -plane.x*.5646425+plane.y*.8253356)*.05+wavePhase.zw;
+    float3 foamWarp=noiseGradient(foamWarpCoord);
     // Broad warp noise gives foam its tongue-scale shape; the already drifting
-    // chop sample tears the edges into smaller flecks. The moving threshold
-    // breaks the repeated white stripe without another texture sample.
-    float foamPattern=saturate(.45*waveWarp.x+.55*detail.x);
+    // chop sample tears the edges into smaller flecks. The threshold breaks the stripe.
+    float foamPattern=saturate(.45*foamWarp.x+.55*detail.x);
     float foamThreshold=.82+(1-foamPattern)*.14;
     float whitecap=smoothstep(foamThreshold,foamThreshold+.14,capBand);
     // Foam where the bottom comes up fast is the one cue available for a river hitting a
@@ -895,12 +902,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // FOAM LACE, at WATER QUALITY 7: a mask decides WHERE foam is and says nothing about
     // what it looks like, and one scalar of coverage can only ever be a grey sheet - which is
     // what "the foam is nice but flat" was. Real foam is a lace: bright filaments with dark,
-    // water-filled gaps between them, at three scales at once. All three are already sampled
-    // for the surface itself, so this costs arithmetic and no noise evaluation - the fine
-    // chop is the fleck, the mid octave is the lump a fleck sits on, and the broad warp is
-    // the tongue both are torn out of. It multiplies the crest terms whole, because a whitecap
-    // IS a broken streak, and only .45 of the shore term, because a sheet running up a beach
-    // is continuous in a way a cap on a crest is not.
+    // water-filled gaps between them, at three scales. Fine chop is the fleck and an exact
+    // per-pixel sample of the broad warp is the tongue both are torn out of; the latter costs
+    // one noise evaluation but avoids exposing vertex-triangle interpolation in bright foam.
+    // The level-7 mid octave remains out of foam coverage. Lace multiplies crest terms whole,
+    // because a whitecap IS a broken streak, and only .45 of the shore term, because a sheet
+    // running up a beach is continuous in a way a cap on a crest is not.
     // ...and the lace reads those octaves' VALUES, which is exactly the thing the `detail`
     // fade above exists for: value noise a pixel cannot resolve aliases into a fixed
     // screen-aligned grid, and on foam - where the term multiplies a bright colour - that grid
@@ -933,9 +940,10 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // The mid octave is deliberately NOT a foam input. It is the level-7 value that
         // brought the visible lattice back even after the clipped saturate was removed;
         // its screen projection is exactly the grid reported at quality 7 and above.
-        // The broad warp is interpolated from vertices and is continuous across the liquid
-        // mesh, so use it as the second lace scale instead of per-pixel mid value noise.
-        float broad=lerp(.5,waveWarp.x,filter);
+        // Exact pixel-space broad warp prevents triangle interpolation seams; this octave
+        // stays low-frequency and world-anchored, then fades only when the footprint cannot
+        // resolve it.
+        float broad=lerp(.5,foamWarp.x,filter);
         lace=lerp(1,1-.70*(1-fine)*(1-broad),saturate(filter*2-.2));
     }
     // BACKWASH, at the same level: foam left on a beach lies ALONG the shoreline, in streaks
@@ -1679,6 +1687,17 @@ struct Scope {
             float modelView[4][4]{};
             std::memcpy(modelView,nativeVertexConstants,sizeof(modelView));
             auto anchor=renderer::water::AnchorFromModelView(modelView);
+            // c5..c8 may be VIEW alone or VIEW*WORLD for a translated liquid tile.
+            // In the latter case the camera extracted from modelView is tile-local and
+            // cancels the tile origin when added to rel, restarting foam at every tile.
+            // Query the live VIEW transform on this draw (including reflection views) and
+            // use its global camera only when the rigid bases match the vertex matrix.
+            D3DMATRIX liveView{};
+            if(SUCCEEDED(d->GetTransform(D3DTS_VIEW,&liveView))) {
+                float viewRows[4][4]{};
+                std::memcpy(viewRows,&liveView,sizeof(viewRows));
+                anchor=renderer::water::AnchorForWaterDraw(modelView,viewRows);
+            }
             if(!anchor.valid) {
                 // No rigid basis on this draw (an unfilled constant register, a fixture):
                 // fall back to the captured camera, which is at least the right world, and
@@ -1709,12 +1728,10 @@ struct Scope {
             controls[36]=wave.lattice[0];controls[37]=wave.lattice[1];
             controls[38]=wave.lattice[2];controls[39]=wave.lattice[3];
             controls[40]=wave.ripplePhase[0];controls[41]=wave.ripplePhase[1];
-            // The two trains the vertex stage displaces share their register with the
-            // pixel stage, and the four it does not are one float4 of their own (c217):
-            // gathers from spread registers would cost the pixel stage more than the
-            // four trains it saves, and a phase has to arrive contiguous to be added to
-            // a batch of projections in one instruction.
-            controls[42]=wave.swellPhase[0];controls[43]=wave.swellPhase[1];
+            // Pixel c210.zw were spare once the long swell moved to UV lanes. Use them
+            // for the exact per-pixel foam warp; its transformed camera phase is reduced
+            // in the warp's own period, never borrowed from the chop's c210.xy phase.
+            controls[42]=wave.warpPhase[0];controls[43]=wave.warpPhase[1];
             controls[44]=wave.uvDrift[0];controls[45]=wave.uvDrift[1];
             // c211.z: the WATER QUALITY level itself. Both stages compare it against the gates
             // in src/Water/WaterQuality.h, which spells each one as `level - .5`, so the level

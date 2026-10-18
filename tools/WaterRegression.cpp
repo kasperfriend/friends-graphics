@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -267,13 +268,11 @@ int main() try
     }
     // ---- the anchor: the camera the draw itself carries ----------------------------
     // A world-anchored wave is two halves that have to agree: the camera-relative
-    // coordinate the vertex stage computes from its own matrix, and the camera's world
-    // position the CPU folds into the phase. Read one half from a frame-captured camera
-    // and the sea slides by exactly however far the player moved since that capture - the
-    // capture happens on the first draw of the frame that carries the perspective
-    // constants, so water drawn before it is anchored to LAST frame's camera, and the
-    // client's own reflection pass renders water under a mirrored camera the capture never
-    // sees at all. Both halves therefore come from c5..c8 of the draw being shaded.
+    // coordinate the vertex stage computes from modelView, and the global camera position
+    // folded into the phase. The phase must come from this draw's live VIEW transform, not
+    // a frame capture that may be stale or refer to the player's camera during reflections.
+    // A translated tile makes modelView's extracted camera local, so the helper below also
+    // tests that global view coordinates survive distinct tile origins.
     //
     // The array is the client's row-vector matrix: world axis i arrives in view space as
     // row i, and the camera is -dot(row i, translation). Reading the components ACROSS the
@@ -303,6 +302,29 @@ int main() try
         Require(anchor.valid,"a real liquid draw's matrix is accepted as an anchor");
         Require(std::fabs(anchor.camera[0]-camera[0])<2e-2f&&std::fabs(anchor.camera[1]-camera[1])<2e-2f,
                 "the camera read out of a draw is the camera the draw was rendered from");
+        // A water tile can carry a translation in WORLD while D3DTS_VIEW remains global.
+        // Extracting camera from VIEW*WORLD makes it tile-local and makes foam restart at
+        // every mesh origin. AnchorForWaterDraw must use the live VIEW camera when bases match.
+        const float tile[3]={-937.f,2145.f,0.f};
+        float tileModelView[4][4];
+        std::memcpy(tileModelView,m,sizeof(tileModelView));
+        for(int component=0;component<3;++component)
+            tileModelView[3][component]=m[3][component]+tile[0]*m[0][component]
+                +tile[1]*m[1][component]+tile[2]*m[2][component];
+        const auto tileAnchor=AnchorForWaterDraw(tileModelView,m);
+        Require(tileAnchor.valid&&tileAnchor.worldAligned&&
+                std::fabs(tileAnchor.camera[0]-camera[0])<2e-2f&&
+                std::fabs(tileAnchor.camera[1]-camera[1])<2e-2f,
+                "translated water tiles share the live global camera anchor instead of a tile-local phase");
+        const float localPoint[3]={4640.f-tile[0],-7405.f-tile[1],0.f};
+        float tileView[3]={tileModelView[3][0],tileModelView[3][1],tileModelView[3][2]};
+        for(int i=0;i<3;++i)
+            for(int j=0;j<3;++j)tileView[i]+=localPoint[j]*tileModelView[j][i];
+        const float tileRelX=tileModelView[0][0]*tileView[0]+tileModelView[0][1]*tileView[1]+tileModelView[0][2]*tileView[2];
+        const float tileRelY=tileModelView[1][0]*tileView[0]+tileModelView[1][1]*tileView[1]+tileModelView[1][2]*tileView[2];
+        Require(std::fabs(tileRelX+tileAnchor.camera[0]-4640.f)<3e-2f&&
+                std::fabs(tileRelY+tileAnchor.camera[1]+7405.f)<3e-2f,
+                "the same world point has the same foam phase across translated liquid tiles");
         // The pairing itself: the coordinate the vertex stage computes from this matrix,
         // plus the camera the CPU read out of the SAME matrix, is the world position of the
         // point - at every yaw and pitch, which is exactly what the transposed reading
@@ -832,9 +854,10 @@ int main() try
                 "the lattice coordinate is the world offset from this draw's own camera");
         Require(code.find("GetVertexShaderConstantF(5,nativeVertexConstants[0],31)")!=std::string::npos&&
                 code.find("memcpy(modelView,nativeVertexConstants,sizeof(modelView))")!=std::string::npos&&
-                code.find("AnchorFromModelView(modelView)")!=std::string::npos&&
+                code.find("GetTransform(D3DTS_VIEW,&liveView)")!=std::string::npos&&
+                code.find("AnchorForWaterDraw(modelView,viewRows)")!=std::string::npos&&
                 code.find("anchor.camera[0],anchor.camera[1],anchor.valid")!=std::string::npos,
-                "the wave field is anchored to the batched constants of the draw being shaded");
+                "the wave and foam phase combines this draw's camera-relative vertex constants with its live global view anchor");
         Require(code.find("waveFrame.cameraPosition.x,waveFrame.cameraPosition.y")==std::string::npos,
                 "no water draw is anchored to a camera captured on some other draw");
         Require(code.find("controls[48]=anchor.up[0]")!=std::string::npos&&
@@ -904,11 +927,14 @@ int main() try
         // The foam checkerboard, which took two attempts and is pinned in both directions because the
         // The player's latest capture still has the grid after both earlier changes. Level 7 is the
         // switch that adds rippleMid, and that per-pixel value was still feeding the lace. Keep the
-        // mid octave for its wave slope; use the vertex-interpolated broad warp as the second foam
-        // scale instead, so its lattice cannot be printed onto the coverage. Also pin the old clipped
-        // thresholds out of both implementations.
+        // mid octave remains for its wave slope; sample broad warp exactly per pixel as the second
+        // foam scale, so neither a projected octave nor triangle interpolation prints a grid.
+        // Also pin the old clipped thresholds out of both implementations.
         Require(pixel.find("float fine=lerp(.5,rippleFine.x,filter*filter);")!=std::string::npos&&
-                pixel.find("float broad=lerp(.5,waveWarp.x,filter);")!=std::string::npos&&
+                pixel.find("float2 foamWarpCoord=float2(plane.x*.8253356+plane.y*.5646425,")!=std::string::npos&&
+                pixel.find("float3 foamWarp=noiseGradient(foamWarpCoord);")!=std::string::npos&&
+                pixel.find("float broad=lerp(.5,foamWarp.x,filter);")!=std::string::npos&&
+                pixel.find("float broad=lerp(.5,waveWarp.x,filter);")==std::string::npos&&
                 pixel.find("lace=lerp(1,1-.70*(1-fine)*(1-broad),saturate(filter*2-.2));")!=std::string::npos&&
                 pixel.find("rippleMid.x",pixel.find("float lace=1;"))==std::string::npos&&
                 pixel.find("*1.7-.35)")==std::string::npos&&
@@ -1156,7 +1182,8 @@ int main() try
         // the foam then takes the mirror and the sun road with it - a whitecap scatters.
         Require(pixel.find("float foamWind=saturate(wind);")!=std::string::npos&&
                 pixel.find("float breaking=saturate(pinch*2.4);")!=std::string::npos&&
-                pixel.find("float foamPattern=saturate(.45*waveWarp.x+.55*detail.x);")!=std::string::npos&&
+                pixel.find("float foamPattern=saturate(.45*foamWarp.x+.55*detail.x);")!=std::string::npos&&
+                pixel.find("float foamPattern=saturate(.45*waveWarp.x+.55*detail.x);")==std::string::npos&&
                 pixel.find("float whitecap=smoothstep(foamThreshold,foamThreshold+.14,capBand);")!=std::string::npos,
                 "breaking crests form irregular foam streaks with bounded wind-driven coverage");
         Require(pixel.find("float foamAmount=saturate((shore*waterStyle.z")!=std::string::npos,

@@ -127,11 +127,12 @@ which is what makes them a backwash rather than a second run-up.
 
 Coverage was one scalar, and one scalar can only ever be a grey sheet - which is what "the foam is
 nice but flat" meant. Real foam is a lace: bright filaments with dark, water-filled gaps between
-them, at three scales at once. All three samples already exist for the surface itself, so the lace
-costs arithmetic and no noise evaluation - the fine chop is the fleck, the mid octave is the lump a
-fleck sits on, and the broad warp is the tongue both are torn out of. It multiplies the crest terms
-whole, because a whitecap *is* a broken streak, and only `.45` of the shore term, because a sheet
-running up a beach is continuous in a way a cap on a crest is not.
+them, at multiple scales. The fine chop is the fleck; an exact per-pixel sample of the broad warp
+is the tongue both are torn out of. That extra noise evaluation is intentional: using its
+vertex-interpolated value in high-contrast foam exposed triangle seams that shifted with the camera.
+The level-7 mid octave stays out of coverage, so its projected lattice cannot return as a grid. The
+lace multiplies crest terms whole, because a whitecap *is* a broken streak, and only `.45` of the
+shore term, because a sheet running up a beach is continuous in a way a cap on a crest is not.
 
 The lace reads sampled **values**, not slopes. The first implementation clipped a threshold ramp
 inside the noise range (21.9% of fine cells and 20.2% of mid cells hit the low plateau; the completed
@@ -142,8 +143,8 @@ fixed was premature.
 
 The remaining quality-7 input was the per-pixel **mid octave** itself: level 6 removes that octave
 and the artifact, level 7 adds it. Its world lattice is a useful wave-slope input, but it does not
-need to modulate foam coverage. The lace now combines the fine per-pixel fleck with the broad warp
-already interpolated across the liquid mesh:
+need to modulate foam coverage. The lace combines the fine per-pixel fleck with an exact per-pixel
+broad-warp sample, rather than interpolating that high-contrast foam input across liquid triangles:
 
 ```
 lace = 1 - .70 * (1 - fine) * (1 - broad)
@@ -609,15 +610,15 @@ itself changed from "a phase and a rotation" to "a phase per train":
 | `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
 | `c202` (VS) | one phase per swell train, in cells along that train, wrapped into its own wavelength |
 | `c200` (PS) `.x` | sigma: the Gerstner pinch the pixel stage divides its slope by |
-| `c210` | chop phase (xy), then the two displaced trains' phases (zw) |
-| `c211` | texture creep (xy), the shaded-only train's phase (z), the waves gate (w) |
+| `c210` | chop phase (xy), broad foam-warp phase (zw) |
+| `c211` | texture creep (xy), quality level (z), waves gate (w) |
 | `c212` | this draw's world-up in view space (xyz) and its authored wind (w) |
 
-The vertex stage reads one more set of constants than it used to: `c5..c8`, the draw's own
-model-to-view matrix, are read back on the CPU so the wave phase and the shading's up axis come
-from the same matrix the displacement uses. `watereffect::Scope`'s save/restore is unchanged in
-size - seventeen pixel registers and three vertex registers - because nothing new was added,
-only rearranged.
+The vertex stage's `c5..c8` model-view matrix is read back on the CPU for the per-draw coordinate;
+the phase uses the current global VIEW camera when its basis matches, so an object/tile translation
+is not mistaken for the camera origin. The draw's up axis still comes from its own matrix. The
+shader constant save/restore is unchanged in size - no additional vertex or pixel registers were
+needed for world anchoring.
 
 Round 4 grew both stages by the minimum: the vertex stage gained `c204` (the grouping field's
 camera anchor) and the pixel stage `c217` (the four shading-only trains' phases, in one
@@ -761,14 +762,13 @@ The second half was the anchor. The camera position that the wave phase carries 
 constants - so a water tile drawn before that capture was anchored to last frame's camera, and the
 sea slid backwards by exactly the distance the player moved in between. The client's own water
 reflection pass is worse: it renders water under a mirrored camera the capture never sees at all.
-Both halves now come from the draw itself: `watereffect::Scope` reads `c5..c8` back with
-`GetVertexShaderConstantF`, and `renderer::water::AnchorFromModelView` in `src/Water/WaveField.h`
-turns that matrix into the camera position and the world-up axis the shading uses. It refuses a
-basis that is not orthonormal - the pairing "view position dotted with row *i* is the world
-offset's component *i*" is only true of a rigid basis - and the caller then falls back to the
-captured camera, which is the right world even when it is the wrong frame. The regression test
-builds real yawed, pitched and mirrored matrices, runs the shader's own dot products through them,
-and requires `rel + anchor == world point` to within two centimetres at every angle.
+Both halves now come from the current draw without confusing a tile origin for world origin:
+`watereffect::Scope` reads `c5..c8` and the live `D3DTS_VIEW` transform. `AnchorForWaterDraw` uses
+the global VIEW camera when its basis matches modelView (including translated water tiles), while
+retaining the conservative local anchor for a genuinely transformed basis. This avoids a stale
+`FrameContext` camera and avoids cancelling each tile's world translation. Regression tests construct
+yawed, pitched and translated-tile matrices, then require the shader's relative coordinate plus the
+selected phase anchor to recover the same global world point.
 
 ### Why the sea was fast
 
@@ -816,16 +816,20 @@ the reflection (`*(1 - foam*0.85)`) and the sun road (`*(1 - foam)`) with it, an
 own colour, lifted toward the light but softened at `NoL = -0.25` so a shaded face still carries its
 cap.
 
-The camera-moving foam patch was traced to the shoal/shore inputs, not the wave-noise lattice: the
-shader estimated bed slope from `ddx/ddy` of view-Z depth and scaled it by a projected pixel footprint.
-That is a view-space derivative, so camera pitch and depth precision could change the foam boundary
-and make it crawl even when the world-anchored wave coordinates were correct. Foam now reconstructs
-the seabed point on the sampled pixel ray, uses its vertical separation from the water surface for
-shore/backwash depth, and derives bed slope from the reconstructed 3D normal relative to this draw's
-world-up vector. This keeps foam coverage attached to the terrain across camera translation and
-rotation. Optical column depth and refraction remain in view space; only foam placement uses the
-world-space measures. The existing footprint fade remains as an anti-aliasing LOD, not as a motion
-coordinate.
+The top-down screenshot showed both polygonal seams and camera-relative foam movement. The depth-based
+shore estimate was one source: the old shader derived bed slope from `ddx/ddy` of view-Z depth and a
+projected pixel footprint, so camera pitch and depth precision changed the foam boundary. The shader
+now reconstructs the seabed point on the sampled ray, uses its vertical separation from the water
+surface for shore/backwash depth, and derives slope from the reconstructed 3D normal relative to this
+draw's world-up vector. Optical column depth and refraction remain in view space.
+
+A second source was the coordinate anchor. A native c5..c8 model-view matrix can contain a liquid
+tile's world translation; deriving the camera phase from that matrix cancels the tile origin and
+restarts noise at each tile. The draw now combines its camera-relative vertex coordinates with the
+live D3D view matrix's global camera position when the bases match, so translated world-aligned tiles
+share one phase without borrowing a stale frame camera. Finally, the broad foam warp is sampled at
+pixel positions rather than linearly interpolated across mesh triangles, preventing visible facets in
+large bright patches. The footprint fade is retained only as anti-aliasing LOD.
 
 ### Settings, and what a player sees
 

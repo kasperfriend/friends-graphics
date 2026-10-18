@@ -295,18 +295,18 @@ namespace renderer::water
     }
 
     // ---- the anchor: what the draw itself says about the camera ----------------
-    // The wave field is world-anchored by adding the camera's own coordinate to the
-    // camera-relative one the vertex stage computes. Both halves have to come from the
-    // SAME matrix or the field slides: a frame-captured camera is a frame behind (and is
-    // the player's camera even while the client renders water into its own reflection
-    // target), which is exactly how the sea used to swim when the player moved. So the
-    // caller reads the draw's own model->view constants - c5..c8, four rows, row 3 the
-    // translation - and this turns them into the two things the field needs.
+    // The wave field is world-anchored by adding the global camera coordinate to the
+    // camera-relative position the vertex stage computes. The relative half comes from
+    // this draw's c5..c8; the global half comes from this draw's live VIEW transform, not
+    // FrameContext (which can be a frame behind or refer to the player's camera during a
+    // reflection pass). If modelView includes a translated tile origin, its extracted
+    // camera is local and must not be used as the global phase.
     struct DrawAnchor
     {
-        float camera[2] = {0.f, 0.f};  // camera position in the matrix's own (world) axes
+        float camera[2] = {0.f, 0.f};  // camera position in the matrix's coordinate frame
         float up[3] = {0.f, 0.f, 1.f}; // world +Z in view space: this draw's idea of up
         bool valid = false;
+        bool worldAligned = false;     // phase anchor is global world XY, not object-local
     };
 
     inline DrawAnchor AnchorFromModelView(const float modelView[4][4]) noexcept
@@ -358,6 +358,29 @@ namespace renderer::water
         for (int component = 0; component < 3; ++component) out.up[component] = modelView[2][component];
         out.valid = true;
         return out;
+    }
+
+    // A native c5..c8 "modelView" matrix can include a water-tile world translation.
+    // AnchorFromModelView then returns the camera in that tile's local frame: adding it
+    // to the shader's camera-relative vertex coordinate cancels the tile origin and
+    // restarts every foam/wave field at local (0,0), producing visible seams. For the
+    // common world-aligned water mesh, take the camera and up axis from THIS draw's live
+    // D3D view matrix, but only when its basis matches modelView (translation-only world
+    // transforms). Rotated/scaled objects retain the conservative per-draw anchor.
+    inline DrawAnchor AnchorForWaterDraw(const float modelView[4][4],const float view[4][4]) noexcept
+    {
+        DrawAnchor draw=AnchorFromModelView(modelView);
+        const DrawAnchor world=AnchorFromModelView(view);
+        if(!draw.valid||!world.valid)return draw;
+        for(int axis=0;axis<3;++axis)
+            for(int component=0;component<3;++component)
+                if(std::fabs(modelView[axis][component]-view[axis][component])>.02f)
+                    return draw;
+        draw.camera[0]=world.camera[0];
+        draw.camera[1]=world.camera[1];
+        for(int component=0;component<3;++component)draw.up[component]=world.up[component];
+        draw.worldAligned=true;
+        return draw;
     }
 
     // `scalePercent` is the player-facing wave size knob (100 = shipped default);
