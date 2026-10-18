@@ -129,6 +129,77 @@ ages. Check Auto snow and sandstorm the same way. The near layer's pattern
 repeats every ~19 minutes; because the other two layers never realign with
 it, the combined rain should look unchanging rather than repeating.
 
+# Full-screen rain that was not the phase collapse (2026-10-17, second pass)
+
+Reported again after the split above shipped: *"rain shader is still overflowing full screen most
+of the times"*. The word that matters is **still**. The phase split is sound - every grid is bounded
+by its period, the wrapped cell index never exceeds it, and the decimal part the stage subtracts is
+always below one - so the same symptom coming back meant a different mechanism. There were two, and
+neither had anything to do with session age, which is why the report said "most of the times" rather
+than "after an hour".
+
+## Cause 1: the indoor factor was never set
+
+The precipitation stage is a screen-sized quad composited over everything the client drew, so
+nothing inside it knows where the player is standing. The one thing that was meant to keep rain out
+of a cave, an inn or a city arcade is `smoothedIndoor`, uploaded as `c2.w` and read by the stage as
+`intensity * (1 - indoor * 0.96)`.
+
+It was declared in `WeatherVisuals.h`, read into two constant buffers (precipitation and the lens
+droplets), and never once written by anything in the tree. It was permanently `0.0`, so the
+suppression never happened: rain drew at full strength over the whole screen under any roof, and
+kept doing so for the whole of `nativeWeatherHoldMs` - five seconds - after the client itself had
+stopped emitting particles.
+
+## Cause 2: a missing depth reads as "infinitely far"
+
+When no INTZ depth was captured, the neutral fallback texture is a 1x1 `0xFFFFFFFF`, so
+`GetLinearDepth` answers 100000 for every pixel. That was already handled for roof occlusion
+(`lightColor.w` carries `hasCapturedDepth`), but the mist block was gated only on distance:
+
+```hlsl
+if (isSand < 0.5 && sceneZ > 6.0)   // and a 6..40 yard fade inside
+```
+
+With `sceneZ` at 100000 both gates answer "as far away as it is possible to be", so the mist ran at
+full strength over every pixel of the screen. A distance-gated term reading a missing distance is
+not a distant term; it is an ungated one. This is the state the client is in whenever multisampling
+is above 1x, which is also why the same session reported effects disappearing there.
+
+## Fix
+
+`smoothedIndoor` is now computed in `Present()` from the client's own weather emission, which the
+draw hook already counts. WoW stops emitting weather particles under cover, so a frame that still
+recognises the weather mode but saw no native weather draw is a frame with a roof in it. The evidence
+has to be sustained for `coverEvidenceMs` (350 ms) before it counts, so a client emitting on
+alternate frames, or one throttled frame, never trips it - either resets the clock. It is deliberately
+silent while the game is unfocused or the mode detector is suspended, because absence of a draw there
+means exactly what the five second hold already assumes it means: nothing. The factor is eased, not
+switched: up in about half a second, down in about a second and a half, so a roof edge cannot strobe
+a fullscreen pass.
+
+The mist is gated on `weatherParams.w`, which now carries `hasCapturedDepth`. No depth means no
+depth-gated term, which is the rule the occlusion factor already followed.
+
+`GetStatusText()` appends `(COVER)` while the factor is above half, so the rain dimming under a roof
+reads as the renderer working rather than as the effect failing.
+
+## Verification
+
+`tools/WindRegression.cpp` pins all five pieces of the wiring: the mist gate on `weatherParams.w`, the
+constant upload, the eased update, the silence-while-unfocused condition, and the 350 ms evidence
+window. It also still pins the phase split from the section above, so the two mechanisms cannot be
+confused with each other again.
+
+## In-game check
+
+Stand in rain, then walk under a roof or into a cave. The added layer should fade out in about half a
+second and F10's status should read `RAIN ON (COVER)`; walking back out should bring it back over
+about a second and a half. It should never fade while you are standing in the open in rain, and never
+fade because you alt-tabbed. Separately, run with Multisampling above 1x (no depth) and confirm the
+low grey mist no longer sits over the whole screen - the drops themselves still draw, because they are
+screen-space and never needed depth.
+
 # Layered rainfall look (2026-10-17)
 
 The current replacement rain stage is an analytical particle field, not the

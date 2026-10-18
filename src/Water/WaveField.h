@@ -113,10 +113,58 @@ namespace renderer::water
     // that never repeats inside the distance a player can see.
     inline constexpr float kTrainPhaseCells[kTrainCount] =
         {0.f, .37f * 11.5f, .71f * 8.f, .19f * 5.8f, .55f * 4.4f, .83f * 3.4f, .29f * 2.55f, .63f * 1.95f};
-    // The two trains the mesh is dense enough to carry. Everything above index 1
-    // is normal-mapped only, exactly like a real renderer splits simulation from
-    // detail: displacing an eleven yard wave on a four yard grid is what facets.
+    // The two trains the mesh is dense enough to carry at the shipped quality, and the
+    // two whose sine/cosine pairs travel to the pixel stage in spare UV lanes. Everything
+    // above index 1 is normal-mapped only, exactly like a real renderer splits simulation
+    // from detail: displacing an eleven yard wave on a four yard grid is what facets.
     inline constexpr int kGeometryTrainCount = 2;
+    // WATER QUALITY 8 and above also lifts train C - the twenty yard wave, at five mesh
+    // facets to a crest. That is the shortest train this grid can carry without faceting,
+    // and it is the scale the eye reads as "waves" rather than as swell or as texture: with
+    // only A and B displaced, the silhouette against a shore, a hull or the horizon stays
+    // flat while the shading on it moves, which is the tell that a sea is a picture. Train
+    // D (14.5 yards, three and a half facets) is the reason this is a ceiling and not a
+    // step: below four facets a displaced wave is a staircase the normal map cannot hide.
+    inline constexpr int kGeometryTrainCountMax = 3;
+
+    // The pinch budget of the trains the mesh actually lifts, which is what the Gerstner
+    // surface folds against: sum of weight*k over the displaced trains. Both stages and the
+    // fold clamps below read this rather than a hand-written pair of terms, so adding a
+    // displaced train cannot leave the clamp describing a mesh that no longer exists.
+    inline constexpr float GeometryPinch(int trains) noexcept
+    {
+        float pinch = 0.f;
+        const int count = trains < 0 ? 0 : (trains > kTrainCount ? kTrainCount : trains);
+        for (int train = 0; train < count; ++train) pinch += kTrainWeight[train] * kTrainRadians[train];
+        return pinch;
+    }
+
+    // The displaced weight sum, and the renormalization the vertex stage divides the combined
+    // lift and slide by. WAVE HEIGHT is a peak lift in yards, so adding a train has to add
+    // SHAPE and not SIZE: scaled by the two-train sum over the displaced sum, the peak lift
+    // and the Gerstner slide/lift ratio are exactly what the two-train mesh produced, and the
+    // fold budget gets SMALLER rather than larger - one more train sharing the same height.
+    inline constexpr float GeometryWeightSum(int trains) noexcept
+    {
+        float sum = 0.f;
+        const int count = trains < 0 ? 0 : (trains > kTrainCount ? kTrainCount : trains);
+        for (int train = 0; train < count; ++train) sum += kTrainWeight[train];
+        return sum;
+    }
+
+    inline constexpr float MeshNormalization(int trains) noexcept
+    {
+        const float sum = GeometryWeightSum(trains);
+        return sum > 0.f ? GeometryWeightSum(kGeometryTrainCount) / sum : 1.f;
+    }
+
+    // The worst pinch the mesh can be handed at the highest quality: the displaced trains'
+    // budget times the renormalization that keeps the peak height authored. This is the
+    // number the fold clamp is written against, and it is a little ABOVE the two-train
+    // budget (three trains carry proportionally more slope per unit of height than two do)
+    // but far below the shading's eight-train budget, which never moves a triangle.
+    inline constexpr float kMeshPinchMax = GeometryPinch(kGeometryTrainCountMax)
+        * MeshNormalization(kGeometryTrainCountMax);
 
     // ---- how fast a wave of a given length should travel ---------------------
     // Deep-water dispersion: a gravity wave of wavelength L travels at
@@ -247,18 +295,18 @@ namespace renderer::water
     }
 
     // ---- the anchor: what the draw itself says about the camera ----------------
-    // The wave field is world-anchored by adding the camera's own coordinate to the
-    // camera-relative one the vertex stage computes. Both halves have to come from the
-    // SAME matrix or the field slides: a frame-captured camera is a frame behind (and is
-    // the player's camera even while the client renders water into its own reflection
-    // target), which is exactly how the sea used to swim when the player moved. So the
-    // caller reads the draw's own model->view constants - c5..c8, four rows, row 3 the
-    // translation - and this turns them into the two things the field needs.
+    // The wave field is world-anchored by adding the global camera coordinate to the
+    // camera-relative position the vertex stage computes. The relative half comes from
+    // this draw's c5..c8; the global half comes from this draw's live VIEW transform, not
+    // FrameContext (which can be a frame behind or refer to the player's camera during a
+    // reflection pass). If modelView includes a translated tile origin, its extracted
+    // camera is local and must not be used as the global phase.
     struct DrawAnchor
     {
-        float camera[2] = {0.f, 0.f};  // camera position in the matrix's own (world) axes
+        float camera[2] = {0.f, 0.f};  // camera position in the matrix's coordinate frame
         float up[3] = {0.f, 0.f, 1.f}; // world +Z in view space: this draw's idea of up
         bool valid = false;
+        bool worldAligned = false;     // phase anchor is global world XY, not object-local
     };
 
     inline DrawAnchor AnchorFromModelView(const float modelView[4][4]) noexcept
@@ -310,6 +358,29 @@ namespace renderer::water
         for (int component = 0; component < 3; ++component) out.up[component] = modelView[2][component];
         out.valid = true;
         return out;
+    }
+
+    // A native c5..c8 "modelView" matrix can include a water-tile world translation.
+    // AnchorFromModelView then returns the camera in that tile's local frame: adding it
+    // to the shader's camera-relative vertex coordinate cancels the tile origin and
+    // restarts every foam/wave field at local (0,0), producing visible seams. For the
+    // common world-aligned water mesh, take the camera and up axis from THIS draw's live
+    // D3D view matrix, but only when its basis matches modelView (translation-only world
+    // transforms). Rotated/scaled objects retain the conservative per-draw anchor.
+    inline DrawAnchor AnchorForWaterDraw(const float modelView[4][4],const float view[4][4]) noexcept
+    {
+        DrawAnchor draw=AnchorFromModelView(modelView);
+        const DrawAnchor world=AnchorFromModelView(view);
+        if(!draw.valid||!world.valid)return draw;
+        for(int axis=0;axis<3;++axis)
+            for(int component=0;component<3;++component)
+                if(std::fabs(modelView[axis][component]-view[axis][component])>.02f)
+                    return draw;
+        draw.camera[0]=world.camera[0];
+        draw.camera[1]=world.camera[1];
+        for(int component=0;component<3;++component)draw.up[component]=world.up[component];
+        draw.worldAligned=true;
+        return draw;
     }
 
     // `scalePercent` is the player-facing wave size knob (100 = shipped default);
@@ -417,12 +488,13 @@ namespace renderer::water
         + kTrainWeight[5] * kTrainRadians[5] + kTrainWeight[6] * kTrainRadians[6]
         + kTrainWeight[7] * kTrainRadians[7];
 
-    // The same sum over the trains the MESH carries. This is the one the Gerstner
-    // surface actually folds against: the vertex stage slides the two long trains only,
-    // so the six short ones steepen the shading without ever turning a triangle
-    // inside out, and the fold clamp is written against this number, not the other.
-    inline constexpr float kGeometryPinch = kTrainWeight[0] * kTrainRadians[0]
-        + kTrainWeight[1] * kTrainRadians[1];
+    // The same sum over the trains the MESH carries at the shipped quality. This is the one
+    // the Gerstner surface actually folds against: the vertex stage slides the two long
+    // trains only, so the six short ones steepen the shading without ever turning a triangle
+    // inside out, and the fold clamp is written against this number, not the other. WATER
+    // QUALITY 8 adds train C to the mesh, renormalized to this baseline's peak height, which
+    // is what kMeshPinchMax below describes.
+    inline constexpr float kGeometryPinch = GeometryPinch(kGeometryTrainCount);
 
     // The largest |height| the table can reach is the sum of its weights, so this divisor
     // maps a swell sample into -0.5..0.5 and a crest-reading `swell01` into 0..1 with calm
@@ -460,17 +532,24 @@ namespace renderer::water
     // a shaded picture of a wave and water that reads as a body moving in three
     // dimensions. `sigma` is the dimensionless steepness both stages share
     // (lateral/cell); the surface folds - crests tear into loops - once
-    // sigma*kGeometryPinch reaches 1 AT FULL GROUPING, so it is clamped well below
+    // sigma*kMeshPinchMax reaches 1 AT FULL GROUPING, so it is clamped well below
     // that and the clamp, not the shader, is what guarantees a wave can never turn
     // inside out.
     inline constexpr float kGeometryWaveYards = .75f;  // WAVE HEIGHT 100 at the shipped wave size
     inline constexpr float kGerstnerSigma = .45f;      // the shipped crest shape
-    // 1 - .55*kGeometryPinch*kGroupMax is the flattest the mesh can be asked to get.
-    // The grouping envelope multiplies the lift AND the slide, so the ceiling the clamp
-    // is written against has the envelope's own maximum in it: a crest at the top of a
-    // set is steeper than the same crest between sets, and the fold limit has to hold on
-    // the tall one.
-    inline constexpr float kGerstnerSigmaMax = .55f;   // fold safety: Jacobian never below ~.54
+    // 1 - .55*kMeshPinchMax*kGroupMax is the flattest the mesh can be asked to get, at any
+    // WATER QUALITY: the worst pinch the mesh is ever handed is the displaced trains' budget
+    // times the renormalization that keeps the peak height authored (kMeshPinchMax, which is
+    // the three-train number and therefore also the two-train one). The grouping envelope
+    // multiplies the lift AND the slide, so the ceiling the clamp is written against has the
+    // envelope's own maximum in it: a crest at the top of a set is steeper than the same crest
+    // between sets, and the fold limit has to hold on the tall one.
+    inline constexpr float kGerstnerSigmaMax = .55f;   // fold safety: Jacobian never below ~.48
+    // Stated rather than assumed, because it is the one number here that keeps a wave from
+    // turning inside out on a player's screen: at the shipped steepness and the top of a set,
+    // the mesh the highest quality builds still has a positive Jacobian with room to spare.
+    static_assert(kGerstnerSigmaMax * kMeshPinchMax * kGroupMax < .75f,
+                  "the Gerstner mesh cannot fold at the highest quality or the top of a set");
 
     struct GeometryWaves
     {

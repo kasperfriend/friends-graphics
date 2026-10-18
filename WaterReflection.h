@@ -48,7 +48,20 @@ inline void Prepare(IDirect3DDevice9* d,const renderer::water::Observation* obse
  attempted=true;
  if(!volume::ready)return;
  D3DSURFACE_DESC desc{};
- if(FAILED(volume::target->GetDesc(&desc))||desc.MultiSampleType!=D3DMULTISAMPLE_NONE){++failedFrames;return;}
+ // Colour only, and multisampling is ALLOWED here - which it was not, and the guard was costing the
+ // whole reflection/refraction colour source whenever the client ran above 1x. Copying a
+ // multisampled render target into the plain D3DUSAGE_RENDERTARGET texture created below is not a
+ // special case in D3D9, it is the resolve: StretchRect averages the samples on the way across,
+ // which is exactly what a sampled colour source needs. If a driver refuses it, the HRESULT is
+ // already handled one line down and this fails the way it used to, per frame, without taking
+ // anything else with it.
+ //
+ // The DEPTH side of this renderer has no equivalent and cannot be given one: a multisampled depth
+ // buffer cannot be sampled by a pixel shader in D3D9 at all, so above 1x the effects that read
+ // depth lose it whatever this file does. That is why anti-aliasing lives in the image pass
+ // (see GraphicsEffects.ini's [PostProcess] AntiAliasing) and why 1x multisampling is the setting
+ // this renderer is meant to run at.
+ if(FAILED(volume::target->GetDesc(&desc))){++failedFrames;return;}
  if(resources.owner!=d||resources.width!=desc.Width||resources.height!=desc.Height||resources.format!=desc.Format||!resources.scene||!resources.surface){
      resources.scene.Reset();
      resources.surface.Reset();

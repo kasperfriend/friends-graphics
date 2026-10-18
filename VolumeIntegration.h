@@ -38,6 +38,14 @@ renderer::CloudWeather cloudWeather=renderer::CloudWeather::Clear;
 float cloudWeatherStrength=1.f;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,temporalShaftsEnabled=false;
 bool postProcessEffectEnabled=true;
+// Anti-aliasing has its own switch instead of riding the grade master above, because the two answer
+// different questions and a player needs to be able to answer them separately: the master is "do I
+// want my colours graded" (off for maximum FPS), this one is "do I want my edges smoothed". It is
+// the replacement for hardware multisampling, which this renderer cannot use at all above 1x - a
+// multisampled depth buffer cannot be sampled by a pixel shader in D3D9, and every depth-reading
+// effect here loses its depth when the client is set higher. Making AA a passenger on the grade
+// master would mean the fix for that is invisible to anyone who has never touched PostProcess.
+bool antiAliasingEnabled=true;
 bool sunGlareEnabled=true;
 float sunGlareStrength=0.25f;
 UINT shadowMapUpdateInterval=2;
@@ -326,15 +334,17 @@ void ReloadTuning() {
     gammaPercent = std::clamp(ReadTuning(L"GammaPercent", 100, L"PostProcess"), 50, 180);
     sharpnessPercent = std::clamp(ReadTuning(L"SharpnessPercent", 35, L"PostProcess"), 0, 100);
     postProcessEffectEnabled = ReadTuning(L"Enabled", 1, L"PostProcess") != 0;
+    antiAliasingEnabled = ReadTuning(L"AntiAliasing", 1, L"PostProcess") != 0;
     // One line per CHANGE, not one per reload: this runs on every settled crossing
     // as well as at startup, and a line here is an open, a write and a close of a
     // file in the game folder - which a scanner watching that folder turns into
-    // milliseconds, on exactly the path a player walks a border on. The text is
-    // unchanged, so an existing log still reads the same way.
+    // milliseconds, on exactly the path a player walks a border on. The line carries the
+    // anti-aliasing switch as well as the grade, so a log answers "is AA on" without a second
+    // lookup - it is the setting that decides whether the client should be at 1x multisampling.
     {
-        char message[160];
-        sprintf_s(message, sizeof(message), "PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",
-            postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);
+        char message[192];
+        sprintf_s(message, sizeof(message), "PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d anti-aliasing=%d",
+            postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent,antiAliasingEnabled);
         static std::string lastPostProcessLine;
         if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}
     }
@@ -444,8 +454,9 @@ inline bool HasActiveEffects() {
     bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
     bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
     bool hasClouds = (!shaftDebug && cloudsEffectEnabled && renderer::VolumetricClouds::Instance().Settings().enabled);
-    bool hasPost = postProcessEffectEnabled &&
-        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
+    bool hasPost = (postProcessEffectEnabled &&
+        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) ||
+        antiAliasingEnabled;
     bool hasAO = !shaftDebug && renderer::AmbientOcclusion::Instance().IsActive();
     return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO;
 }
@@ -1408,12 +1419,19 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(2, nullptr));
     }
 
-    // Independent post pass: optional glare failures must not suppress grading.
-    if (postProcessEffectEnabled && legacyShaders.postProcess &&
-        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) {
+    // Independent post pass: optional glare failures must not suppress grading. Anti-aliasing rides
+    // the same pass and the same scratch copy of the backbuffer - one blit for both - but it can put
+    // the pass on the screen by itself, and when it does the grade is forced to identity so that a
+    // player who has the master off cannot get their brightness applied through the back door of an
+    // AA pass they turned on for their edges.
+    const bool gradeWanted = postProcessEffectEnabled &&
+        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
+    if (legacyShaders.postProcess && (gradeWanted || antiAliasingEnabled)) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
-        const float postParams[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
-        const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams);
+        const float postParams[4]={gradeWanted?brightnessPercent*.01f:0.f,gradeWanted?contrastPercent*.01f:1.f,
+            gradeWanted?gammaPercent*.01f:1.f,gradeWanted?sharpnessPercent*.01f:0.f};
+        const float aaParams[4]={antiAliasingEnabled?1.f:0.f,0.f,0.f,0.f};
+        const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams,aaParams);
         if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg, sizeof(msg), "PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
     }
 
@@ -1617,17 +1635,22 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
 }
 
 bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
-    if (!target || !surface || !postProcessEffectEnabled ||
-        (brightnessPercent==0 && contrastPercent==100 && gammaPercent==100 && sharpnessPercent==0)) return false;
+    // Same two independent reasons to run the pass as the composed path above, and the same rule
+    // that anti-aliasing alone is enough to put it on screen with an identity grade.
+    const bool gradeWanted = postProcessEffectEnabled &&
+        (brightnessPercent!=0 || contrastPercent!=100 || gammaPercent!=100 || sharpnessPercent!=0);
+    if (!target || !surface || (!gradeWanted && !antiAliasingEnabled)) return false;
     ComPtr<IDirect3DSurface9> currentTarget;
     if(FAILED(d->GetRenderTarget(0,currentTarget.GetAddressOf())) || currentTarget.Get()!=target.Get())return false;
     D3DSURFACE_DESC desc{};
     if(FAILED(target->GetDesc(&desc)) || !legacyShaders.Ensure(d) ||
         !legacyTargets.Ensure(d,desc.Width,desc.Height,desc.Format,std::max<UINT>(1,desc.Width/2),std::max<UINT>(1,desc.Height/2)))return false;
-    const float params[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
+    const float params[4]={gradeWanted?brightnessPercent*.01f:0.f,gradeWanted?contrastPercent*.01f:1.f,
+        gradeWanted?gammaPercent*.01f:1.f,gradeWanted?sharpnessPercent*.01f:0.f};
+    const float aaParams[4]={antiAliasingEnabled?1.f:0.f,0.f,0.f,0.f};
     const auto tracked=renderer::g_trackedState;
     internal=true;
-    const HRESULT hr=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),params);
+    const HRESULT hr=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),params,aaParams);
     internal=false;
     renderer::g_trackedState=tracked;
     if(SUCCEEDED(hr)){static bool logged=false;if(!logged){Log("PostProcess applied independently of camera capture");logged=true;}return true;}

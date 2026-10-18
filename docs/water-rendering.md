@@ -1,5 +1,273 @@
 # Water rendering audit
 
+## Full rework round 5: the quality ladder, mid waves, shore and back flow (2026-10-17)
+
+Round 4 left a sea that reads as a body of water, and a problem no look-setting could answer: the
+only way to buy frames back from it was to switch features off one at a time, and nothing in the
+tree said how much the water cost. This round adds the missing third kind of control - one level
+that trades the whole set of expensive terms at once - and spends the room it creates on three
+things the reference has and this renderer did not: waves in the band between the swell and the
+chop, a shoreline that knows a beach from a rock wall, and water that goes back out again.
+
+### Why a ladder and not eleven switches
+
+A slider with eleven positions is a promise that each position is worth something, and the only way
+to keep that promise cheaply is to make the level the single input. `src/Water/WaterQuality.h` is
+the one place the ladder is written down. `WaterEffect.h` resolves a level into a `QualityPlan`
+once per tuning reload, uploads the plan as constants, and both shader stages compare the level they
+were handed against that header's own gate midpoints (`GateFor(level) = level - .5`), so a level can
+never sit on a boundary and the CPU and the GPU cannot disagree about what a level means. Eleven
+compiled shader variants would have been the alternative; one shader with a uniform gate is what
+ships, and the two ray marches take a *trip count* from a register rather than a branch, so a level
+can hand them any count between 0 and the 12 their loops are written against without recompiling.
+
+| level | name | what it evaluates |
+|---|---|---|
+| 0 | FLAT | no procedural sea at all: no wave gate, no chop, no marches, no emitter reflections |
+| 1 | MINIMAL | the analytic swell shaded on a flat sheet, sky reflection only |
+| 2 | LOW | the mesh lifts, the base chop octave, a 3-step reflection march |
+| 3 | FAIR | 4-step marches; sun-road occlusion returns |
+| 4 | MEDIUM | the second chop octave, bed-slope shore understanding, 6-step marches |
+| 5 | GOOD | 7-step marches |
+| 6 | HIGH | **the sea that shipped before this key existed** - 8-step marches, 8 emitters |
+| 7 | ENHANCED | mid-wave octave, foam lace, shore back flow (**shipped default**) |
+| 8 | VERY HIGH | the mesh also lifts the 20-yard mid wave, 10-step marches |
+| 9 | ULTRA | 12-step marches |
+| 10 | MAX | backlit foam veil, soft refracted contact line |
+
+Two rules the ladder keeps, both pinned in `tools/WaterRegression.cpp`:
+
+* **A level never changes the authored look of the water it keeps.** WAVE HEIGHT is the same peak
+  lift at 0 and at 10, and CLARITY, FOAM AMOUNT and GLINT STRENGTH are the same numbers. The one
+  place that could have broken it is the displaced mid wave - a third Gerstner train would have made
+  the same authored height taller - so the vertex stage renormalizes by
+  `(kWeightA+kWeightB)/(kWeightA+kWeightB+midGate*kWeightC)`, applied to the lift *and* the slide
+  together. The mesh keeps its peak height and its slide-to-lift ratio at every level; the fold
+  budget gets smaller rather than larger (`kMeshPinchMax = .825274`, still inside the eight-train
+  `kMaxPinch` the shading clamp assumes).
+* **A level is monotone.** Raising it can only add work and add detail, so the slider has no
+  surprises in it and a player looking for frames only moves down.
+
+Level 0 is cheap in a way that matters beyond the shader: with no reflection march and no sun-road
+march there is nothing left that reads the pre-water copy for those two features, so
+`NeedsScene()` stops asking for the capture they would not read. Refraction, absorption and foam
+still ask for it, because the shore, the shoal and the back flow are all read out of that depth
+buffer at every level that has them.
+
+### Mid waves
+
+The shortest analytic train is 4.9 yards and the base chop is one 2.5-yard cell; between them the
+sea carried nothing but smooth rounded forms at a fixed scale, which is exactly what the eye groups
+back into lines - the round-4 comb, one band higher. A third noise octave at just under half the
+base frequency (5.4-yard lumps), counter-phased against the base octave the way the fine one is and
+riding the swell between the two, breaks the regularity at the scale that was missing. It fades
+with `filter` rather than with its square: at half the base frequency it stays resolvable about
+twice as far as the fine octave, and fading it as early would remove it from the middle distance,
+which is the only place it was added for.
+
+Above level 8 the *mesh* also lifts the 20-yard train C, which is the shortest wave the client's
+roughly four-yard liquid grid can carry without faceting (five facets to a crest). It is a ceiling,
+not a step on the way to something shorter.
+
+### Shore understanding
+
+The shoal foam was a per-pixel depth difference, and a difference measured per pixel is not a slope:
+it halves when the resolution doubles and halves again when the camera steps back, which is why the
+foam over a bar existed only within a few yards of the water's edge and vanished from the beach above
+it. The lattice footprint the pixel stage already takes for the chop fade is that pixel's own size in
+world yards, so dividing by it turns the screen-space difference into the dimensionless bed slope it
+was always meant to be - the same number at any resolution and any distance, and the same number
+`tools/WaterPreview.cpp` measures in world space with `FieldSlope`, which is the reading the
+published frames were tuned against. It carries the view angle's `1/cos`, because the separation this
+pass can read is along the view axis rather than vertical.
+
+That divisor has a floor, `kBedSlopeSpanYards`, and the floor is the part that was missing at first.
+`ddx(depth)` is a difference across **one pixel**, so at the water's edge - where one pixel is a few
+inches - dividing by that pixel's own footprint measures the depth buffer's quantization and dither
+rather than the bed, and reports it as an enormous slope. That number drives the shoal foam, the
+beach/wall split and the swash band width, so up close it read as a checkerboard of foam on the
+seabed that crawled with the camera. The floor is 1.5 yards because that is the span `FieldSlope`
+samples (`+-1.5`), so the shader and the mirror the look was tuned against read the same baseline;
+it is a floor, so any coarser pixel keeps its own footprint and distant water is untouched. Up close
+the shader now reports a calmer slope than a per-pixel difference would, which is the trade: less
+shoal foam in the last yard than a number that was mostly noise was producing.
+
+One number then separates the two shores that look the same to a depth buffer: about twelve degrees
+of bed is a beach, about forty is a wall. A beach gets a wide swash zone and sheets running up it; a
+wall gets a narrow bright contact line and nothing that can run up it. At level 10 the same slope
+buys a soft contact - the last inches of a waterline are a meniscus, not a step, so the refracted
+sample's offset fades in over the first yard instead of pulling the bottom by the full wave slope
+right at the seam.
+
+### Back flow
+
+Nothing in the renderer moved water back out of a beach, so a shoreline could only ever arrive. The
+driver is the longest swell train the pixel is standing in - the same analytic train A the vertex
+stage lifted the mesh with, arriving through the same interpolated sine/cosine pair - so the run-up
+comes in with a crest the player can already see coming, and the drain follows it back out at the
+speed the sea is really travelling. No second clock and no new phase: `sin01.x` is that crest's
+height here and `cos01.x` its rate of change, positive while the water is rising and negative while
+it is leaving.
+
+Depth is the shoreline's own coordinate - "up the beach" is "less water over the bottom" - so the
+whole effect is a shift of the depth the shore masks are built from, and it needs no shore normal
+this pass has no way to read. It moves the shore and foam edges **only**: the absorption column, the
+refraction and the in-scattering still measure the water that is really there, because a sheet
+running up a beach is thin water, and thin water is exactly what those terms describe. The run-up in
+yards is `SwashYards(plan, geometry.amplitude)` - the arriving crest's own height, scaled once and
+capped at 2.5 yards - so it inherits WAVE HEIGHT, WAVE SIZE, the zone's sea state and the WAVES
+switch without a second authoring path, and it is zero on water that was authored flat.
+
+The foam that goes back out with it is a band in depth moving with the swell, torn into flecks by
+the chop value so it can never read as rings painted on the water, kept inside the swash zone by
+`shallowEdge`, and gated on `draining` - the streaks are only there while the sheet is leaving,
+which is what makes them a backwash rather than a second run-up.
+
+### Foam
+
+Coverage was one scalar, and one scalar can only ever be a grey sheet - which is what "the foam is
+nice but flat" meant. Real foam is a lace: bright filaments with dark, water-filled gaps between
+them, at multiple scales. The fine chop is the fleck; an exact per-pixel sample of the broad warp
+is the tongue both are torn out of. That extra noise evaluation is intentional: using its
+vertex-interpolated value in high-contrast foam exposed triangle seams that shifted with the camera.
+The level-7 mid octave stays out of coverage, so its projected lattice cannot return as a grid. The
+lace multiplies crest terms whole, because a whitecap *is* a broken streak, and only `.45` of the
+shore term, because a sheet running up a beach is continuous in a way a cap on a crest is not.
+
+The lace reads sampled **values**, not slopes. The first implementation clipped a threshold ramp
+inside the noise range (21.9% of fine cells and 20.2% of mid cells hit the low plateau; the completed
+lace was flat at 1.0 for 43.1% of sampled cells). Replacing that with a smooth complement product
+removed the artificial plateau, but a second in-game report showed the grid still present. That
+proved the plateau was not the whole cause, and the earlier claim that the camera-moving grid was
+fixed was premature.
+
+The remaining quality-7 input was the per-pixel **mid octave** itself: level 6 removes that octave
+and the artifact, level 7 adds it. Its world lattice is a useful wave-slope input, but it does not
+need to modulate foam coverage. The lace combines the fine per-pixel fleck with an exact per-pixel
+broad-warp sample, rather than interpolating that high-contrast foam input across liquid triangles:
+
+```
+lace = 1 - .70 * (1 - fine) * (1 - broad)
+```
+
+The mid octave continues to shape the wave surface; only its value is removed from the foam lace.
+The broad field is evaluated in the vertex stage and shared across adjacent pixels/tiles, avoiding a
+mid-frequency per-pixel lattice in the bright foam mask. The CPU preview mirrors the same formula.
+Regression pins require the mid-value input to stay out of the lace and the clipped threshold forms
+to stay gone. This is the first change aimed at the quality-7 input itself; the game capture remains
+the acceptance check for the reported camera-moving grid.
+
+At the same level the colour becomes a ramp on the coverage the masks already produced instead of
+one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
+crest, a thin veil lets the water's own tint through and reads as the grey-green lace underneath it.
+That ramp is what lets the two coexist on one wave. At level 10 the veil also glows when the source
+is behind it, on the same `vDotL` the in-scatter lobe already computed, weighted by what the ramp
+left over so the thick caps that already scatter everything back are not double-lit.
+
+### Looking up through the water
+
+The surface is a two-sided interface, but a two-sided normal alone is not a two-sided optical model.
+When the camera is below the surface, the view ray travels from water toward air. At angles beyond
+water's critical angle, no transmitted ray exists: the interface is totally internally reflecting.
+The shader now retains the camera-side bit before orienting the normal, adds a narrow smooth TIR ramp
+around `cos(theta_c)=sqrt(1-(1/1.333)^2) ~= .661`, and uses the same interface Fresnel for the
+reflection mix. It also attenuates the camera-to-surface ray by the authored per-channel
+Beer-Lambert coefficients and converges it toward the body's deep tint. This uses ray length, not
+view-Z, so an oblique underwater view does not artificially shorten the water column. Above water,
+the camera-side blend is exactly identity and the new reflection term is gated off.
+
+The output alpha is at least the reflection weight already mixed into the water colour. Without that
+floor the fixed-function blend applies the original scene a second time over the computed reflection,
+letting the opposite liquid face show through at the exact angles where the reflection should dominate.
+
+A separate camera-angle dropout was visible in the user's report. Their `WaterEffect.log` showed all
+sampled liquid candidates replaced (128/128, 105/105, 109/109, 157/157), no shader creation failure,
+and no ignored liquid layouts; `WaterReflection.log` showed successful copies. So the effect was not
+being disabled in those frames. The replacement vertex shader nevertheless consumed native VS c4 as a
+fog curve without checking its contents. An alternate camera-selected VS can bind a different c4; the
+fog interpolation can then collapse the whole computed water colour to fogColor, visually identical to
+losing the shader. Before each replacement draw c4 is now checked against the shared finite fog-curve
+shape. If it is invalid, this draw uses the identity fog curve (unfogged water), and the native c4 is
+restored on every exit. The affected VS/PS hashes and bad c4 are recorded once in `WaterEffect.log`.
+
+The user's latest `WaterEffect.log` confirms successful replacement in the sampled frames, but the
+built-in F8 draw capture was disabled (`Enabled=0`), so it does not contain the per-draw shader/c4
+identities at the exact bad angle. The new fallback logs an invalid c4 automatically in `WaterEffect.log`
+without requiring F8. A true unmatched draw family is still separately reported by hash.
+
+### Registers, slots and the interpolant ceiling
+
+No register, no interpolant and no texture was added, which is the only reason this round could
+happen at all: the Output struct is still eleven fields and the pixel stage still takes ten inputs,
+against the eleven-`o#`/ten-`v#` ceiling round 4 documented. The ladder rides lanes that were
+already travelling:
+
+| lane | contents, as of round 5 |
+|---|---|
+| `c202.z` (VS) | the mid wave's phase, one of the three trains the mesh can now lift |
+| `c204.z` (VS) | the mid-wave gate, a multiplier rather than a branch so it can scale the renormalization |
+| `c204.y` / `c204.z` (PS) | reflection march steps, sun-road march steps (`controls[17]`, `controls[18]`) |
+| `c211.z` (PS) | the quality level itself (`controls[46]`), which the stage compares against the ladder's midpoints |
+| `c211.w` (PS) | the wave gate, now also zero at level 0 - the same thing asked from the other direction |
+| `c218.z` (PS) | the shore back-flow run-up in yards, 0 with the feature off (`controls[74]`) |
+
+`controls` is 75 floats of the 156 the saved `c180..c218` span holds, so the save/restore window,
+the single `SetPixelShaderConstantF(180, …, 39)` upload and the untouched `c197..c199` gap are all
+unchanged; `c204.w` and `c218.w` are still spare.
+
+The slot count is the one estimate in this round that was wrong, and it is worth recording exactly
+how wrong. This document estimated "roughly eighty"; Windows CI measured the pixel stage at **890**
+slots against **713** on the commit it branched from - **+177**, and the vertex stage 169 to **188**
+(+19) for the third train. The two foam-checkerboard fixes that followed - fading the lace with the
+octaves it reads, and flooring the bed slope's measurement span - took the pixel stage to **895** and
+left the vertex stage alone. That is round 3 and round 4's lesson a third time: the price per term is
+invisible to a reader counting terms. What actually cost it is that a noise octave is a four-corner
+hash plus a bicubic, so the mid octave alone is worth dozens of slots before the shore shape, the
+swash, the lace, the backwash, the colour ramp and the veil are counted, and the two marches giving
+back steps gave back *time*, which is not the same currency - with `[loop]` the instruction count is
+static, so cutting steps buys time per pixel and nothing at all in slots.
+
+Which is also the correction this round owes about the ladder itself: **a level buys time per pixel,
+not slots.** `[branch]` gates still compile, so every level pays the same slot count and a level cannot
+rescue a card whose `MaxPixelShader30InstructionSlots` is under it - such a card fails
+`CreatePixelShader` and keeps native water at level 0 exactly as at level 10, which is what it did
+at 713 too. The band that changed is only a hypothetical card reporting between 713 and 889; the
+512-slot floor cards were already outside the shader before this round. The 2048 cap still holds at
+about 2.3x headroom rather than the 3x it was written against, and the count is still the number a
+change like this one has to answer for.
+
+### Verification
+
+* `tools/WaterRegression.cpp` walks every level: each plan is in range, every resolved gate *is* its
+  level, both ladders are monotone in cost and in features, absurd levels clamp instead of indexing
+  past the tables, level 0 is flat, level 6 is the shipped sea, level 7 adds the mid octave and the
+  shore work at the shipped march budget, and level 10 is everything. The shader's gate literals are
+  derived from `GateFor()` rather than typed again, so the two halves cannot drift by one. The
+  three-train fold is pinned against `kMeshPinchMax` and the renormalization against
+  `MeshNormalization()`, and train C's coefficients moved from the "shading-only" literal set to the
+  "both stages assemble the displaced trains from the same coefficients" one.
+* Both stages were re-parsed with a portable HLSL parser (the sandbox has no `fxc`); the modified
+  pixel stage parses clean against the same harness the pre-change source does, and the vertex
+  stage's only diagnostic is the pre-existing `Vertex shader must output a position` semantic note
+  about `gl_Position`. Final instruction counts remain a Windows CI and live-client check.
+* `tools/WaterPreview.cpp` resolves the *same* header rather than inventing its own gates, and
+  gained `--quality`, `--shore-foam-width` and probe lines for every intermediate the round adds
+  (`bedSlope`, `beach`, `runUp`, `draining`, `swashDepth`, `lace`, `backwash`, `foamColour`,
+  `veil`), so a level can be audited one pixel at a time:
+
+  ```
+  build/waterpreview --scene coast --quality 7 --shore-foam 220 --wind 190 \
+      --shore-foam-width 320 --probe 274 242 --time 22
+      shore bedSlope 0.0357304  beach 1  runUp 1.31625  draining 1  swashDepth 3.31377
+      foam lace 0.53838  backwash 0.265436  colour 0.436471 0.529412 0.477059  veil 0
+  ```
+
+  (Printed in full because an earlier revision of this block quoted numbers two different probe
+  pixels had produced under a command line that reproduced neither.)
+
+  The same pixel at `--quality 6` prints `runUp 0  draining 0  lace 1  backwash 0`, and the run-up
+  travels the waterline between 2.7 and 5.0 yards across a swell period, which is the back flow.
+
 ## Water-heavy-area performance pass (2026-10-15)
 
 Booty Bay exposed both halves of the water cost: a large number of liquid tiles
@@ -162,6 +430,20 @@ were structural rather than a matter of tuning numbers:
   the body directly, against the geometric normal, in both the light direction and the
   hemisphere it sees. Flat water and a zero-strength sea are untouched by construction: the
   terms are differences.
+
+  That multiplier is **floored**, and the floor is not a tuning preference. `controls.z` is
+  `NormalPercent * clamp(sqrt(agitation), 0, 2.5)`, so in an agitated sea the expression
+  `1 + controls.z*(1.9*(NoL-dot(n,l)) + .75*(...))` goes **negative** on a face turning away from
+  the source - and nothing saturates `rgb` between there and the output, so the render target
+  clamped it to pure black. Water is alpha-blended and writes no depth, so the far face of a wave
+  shows through the near one, and a far face clamped to black read as a silhouette cut out of the
+  sea: reported as "the blacked shape of a wave visible through the water" from surface height.
+  The floor is `lerp(.22, .78, saturate(-vDotL*1.7-.45))` - it keeps the whole brightening range
+  and most of the shading, and rises with the light coming through the sheet toward the viewer,
+  the same `dot(-v,l)` cue the in-scatter lobe and the foam veil glow use, so all three agree
+  about which side of a wave the sun is on. A thin sheet with the light behind it is among the
+  brightest things in a sea and never the darkest. `vDotL` moved up to the body shading because
+  that is now the first of the three places that needs it; it is still computed once.
 - **The "environment" was fog.** Reflections at grazing angles mixed toward `fogColor`, which
   is why open water read as a dark sheet with a bright smudge on it. The surface now reflects
   a horizon-to-zenith sky built from the scene's own fog and light colour, with the sun/moon
@@ -200,11 +482,15 @@ texture on compute shaders, samples a mip-blurred reflection chain, and shades w
 GGX/Smith and an environment BRDF curve. D3D9 `ps_3_0` has no compute, no UAVs, no ping-pong
 state without spending a render pass, and no ceiling on how many instruction slots the water pixel
 stage may spend: `tools/ValidateShaders.ps1` compiles it, reads the count and annotates it on every
-run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14 and the
-2026-10-17 CSE pass brought it to about 580 under an explicit 2048 cap; it had
+run, and lets it be (fxc /O3 measured the shader at 642 slots on Windows CI on 2026-10-14, at 713
+on 2026-10-17 after the CSE pass, at **890** after round 5's quality ladder added the mid
+octave and the shore work, and at **895** after the foam-checkerboard fixes - the estimate for
+round 5 was "roughly eighty" and the measured
+answer was +177, under the same explicit 2048 cap; it had
 been held to 621 - 597 measured plus 24 of compiler margin - until that ceiling started deciding
 which waves were allowed to shade, which is the wrong job for a budget, so round 4 retired it rather
-than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom instead). The count is still the number to argue about, and the reason to keep measuring
+than re-negotiating it, and the cap came back in 2026-10-17 at three times headroom, now about 2.3x).
+The count is still the number to argue about, and the reason to keep measuring
 at all is Round 3: it estimated 608, the shader measured 633, and instead of a zero-margin budget or
 cut visible shading the broad warp moved to the vertex stage and is interpolated to pixels - the slot
 count came down by changing *where* the work happens, not by removing work. Earlier rounds, the device
@@ -324,15 +610,15 @@ itself changed from "a phase and a rotation" to "a phase per train":
 | `c201` (VS) / `c209` (PS) | the world-to-lattice rows, identical in both stages |
 | `c202` (VS) | one phase per swell train, in cells along that train, wrapped into its own wavelength |
 | `c200` (PS) `.x` | sigma: the Gerstner pinch the pixel stage divides its slope by |
-| `c210` | chop phase (xy), then the two displaced trains' phases (zw) |
-| `c211` | texture creep (xy), the shaded-only train's phase (z), the waves gate (w) |
+| `c210` | chop phase (xy), broad foam-warp phase (zw) |
+| `c211` | texture creep (xy), quality level (z), waves gate (w) |
 | `c212` | this draw's world-up in view space (xyz) and its authored wind (w) |
 
-The vertex stage reads one more set of constants than it used to: `c5..c8`, the draw's own
-model-to-view matrix, are read back on the CPU so the wave phase and the shading's up axis come
-from the same matrix the displacement uses. `watereffect::Scope`'s save/restore is unchanged in
-size - seventeen pixel registers and three vertex registers - because nothing new was added,
-only rearranged.
+The vertex stage's `c5..c8` model-view matrix is read back on the CPU for the per-draw coordinate;
+the phase uses the current global VIEW camera when its basis matches, so an object/tile translation
+is not mistaken for the camera origin. The draw's up axis still comes from its own matrix. The
+shader constant save/restore is unchanged in size - no additional vertex or pixel registers were
+needed for world anchoring.
 
 Round 4 grew both stages by the minimum: the vertex stage gained `c204` (the grouping field's
 camera anchor) and the pixel stage `c217` (the four shading-only trains' phases, in one
@@ -476,14 +762,13 @@ The second half was the anchor. The camera position that the wave phase carries 
 constants - so a water tile drawn before that capture was anchored to last frame's camera, and the
 sea slid backwards by exactly the distance the player moved in between. The client's own water
 reflection pass is worse: it renders water under a mirrored camera the capture never sees at all.
-Both halves now come from the draw itself: `watereffect::Scope` reads `c5..c8` back with
-`GetVertexShaderConstantF`, and `renderer::water::AnchorFromModelView` in `src/Water/WaveField.h`
-turns that matrix into the camera position and the world-up axis the shading uses. It refuses a
-basis that is not orthonormal - the pairing "view position dotted with row *i* is the world
-offset's component *i*" is only true of a rigid basis - and the caller then falls back to the
-captured camera, which is the right world even when it is the wrong frame. The regression test
-builds real yawed, pitched and mirrored matrices, runs the shader's own dot products through them,
-and requires `rel + anchor == world point` to within two centimetres at every angle.
+Both halves now come from the current draw without confusing a tile origin for world origin:
+`watereffect::Scope` reads `c5..c8` and the live `D3DTS_VIEW` transform. `AnchorForWaterDraw` uses
+the global VIEW camera when its basis matches modelView (including translated water tiles), while
+retaining the conservative local anchor for a genuinely transformed basis. This avoids a stale
+`FrameContext` camera and avoids cancelling each tile's world translation. Regression tests construct
+yawed, pitched and translated-tile matrices, then require the shader's relative coordinate plus the
+selected phase anchor to recover the same global world point.
 
 ### Why the sea was fast
 
@@ -530,6 +815,21 @@ stays dark water with a little chop. Foam is a surface, not a decal: it raises t
 the reflection (`*(1 - foam*0.85)`) and the sun road (`*(1 - foam)`) with it, and only then adds its
 own colour, lifted toward the light but softened at `NoL = -0.25` so a shaded face still carries its
 cap.
+
+The top-down screenshot showed both polygonal seams and camera-relative foam movement. The depth-based
+shore estimate was one source: the old shader derived bed slope from `ddx/ddy` of view-Z depth and a
+projected pixel footprint, so camera pitch and depth precision changed the foam boundary. The shader
+now reconstructs the seabed point on the sampled ray, uses its vertical separation from the water
+surface for shore/backwash depth, and derives slope from the reconstructed 3D normal relative to this
+draw's world-up vector. Optical column depth and refraction remain in view space.
+
+A second source was the coordinate anchor. A native c5..c8 model-view matrix can contain a liquid
+tile's world translation; deriving the camera phase from that matrix cancels the tile origin and
+restarts noise at each tile. The draw now combines its camera-relative vertex coordinates with the
+live D3D view matrix's global camera position when the bases match, so translated world-aligned tiles
+share one phase without borrowing a stale frame camera. Finally, the broad foam warp is sampled at
+pixel positions rather than linearly interpolated across mesh triangles, preventing visible facets in
+large bright patches. The footprint fade is retained only as anti-aliasing LOD.
 
 ### Settings, and what a player sees
 
@@ -956,6 +1256,10 @@ the reporting player's machine. In-game confirmation still matters.
 - **No capture:** valid fallback projection constants prevent `0/0` and NaNs
   when INTZ is unavailable (notably with MSAA). Waves, environment reflection,
   glint and crest foam still render; screen-space features require capture.
+  Above 1x the *colour* source is still captured - a multisampled colour target
+  resolves through the `StretchRect` this was already making - and only depth is
+  impossible. Anti-aliasing comes from the image pass instead:
+  `docs/anti-aliasing.md`.
 - **Refraction off really means off:** zero distortion and zero scene-color
   mixing. Absorption remains independent. Foreground depth is no longer treated
   as a deep seabed, and distorted samples crossing a foreground silhouette are
@@ -987,9 +1291,10 @@ the reporting player's machine. In-game confirmation still matters.
 - `tools/ValidateShaders.ps1`: compiles the production VS/PS and fails if either stage does not
   compile, or if any *budgeted* shader - the volume and cloud raymarches, weather, and the water
   pixel stage (2048, see "The 2048 cap and the CSE pass" above) - exceeds its ceiling. The water
-  pixel stage's pre-optimization baseline was 642 slots on Windows CI on 2026-10-14; the
-  2026-10-17 CSE pass is estimated at about 580, and the first Windows run after that pass is the
-  authoritative new count (the former 621 cap is described under "Full rework round 4").
+  pixel stage measured 642 slots on Windows CI on 2026-10-14, 713 after the CSE pass, **890**
+  after round 5's quality ladder and **895** after the foam-checkerboard fixes; the vertex stage
+  measures 188. Both counts are annotated on every
+  run (the former 621 cap is described under "Full rework round 4").
 - `tools/ShaderSourceRegression.cpp`: reads every raw HLSL literal in the tree and rejects the
   GLSL spellings fxc reports as undeclared (`mix`, `fract`, `mod`, `inversesqrt`, the GLSL
   texture lookups and type names), naming the line and the HLSL spelling meant. It runs in the
@@ -999,9 +1304,17 @@ the reporting player's machine. In-game confirmation still matters.
   combinations, and target-size policy tests (included in Linux CI). It also pins the packed
   long-wave dataflow, zero-contribution branches, profile-query cache, batched constant windows,
   volume-only MRT gate, and the in-scatter/sun-glint normalizations as production shader text -
-  plus the look formulas in the CPU mirror - so an optimization cannot quietly cut the look.
+  plus the look formulas in the CPU mirror - so an optimization cannot quietly cut the look. Since
+  round 5 it also holds the WATER QUALITY ladder to itself: every level resolves in range and to its
+  own gates, both ladders are monotone in cost and in features, level 0 is flat and level 6 is the
+  previously shipped sea, the shader's gate literals are derived from `GateFor()` rather than typed
+  twice, the marches take their trip counts from registers, a level with no marches stops asking for
+  the scene copy, the three-train fold is bounded by `kMeshPinchMax`, and the F7 slider and the ini
+  key agree with the header's own bounds.
 - `tools/WaterPreview.cpp`: not a test, but the thing the look was tuned against (see "Looking at
   changes without a GPU"). It needs no device and builds with the same compiler invocation.
+  `--quality N` renders a level, and `--probe X Y` prints the shore and foam intermediates that
+  level adds, so a ladder step can be audited one pixel at a time without a GPU.
 - `tools/Test-Water.cmd`: builds a D3D9 regression executable using the actual
   water Scope and capture code. It checks shader installation, rendered magenta
   debug pixels, no-capture color, the complete batched constant span (including
@@ -1030,6 +1343,8 @@ the reporting player's machine. In-game confirmation still matters.
 4. For SSR/refraction/depth tint, use in-game **Multisampling 1x** and restart;
    INTZ capture cannot replace multisampled depth. `WaterReflection.log` records
    the first pre-water scene copy. Missing capture must not disable basic water.
+   The edges come from the image pass's anti-aliasing instead - see
+   `docs/anti-aliasing.md`, which lists everything above 1x costs.
 5. Check a coast, a shallow canal, under a bridge, sun/moon glint, and a nearby
    lamp. Test reflections off with refraction/depth/foam on, atmosphere off,
    F11 off/on, window resize, and Alt+Tab. Native lava/slime and unsupported

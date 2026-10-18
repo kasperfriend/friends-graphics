@@ -94,6 +94,17 @@ inline std::vector<Item> items={
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
  {KIND_TOGGLE,L"Water",L"Enabled","WATER",0,1,1,1},
+ // One level for how much work the surface is allowed to take, and the only water control that
+ // is not a look: the chop octaves, the reflection and sun-road marches, the mirrored emitters,
+ // the mid-wave band, the foam lace and the shore back-flow are all steps on it. 0 is a flat
+ // sheet costing about what the client's own water costs, 6 is the sea this renderer shipped
+ // before the slider existed, 7 (the default) adds the mid waves, the lace and the back-flow,
+ // 10 is everything. The ladder lives in src/Water/WaterQuality.h, so a level means the same
+ // thing here, in both shader stages and in the log; every level is a look the game can already
+ // draw, and the level only decides how much of it is evaluated. The bound matches the clamp in
+ // WaterEffect.h (`std::clamp(ReadTuning(L"Quality",...),kQualityMin,kQualityMax)`), so the
+ // slider cannot be dragged past what the renderer resolves.
+ {KIND_SLIDER,L"Water",L"Quality","WATER QUALITY (0 FLAT 6 HIGH 10 MAX)",0,10,1,7},
  {KIND_TOGGLE,L"Water",L"WavesEnabled","WAVES",0,1,1,1},
  // Lifts and slides the surface itself, so a crest is a form the light falls across rather
  // than a normal map pretending to be one. Off leaves the shading intact on a flat sheet.
@@ -170,7 +181,14 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},
- {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
+ {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35},
+ // Anti-aliasing is the last item in this tab and sits next to Sharpness on purpose: FXAA trades a
+ // little detail for smooth edges, and Sharpness is the knob that puts the detail back. It is its
+ // own switch rather than a passenger on POST PROCESS above, because it is the replacement for
+ // hardware multisampling - which this renderer cannot use above 1x at all, since a multisampled
+ // depth buffer cannot be sampled by a pixel shader in D3D9 and every depth-reading effect loses
+ // its depth when the client is set higher.
+ {KIND_TOGGLE,L"PostProcess",L"AntiAliasing","ANTI ALIASING (FXAA, USE 1X MULTISAMPLING)",0,1,1,1}
 };
 inline const std::vector<int> defaults=[](){std::vector<int> result;for(const auto& i:items)result.push_back(i.value);return result;}();
 }
