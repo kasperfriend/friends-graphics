@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: The last copies of nearby objects around lamp pools are gone
+title: Tilted cameras can still reveal nearby-object copies in lamp pools
 ---
-A soft shape-copy of a nearby character or object remained in the light's pool around it, growing with LIGHT SMOOTHING. The light now discards a measurement that hits something standing off the ground, or a ray that skims the horizon tens of yards away. The copies are gone at every smoothing level.
+Edge filtering reduced nearby-object copies but not at every camera angle. A pitched camera can expose residual copies, and wide LIGHT SMOOTHING can make them worse. Measuring height against world vertical reduces the pitched-camera error; increasing smoothing is not a cure.

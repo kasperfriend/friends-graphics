@@ -79,6 +79,17 @@ inline Vec3 Normalize(Vec3 a)
     return l > 1e-8f ? a * (1.f / l) : Vec3{};
 }
 inline float Saturate(float v) { return v < 0.f ? 0.f : v > 1.f ? 1.f : v; }
+
+// Dynamic-light debug views are renderable without a selected source (mode 4
+// visualizes receiver-normal confidence, and the source modes use black for an
+// empty light set). Keep this policy portable so the compositor, renderer and
+// regression suite cannot disagree about whether the pass should run.
+inline bool IsDebugView(int mode) noexcept { return mode >= 1 && mode <= 4; }
+inline bool ShouldActivate(bool enabled, float intensityScale, int debugMode) noexcept
+{
+    return enabled && ((std::isfinite(intensityScale) && intensityScale > 0.f) || IsDebugView(debugMode));
+}
+
 inline float Smoothstep(float e0, float e1, float x)
 {
     const float t = Saturate((x - e0) / std::max(e1 - e0, 1e-6f));
@@ -352,16 +363,16 @@ struct SurfaceFrame
     float intact = 1.f;
 };
 
-// `up` is the unit sky direction of the camera that owns this frame (the
-// inverse view's second row, which the surface pass has as a uniform); the
-// near-object gate below measures standing height against it.
+// `worldUp` is WoW's fixed world-vertical axis (+Z), not the camera's screen-up
+// vector. A character's standing height remains world-vertical when the camera
+// pitches or rolls; using camera-up makes the gate disappear at steep angles.
 inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Vec3& pRight,
                                       const Vec3& pUp, const Vec3& pDown,
                                       float zLeft, float zRight, float zUp, float zDown,
                                       float zLeft2, float zRight2, float zUp2, float zDown2,
                                       float zCentre, const Vec3& toEye,
                                       const NormalTuning& tuning, const TapSurvival& survives,
-                                      const Vec3& up)
+                                      const Vec3& worldUp)
 {
     // HORIZON-FLIGHT VETO. The window is a fixed UV span, but its world size
     // depends on the ray: the sideways taps (left/right) land a world window
@@ -407,22 +418,22 @@ inline SurfaceFrame ReconstructNormal(const Vec3& p, const Vec3& pLeft, const Ve
     // shape-copy of the object beside it. At wide smoothing windows both
     // sides of the window reach the object and the arbitration is a coin
     // flip, which is why the copies grew with smoothing instead of shrinking.
-    // Whatever the depth says, a standing body is a metre or more off the
-    // local ground plane, and a plane - however sloped - has exactly zero
-    // second difference in world height. Each side's height h (against the
-    // camera's sky direction) therefore forms a height second difference
-    // with its partner side: a side whose second difference AND whose own
-    // height both clear the window's relief scale is foreign, and its weight
-    // slides to zero. Ground relief across a window is centimetres; a
-    // silhouette or object tap is decimetres to metres. A dead or vetoed
-    // tap counts as the receiver's own level, so the gate still fires when
-    // the foreign side is the only one that measured a surface.
+    // Whatever the depth says, a standing body is elevated along world +Z
+    // from the local ground plane, and a plane - however sloped - has no
+    // second difference in world height for a symmetric window. Each side's
+    // height h (measured on world +Z, not the camera's screen-up axis) therefore
+    // forms a height second difference with its partner: a side whose second
+    // difference AND whose own height both clear the window's relief scale is
+    // foreign, and its weight slides to zero. The height tolerance allows
+    // ordinary terrain relief without tying the test to camera orientation.
+    // A dead or vetoed tap counts as the receiver's own level, so the gate
+    // still fires when the foreign side is the only one that measured a surface.
     float left = x.left, right = x.right, upSide = y.left, down = y.right;
     {
-        const float hL = stays.left ? Dot(pLeft - p, up) : 0.f;
-        const float hR = stays.right ? Dot(pRight - p, up) : 0.f;
-        const float hU = stays.up ? Dot(pUp - p, up) : 0.f;
-        const float hD = stays.down ? Dot(pDown - p, up) : 0.f;
+        const float hL = stays.left ? Dot(pLeft - p, worldUp) : 0.f;
+        const float hR = stays.right ? Dot(pRight - p, worldUp) : 0.f;
+        const float hU = stays.up ? Dot(pUp - p, worldUp) : 0.f;
+        const float hD = stays.down ? Dot(pDown - p, worldUp) : 0.f;
         const float live = (stays.left ? 1.f : 0.f) + (stays.right ? 1.f : 0.f) +
                            (stays.up ? 1.f : 0.f) + (stays.down ? 1.f : 0.f);
         const float spread = ((stays.left ? 1.f : 0.f) * Length(pLeft - p) +
@@ -477,9 +488,15 @@ inline Vec3 PoolShade(const LightSample& light, const Vec3& p, const SurfaceFram
                       const Vec3& camera)
 {
     const Vec3 toLightVector = light.position - p;
-    const float distance = Length(toLightVector);
+    const float distanceSquared = Dot(toLightVector, toLightVector);
+    const float radius = std::max(light.radius, 0.01f);
+    // Outside the finite support, every diffuse/specular term is multiplied by
+    // zero. Reject in squared space before computing a square root, normalizing
+    // vectors or evaluating the specular power.
+    if (distanceSquared >= radius * radius) return {};
+    const float distance = std::sqrt(std::max(distanceSquared, 0.f));
     const Vec3 toLight = distance > 1e-4f ? toLightVector * (1.f / distance) : Vec3{ 0.f, 0.f, 1.f };
-    const float falloff = Saturate(1.f - distance / std::max(light.radius, 0.01f));
+    const float falloff = Saturate(1.f - distance / radius);
     float attenuation = falloff * falloff / (1.f + distance * distance * 0.035f);
     if (light.outerCone > -0.5f)
     {

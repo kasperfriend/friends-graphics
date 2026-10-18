@@ -90,9 +90,9 @@ silhouette base keeps its own light to within 15% (was 344%).
 
 2026-10-17: player report - near characters and objects the light pass drew
 illusionary shape-copies of them, dark slabs floating beside the real geometry,
-and F7 "LIGHT SMOOTHING" (`NormalSpreadPercent`) only softened them. The pass
-has no temporal history, so this was never ghosting: it was the pool's normal
-being steered by the object's own depth.
+and F7 "LIGHT SMOOTHING" (`NormalSpreadPercent`) made them worse. The pass has
+no temporal history, so this was never ghosting: it was the pool's normal being
+steered by the object's own depth.
 
 Root cause, from a CPU reconstruction over an eye-level scene with undulating
 ground, a character-like capsule and a crate a few yards away: when the normal
@@ -137,3 +137,46 @@ there is parity. Flat ground and the grazing far field are unchanged from the
 shipped look; undulating ground at a grazing angle now measures 6.8-7.2 degrees
 (was 5.2-5.7 with the old weighting, 64 before the reconstruction fixes), the
 cost of dropping one side at genuine relief creases.
+
+## Dynamic light copies under a tilted camera
+
+2026-10-18: a follow-up report showed that nearby-character copies still grew
+with LIGHT SMOOTHING when the camera was pitched. The near-object gate had
+measured standing height along inverse-view row 1 (camera-up), not world
+vertical. A forward/back tap displacement could cancel a character's height,
+so the foreign tap survived exactly when the wider smoothing window reached
+it.
+
+The gate now measures height along WoW world +Z in both the CPU core and the
+surface shader. The local-light regression renders the same character/crate
+scene with a 30-degree downward camera and compares the correct world-up result
+to the former camera-up result at 25%, 100% and 400% smoothing. At 400%, the
+camera-up version's near-silhouette error is 0.455 versus 0.093 with world-up;
+the fixed result stays under the regression's 0.12 ceiling.
+
+## Dynamic-light activation, selection and diagnostics
+
+The direct local-light pool is now an independent volume-composite effect:
+enabling `[DynamicLighting]` no longer silently depends on fog, clouds, glare or
+another volume feature being active. Volumetric scattering still uses the active
+global/local fog medium. Debug modes 1-4 also run with an empty selected
+light set and are composited in isolation, before noise textures, atmosphere,
+clouds or grading can hide the diagnostic. Mode 1 shows each source after
+surface shading and attenuation but before the user/environment multipliers;
+mode 2 shows the final direct contribution; mode 3 remains black because the
+removed screen-space visibility pass intentionally has no duplicate-shadow
+replacement; mode 4 shows the normal-window confidence. For local-light
+volumetric scatter, use `AtmosphereDebugMode=13`, separate from the atmosphere's
+own debug modes. The older `[Atmosphere] LocalLightPercent` bright-pixel glow is a
+separate, disconnected compatibility path; use `[DynamicLighting]` for the
+selected world-space sources.
+
+The per-frame source scan now rejects distant manifest/native/attached sources
+in squared-distance space and uses a partial top-four/top-eight sort rather
+than sorting every candidate. Surface and portable pool shading reject lights
+outside their finite radius before square roots, specular powers and shading.
+Manifest IDs hash the full record (not position alone), so two intentionally
+layered emitters at one position remain distinct. Persistent D3D lights stay
+eligible while the device still reports them enabled; draw-scoped enables keep
+the existing short grace window. Reaching the attached-torch cap skips only
+additional emitters instead of aborting observation of the remaining batch.

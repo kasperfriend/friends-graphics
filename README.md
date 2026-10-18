@@ -227,7 +227,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | --- | --- |
 | `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
 | `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
-| `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, the pool's smoothing window, and debug modes. |
+| `[DynamicLighting]` | Direct local-light pools, volumetric-scattering scale, quality, smoothing and debug views. Direct pools need `[Volume] Enabled=1` but no other effect; volumetric scattering uses the active atmosphere/local-fog medium. |
 | `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain particle speed, density, length, width, opacity, wind influence and debug views, plus occlusion and lens droplets; rain follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
 | `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links, continuity-layer drift and diagnostic HUD. |
 | `[VolumetricClouds]` | Cloud shape, coverage, drift gain, lighting, shadows, rays and quality. |

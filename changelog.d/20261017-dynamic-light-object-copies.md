@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: Dynamic lights no longer paint copies of nearby characters and objects into the pool
+title: Edge filtering reduces nearby-object copies in lamp pools
 ---
-Lamp pools near characters and objects used to show dark shape-copies of them; LIGHT SMOOTHING only softened the copies. The light now ignores a nearby object's edge instead of being steered by it. Terrain shading and the slider work as before.
+Lamp pools near characters and objects can show shape-copies when their depth steers the reconstructed normal. The edge filter reduces that influence at ordinary smoothing, but wide LIGHT SMOOTHING windows can still make residual copies worse; increasing smoothing is not a fix.
