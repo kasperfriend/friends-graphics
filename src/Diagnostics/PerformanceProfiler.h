@@ -68,6 +68,8 @@ namespace renderer
 
         void FlushTimings();
         void EnsureGpuQueries(IDirect3DDevice9* device);
+        // Called only while m_mutex is already held (Reset and OnFrameBegin).
+        void ResetGpuQueriesUnlocked();
 
         std::wstring m_logPath;
         bool m_cpuProfilingEnabled = false;

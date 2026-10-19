@@ -23,9 +23,8 @@ namespace renderer
         m_logPath = path;
     }
 
-    void PerformanceProfiler::Reset(IDirect3DDevice9* /*device*/)
+    void PerformanceProfiler::ResetGpuQueriesUnlocked()
     {
-        std::lock_guard lock(m_mutex);
         for (auto& slot : m_gpuRing)
         {
             slot.disjoint.Reset();
@@ -33,10 +32,17 @@ namespace renderer
             for (auto& s : slot.start) s.Reset();
             for (auto& e : slot.end) e.Reset();
             slot.frameIssued = false;
+            for (auto& issued : slot.issued) issued = false;
         }
         m_gpuDeviceOwner = nullptr;
         m_gpuQueriesSupported = false;
         m_gpuWriteSlot = 0;
+    }
+
+    void PerformanceProfiler::Reset(IDirect3DDevice9* /*device*/)
+    {
+        std::lock_guard lock(m_mutex);
+        ResetGpuQueriesUnlocked();
     }
 
     void PerformanceProfiler::EnsureGpuQueries(IDirect3DDevice9* device)
@@ -44,7 +50,10 @@ namespace renderer
         if (m_gpuDeviceOwner == device)
             return;
 
-        Reset(device);
+        // OnFrameBegin holds m_mutex while entering this function. Reset()
+        // takes that same mutex, so use the unlocked helper here rather than
+        // recursively locking a non-recursive mutex on first use/device change.
+        ResetGpuQueriesUnlocked();
         m_gpuDeviceOwner = device;
         if (!device) return;
 
@@ -72,7 +81,7 @@ namespace renderer
         m_gpuQueriesSupported = allOk;
         if (!allOk)
         {
-            Reset(device);
+            ResetGpuQueriesUnlocked();
         }
     }
 

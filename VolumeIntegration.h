@@ -456,7 +456,7 @@ inline bool HasOtherActiveEffects() {
     // other effect switched off gets no mask, and the surface is shaded twice - once by the
     // water stage's own camera column and once by the medium.
     const bool hasUnderwater = !shaftDebug && renderer::Underwater::Instance().IsActive();
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
+    return hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
            hasLightScatteringDebug || hasUnderwater;
 }
 
