@@ -387,7 +387,7 @@ int main() try {
         Require(memcmp(gap,savedPixelConstants+68,sizeof(gap))==0,
             "batched upload preserves the untouched c197/c198 gap");
         float opacity[4];Check(d->GetPixelShaderConstantF(199,opacity,1));
-        Require(opacity[0]>=.5f&&opacity[0]<=1.f&&opacity[3]==0.f,
+        Require(opacity[0]>=.5f&&opacity[0]<=1.f,
             "the same upload writes the WATER OPACITY floor on c199");
         // c199's spare lanes carry the two ranges the same stage reads: how far the
         // bed stays visible, and where the far sea has finished dissolving into air.
@@ -395,6 +395,11 @@ int main() try {
                 opacity[2]==watereffect::horizonFogYards&&
                 opacity[1]>=5.f&&opacity[2]>opacity[1],
             "c199 carries the visibility range and the horizon fog distance");
+        // c199.w is the fog scale the surface evaluates per pixel: the client's own
+        // curve reduced to a distance, or the authored horizon distance when the
+        // curve is not usable. It must always be a distance, never a leftover zero.
+        Require(opacity[3]>1.f&&opacity[3]<=4000.f,
+            "c199 carries a usable fog scale for the per-pixel distance fog");
         // Coverage only means something under an alpha blend, and the native liquid
         // material owns that state. The replaced draw must composite with
         // SRCALPHA/INVSRCALPHA and the block above must put the original back.
