@@ -229,7 +229,24 @@ notices a fade in progress, not only a changed id set.
 `tools/CameraAnchoringRegression.cpp` pins the one-swap-per-frame rule, the
 margin, the tie behaviour and the fade curve.
 
-## The camera's heading is not a fact about a lamp (2026-10-19)
+## **And it was not only the score: the pool itself was view-dependent.** A native
+source is observed only through the draw calls that consume it, and the client
+submits those only for emitters inside the frustum. Selection still required
+re-observation inside a 1.4 s batch-cadence window, so turning away retired the
+lamp after 1.4 s - its ground lighting going dark while that ground was still on
+screen - and turning back needed six fresh frames before it lit again. That is
+the reported asymmetry exactly: yaw sweeps emitters across the frustum edge far
+more often than pitch does, and no change to scoring could reach a lamp that had
+already left the pool.
+
+A confirmed source (`stableFrames >= 6`) is now held across
+`kNativeConfirmedHoldMs = 15000` of silence, while an unconfirmed one keeps the
+old five-part test. The window is finite on purpose: a brazier that is put out
+or a door that closes must not glow forever. A lamp now leaves the pool only
+through slot reuse (a new generation and stable id), expiry of that hold, or the
+distance cull - none of which a head turn can do.
+
+The camera's heading is not a fact about a lamp (2026-10-19)
 
 Two view-dependent gates were left in the pass, and both made the same report -
 "dynamic lights break at some angles and flicker":

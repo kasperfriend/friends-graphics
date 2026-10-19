@@ -599,7 +599,7 @@ inline bool NeedsScene() {
         sunGlintEnabled&&qualityPlan.lightSteps>0);
 }
 bool showStatus=false;
-unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0;
+unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0,frameBlendOverrides=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
 inline void ReportFailure(const char* operation,HRESULT hr) {
@@ -1765,7 +1765,16 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // the colour an infinitely thick column converges on, in proportion to the water
         // really over the pixel (so a shoreline's first yard still shows its sand).
         float3 seaBody=deepTint.rgb+inScatter;
-        body=lerp(body,seaBody,opacityControl.x*saturate(effectiveDepth*.5));
+        // ...and it may never be switched off by a depth reading that is missing,
+        // implausible, or the sheet's own surface. `depthValid` is false both when
+        // the copy has no depth and when the depth it has is not behind this
+        // fragment; treating either as "ankle deep" turned the slider off over
+        // exactly the open water it is for. An unknown bed is not a shallow one,
+        // so the fade falls back to the slider's full authority. A genuine,
+        // measured shallow shelf still keeps its sand.
+        float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);
+        float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);
+        body=lerp(body,seaBody,opacityControl.x*bedFade);
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
         waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));
@@ -2191,7 +2200,8 @@ void Present() {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
-            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed
+            <<" liquidLayoutsIgnored="<<frameNearMisses<<" blendOverridden="<<frameBlendOverrides
+            <<" shaderFailure="<<shaderCreationFailed
             <<" sea="<<seaAgitation<<","<<seaMotion<<","<<seaShear<<" weather="<<seaWeather.kind
             <<','<<seaWeather.strength
             <<" underwater="<<submersionTracker.yards<<","<<submersionTracker.ramp
@@ -2213,7 +2223,7 @@ void Present() {
             <<" vertexZ="<<uwLastVertexZ<<" detNeg="<<uwPlaneDetNeg
             <<" lane="<<uwLastLane<<" published="<<uwPublished
             <<" mediumValid="<<(underwaterFrame.medium.valid?1:0)<<'\n';
-    frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
+    frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=frameBlendOverrides=0;
     uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
@@ -2603,6 +2613,11 @@ struct Scope {
     ComPtr<IDirect3DSurface9> oldDepthRT;bool depthBound=false;
     D3DVIEWPORT9 oldViewport{};
     DWORD oldColorWrite[2]{};
+    // The four states the replacement's coverage depends on. Saved outside a
+    // state block (the legacy path), restored in Restore(); with a block the
+    // block's own Capture/Apply owns them.
+    DWORD oldBlend[5]{};
+    bool blendStateSaved=false;
     bool targetState=false;
     // True while the shared D3DSBT_ALL block holds this scope's original
     // pixel/vertex shader, texture and sampler state (everything the block
@@ -2681,6 +2696,25 @@ struct Scope {
             observation.vertexShaderBound?1:0,observation.pixelShaderBound?1:0);
         if(reported.insert(line).second&&!logPath.empty())
             std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
+    }
+    // A liquid draw whose native blend cannot show coverage at all. Reported once
+    // per distinct combination: this is the state that decided whether any alpha
+    // the water stage writes could ever be seen, so a log that names it settles
+    // "the slider does nothing to the water I can see through" without a capture.
+    static void ReportBlendOverride(DWORD enable,DWORD src,DWORD dst,DWORD op) {
+        ++frameBlendOverrides;
+        static std::unordered_set<unsigned long long> reported;
+        const unsigned long long key=(static_cast<unsigned long long>(enable)<<48)|
+            (static_cast<unsigned long long>(src)<<32)|
+            (static_cast<unsigned long long>(dst)<<16)|static_cast<unsigned long long>(op);
+        if(reported.size()>=8||!reported.insert(key).second)return;
+        char line[224];
+        std::snprintf(line,sizeof(line),
+            "liquid draw composited with blend enable=%lu src=%lu dst=%lu op=%lu;"
+            " the water stage forces an alpha blend for this draw so coverage means something",
+            static_cast<unsigned long>(enable),static_cast<unsigned long>(src),
+            static_cast<unsigned long>(dst),static_cast<unsigned long>(op));
+        if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
     }
     static void ReportFogFallback(const renderer::water::Observation& observation,const float* c4) {
         static std::unordered_set<std::string> reported;
@@ -3194,6 +3228,39 @@ struct Scope {
                     }
                 }
             }
+            // COVERAGE IS ONLY MEANINGFUL UNDER AN ALPHA BLEND. The whole contract
+            // of the replacement pixel stage is "this fragment is this much sea":
+            // `result_.color.a` is the column's extinction, and the fixed-function
+            // blend is what lets the world below show through by exactly (1-a).
+            // The native liquid material composites however the client authored it,
+            // and a client that draws its ocean additively - or with ONE as the
+            // source factor - makes alpha a no-op: the seabed stays at full strength
+            // through the sheet at any coverage we write, while changing the body
+            // colour still visibly replaces the client's own liquid texture. That is
+            // the report "opacity changes the old texture but not how much water I
+            // can see through", and no amount of tuning inside the shader could have
+            // reached it. The block captured above restores these with everything
+            // else; on a device without one they are saved here and written back in
+            // Restore(). Only the states that decide coverage are touched.
+            {
+                blendStateSaved=
+                    SUCCEEDED(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&oldBlend[0]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_SRCBLEND,&oldBlend[1]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_DESTBLEND,&oldBlend[2]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
+                if(blendStateSaved&&
+                   (oldBlend[0]!=TRUE||oldBlend[1]!=D3DBLEND_SRCALPHA||
+                    oldBlend[2]!=D3DBLEND_INVSRCALPHA||oldBlend[3]!=D3DBLENDOP_ADD))
+                    ReportBlendOverride(oldBlend[0],oldBlend[1],oldBlend[2],oldBlend[3]);
+                const HRESULT blendHr=
+                    d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
+                if(FAILED(blendHr)){Restore();ReportFailure("water blend state",blendHr);return;}
+            }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
@@ -3270,11 +3337,20 @@ struct Scope {
                         device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
                 }
             }
+            if(blendStateSaved) {
+                device->SetRenderState(D3DRS_ALPHABLENDENABLE,oldBlend[0]);
+                device->SetRenderState(D3DRS_SRCBLEND,oldBlend[1]);
+                device->SetRenderState(D3DRS_DESTBLEND,oldBlend[2]);
+                device->SetRenderState(D3DRS_BLENDOP,oldBlend[3]);
+                // The pass turns separate alpha factors off so SRCALPHA/INVSRCALPHA
+                // govern the whole output; the native draw may have had them on.
+                device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
+            }
         }
         // c4 is outside the block's documented water spans. Restore it after either
         // state-block or manual restoration, including every early-return path.
         if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
-        device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=false;
+        device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=blendStateSaved=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

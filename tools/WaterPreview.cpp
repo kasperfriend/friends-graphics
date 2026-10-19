@@ -1005,7 +1005,11 @@ int main(int argc, char** argv)
                         // refracted part: at the shipped 85% most of the surface used to stay
                         // the client's own pale liquid colour whatever the slider said. Same
                         // line, same gate, same shipped value as the shader.
-                        body = Lerp(body, Add(deep, inScatter), .85f * Saturate(effectiveDepth * .5f));
+                        // An unknown bed is not a shallow one: when there is no
+                        // trustworthy depth reading the slider keeps full authority,
+                        // which is the only way it can hide open water's bed.
+                        const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;
+                        body = Lerp(body, Add(deep, inScatter), .85f * bedFade);
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));
                     }
                     // Same neutral-at-0x808080 contract as the shader: tint is uploaded as

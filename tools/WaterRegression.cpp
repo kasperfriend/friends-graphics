@@ -1181,11 +1181,22 @@ int main() try
             const auto bed=pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;");
             const auto bodyLine=pixel.find("float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));",bed);
             const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;",bodyLine);
+            const auto gate=pixel.find(
+                "float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);",sea);
+            const auto trust=pixel.find(
+                "float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);",gate);
             const auto fade=pixel.find(
-                "body=lerp(body,seaBody,opacityControl.x*saturate(effectiveDepth*.5));",sea);
+                "body=lerp(body,seaBody,opacityControl.x*bedFade);",trust);
             Require(bed!=std::string::npos&&bodyLine!=std::string::npos&&sea!=std::string::npos&&
-                    fade!=std::string::npos&&bed<bodyLine&&bodyLine<sea&&sea<fade,
+                    gate!=std::string::npos&&trust!=std::string::npos&&fade!=std::string::npos&&
+                    bed<bodyLine&&bodyLine<sea&&sea<gate&&gate<trust&&trust<fade,
                     "water opacity fades the WHOLE body toward the sea, after the refraction mix");
+            // An unknown or implausible bed reading must not switch the slider off.
+            // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
+            Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
+                        !=std::string::npos &&
+                    pixel.find("opacityControl.x*saturate(effectiveDepth*.5)")==std::string::npos,
+                    "a missing or implausible depth reading still lets opacity hide the bed");
             // The regression that mattered: the fade must come after `body` is composed from
             // the client's colour and the captured bottom, or it only scales the part
             // REFRACTION owns (14% at the shipped setting) and the slider does nothing.
@@ -1195,7 +1206,9 @@ int main() try
                         !=std::string::npos,
                     "the depth transition still converges on the same sea body");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * Saturate(effectiveDepth * .5f));")
+            Require(mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
+                        !=std::string::npos &&
+                    mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
                         !=std::string::npos,
                     "the CPU preview fades the whole body at the shipped opacity too");
             // And the case with no scene copy at all keeps the BODY, not the client's own
@@ -1244,6 +1257,21 @@ int main() try
                 "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
             const auto optics=pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));");
             const auto fade=pixel.find("surfaceAlpha*=1-smoothstep(0.0,.25,wrongSide);");
+            // THE BLEND. Coverage is only an image if the fixed-function blend lets
+            // the world through by (1-a). The native liquid material owns that state,
+            // and an additive (or ONE-sourced) ocean makes every alpha we write a
+            // no-op: the seabed stays at full strength and only the body colour
+            // changes, which is the report "opacity hides the old texture but not
+            // what I can see through". The pass now forces the one blend its output
+            // is authored for and lets the captured state block put the original back.
+            Require(code.find("d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);")!=std::string::npos&&
+                    code.find("device->SetRenderState(D3DRS_ALPHABLENDENABLE,oldBlend[0]);")!=std::string::npos&&
+                    code.find("liquid draw composited with blend enable=")!=std::string::npos,
+                    "the replaced draw composites with an alpha blend, and the native state is restored");
             Require(pixel.find("float4 opacityControl:register(c199);")!=std::string::npos&&
                     floorRule!=std::string::npos&&optics!=std::string::npos&&fade!=std::string::npos&&
                     optics<floorRule&&floorRule<fade,

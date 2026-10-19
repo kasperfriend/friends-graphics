@@ -302,8 +302,38 @@ namespace renderer
             constexpr ULONGLONG kNativeObservationGraceMs = 1400;
             const bool recentlyEnabled = slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= kNativeEnableGraceMs;
             const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= kNativeObservationGraceMs;
-            if (!slot.valid || (!slot.enabled &&
-                (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))) continue;
+            // A CONFIRMED source is not dropped for having gone quiet, and that is the
+            // last place the camera's heading decided whether a lamp existed. The client
+            // enables a light for the draws that consume it and disables the slot again
+            // afterwards, and it only submits those draws for emitters inside the
+            // frustum - so "not observed this second" is a fact about where the camera
+            // is pointed, not about whether the lamp is still in the world. Requiring
+            // re-observation made the pool itself view-dependent: turning away retired a
+            // lamp after 1.4 s, which is a lamp's ground lighting going dark while that
+            // ground is still on screen, and turning back needed six fresh frames before
+            // it lit again - the reported "lights break, more on left-right rotation".
+            // No scoring change could reach it because the lamp had already left the pool.
+            // Silence is only evidence for a slot that has never been confirmed; a
+            // confirmed one leaves through slot reuse (a new generation and signature),
+            // an explicit disable without a matching light, or the distance cull below,
+            // none of which a head turn can do.
+            // A confirmed source therefore gets a silence window measured against how
+            // long a player can plausibly look away (`kNativeConfirmedHoldMs`), not
+            // against the batch cadence. It is still finite: a light that is genuinely
+            // gone - a door closing, a brazier put out - must not glow forever.
+            constexpr ULONGLONG kNativeConfirmedHoldMs = 15000;
+            if (!slot.valid) continue;
+            const bool confirmed = slot.stableFrames >= 6;
+            // Live the way the original test saw it: enabled, or enabled and observed
+            // inside the batch-cadence window - and only for a source that has been
+            // confirmed as persistent, which is the filter the spell/particle flashes
+            // need.
+            const bool liveNow = slot.enabled || (recentlyEnabled && recentlySeen && confirmed);
+            // Or held: confirmed once, and seen inside the long window a player can
+            // spend looking the other way. This is the branch that used to be missing.
+            const bool held = confirmed && slot.lastSeenTick != 0 &&
+                now - slot.lastSeenTick <= kNativeConfirmedHoldMs;
+            if (!liveNow && !held) continue;
             const D3DLIGHT9& d = slot.light;
             if (!std::isfinite(d.Position.x) || !std::isfinite(d.Position.y) || !std::isfinite(d.Position.z) ||
                 !std::isfinite(d.Diffuse.r) || !std::isfinite(d.Diffuse.g) || !std::isfinite(d.Diffuse.b) ||

@@ -2766,6 +2766,44 @@ while it asserts that a copied 128 gray stays 128: with the new term in place, a
 the raw refraction round trip *at the shipped opacity* would be asserting that the slider
 does nothing.
 
+## Round 10: coverage needs a blend, and the bed reading cannot veto the slider (2026-10-19)
+
+**The alpha was never reaching the screen.** The replacement pixel stage's whole
+contract is "this fragment is this much sea": `result_.color.a` is the column's
+own extinction and the fixed-function blend is what lets the world below show
+through by exactly `1 - a`. The pass never touched the blend state, so the draw
+composited exactly as the native liquid material was authored to - and an ocean
+composited additively (or with `ONE` as the source factor) makes alpha a no-op.
+On such a client every coverage change we ever shipped was invisible: the body
+colour still replaced the client's own liquid texture (that is what "opacity
+hides the old water"), while the seabed stayed at full strength through the
+sheet at any alpha, which is "it does not regulate real underwater
+transparency". No amount of tuning inside the shader could have reached it.
+
+- The pass now sets `ALPHABLENDENABLE=TRUE`, `SRCALPHA`/`INVSRCALPHA`,
+  `BLENDOP_ADD` and `SEPARATEALPHABLENDENABLE=FALSE` for the replaced draw only.
+  The `D3DSBT_ALL` block the pass already captures restores all of it, and the
+  no-block path saves and writes the four values back itself.
+- A draw whose native blend is not already that is logged once per distinct
+  combination (`liquid draw composited with blend enable=...`), and the periodic
+  line carries `blendOverridden=N`. That sentence is the evidence, without a
+  capture, that this was the client's compositing and not our coverage.
+- `WaterRegression` pins the four writes, the restore, and the log line.
+
+**A missing depth reading used to switch the slider off.** `hideBed` was gated
+by `saturate(effectiveDepth * .5)`, and `effectiveDepth` is 0 whenever the
+captured depth is missing, is not behind the fragment, or is the sheet's own
+surface (`behindZ == viewPos.z`, which is what a copy that already contains the
+water looks like). Treating that as "ankle deep" meant the fade weight was zero
+over exactly the open water the slider exists for: the surface kept the
+captured bed at full strength and the only visible effect left was the alpha.
+
+- `bedTrusted = depthValid * step(viewPos.z + .25, behindZ)` and
+  `bedFade = lerp(1.0, saturate(effectiveDepth * .5), bedTrusted)`: an unknown
+  or implausible bed is **not** a shallow one, so opacity keeps full authority.
+  A genuinely measured shallow shelf still keeps its sand, which was the point
+  of the gate. The CPU preview mirrors it.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

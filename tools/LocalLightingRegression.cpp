@@ -1399,11 +1399,23 @@ int main()
               "volumetric diagnostics expose mode 13 and cull zero-power or missed lamp rays");
         Check(manager.find("light.stableId = StableManifestId(block);") != std::string::npos &&
               manager.find("std::isfinite(position.x)") != std::string::npos &&
-              manager.find("(!slot.enabled &&") != std::string::npos &&
-              manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos &&
               manager.find("kNativeEnableGraceMs = 700") != std::string::npos &&
               manager.find("kNativeObservationGraceMs = 1400") != std::string::npos,
               "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
+        // A lamp's existence may not depend on the camera's heading either. The pool
+        // used to require re-observation inside the batch cadence (1.4 s), and the
+        // client only submits an emitter's draws while it is in the frustum - so
+        // turning away retired the lamp and turning back needed six frames before it
+        // lit again. Both halves are pinned: the ordinary live test still needs the
+        // confirmation, and a confirmed source is held across a much longer silence.
+        Check(manager.find("const bool liveNow = slot.enabled || (recentlyEnabled && recentlySeen && confirmed);")
+                  != std::string::npos &&
+              manager.find("kNativeConfirmedHoldMs = 15000") != std::string::npos &&
+              manager.find("const bool held = confirmed && slot.lastSeenTick != 0 &&") != std::string::npos &&
+              manager.find("if (!liveNow && !held) continue;") != std::string::npos &&
+              manager.find("(!slot.enabled &&\n                (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))")
+                  == std::string::npos,
+              "a confirmed lamp survives a head turn instead of leaving the pool");
         Check(settings.find("NormalSpreadPercent") == std::string::npos &&
               overlay.find("NormalSpreadPercent") == std::string::npos &&
               manager.find("NormalSpreadPercent") == std::string::npos,
