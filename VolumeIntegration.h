@@ -369,6 +369,16 @@ void Configure(const std::wstring& base) {
     ReloadTuning();
 }
 
+// A confirmed zone change: the precipitation the client was drawing belongs to the
+// place the player left, so neither the detected weather nor the deck coverage it
+// forced may be carried across (see weathervisuals::ForgetLocation and
+// CloudDynamics::ForgetWeather). The cloud field's own climate still eases.
+inline void ForgetWeather() noexcept {
+    cloudWeather=renderer::CloudWeather::Clear;
+    cloudWeatherStrength=0.f;
+    renderer::VolumetricClouds::Instance().ForgetWeather();
+}
+
 // Frame-scoped DEFAULT resources: persistent textures STAY ALIVE across frames!
 void Finish(IDirect3DDevice9* d) {
     // A recreated device has a different pointer. Drop frame-owned references

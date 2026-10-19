@@ -1125,6 +1125,22 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     if (renderMode == 1) rainCompositeReady = drewPrecipitation;
 }
 
+// A confirmed zone change is a weather discontinuity: the rain the client was
+// emitting in the old zone is not evidence about the new one. Without this, the
+// 30 s no-evidence hold (which exists for particle gaps, not for travel) kept the
+// old zone's precipitation alive across a teleport, and every consumer that reads
+// it - the cloud deck's coverage, the rain field, the sea state - behaved as if it
+// were still raining where the player now stands.
+inline void ForgetLocation() noexcept
+{
+    nativeWeatherMode = 0;
+    nativeWeatherSeenThisFrame = 0;
+    nativeWeatherPrimitives = 0;
+    lastNativeWeatherTick = 0;
+    weatherSuspended = false;
+    coverMs = 0;
+}
+
 // Native draws are observations, not a per-frame boolean weather API. Missing
 // draws in steady light rain must not repeatedly switch the shader off.
 inline void UpdateWeatherObservation(DWORD now, bool focused, bool preserveDetection)

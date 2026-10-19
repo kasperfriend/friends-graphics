@@ -298,6 +298,59 @@ Four frames from `tools/CloudPreview.cpp` at the shipped defaults: scattered cum
 broken deck at 50, an overcast lid at 92, and the same sky seen from 3600 units up. All four are the same field and
 the same lighting - only the slider and the camera move.
 
+## Zone changes and the weather deck (2026-10-19)
+
+### What was being seen
+
+After a burst of teleports the deck sat at full coverage in every location and never
+changed - no transition, no clear sky, just an overcast lid wherever the player went.
+
+### Where the coverage came from
+
+Two things feed coverage. The first is the climate: the authored `CoveragePercent`
+slider times `CloudCoverageMultiplier` from the resolved environment profile, eased by
+`CloudDynamics` toward the new target over `TransitionSeconds` - a normal transition.
+The second is precipitation: `result.coverage += (1-result.coverage)*wet`, where `wet`
+is the decaying weight of the client's detected rain/snow/sand. At `wet=1` the deck is
+***full*** overcast regardless of the zone's climate.
+
+That second state is deliberately slow: when the native particles stop, the detection
+holds for `nativeWeatherHoldMs` (30 s, so a doorway or a particle gap cannot blink the
+pass) and the wet weight then eases out over its own 35 s response. Neither of those was
+ever cleared on travel, because nothing told the weather state that the player had left
+the place the rain belonged to. A teleport therefore carried the old zone's rain
+evidence across, and a clear destination inherited a full deck for the hold plus the
+clearing ramp - and a second teleport re-armed nothing, so it stayed that way.
+
+### The fix
+
+A confirmed **zone or map** change is a discontinuity, not a trend:
+
+- `weathervisuals::ForgetLocation()` drops the detected weather (`nativeWeatherMode`,
+  the per-frame observation, the hold tick and `weatherSuspended`) and the cover
+  estimate. The particle evidence that made it true belonged to the old zone; the new
+  zone's own draws set it again within a frame or two.
+- `volume::ForgetWeather()` clears the frame's published weather and, through
+  `VolumetricClouds::ForgetWeather()`, the `CloudDynamics` wet vector
+  (`m_wet = {0,0,0}`) that had pinned coverage to 1.
+- The climate filter is untouched: `m_current` still eases toward the new zone's
+  `CloudCoverageMultiplier`, which is the transition the report expected to see.
+- Only changes between two **valid** samples count. A loading screen's invalid sample
+  is travel, not a new sky, so it neither fires the reset nor masks the real change on
+  landing. Sub-zone (area) changes are ignored on purpose: walking between two districts
+  of one city is the same sky.
+
+The call site is in `Present`, immediately after
+`EnvironmentProfileManager::Update` has confirmed the location, and it logs
+`Weather re-armed: the zone changed...` once per move.
+
+### Verification
+
+`tools/CloudClimateRegression.cpp` drives a deck to `wet=1`/coverage 1, calls
+`ForgetWeather()`, and requires the next frame to be at the zone's own coverage (`0.5`
+with neutral multipliers) and to rebuild when rain continues; source pins hold the two
+reset entry points and the zone-only trigger in `ModernWoWRenderer.cpp`.
+
 ## Tests
 
 `tools/AtmosphereRegression.cpp` (run with `tools/Test-Atmosphere.cmd`, needs a real D3D9 device) covers the deck on

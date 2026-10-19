@@ -116,6 +116,10 @@ namespace renderer
         bool Render(IDirect3DDevice9* device, const FrameContext& frameContext, IDirect3DSurface9* targetSurface);
         VolumetricCloudSettings& Settings() { return m_settings; }
         const VolumetricCloudSettings& Settings() const { return m_settings; }
+        // The previous zone's precipitation is not evidence about this one (see
+        // CloudDynamics::ForgetWeather). The deck's climate still eases; only the
+        // wet vector that pins coverage to full is dropped.
+        void ForgetWeather() noexcept { m_dynamics.ForgetWeather(); }
         IDirect3DTexture9* GetCloudTexture() const { return m_cloudTexture.Get(); }
         IDirect3DTexture9* GetShadowTexture() const { return m_shadowValid ? m_shadowTexture.Get() : nullptr; }
         Vec4 ShadowArea() const { return m_shadowArea; }

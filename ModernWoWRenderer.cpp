@@ -194,6 +194,10 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 
 // When the place last changed, when its tuning was last applied, and whether the
 // renderer has configured itself for a place at all yet. See HookedPresent.
+// The last place, in the only granularity weather cares about: a map/zone change is
+// a different sky, an area change (a district, a cave, a tower) is not. Zero until a
+// valid sample arrives, so the first zone-in is treated as a move from nowhere.
+uint32_t g_weatherMapId = 0, g_weatherZoneId = 0;
 uint64_t g_placeChangedAt = 0;
 // What the client has drawn, as of the last Present: the frame that takes a gap
 // is the difference between this and the session total when the gap is measured
@@ -351,6 +355,21 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             renderer::ShouldHoldLocation(worldFrame, environment.Location().valid));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
+    {
+        // A confirmed zone change is also a weather discontinuity. The detected
+        // precipitation (and the deck coverage it forces) described the place the
+        // player left; the 30 s hold that keeps it alive across particle gaps must not
+        // carry it across a teleport, or a clear zone inherits the old one's overcast
+        // for the hold plus the slow clearing ramp. Only a change between two VALID
+        // samples counts: a loading screen's invalid sample is travel, not a new sky.
+        const auto& place=renderer::EnvironmentProfileManager::Instance().Location();
+        if(place.valid&&(place.mapId!=g_weatherMapId||place.zoneId!=g_weatherZoneId)) {
+            if(g_weatherMapId||g_weatherZoneId) Log("Weather re-armed: the zone changed, so the old zone's precipitation no longer applies");
+            g_weatherMapId=place.mapId;g_weatherZoneId=place.zoneId;
+            weathervisuals::ForgetLocation();
+            volume::ForgetWeather();
+        }
+    }
     waterreflection::Present();
     volume::Present(d);
     // The normal weather pass precedes the first UI draw. Some client frames
