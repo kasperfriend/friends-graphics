@@ -1898,13 +1898,27 @@ void TestMirror()
     // of water overhead, where std::max(NaN, 0) is not specified to be 0.
     Require(pass.find("float finiteCheck=dot(colour,colour);") != std::string::npos
                 && pass.find("if(!(finiteCheck<1e30)) return scene;") != std::string::npos
-                && pass.find("if (!frameContext.cameraValid) { NoteIdle(7,") != std::string::npos
+                && pass.find("const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&")
+                    != std::string::npos
+                && pass.find("frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;")
+                    != std::string::npos
+                && pass.find("if (!frameContext.cameraValid && !poseRetained) { NoteIdle(7,")
+                    != std::string::npos
                 && pass.find("const float value = frameContext.inverseView.m[row][axis];") != std::string::npos
                 && pass.find("if (!std::isfinite(value))") != std::string::npos
                 && pass.find("if (!(lengthSquared > 1e-8f))") != std::string::npos
                 && pass.find("const float yardsOverhead = std::isfinite(frameContext.underwaterYards)")
                     != std::string::npos,
             "a NaN cannot reach the frame: the stage falls back to it, and the CPU refuses to upload one");
+    // The medium must not be at the mercy of which way the diver happens to look. A frame
+    // whose draws carried no fresh eye (looking up at the surface, a wall, a menu) keeps the
+    // retained pose for the same short hold the lamps use, instead of dropping the fog,
+    // the caustics, the beams and the grade at some camera angles and not others.
+    Require(pass.find("const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&")
+                != std::string::npos
+                && pass.find("frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;")
+                != std::string::npos,
+            "an un-recaptured pose sustains the medium for kCameraEyeHoldMs instead of switching it off by camera angle");
     // Dirt: the silt gradient and the hundred-yard patch field are spelled identically on both
     // sides of the mirror, ride the spare warp-register lane, and multiply the zone's clarity
     // rather than replacing it - there is still one clarity and the zone still owns it.

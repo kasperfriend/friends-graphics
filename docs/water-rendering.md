@@ -2659,6 +2659,61 @@ not the normal path: with a capture present nothing about it changes.
 the optical terms and the wrong-side fade, the captureless safety net, the tinted fog target
 (and its preview mirror).
 
+## Round 8: the medium does not depend on which way the camera points (2026-10-19)
+
+### What was being seen
+
+Underwater, the medium (fog, caustics, beams, grade) disappeared at some camera
+positions - most reliably when the view turned up towards the surface - and came back
+when the camera turned back. The water *surface* was still shaded; only the medium was
+missing.
+
+### The cause
+
+`Underwater::Render` refused any frame whose `FrameContext::cameraValid` was false. That
+flag is published by the frame's camera capture, which needs a draw carrying the eye:
+a frame that draws only sky, only a wall, or only UI publishes no fresh pose, so
+`cameraValid` stays false while the retained inverse view, projection unpack and camera
+position are still the last accepted ones (a frame or two old). Looking up from under the
+surface is exactly such a frame, so turning the head switched the whole medium off and a
+terrain draw switched it back on. The state itself was never wrong - the tracker kept the
+submersion the entire time, including ten-second stretches with no liquid draw at all
+(`UnderwaterRegression`'s "diver looking at the seabed" case) - so the camera pose gate
+was the only thing dropping the pass.
+
+### The fix
+
+The retained pose is used for a bounded hold, exactly like the local lights:
+
+```cpp
+const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&
+    frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+```
+
+- Inside `kCameraEyeHoldMs` (1 s) the pass runs on the rows the frame still carries. The
+  reconstruction is off by however far the camera moved since the last eye-carrying draw,
+  which for one hold is the swimmer's own movement - and the tracker refuses to advance
+  the eye on those frames, so nothing drifts.
+- Past the hold the pass refuses as before: a genuinely stale camera is a wrong world
+  position, and the `NoteIdle(7)` line now says which of the two it was.
+
+### The rest of the camera dependence
+
+Holding the pose is the fix for the transient; the pass also reads four *bits* that are
+left over from the camera capture and must be this frame's before the hold applies:
+`projUnpack` (is the depth this frame's projection), `depthMaxZ`, `viewRawValid` (the raw
+view is this frame's) and `cameraValid`. Those are checked before the hold, so a retained
+pose is only ever used with a projection that goes with it - the pair is republished
+together or not at all. The medium itself (clarity, tint, deep colour) is rebuilt from the
+tuning and the environment every frame whether or not a liquid draw ran, so no part of the
+*fog* is carried over from a draw or a previous camera.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` pins the hold (both the expression and the 1 s bound)
+next to the existing NaN/projection refusals, so the pass cannot go back to dropping the
+medium by camera angle.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
