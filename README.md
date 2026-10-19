@@ -5,9 +5,6 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 > [!IMPORTANT]
 > This project is developed and tested for the **Ascension client**. It is **not tested with a stock World of Warcraft 3.3.5 client**. The renderer is under active development, so visual glitches, compatibility problems, crashes, and performance regressions may still occur.
 
-> [!WARNING]
-> **AI Materials are not implemented as a supported feature yet.** The repository contains experimental material-cache code and configuration placeholders, but they are incomplete, disabled by default, and should not be treated as part of the current release.
-
 ## Screenshots
 
 <table>
@@ -156,7 +153,6 @@ sky, the rows are what the zone asks for, and every panel shares a clock and a c
 
 ## Known limitations
 
-- AI Materials, generated normal maps, parallax relief, and material self-shadowing are still experimental and are not implemented as a supported release feature.
 - Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
 - Ambient occlusion only sees what is on screen: off-screen geometry cannot occlude, contact shading is weaker than it should be where a normal is reconstructed across a crease, and occluders thinner than about a yard can be stepped over. Run it inside the atmosphere composite, so it needs `[Volume] Enabled=1`.
 - Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
@@ -176,7 +172,7 @@ sky, the rows are what the zone asks for, and every panel shares a clock and a c
 `F8` captures one diagnostic frame when `[Diagnostics] Enabled=1` in
 `ModernWoWRenderer.ini`. F12 reloads that section; `AutoCapture=1` captures a
 frame after reload without F8. Capture status and file errors appear in
-`WaterEffect.log`. This is troubleshooting only, not an AI Materials control.
+`WaterEffect.log`. This is troubleshooting only.
 
 F7 now uses a left-hand category list: select a tab to open its related settings. Drag the title bar to move the window, or drag the bottom-right corner to resize it. Longer tabs scroll with the mouse wheel over the settings pane, the scrollbar, or the up/down buttons. The window stays on screen; its size, position, selected tab and per-tab scroll positions are retained while the client is running. Changes save automatically.
 
@@ -235,7 +231,6 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
 | `[PostProcess]` | Global enable switch, brightness, contrast, gamma, and sharpness. Always saved in `GraphicsEffects.ini`; location overrides are ignored. |
 | `[DistanceFog]` | One F7 enable/distance/power control for world-edge fog in the volume compositor and its native-shader fallback; neutral reset is 100/100. |
-| `[AIMaterials]` | Unfinished experimental placeholder; keep disabled. |
 
 The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.
 
@@ -271,7 +266,7 @@ Each successful Release build uploads an install-ready artifact containing:
 - `ModernWoWRenderer.ini`
 - `GraphicsEffects.ini`
 - `EnvironmentProfiles.ini` (location verification and environment configuration)
-- required `MaterialCache` manifests
+- required `MaterialCache` local-light manifests
 - packaged weather textures
 
 Artifacts are retained for 14 days, including PR and manual builds. Publishing a GitHub Release is separate: run the manual `Release` workflow to build, validate and publish the ZIP. Ordinary pushes do not publish releases.
@@ -308,7 +303,6 @@ src/Environment/            Location profiles, shared wind and F7 controls
 src/Water/                  Sea state, wave fields and integrated wind-driven motion
 src/Lighting/               Trusted local-light collection and lifetime rules
 src/Scene/                  Draw-call classification
-src/Materials/              Experimental, unfinished AI Materials code
 src/Diagnostics/            Runtime logging, capture, and profiling
 tools/                      Offline regression and shader validation tools
 Screenshots/                README gallery source images

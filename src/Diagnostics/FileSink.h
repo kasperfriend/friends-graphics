@@ -59,7 +59,7 @@
 // `if (cond) ofstream(...)` whose condition would have to grow braces to take a
 // flush first. Each also writes only when its own tuning actually changed, so
 // what buffering would save there is one open on a crossing that is already
-// re-applying nine subsystems. The menu report and the material tuning log have a
+// re-applying eight subsystems. The menu report and the renderer log have a
 // single writer each, and those are here.
 namespace renderer::filesink {
 

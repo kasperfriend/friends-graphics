@@ -2790,8 +2790,8 @@ struct Scope {
                 anchor.valid=waveFrame.cameraValid;
                 // World +Z in view space is ROW 2 of the captured view, which is the
                 // convention AnchorFromModelView documents ("world axis i arrives in view
-                // space as row i") and the one MaterialCacheManager transforms world
-                // vectors with. Reading the components across the rows instead yields the
+                // space as row i") and the one the renderer's world-space helpers use.
+                // Reading the components across the rows instead yields the
                 // view axes expressed in world coordinates - the exact mistake that
                 // comment names - so this fallback used to hand the pixel stage, and the
                 // medium published below, an up axis with the camera's rotation applied
