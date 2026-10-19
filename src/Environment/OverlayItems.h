@@ -136,6 +136,15 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"GeometryWavePercent","WAVE HEIGHT",0,300,5,100},
  {KIND_SLIDER,L"Water",L"WaveSofteningPercent","WAVE FADE",0,400,5,100},
  {KIND_SLIDER,L"Water",L"ClarityPercent","WATER CLARITY",5,200,5,100},
+ // How much of the scene the surface is allowed to leave showing, 0..100. This is NOT
+ // clarity: clarity is how far daylight reaches through the body, and it is why raising
+ // it darkens the bed rather than the sheet. In clear, shallow water the client's own
+ // liquid alpha and that extinction are both near nothing, so the bed read straight up
+ // through the sea. This is a floor under the shader's coverage, so 100 is a sheet you
+ // cannot see the bottom through, 0 restores the pre-slider look, and anything between is
+ // a surface you can tune per zone like every other water key. The bounds match the clamp
+ // in WaterEffect.h (`std::clamp(ReadTuning(L"OpacityPercent",85),0,100)`).
+ {KIND_SLIDER,L"Water",L"OpacityPercent","WATER OPACITY",0,100,5,85},
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WATER WIND / FOAM BIAS",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
  {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},

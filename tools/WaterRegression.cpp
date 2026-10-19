@@ -1154,6 +1154,46 @@ int main() try
                 pixel.find("absorption*(.78-.20*fresnel)")==std::string::npos&&
                 pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")!=std::string::npos,
                 "a water face covers by what its own column extinguishes, so the sea behind it cannot show through the sea in front");
+        // WATER OPACITY. Coverage is not the same question as clarity, and the shader had no
+        // lane for it at all: baseAlpha came from the client's painted liquid and depthAlpha
+        // from the body's own extinction, so a clear, shallow sea multiplied to almost nothing
+        // and the bed read straight up through the surface - the picture the report is about.
+        // The knob is a floor under the coverage, applied AFTER the optical terms (so it can
+        // only add cover where the optics already agreed) and BEFORE the wrong-side fade (so a
+        // far sheet still dissolves at its silhouette instead of being pinned opaque by it),
+        // read from its own ini key so it is not a second spelling of WATER CLARITY, and
+        // uploaded on a lane inside the block the draw already writes.
+        {
+            const auto floorRule=pixel.find("surfaceAlpha=max(surfaceAlpha,opacityControl.x);");
+            const auto optics=pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));");
+            const auto fade=pixel.find("surfaceAlpha*=1-smoothstep(0.0,.25,wrongSide);");
+            Require(pixel.find("float4 opacityControl:register(c199);")!=std::string::npos&&
+                    floorRule!=std::string::npos&&optics!=std::string::npos&&fade!=std::string::npos&&
+                    optics<floorRule&&floorRule<fade,
+                    "opacity is a floor on coverage: after the optical terms, before the wrong-side fade");
+            Require(pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")
+                        !=std::string::npos&&
+                    pixel.find("depthAlpha=absorption*opacityControl")==std::string::npos&&
+                    code.find("opacityPercent=float(std::clamp(ReadTuning(L\"OpacityPercent\",85),0,100));")
+                        !=std::string::npos&&
+                    code.find("absorptionStrength=std::clamp(ReadTuning(L\"DepthAbsorptionPercent\",38),0,100)*.01f;")
+                        !=std::string::npos,
+                    "opacity has its own key and does not fold into depth absorption, so clarity keeps its meaning");
+            // The lane is c199, inside the saved/restored c180..c218 block, and the per-frame
+            // upload writes it in the same place the rest of the controls are built - not after
+            // the cached-light memcpy, which stops at c196.
+            const auto lane=code.find("pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);");
+            const auto cached=code.find("std::memcpy(pixelConstants,cache.values,sizeof(cache.values));");
+            Require(lane!=std::string::npos&&cached!=std::string::npos&&lane<cached&&
+                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos,
+                    "opacity rides c199 inside the one c180..c218 upload, ahead of the cached-light splice that only overwrites c180..c196");
+            const std::string ini=ReadAlongside("../GraphicsEffects.ini");
+            const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
+            Require(ini.find("OpacityPercent=85")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"OpacityPercent\",\"WATER OPACITY\",0,100,5,85}")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"ClarityPercent\",\"WATER CLARITY\",5,200,5,100}")!=std::string::npos,
+                    "opacity ships at 85 in the ini and as its own 0..100 F7 slider beside clarity");
+        }
         // The CPU half: the plane over the camera, read from the draw's own modelView and one
         // of its own vertices - and nothing else. It used to be read against the live VIEW
         // transform and refused outright when the view's basis determinant was negative (the

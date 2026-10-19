@@ -45,6 +45,9 @@ float strength=.003f;
 float normalStrength=.16f, specularStrength=.55f;
 float reflectionStrength=.70f,environmentStrength=.24f,reflectionDistance=120.f,reflectionThickness=1.8f;
 float flowSpeed=1.f,flowRotation=.32f;
+// WATER OPACITY: the coverage floor above, 0..100 percent. Read with the other
+// tuning so a per-location override and the F7 slider land in the same place.
+float opacityPercent=85.f;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
@@ -808,6 +811,13 @@ const char* source=R"HLSL(
 float4 localPosition[8]:register(c180); // view-space emitters
 float4 localColor[8]:register(c188);
 float4 localControl:register(c196); // count, enabled
+// x=how opaque the surface is at least (WATER OPACITY, 0..1). The client's
+// liquid alpha plus depth absorption is all this stage had, and in shallow,
+// clear water that is nearly nothing: the bed read straight through the sea.
+// This is a floor on the coverage, not a second picture of it - the column's
+// own extinction still decides everything above it, so deep water and a
+// reflection still converge where they did.
+float4 opacityControl:register(c199);
 sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
@@ -1832,6 +1842,11 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Riding the native alpha alone left three quarters of the live scene blended
     // through a shallow sheet at grazing angles, mirror or no mirror.
     surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));
+    // The authored floor. Applied after the optical terms and before the wrong-side
+    // fade below, so a far sheet still dissolves at the silhouette instead of being
+    // held opaque by the floor: the floor says how much sea a pixel is, the fade says
+    // that this fragment is not one.
+    surfaceAlpha=max(surfaceAlpha,opacityControl.x);
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
     // silhouette itself turning away, not a second sheet behind the first.
@@ -1888,6 +1903,10 @@ void ReloadTuning(){
     flowRotation=std::clamp(ReadTuning(L"FlowRotationPercent",32),0,100)*.01f;
     refractionStrength=std::clamp(ReadTuning(L"RefractionPercent",14),0,100)*.01f;
     absorptionStrength=std::clamp(ReadTuning(L"DepthAbsorptionPercent",38),0,100)*.01f;
+    // Not "clarity": clarity is how far light reaches THROUGH the water and is
+    // a property of the body. This is how much of the scene the surface is
+    // allowed to leave showing, which is a property of the sheet.
+    opacityPercent=float(std::clamp(ReadTuning(L"OpacityPercent",85),0,100));
     depthFogStrength=std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)*.01f;
     shoreFoamStrength=std::clamp(ReadTuning(L"ShoreFoamPercent",28),0,60)*.01f;
     shoreFoamWidth=std::clamp(ReadTuning(L"ShoreFoamWidthPercent",120),25,800)*.01f;
@@ -1933,7 +1952,7 @@ void ReloadTuning(){
         // unchanged, so an existing log still reads the same way.
         std::ostringstream row;
         row<<"tuning enabled="<<effectEnabled<<" master="<<active<<" quality="<<waterQuality
-            <<'('<<renderer::water::QualityName(waterQuality)<<')'<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
+            <<'('<<renderer::water::QualityName(waterQuality)<<')'<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" opacity="<<opacityPercent<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
         static std::string lastRow;
         if(lastRow!=row.str()){lastRow=row.str();std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<lastRow;}
     }
@@ -2469,8 +2488,8 @@ struct Scope {
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
     // Save each touched constant span as one block. Pixel c180..c218 includes
-    // local lights, the untouched c197..c199 gap, and all water controls, so
-    // setup and restoration each cross the D3D9 driver only once.
+    // local lights, the c197/c198 gap, the WATER OPACITY floor at c199, and all
+    // water controls, so setup and restoration each cross the D3D9 driver once.
     float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
     bool pixelConstantsSaved=false,vertexFogFallback=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
@@ -2656,6 +2675,12 @@ struct Scope {
             // above); it now carries DEPTH FOG - the second leg of the bed's path,
             // 1 with the toggle off, which makes the column below bit-identical.
             controls[19]=depthFogEnabled?depthFogStrength:1.f;
+            // c199 (pixelConstants index 19) is inside the block this draw uploads
+            // and is not declared by the client's own stage; our pixel stage reads
+            // it as the opacity floor. The other three lanes are cleared so a
+            // leftover from the saved client block can never leak into them.
+            pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);
+            pixelConstants[19][1]=pixelConstants[19][2]=pixelConstants[19][3]=0.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops
@@ -3088,8 +3113,9 @@ struct Scope {
                     cache.cameraValid=frame.cameraValid;cache.viewValid=frame.viewRawValid;
                     cache.localLights=qualityPlan.localLights;cache.valid=true;
                 }
-                // Preserve c197..c199 from the saved block, splice in the cached
-                // lights and water controls, then upload c180..c218 in one call.
+                // Preserve c197/c198 and the c199 opacity floor from the block
+                // built above, splice in the cached lights and water controls,
+                // then upload c180..c218 in one call.
                 std::memcpy(pixelConstants,cache.values,sizeof(cache.values));
                 if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],39))){Restore();return;}
             }

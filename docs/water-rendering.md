@@ -2486,6 +2486,63 @@ the reporting player's machine. In-game confirmation still matters.
 - `tools/Test-Atmosphere.cmd`: includes equal-depth water/terrain boundary
   comparison at MaxZ=.94, in addition to the existing water/fog regressions.
 
+## Round 5: WATER OPACITY, a floor under coverage (2026-10-19)
+
+### What was being seen
+
+At Stormwind Harbor the modern surface was a sheet of glass: the bed, the rocks and the
+shoreline under it read through the sea almost undimmed, while the client's own water next
+to it hid them. F7 showed every water effect enabled, so this was not a missing pass.
+
+Coverage in the pixel stage was built from exactly two terms: the client's painted liquid
+alpha (`baseAlpha=color.a*base.a`) and the column's own extinction (`depthAlpha=absorption`,
+the Beer-Lambert term the body's `ClarityPercent` feeds). Both are small in clear, shallow
+water, and they multiply: `surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha)`. There
+was no term anywhere - not in `[Water]`, not in F7, not in the register map - that said how
+much of the scene the sheet is allowed to leave showing. The renderer had a knob for how far
+light reaches *through* the body and none for how much the *surface* covers.
+
+### Why clarity was not the answer
+
+`WATER CLARITY` drives `bodyStyle.x = .088*(100/clarity*zoneClarity)`, which is extinction
+per yard. Raising it darkens the bed (through the depth-fog and refracted-bed paths) and only
+weakly raises the surface's own coverage, because `absorption` is `1-exp(-sigma*depth)` and at
+a shallow shore the depth is a yard or two. Tuning clarity to make the sheet opaque therefore
+also makes every zone soup, which is the wrong trade and the wrong knob. The surface needed
+its own lane.
+
+### What changed
+
+- **One lane, c199.** `float4 opacityControl:register(c199)` - the first free register in the
+  block the water draw already writes. `pixelConstants[19][0]` carries the floor, the other
+  three lanes are cleared, and it is built *before* the cached-light splice because
+  `localLightConstantCache.values` is 68 floats and stops at c196. No new register was added,
+  no upload grew: `c180..c218` is still one `SetPixelShaderConstantF`, and the span was
+  already saved and restored by `Scope`, so c199 restores with everything else.
+- **A floor, not a second formula.** `surfaceAlpha=max(surfaceAlpha,opacityControl.x)`, placed
+  after the reflection and from-below optical maxima and before the wrong-side fade. After the
+  optics, so it can only add cover where the optics already agreed and deep water still
+  converges on the deep tint. Before the fade, so a far sheet still dissolves at its
+  silhouette instead of being pinned opaque by the floor - the floor says how much sea a pixel
+  is, the fade says that this fragment is not one.
+- **Its own key.** `[Water] OpacityPercent=85`, read exactly like every other water number
+  (`ReadTuning`), so `LocationGraphics.ini` can override it per map/zone/area. Written into the
+  mirror `tools/WaterPreview.cpp` at the same position in the same order, with the shipped
+  default, so `--probe` reports the alpha the DLL draws.
+- **F7.** `WATER OPACITY`, 0..100 step 5, default 85, beside `WATER CLARITY` and bounded by the
+  same clamp the renderer applies.
+
+0 restores the previous look exactly; that is the escape hatch if a body wants the old
+see-through sheet. 85 is roughly the opacity of the client's own water in the report.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the whole chain: the register declaration, the floor's
+position between the underwater maximum and the wrong-side fade, the fact that depth
+absorption is untouched (so clarity keeps its meaning and the two knobs cannot drift into each
+other), the c199 upload ahead of the cached-light splice, the ini default, and the exact F7
+line and bounds.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

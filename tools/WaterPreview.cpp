@@ -1057,7 +1057,13 @@ int main(int argc, char** argv)
                     // depth past the first e-fold, which is the other half of seeing the front
                     // of one wave through the back of the next.
                     const float depthAlpha = absorption;
-                    const float alpha = Saturate(baseAlpha + (1.f - baseAlpha) * depthAlpha);
+                    float alpha = Saturate(baseAlpha + (1.f - baseAlpha) * depthAlpha);
+                    // WATER OPACITY, at its shipped 85%: a floor under the coverage, exactly the
+                    // shader's `surfaceAlpha=max(surfaceAlpha,opacityControl.x)`. The preview draws
+                    // the shipped look, so it takes the ini default rather than a command-line
+                    // override; a body whose override raises or lowers it is a picture this cannot
+                    // certify, same as any other per-area tuning.
+                    alpha = std::max(alpha, .85f);
                     const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
                     // The shader fogs toward the flat scene fog colour and lets the device blend
                     // it over the copy with the water's own alpha; both happen here in that order.
