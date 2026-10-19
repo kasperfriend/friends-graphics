@@ -1001,7 +1001,7 @@ int main(int argc, char** argv)
                     // the same picture and not a different one that happens to compile.
                     const float viewDistance = viewZ;
                     const float murkDistance = 90.f, horizonDistance = 900.f;
-                    const float murk = Smoothstep(murkDistance * .35f, murkDistance, viewDistance);
+                    const float murk = Smoothstep(murkDistance * .22f, murkDistance, viewDistance);
                     const float airShare = Smoothstep(horizonDistance * .6f, horizonDistance, viewDistance);
                     if (true)               // a capture exists whenever this preview has a copy
                     {
@@ -1085,7 +1085,12 @@ int main(int argc, char** argv)
                     // reveal the clear colour, which reads as glass over emptiness.
                     alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));
                     alpha = std::max(alpha, murk);
-                    const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
+                    // The shader evaluates its fog at THIS pixel's distance from the
+                    // scale the client's curve reduces to, never from the per-vertex
+                    // interpolant: on a tile five hundred yards across, a curve sampled
+                    // at three corners and blended is not the curve, and two sibling
+                    // tiles show their shared edge. Mirrored here at the fallback scale.
+                    const float fogPixel = 1.f - std::exp(-(viewDistance / horizonDistance) * (viewDistance / horizonDistance));
                     // A sea's horizon is not the sky: the shader mixes the air fog toward the
                     // body's deep colour in proportion to the column's own saturation
                     // (`seaShare`), so the far water still reads as a surface instead of as a
@@ -1100,7 +1105,7 @@ int main(int argc, char** argv)
                         std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare));
                     // The shader fogs toward that target and lets the device blend it over the
                     // copy with the water's own alpha; both happen here in that order.
-                    const float fogged = std::max(fog, airShare);
+                    const float fogged = std::max(fogPixel, airShare);
                     out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fogged), alpha);
                     if (c.probeX == x && c.probeY == y)
                     {

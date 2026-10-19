@@ -540,7 +540,21 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  edge=(1-exp(-edge*edge*edgeTuning.y*3))*edgeTuning.z;
  float3 skyRay=normalize(float3((uv.x*2-1)/edgeProjection.x,(1-uv.y*2)/edgeProjection.y,1));
  float horizon=saturate(1-abs(dot(skyRay,worldUp.xyz))*2);
- edge*=sky*horizon*horizon;
+ // Below the horizon there is no sky to preserve, so the air in front of the camera
+ // is at its full depth: anything this frame did not draw below the horizon line -
+ // the far side of the sky dome where the liquid stops, a gap between tiles, a hole
+ // in the world - is filled with the same haze as the horizon itself instead of
+ // being a brighter void cut into the sea.
+ float belowHorizon=step(dot(skyRay,worldUp.xyz),0.0);
+ // THE AIR FOG HAS TO CONSUME THE WATER'S EDGE, NOT ONLY THE SKY'S.
+ // This band used to be applied where `sky` was true and nowhere else, so it
+ // painted the sky above the horizon and stopped dead at the water's silhouette:
+ // two colours meeting on one line, which is the seam a player sees and cannot mask
+ // from the water side. The band belongs to the AIR in front of the camera, so the
+ // water sheet gets the same treatment as the sky behind it - the same colour on
+ // both sides of that line. Terrain keeps the unchanged behaviour.
+ float airMask=(sky>.5)?max(horizon*horizon,belowHorizon):step(.35,water)*horizon*horizon;
+ edge*=airMask;
  result=lerp(result,pow(max(edgeColor.rgb,0),2.2),edge);
  // Boundary depth already clips the air integration to the water surface.
  // Preserve the game's own sun disc luminance. Atmosphere supplies the halo,

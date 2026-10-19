@@ -51,6 +51,14 @@ float flowSpeed=1.f,flowRotation=.32f;
 float opacityPercent=85.f;
 float waterVisibilityYards=90.f;
 float horizonFogYards=900.f;
+// The distance at which the CLIENT's own fog curve has all but finished, in yards,
+// reduced once per frame from the curve the draw actually carries. It is the scale
+// of the per-pixel distance fog the surface applies instead of the interpolated
+// per-vertex one: one number for the frame, so two tiles of the same sea at the same
+// distance cannot fog differently, and a curve sampled once per pixel cannot be
+// distorted by a triangle edge.
+float fogCurveYards=0.f;
+unsigned fogCurveFrame=0xffffffffu;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
@@ -1290,7 +1298,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // is the honest variable: it is what the player judges the depth by, and unlike a
     // depth reading it cannot be missing.
     float viewDistance=length(viewPos);
-    float murk=smoothstep(opacityControl.y*.35,max(opacityControl.y,.001),viewDistance)*(1-underwater);
+    float murk=smoothstep(opacityControl.y*.22,max(opacityControl.y,.001),viewDistance)*(1-underwater);
     // The camera-to-fragment ray length, capped the way the far column is capped. Computed
     // here rather than down with the camera-column absorption because the column below now
     // needs it too, and the two have to be the same number: one is the length of water this
@@ -1991,9 +1999,21 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);
     float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);
     float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85)*(1-airShare);
-    // Named, not assigned into the interpolant: the fog factor the result uses below
-    // is the larger of the client's curve and this distance ramp.
-    float fogFactor=max(fog,airShare);
+    // THE FOG IS SAMPLED PER PIXEL, NOT READ OFF A TRIANGLE CORNER.
+    // `fog` arrives interpolated from the vertex stage, and a water tile is five
+    // hundred yards across: a nonlinear curve evaluated at three corners and blended
+    // across the face is not the curve, and two sibling tiles that resolve it
+    // differently show their shared edge. The factor here is evaluated at this
+    // pixel's own distance, from the scale the CPU reduced the client's curve to -
+    // so equal distance always means equal fog, on every tile of every sea. The
+    // squared form is the client's own shape (flat until the middle distance, then
+    // saturating) without needing three constants where one will do.
+    float fogScale=max(opacityControl.w,1.0);
+    float fogReach=viewDistance/fogScale;
+    float fogPixel=1.0-exp(-fogReach*fogReach);
+    // Under the surface the client's own underwater fog is the right one and it is
+    // kept exactly; above it, the pixel factor and the horizon handover decide.
+    float fogFactor=lerp(max(fogPixel,airShare),fog,underwater);
     // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
     // body the near sheet converges on, so the fog distance stops being a visible
     // edge in the middle of one continuous plane. The remaining air share keeps the
@@ -2818,10 +2838,27 @@ struct Scope {
             // curve's finite shape, replace them with the identity fog curve for this
             // draw; otherwise a garbage exponent/offset can collapse the whole water
             // colour to fogColor and look like the water shader switched off.
-            if(SUCCEEDED(d->GetVertexShaderConstantF(4,oldVertexFog,1))&&
-               !renderer::water::HasFogCurve(oldVertexFog)) {
+            const bool fogCurveRead=SUCCEEDED(d->GetVertexShaderConstantF(4,oldVertexFog,1));
+            if(fogCurveRead&&!renderer::water::HasFogCurve(oldVertexFog)) {
                 vertexFogFallback=true;
                 ReportFogFallback(observation,oldVertexFog);
+            }
+            // Reduce this draw's fog curve to the one distance the surface needs: where
+            // it has all but finished (95%). Solved once per FRAME - not per draw - so
+            // every liquid draw in a frame agrees even if the client hands sibling tiles
+            // slightly different curves; that disagreement was one of the ways one body of
+            // water came out in pieces. A curve that does not solve to a usable distance
+            // leaves the authored horizon distance in charge.
+            {
+                const unsigned frameIndex=renderer::FrameContext::Current().frameIndex;
+                if(frameIndex!=fogCurveFrame) {
+                    fogCurveFrame=frameIndex;
+                    if(fogCurveRead&&renderer::water::HasFogCurve(oldVertexFog)) {
+                        const float exponent=max(oldVertexFog[2],.001f);
+                        const float solved=(std::pow(.95f,1.f/exponent)-oldVertexFog[1])/oldVertexFog[0];
+                        if(std::isfinite(solved)&&solved>1.f) fogCurveYards=solved;
+                    }
+                }
             }
             float pixelConstants[39][4];
             std::memcpy(pixelConstants,oldPixelConstants,sizeof(pixelConstants));
@@ -2878,7 +2915,9 @@ struct Scope {
             // state to keep in step with the surface shader.
             pixelConstants[19][1]=waterVisibilityYards;
             pixelConstants[19][2]=horizonFogYards;
-            pixelConstants[19][3]=0.f;
+            // The fog's own scale for this frame: the client's curve where it gave us a
+            // usable one, the authored horizon distance otherwise.
+            pixelConstants[19][3]=fogCurveYards>1.f?fogCurveYards:horizonFogYards;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops

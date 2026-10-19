@@ -1178,7 +1178,9 @@ int main() try
                         !=std::string::npos&&
                     mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare)")
                         !=std::string::npos &&
-                    mirror.find("const float fogged = std::max(fog, airShare);")!=std::string::npos &&
+                    mirror.find("const float fogPixel = 1.f - std::exp(-(viewDistance / horizonDistance) * (viewDistance / horizonDistance));")
+                        !=std::string::npos &&
+                    mirror.find("const float fogged = std::max(fogPixel, airShare);")!=std::string::npos &&
                     mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
                     "the CPU preview fogs toward the same tinted target, deepening with distance");
         }
@@ -1208,7 +1210,7 @@ int main() try
             // column's transmittance, which CLARITY owns and a clear shelf barely
             // moves - that closes the body over the bed and takes coverage to 1.
             const auto murk=pixel.find(
-                "float murk=smoothstep(opacityControl.y*.35,max(opacityControl.y,.001),viewDistance)*(1-underwater);");
+                "float murk=smoothstep(opacityControl.y*.22,max(opacityControl.y,.001),viewDistance)*(1-underwater);");
             const auto murkBody=pixel.find("body=lerp(body,seaBody,murk);",fade);
             const auto murkCover=pixel.find("surfaceAlpha=max(surfaceAlpha,murk);");
             Require(murk!=std::string::npos&&murkBody!=std::string::npos&&murkCover!=std::string::npos&&
@@ -1221,13 +1223,19 @@ int main() try
             const auto air=pixel.find(
                 "float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);");
             const auto share=pixel.find("float seaShare=max(",air);
-            const auto fogFactor=pixel.find("float fogFactor=max(fog,airShare);",share);
+            const auto fogScale=pixel.find("float fogScale=max(opacityControl.w,1.0);",share);
+            const auto fogPixel=pixel.find("float fogPixel=1.0-exp(-fogReach*fogReach);",fogScale);
+            const auto fogFactor=pixel.find("float fogFactor=lerp(max(fogPixel,airShare),fog,underwater);",fogPixel);
             const auto usesFog=pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);",fogFactor);
-            Require(air!=std::string::npos&&share!=std::string::npos&&fogFactor!=std::string::npos&&
-                    usesFog!=std::string::npos&&air<share&&share<fogFactor&&fogFactor<usesFog&&
+            Require(air!=std::string::npos&&share!=std::string::npos&&fogScale!=std::string::npos&&
+                    fogPixel!=std::string::npos&&fogFactor!=std::string::npos&&
+                    usesFog!=std::string::npos&&air<share&&share<fogScale&&fogScale<fogPixel&&
+                    fogPixel<fogFactor&&fogFactor<usesFog&&
+                    pixel.find("max(fog,airShare)")==std::string::npos&&
+                    pixel.find("float fog=max(fog,airShare);")==std::string::npos&&
                     pixel.find(")*(1-airShare);")!=std::string::npos&&
                     pixel.find("fog=max(fog,airShare);")==std::string::npos,
-                    "the far sea dissolves into the haze continuously, by distance");
+                    "the sea's fog is sampled per pixel at its own distance, never from a triangle corner");
             // Both distances are player-facing, per-location tunables.
             Require(code.find("waterVisibilityYards=float(std::clamp(ReadTuning(L\"VisibilityYards\",90),5,400));")
                         !=std::string::npos&&
@@ -1251,7 +1259,7 @@ int main() try
                         !=std::string::npos,
                     "the depth transition still converges on the same sea body");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float murk = Smoothstep(murkDistance * .35f, murkDistance, viewDistance);")
+            Require(mirror.find("const float murk = Smoothstep(murkDistance * .22f, murkDistance, viewDistance);")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), murk);")!=std::string::npos &&
                     mirror.find("alpha = std::max(alpha, murk);")!=std::string::npos &&

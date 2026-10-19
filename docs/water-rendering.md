@@ -2882,6 +2882,63 @@ it: they see a depth buffer in which the sea is *behind* the water at infinity
 would also fog the sky the water meets. The water stage knows which pixels are
 water and how far away they are, and the plane's edge is a property of the plane.
 
+## Round 13: the air fog must own both sides of the horizon (2026-10-19)
+
+Round 12 gave the sea a distance ramp that hands it over to the air. That closed
+the water's *own* far end, and it still left a line, because the two sides of the
+horizon were painted by two different things:
+
+- the **sky** was fogged by the atmosphere composite's horizon band
+  (`edge = ... * sky * horizon * horizon`), which is exactly the air fog a player
+  describes as "the original's fog starts in the air";
+- the **water** was fogged by the water stage toward the client's fog colour -
+  and the composite's band explicitly excluded it (`sky` requires the water mask
+  to be clear).
+
+Two fog curves meeting on one silhouette is a line. Worse, the region *between*
+them - the far side of the sky dome where the liquid tiles end, which the client
+still draws as sky below the horizon - was neither, so a bright rectangular void
+sat inside the sea.
+
+The band is a property of the air in front of the camera, so it now covers:
+
+```
+belowHorizon = step(dot(skyRay, worldUp), 0)          // rays below the horizon line
+airMask      = sky ? max(horizon^2, belowHorizon)     // sky, and the void under it
+                   : step(.35, water) * horizon^2     // the water sheet itself
+edge         = distanceRamp * airMask
+```
+
+- Water and sky now converge on the **same colour** at the same place. It is
+  literally the same value: `edgeColor` is `EnvironmentFogCapture`'s
+  `ambientFogColor`, read from the client's own pixel-shader fog colour - which
+  is the same `fogColor` the water stage fades into. One colour, both sides.
+- Terrain keeps the unchanged behaviour (`sky` is still what excludes it).
+- Below the horizon there is no sky to preserve, so everything not drawn there
+  gets the full haze: gaps between liquid tiles and holes in the world stop being
+  brighter than the sea around them. This is the "nothingness" in the report.
+
+**And the water's own fog is now per pixel.** `fog` arrived as a vertex
+interpolant, and a liquid tile is five hundred yards across: evaluating a
+nonlinear curve at three corners and blending across the face is not the curve.
+Two sibling tiles that resolve it differently therefore show the edge they share -
+one of the ways one continuous body of water came out as a rectangle. The surface
+now evaluates its fog at **this pixel's** distance from a single per-frame scale,
+reduced from the client's own curve:
+
+```
+fogScale  = distance at which the client's fog curve reaches 95%  (per frame)
+fogPixel  = 1 - exp(-(viewDistance / fogScale)^2)
+fogFactor = lerp(max(fogPixel, airShare), fog, underwater)
+```
+
+Under water the client's own fog is still used exactly, because that is the
+medium's fog and the pass that owns it is the underwater one.
+
+**The murk starts sooner.** The visibility ramp now begins at 22% of
+`WATER VISIBILITY` rather than 35%: a stone's throw out rather than two, which is
+what the reference does at the diver's own feet.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
