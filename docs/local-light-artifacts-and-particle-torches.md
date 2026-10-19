@@ -228,3 +228,32 @@ notices a fade in progress, not only a changed id set.
 
 `tools/CameraAnchoringRegression.cpp` pins the one-swap-per-frame rule, the
 margin, the tie behaviour and the fade curve.
+
+## The camera's heading is not a fact about a lamp (2026-10-19)
+
+Two view-dependent gates were left in the pass, and both made the same report -
+"dynamic lights break at some angles and flicker":
+
+- **Selection scored the yaw.** A native emitter's score carried
+  `facing = clamp(dot(delta, forward)/distance * .35 + .65, .15, 1)` - a factor of
+  six between a lamp in front of the camera and one behind it. Turning the head
+  re-ordered the four/eight slots, so a different set of lamps lit the same
+  ground, and `StablePool`'s 30% margin turned the re-ordering into swaps and
+  cross-fades rather than a clean picture. The factor is now a tie-break
+  (`* .08 + .92`, clamped to `[.88, 1]`): where a lamp is decides its importance;
+  where the player looks does not.
+- **One radius behind the camera was a hard cut.** `forwardDistance < -radius`
+  deleted a lamp from the candidate list the moment a yaw carried it across that
+  line, so it left the pool and faded - and faded back in on the way past.
+  Only `forwardDistance < -maxDistance` (the light's own reach plus 80 yards
+  behind the camera) culls now, which no head turn can do.
+- **The pass refused un-recaptured frames.** `LocalLightingRenderer::Render`
+  required `FrameContext::cameraValid`, which is published only by a draw that
+  carries the eye. A frame with no terrain in view (looking at the sky or a wall)
+  left the flag false while the retained inverse view and camera position were a
+  frame or two old, and every lamp in the city blinked off. The retained pose is
+  now used for `FrameContext::kCameraEyeHoldMs`, exactly like the underwater
+  medium and the lamps' own observation gate, and refused past it.
+
+`tools/LocalLightingRegression.cpp` pins all three: the two selection expressions
+and the absence of the old cut, and the pose hold in the renderer source.

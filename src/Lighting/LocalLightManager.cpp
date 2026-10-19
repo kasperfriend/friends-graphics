@@ -336,9 +336,21 @@ namespace renderer
             const float maxDistance = light.radius * 2.0f + 80.0f;
             if (!std::isfinite(distanceSquared) || distanceSquared > maxDistance * maxDistance) continue;
             const float forwardDistance = Dot(delta, cameraForward);
-            if (forwardDistance < -light.radius) continue;
+            // Behind the camera is not "irrelevant", it is "off screen this frame",
+            // and one radius was far too tight a line to draw it on: turning the
+            // head moved a lamp across that line in a single frame, dropping it
+            // from the candidate list (so it left the pool and faded) and
+            // bringing it back on the way past - the reported "dynamic lights
+            // break when observed at different angles, flickering". Only a lamp
+            // far behind the whole reach is culled now, which a yaw cannot do.
+            if (forwardDistance < -maxDistance) continue;
             const float distance = std::sqrt(std::max(distanceSquared, 0.0f));
-            const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.35f + 0.65f, 0.15f, 1.0f);
+            // And the score carries the yaw only as a tie-break. It used to
+            // swing a factor of six between an in-front and a behind lamp, so
+            // rotating re-ordered the four/eight slots and a different set of
+            // lamps lit the same ground. Importance is a fact about where the
+            // lamp is; the camera's heading is not part of it.
+            const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.08f + 0.92f, 0.88f, 1.0f);
             light.score = light.intensity * light.radius * light.radius * facing / std::max(4.0f, distanceSquared);
 
             auto previous = m_smoothed.find(light.stableId);

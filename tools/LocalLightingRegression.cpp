@@ -1361,6 +1361,25 @@ int main()
         const std::string settings = ReadFile("GraphicsEffects.ini");
         const std::string overlay = ReadFile("src/Environment/OverlayItems.h");
         const std::string volumeEffects = ReadFile("VolumeEffects.h");
+        // The lamps are world-anchored; the gate that decides whether to draw them was
+        // not. A frame whose draws carried no fresh eye (looking at the sky or a wall)
+        // has cameraValid false while the retained pose is a frame or two old, and
+        // refusing the pass outright blinked every lamp as the camera turned. The hold is
+        // the same one the lamps and the underwater medium use.
+        Check(surface.find("const bool poseRetained = !f.cameraValid && f.viewRawValid &&") != std::string::npos &&
+              surface.find("f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;") != std::string::npos &&
+              surface.find("(!f.cameraValid && !poseRetained) || !f.depthAvailable") != std::string::npos,
+              "a retained pose keeps the lamps drawn instead of blinking them by camera angle");
+        // A lamp's importance is where it is, not where the player is looking. The score
+        // used to swing six-fold with the light's angle to the camera, and a light one
+        // radius behind was culled outright, so turning the head re-ordered the four/eight
+        // slots and dropped lamps in and out - the "lights break when observed at
+        // different angles" report.
+        Check(manager.find("if (forwardDistance < -maxDistance) continue;") != std::string::npos &&
+              manager.find("const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.08f + 0.92f, 0.88f, 1.0f);")
+                  != std::string::npos &&
+              manager.find("if (forwardDistance < -light.radius) continue;") == std::string::npos,
+              "light selection is a fact about the lamp, not the camera's heading");
         Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
               surface.find("sourceDebug+=contribution;") != std::string::npos &&
               surface.find("float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;") != std::string::npos &&
