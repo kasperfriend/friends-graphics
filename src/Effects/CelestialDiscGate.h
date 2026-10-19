@@ -40,9 +40,10 @@ namespace renderer::discgate
     // where the perspective divide is at its steepest.
     inline float RawTolerance(float p22, float p32, float viewDepth, float viewTolerance) noexcept
     {
-        const float near = viewDepth - viewTolerance > 1e-4f ? viewDepth - viewTolerance : 1e-4f;
-        const float far = viewDepth + viewTolerance;
-        return std::fabs(RawDepth(p22, p32, near) - RawDepth(p22, p32, far));
+        // Not `near`/`far`: <windows.h> still defines both as empty macros.
+        const float nearDepth = viewDepth - viewTolerance > 1e-4f ? viewDepth - viewTolerance : 1e-4f;
+        const float farDepth = viewDepth + viewTolerance;
+        return std::fabs(RawDepth(p22, p32, nearDepth) - RawDepth(p22, p32, farDepth));
     }
 
     // centreRaw: raw depth at the tracked disc centre.
