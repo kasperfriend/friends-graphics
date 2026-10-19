@@ -2646,6 +2646,13 @@ really swallowed keeps a sea colour at range, while a shallow shore - where abso
 small - still fades exactly as it did. Under the surface the medium's own asymptote is
 unchanged.
 
+The absorption term alone was not enough in fog: at 320 yards the air's haze is close to
+opaque, so a target that is mostly `fogColor` erased the water into the sky colour whatever
+its absorption. `seaShare` therefore also rises with view distance
+(`max(..., smoothstep(40, 320, |viewPos|) * .9)` above water): near water still meets the
+sky at the horizon, and past a few hundred yards the sheet converges on the body, so
+distance deepens the sea instead of deleting it.
+
 A second case has no picture behind the sheet at all: a frame whose scene copy never
 landed (`captureValid` 0). There `depthAlpha` is zero by construction and the "behind" a
 partial alpha would blend is whatever the client left in the target - over water, the
@@ -2713,6 +2720,51 @@ tuning and the environment every frame whether or not a liquid draw ran, so no p
 `tools/UnderwaterRegression.cpp` pins the hold (both the expression and the 1 s bound)
 next to the existing NaN/projection refusals, so the pass cannot go back to dropping the
 medium by camera angle.
+
+## Round 9: WATER OPACITY owns the colour, not only the blend (2026-10-19)
+
+### What was being seen
+
+The slider moved, the sea did not. Coverage was already floor-ed at 85% and had made
+the shallows better, but open water still read as a sheet of glass, and dragging the
+slider between 85 and 100 changed almost nothing.
+
+### Two channels, one of them unwired
+
+There are two independent ways the scene under the water reaches the screen.
+
+1. **The blend.** `surfaceAlpha` decides how much of the captured scene shows beside the
+   water's own colour. This is what the floor from round 5 controls.
+2. **The body's colour.** `bottom = refracted * transmittance + inScatter + deep * absorption`
+   is the *captured seabed*, already inside the water's own output. That is then mixed in
+   at `depthValid * RefractionPercent`, its own authored control, and the result converges
+   on the deep colour by `absorption`.
+
+The floor only ever touched (1). With refraction at its shipped 14% the bed contributed
+little, but at a high REFRACTION setting - or wherever the capture is missing outright -
+the body was the whole picture, and the slider could not touch it. Worse, without a
+capture the stage fell straight through to the client's own liquid colour, which over open
+ocean is a pale, nearly invisible sheet: the colour of the sky it sits under.
+
+### The fix
+
+- `body = lerp(body, seaBody, opacityControl.x * saturate(effectiveDepth * .5))`, **after**
+  `body` has been composed from the client's colour and the captured bottom. This is the
+  line that failed the first time round: the fade was applied *inside* the captured-bottom
+  term, which REFRACTION scales - 14% at the shipped setting - so 85% of the surface stayed
+  the client's own pale liquid colour at every slider position. "Opacity does nothing" was
+  literally true: it moved a sixth of the picture. Now 100 is the sea body and 0 restores
+  the physics exactly, and the depth gate keeps a shoreline honest (the first yard of a
+  sheet cannot hide a bed it is not over).
+- A frame with no scene copy at all now shows `deep + inScatter` rather than the client's
+  liquid. Coverage is already forced to 1 there (round 7), so the surface is a body with
+  nothing to blend - and the body is what it should look like.
+- The CPU preview carries the same `hideBed` at the shipped 85%.
+
+`tools/WaterDeviceRegression.cpp`'s sRGB/refraction block now sets `opacityPercent = 0`
+while it asserts that a copied 128 gray stays 128: with the new term in place, asserting
+the raw refraction round trip *at the shipped opacity* would be asserting that the slider
+does nothing.
 
 ## In-game verification / troubleshooting
 

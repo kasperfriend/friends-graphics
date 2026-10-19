@@ -999,15 +999,13 @@ int main(int argc, char** argv)
                     if (true)               // a capture exists whenever this preview has a copy
                     {
                         V3 bottom = Add(Add(Mul(refracted, transmittance), inScatter), Mul(deep, absorption));
-                        // WATER OPACITY hides the bed from the COLOUR too, not only from the
-                        // blend: the body converges on what an infinitely thick column
-                        // converges on, gated by the water actually over the pixel so a
-                        // shoreline's first yard keeps its sand. Same rule as the shader's
-                        // `hideBed`, at the shipped 85%.
-                        const float hideBed = .85f * Saturate(effectiveDepth * .5f);
-                        bottom = Lerp(bottom, Add(deep, inScatter), hideBed);
                     probeBottom = bottom;
                         V3 body = Lerp(rgb, bottom, validDepth * Saturate(refractionStrength));
+                        // WATER OPACITY fades the WHOLE body toward the sea, not just the
+                        // refracted part: at the shipped 85% most of the surface used to stay
+                        // the client's own pale liquid colour whatever the slider said. Same
+                        // line, same gate, same shipped value as the shader.
+                        body = Lerp(body, Add(deep, inScatter), .85f * Saturate(effectiveDepth * .5f));
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));
                     }
                     // Same neutral-at-0x808080 contract as the shader: tint is uploaded as
@@ -1079,7 +1077,11 @@ int main(int argc, char** argv)
                     // body's deep colour in proportion to the column's own saturation
                     // (`seaShare`), so the far water still reads as a surface instead of as a
                     // hole in the world. Same term here.
-                    const V3 fogTarget = Lerp(c.fog, deep, Saturate(absorption) * .55f);
+                    // Distance deepens the sea rather than deleting it: past a few hundred
+                    // yards the fog target is mostly the body's own colour.
+                    const float farSea = Smoothstep(40.f, 320.f, viewZ);
+                    const V3 fogTarget = Lerp(c.fog, deep,
+                        std::max(Saturate(absorption) * .55f, farSea * .9f));
                     // The shader fogs toward that target and lets the device blend it over the
                     // copy with the water's own alpha; both happen here in that order.
                     out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fog), alpha);

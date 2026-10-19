@@ -1375,10 +1375,10 @@ int main()
         // radius behind was culled outright, so turning the head re-ordered the four/eight
         // slots and dropped lamps in and out - the "lights break when observed at
         // different angles" report.
-        Check(manager.find("if (forwardDistance < -maxDistance) continue;") != std::string::npos &&
-              manager.find("const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.08f + 0.92f, 0.88f, 1.0f);")
+        Check(manager.find("light.score = light.intensity * light.radius * light.radius / std::max(4.0f, distanceSquared);")
                   != std::string::npos &&
-              manager.find("if (forwardDistance < -light.radius) continue;") == std::string::npos,
+              manager.find("forwardDistance") == std::string::npos &&
+              manager.find("const float facing") == std::string::npos,
               "light selection is a fact about the lamp, not the camera's heading");
         Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
               surface.find("sourceDebug+=contribution;") != std::string::npos &&

@@ -1157,16 +1157,19 @@ int main() try
         // takes the body's deep colour in proportion to the column's own saturation, above
         // water only, so a shallow shore still fades exactly as before.
         {
-            const auto share=pixel.find("float seaShare=saturate(absorption)*(1-underwater)*.55;");
+            const auto farSea=pixel.find("float farSea=smoothstep(40.0,320.0,length(viewPos))*(1-underwater);");
+            const auto share=pixel.find(
+                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.9);");
             const auto target=pixel.find(
                 "float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);");
             const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
-            Require(share!=std::string::npos&&target!=std::string::npos&&target==fade&&share<target,
+            Require(farSea!=std::string::npos&&share!=std::string::npos&&target!=std::string::npos&&
+                    target==fade&&farSea<share&&share<target,
                     "the distant sheet fades into the sea's own colour above water, and into the medium below it");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const V3 fogTarget = Lerp(c.fog, deep, Saturate(absorption) * .55f);")
-                        !=std::string::npos,
-                    "the CPU preview fogs toward the same tinted target");
+            Require(mirror.find("const float farSea = Smoothstep(40.f, 320.f, viewZ);")!=std::string::npos&&
+                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .9f)")!=std::string::npos,
+                    "the CPU preview fogs toward the same tinted target, deepening with distance");
         }
         // WATER OPACITY, second half. The alpha floor only decides how much of the scene the
         // sheet lets past; the body's COLOUR is built from the refracted seabed, so on a
@@ -1175,20 +1178,26 @@ int main() try
         // "opacity does nothing visually". The body now converges on the asymptote an
         // infinitely thick column converges on, gated by the water actually over the pixel.
         {
-            const auto hide=pixel.find("float hideBed=opacityControl.x*saturate(effectiveDepth*.5);");
-            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
-            const auto bottom=pixel.find(
-                "float3 bottom=lerp(refracted*transmittance+inScatter+deepTint.rgb*absorption,seaBody,hideBed);");
-            const auto uses=pixel.find("waterBody=lerp(body,deepTint.rgb+inScatter,",bottom);
-            Require(hide!=std::string::npos&&sea!=std::string::npos&&bottom!=std::string::npos&&
-                    hide<sea&&sea<bottom&&bottom<uses,
-                    "water opacity hides the bed from the body's colour too, not only from the blend");
-            Require(pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;")
-                        ==std::string::npos,
-                    "the unmixed bed colour is gone, so a full slider can hide it");
+            const auto bed=pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;");
+            const auto bodyLine=pixel.find("float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));",bed);
+            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;",bodyLine);
+            const auto fade=pixel.find(
+                "body=lerp(body,seaBody,opacityControl.x*saturate(effectiveDepth*.5));",sea);
+            Require(bed!=std::string::npos&&bodyLine!=std::string::npos&&sea!=std::string::npos&&
+                    fade!=std::string::npos&&bed<bodyLine&&bodyLine<sea&&sea<fade,
+                    "water opacity fades the WHOLE body toward the sea, after the refraction mix");
+            // The regression that mattered: the fade must come after `body` is composed from
+            // the client's colour and the captured bottom, or it only scales the part
+            // REFRACTION owns (14% at the shipped setting) and the slider does nothing.
+            Require(pixel.find("float3 bottom=lerp(refracted*transmittance")==std::string::npos,
+                    "opacity is not applied inside the refracted term");
+            Require(pixel.find("waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));")
+                        !=std::string::npos,
+                    "the depth transition still converges on the same sea body");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float hideBed = .85f * Saturate(effectiveDepth * .5f);")!=std::string::npos,
-                    "the CPU preview hides the bed at the shipped opacity too");
+            Require(mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * Saturate(effectiveDepth * .5f));")
+                        !=std::string::npos,
+                    "the CPU preview fades the whole body at the shipped opacity too");
             // And the case with no scene copy at all keeps the BODY, not the client's own
             // liquid: over open ocean that fallthrough was a pale, nearly transparent sheet
             // the colour of the sky - the "completely transparent water" of the report.

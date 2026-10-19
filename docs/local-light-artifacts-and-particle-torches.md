@@ -239,14 +239,18 @@ Two view-dependent gates were left in the pass, and both made the same report -
   six between a lamp in front of the camera and one behind it. Turning the head
   re-ordered the four/eight slots, so a different set of lamps lit the same
   ground, and `StablePool`'s 30% margin turned the re-ordering into swaps and
-  cross-fades rather than a clean picture. The factor is now a tie-break
-  (`* .08 + .92`, clamped to `[.88, 1]`): where a lamp is decides its importance;
-  where the player looks does not.
+  cross-fades rather than a clean picture. A reduced tie-break (`* .08 + .92`)
+  was still visible in game - "breaks more on left-right rotation than up-down"
+  is that term, and it is exactly the axis it is sensitive to - so the score now
+  reads `intensity * radius^2 / distance^2` and nothing else. `cameraForward`
+  stays in the signature (the volume march and the water stage share the pose)
+  and is deliberately unread.
 - **One radius behind the camera was a hard cut.** `forwardDistance < -radius`
   deleted a lamp from the candidate list the moment a yaw carried it across that
-  line, so it left the pool and faded - and faded back in on the way past.
-  Only `forwardDistance < -maxDistance` (the light's own reach plus 80 yards
-  behind the camera) culls now, which no head turn can do.
+  line, so it left the pool and faded - and faded back in on the way past. That
+  test is gone: the frustum already culls what is not drawn, and a lamp just off
+  the edge of the screen still lights ground at its edge. A lamp behind the
+  player is lighting ground the player can turn onto.
 - **The pass refused un-recaptured frames.** `LocalLightingRenderer::Render`
   required `FrameContext::cameraValid`, which is published only by a draw that
   carries the eye. A frame with no terrain in view (looking at the sky or a wall)

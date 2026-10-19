@@ -335,23 +335,22 @@ namespace renderer
             const float distanceSquared = Dot(delta, delta);
             const float maxDistance = light.radius * 2.0f + 80.0f;
             if (!std::isfinite(distanceSquared) || distanceSquared > maxDistance * maxDistance) continue;
-            const float forwardDistance = Dot(delta, cameraForward);
-            // Behind the camera is not "irrelevant", it is "off screen this frame",
-            // and one radius was far too tight a line to draw it on: turning the
-            // head moved a lamp across that line in a single frame, dropping it
-            // from the candidate list (so it left the pool and faded) and
-            // bringing it back on the way past - the reported "dynamic lights
-            // break when observed at different angles, flickering". Only a lamp
-            // far behind the whole reach is culled now, which a yaw cannot do.
-            if (forwardDistance < -maxDistance) continue;
+            // NOTHING about the camera's HEADING may decide whether a lamp is drawn.
+            // It used to: a light one radius behind was culled outright, and the score
+            // carried a factor of six between "in front" and "behind", so a yaw moved
+            // lamps in and out of the four/eight slots and re-ordered the rest - which
+            // `StablePool`'s hysteresis turned into swaps and cross-fades rather than a
+            // clean picture. The report is exactly that: "lights break more often on
+            // left-right rotation than up-down". Distance and intensity are facts about
+            // where the lamp is; the direction the player happens to face is not, and a
+            // lamp behind the player is still lighting ground the player can turn onto.
+            // It is also the wrong test for "off screen": the frustum culls what is not
+            // drawn, and haloes reach past a screen edge from lights just outside it.
+            // `cameraForward` stays in the signature because the volume march and the
+            // water stage take the same pose, but this selection no longer reads it.
+            (void)cameraForward;
             const float distance = std::sqrt(std::max(distanceSquared, 0.0f));
-            // And the score carries the yaw only as a tie-break. It used to
-            // swing a factor of six between an in-front and a behind lamp, so
-            // rotating re-ordered the four/eight slots and a different set of
-            // lamps lit the same ground. Importance is a fact about where the
-            // lamp is; the camera's heading is not part of it.
-            const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.08f + 0.92f, 0.88f, 1.0f);
-            light.score = light.intensity * light.radius * light.radius * facing / std::max(4.0f, distanceSquared);
+            light.score = light.intensity * light.radius * light.radius / std::max(4.0f, distanceSquared);
 
             auto previous = m_smoothed.find(light.stableId);
             if (previous != m_smoothed.end())

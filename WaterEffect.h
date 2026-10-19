@@ -1757,13 +1757,23 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // the pre-slider physics. The weight is gated by the water actually under the pixel,
         // so a shoreline's first yard still shows its sand: a sheet ankle-deep cannot hide
         // anything it is not standing over.
-        float hideBed=opacityControl.x*saturate(effectiveDepth*.5);
-        float3 seaBody=deepTint.rgb+inScatter;
-        float3 bottom=lerp(refracted*transmittance+inScatter+deepTint.rgb*absorption,seaBody,hideBed);
+        // The captured bottom, unchanged - this is the optics the sheet is for.
+        float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;
+        // REFRACTION is how much of that bottom replaces the client's own liquid colour.
         float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));
+        // WATER OPACITY then fades the WHOLE body toward the sea, and this is the line
+        // that finally makes the slider do something you can see. It used to be applied
+        // inside the captured-bottom term above, i.e. to the part REFRACTION scales -
+        // 14% at the shipped setting - so 85% of the surface stayed the client's own pale
+        // liquid colour no matter where the slider was dragged. "Opacity does nothing"
+        // was exactly true: it moved a sixth of the picture. Now the surface converges on
+        // the colour an infinitely thick column converges on, in proportion to the water
+        // really over the pixel (so a shoreline's first yard still shows its sand).
+        float3 seaBody=deepTint.rgb+inScatter;
+        body=lerp(body,seaBody,opacityControl.x*saturate(effectiveDepth*.5));
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
-        waterBody=lerp(body,deepTint.rgb+inScatter,saturate(absorption*(.85-.22*fresnel)));
+        waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));
     } else {
         // No scene copy at all: there is no bed to refract and no column to absorb through,
         // and the old fallthrough kept the CLIENT's own liquid colour. Over open ocean that
@@ -1933,7 +1943,14 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // (where absorption is small) still fades exactly as it did, and only water that the
     // body has really swallowed takes the deep colour. Under the surface the medium is the
     // body, so that branch keeps the medium's own asymptote unchanged.
-    float seaShare=saturate(absorption)*(1-underwater)*.55;
+    // A fogged sea must not become the fog. At 320 yards the air's own haze is close to
+    // opaque, so a target that is mostly `fogColor` erases the water into the sky colour
+    // and the far sea reads as a hole - which is what survives every coverage fix. The
+    // share therefore rises with view distance: near water keeps the air's colour (the
+    // horizon still meets the sky), and past a few hundred yards the sheet converges on
+    // the body instead, so distance deepens it rather than deleting it.
+    float farSea=smoothstep(40.0,320.0,length(viewPos))*(1-underwater);
+    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.9);
     float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);
     result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
