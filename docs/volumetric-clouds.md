@@ -351,3 +351,41 @@ rain/snow/sand onset/clearing; check a zero-wind sky several minutes apart; fly
 below/inside/above; pan off the sun; toggle F7/F10, reload F12 and Alt+Tab. Confirm
 no field restart, boundary pop or cloud/shadow disagreement. Native weather
 recognition still requires a supported client draw signature.
+
+### Camera pose freshness: cities, interiors, and looking up
+
+The deck is anchored at absolute world heights, so "the clouds are dragged along with the camera" can only
+mean the *frame's camera* was wrong while the client's depth buffer was the real one. That happens where no
+draw ever carries a full-frame rigid camera - most of Orgrimmar seen from street level, with the terrain over
+the player's head frustum-culled - and it clears up on higher ground because a real capture latches there.
+
+`CameraCapture` now treats every sky/draw transform it sees as a *candidate* for the frame, not as the camera:
+
+- The transform must be a rigid basis: unit-length, mutually orthogonal rows. A scaled billboard's rows are
+  not the camera's axes.
+- Its view translation must either be zero (the sun's skybox trick, where the rows ARE the camera's rotation)
+  or imply an eye within `kSkyEyeLeashYards` (40 yd) of the last accepted camera. The moon's billboard sits at
+  a fixed 4-16 yd render distance along the light and its rotation is not the camera's, so it is dropped rather
+  than merely ignored; that is what used to make the deck swing with the mouse.
+- Candidates are collected for the whole frame (`SkyPoseSelector`) and resolved once at the UI draw, when the
+  frame's own sun/moon disc has been painted. A candidate that reproduces the painted disc (within 0.18 of
+  normalized screen units) wins, using `ProjectWorldDirection`, which projects through the view matrix's
+  COLUMNS - the same convention as `CelestialTracker` and `MathTypes`' row-vector transform.
+- Without a disc, continuity with the accepted camera decides (`BasisAgreement >= .75`). A discontinuous
+  transform is held for two frames and only adopted if the frame repeats it; one that changes every frame is
+  never adopted.
+- The eye is always `CameraContinuityGate::Position()` - the last position a real draw carried. A sky
+  transform's translation never moves it.
+
+Frames that still cannot be corroborated publish `FrameContext::cameraPoseStale` and keep the previous
+orientation for screen-space passes. Every pass that places something in *world* space must refuse
+(or hold) that frame:
+`VolumetricClouds::Render` refuses a stale pose outright; `LocalLightingRenderer::Render` and
+`LocalLightManager::ObserveTorchDraw` refuse it while `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a
+pose held for a frame keeps the lamps steady (a frame-late lamp is invisible, a lamp placed through a
+second-old eye is in the wrong street) while a genuinely orphaned pose is never drawn from. `capturedViewValid` and
+`cameraCaptureShaderHash` are now cleared every frame and published only by a capture that actually succeeded,
+so `DrawCallClassifier` cannot inherit a failed attempt's shader as "terrain".
+
+`tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
+the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.

@@ -432,7 +432,17 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const auto& lights = manager.Selected();
     const int debugMode = manager.DebugMode();
     const bool debugView = locallighting::IsDebugView(debugMode);
+    // Both the light pool's selection and each pixel's world position are
+    // reconstructed from this pose, so a pose the capture could not corroborate
+    // would place every lamp somewhere the player is not - the reported
+    // "dynamic lights are broken" next to the dragged clouds. Hold the pass for
+    // that frame instead of drawing it from a camera the player has left.
     if (!manager.Enabled() || (lights.empty() && !debugView) || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
+    // Only a pose this frame could not corroborate AND an eye no draw has
+    // carried for kCameraEyeHoldMs is refused. A pose held for a frame still
+    // reconstructs the scene correctly enough to light it; refusing that would
+    // flicker every lamp in the city the moment the draw stream stumbles.
+    if (f.cameraPoseStale && !(f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs)) return false;
     if (!m_retry.Open(GetTickCount64())) return false;
     D3DSURFACE_DESC desc{};
     if (!f.sceneSurface || FAILED(f.sceneSurface->GetDesc(&desc)) || !EnsureShaders(device) ||

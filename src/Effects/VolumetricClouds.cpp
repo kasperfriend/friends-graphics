@@ -885,6 +885,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
  if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
+ // The deck is anchored in WORLD space at absolute heights, so it is only
+ // correct from the camera that is actually being rendered. In a city the
+ // terrain capture never latches while everything overhead is culled, and the
+ // frame used to fall back to whatever fixed-function transform it found
+ // first - the deck then rotated with the mouse instead of with the world
+ // ("the clouds are dragged along with the camera"). The capture now says
+ // plainly when it could not corroborate the pose; draw nothing rather than
+ // draw the sky from a camera the player has already left.
+ if(f.cameraPoseStale)return false;
 
  // Advance before the clear-sky early-out: an empty deck must still be
  // able to develop a storm. The clock bounds loading/focus gaps.

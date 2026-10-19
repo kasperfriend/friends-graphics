@@ -510,6 +510,11 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
         renderer::CameraCapture::Instance().BeginFrame();
+        // Both describe this frame's capture attempt. A frame that never
+        // latches a camera must not hand DrawCallClassifier the previous
+        // frame's "terrain shader" or view translation.
+        capturedViewValid = false;
+        cameraCaptureShaderHash = 0;
 
         // Per-frame water mask: watereffect::Scope binds this as a second
         // render target during every actual water draw (see WaterEffect.h)
@@ -641,7 +646,8 @@ bool CaptureCamera(IDirect3DDevice9* d) {
 
     renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
     bool ok = renderer::CameraCapture::Instance().Capture(
-        d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
+        d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid,
+        renderer::g_trackedState.vsHash);
     if (ok) {
         renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         celestialDaylight = frameCtx.daylightFactor;
@@ -1621,9 +1627,16 @@ void BeforeDraw(IDirect3DDevice9* d) {
         if (renderer::g_trackedState.currentVS != nullptr) {
             ComPtr<IDirect3DSurface9> ds;
             if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
-                cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
                 ready = CaptureCamera(d);
                 if (ready) {
+                    // Publish the shader only for a draw that ACTUALLY yielded
+                    // the camera. The hash used to be written before the
+                    // attempt, so a failed one - a sky, moon or portrait draw,
+                    // exactly the ones that fail the full-frame/rigid gates -
+                    // was remembered as "the terrain shader" and every later
+                    // WMO draw with it was classified as terrain for the rest
+                    // of the frame.
+                    cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
                     ++cameraFrames;
                 }
             }

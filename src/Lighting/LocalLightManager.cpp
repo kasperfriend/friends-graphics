@@ -187,7 +187,16 @@ namespace renderer
         // Only verified flame material + verified rigid M2 skinning. Neither
         // arbitrary bright pixels nor character/weapon textures become lights.
         const auto& f=FrameContext::Current();
+        // A torch is recovered from the draw's own view-space vertices, so its
+        // world position is only as good as the pose converting it. With a
+        // stale pose the emitter lands somewhere the player is not - and, since
+        // this runs every frame, the light follows the error around. Wait for a
+        // pose a draw actually carried the eye for.
         if(!m_enabled||!d||!f.cameraValid||!f.viewRawValid||!g_trackedState.zEnable||!g_trackedState.alphaBlend)return;
+        // A one-frame-old pose places the torch a frame late, which is
+        // invisible; a pose whose eye is a second old places it in the wrong
+        // street. Only the latter is refused.
+        if(f.cameraPoseStale&&!(f.cameraEyeAgeMs<=FrameContext::kCameraEyeHoldMs))return;
         bool rigid=std::find(std::begin(kRigidM2Shaders),std::end(kRigidM2Shaders),g_trackedState.vsHash)!=std::end(kRigidM2Shaders);
         bool unskinned=std::find(std::begin(kUnskinnedM2Shaders),std::end(kUnskinnedM2Shaders),g_trackedState.vsHash)!=std::end(kUnskinnedM2Shaders);
         if(!rigid&&!unskinned)return;
