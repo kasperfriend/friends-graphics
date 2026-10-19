@@ -2108,12 +2108,13 @@ inline void Reset(IDirect3DDevice9* d) {
     // state, not device resources; forgetting them would pop every crest.
     lastWaveAnchor.valid=false;
     localLightConstantCache.valid=false;
-    if(cachedShaderDevice == d) {
-        cachedReplacementPS.Reset();
-        cachedReplacementVS.Reset();
-        cachedShaderDevice = nullptr;
-        shaderCreationFailed=false;
-    }
+    // The hook is invoked for the active device, including replacement
+    // devices whose pointer differs from the cached shader owner. These
+    // singleton-owned COM references must not survive that transition.
+    cachedReplacementPS.Reset();
+    cachedReplacementVS.Reset();
+    cachedShaderDevice = nullptr;
+    shaderCreationFailed=false;
 }
 void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0) noexcept {
     if(!external&&(!enabled||!showStatus))return;

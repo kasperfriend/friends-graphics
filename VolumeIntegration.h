@@ -40,7 +40,6 @@ bool cloudsEffectEnabled=true;
 renderer::CloudWeather cloudWeather=renderer::CloudWeather::Clear;
 float cloudWeatherStrength=1.f;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,temporalShaftsEnabled=false;
-constexpr bool kAllowScreenSpaceContactShadow = false;
 bool postProcessEffectEnabled=true;
 // Anti-aliasing has its own switch instead of riding the grade master above, because the two answer
 // different questions and a player needs to be able to answer them separately: the master is "do I
@@ -65,10 +64,8 @@ struct LegacyVolumeShaders
     ComPtr<IDirect3DPixelShader9> copy;
     ComPtr<IDirect3DPixelShader9> temporal;
     ComPtr<IDirect3DPixelShader9> radial;
-    ComPtr<IDirect3DPixelShader9> contactShadow;
     ComPtr<IDirect3DPixelShader9> postProcess;
     ComPtr<IDirect3DPixelShader9> rayComposite;
-    ComPtr<IDirect3DPixelShader9> localLight;
     ComPtr<IDirect3DPixelShader9> celestialMarker;
 
     bool Ensure(IDirect3DDevice9* d);
@@ -92,12 +89,6 @@ struct LegacyFrameTargets
 
     ComPtr<IDirect3DTexture9> rayB;
     ComPtr<IDirect3DSurface9> rayBSurface;
-
-    ComPtr<IDirect3DTexture9> localA;
-    ComPtr<IDirect3DSurface9> localASurface;
-
-    ComPtr<IDirect3DTexture9> localB;
-    ComPtr<IDirect3DSurface9> localBSurface;
 
     ComPtr<IDirect3DTexture9> rayHistory;
     ComPtr<IDirect3DSurface9> rayHistorySurface;
@@ -123,18 +114,18 @@ FrameResources& resources = *new FrameResources;
 auto& depth = resources.depth; auto& surface = resources.surface;
 auto& originalDepth = resources.originalDepth; auto& target = resources.target;
 
-ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode, celestialMarkerBytecode;
+ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, radialBytecode, postProcessBytecode, rayCompositeBytecode, celestialMarkerBytecode;
 float constants[14][4]{};
 uint64_t cameraCaptureShaderHash = 0;
 float capturedViewTranslation[3]{};
 bool capturedViewValid = false;
-float baseHeight = 60, density = .004f, falloff = .07f, strength = 2.6f, moonStrength = .35f, variation = 1.35f, lowLayer = .35f, raySoftness = 5.f, rayFalloff = 2.f, fogWash = .45f, sunVerticalScale = .4f, sunOffsetX = 0, sunOffsetY = 0, localLightStrength = .8f, localLightThreshold = .25f, sunSourceThreshold = .60f;
+float baseHeight = 60, density = .004f, falloff = .07f, strength = 2.6f, moonStrength = .35f, variation = 1.35f, lowLayer = .35f, raySoftness = 5.f, rayFalloff = 2.f, fogWash = .45f, sunVerticalScale = .4f, sunOffsetX = 0, sunOffsetY = 0, sunSourceThreshold = .60f;
 // Second, independent height-fog layer: low, dense ground mist hugging the
 // terrain, on top of the broader distance haze (`density`/`falloff`/
 // `baseHeight` above). Combined by summing optical depth - physically the
 // right way to stack two independent scattering media along the same ray.
 float groundMistHeight = 4.f, groundMistFalloff = .35f, groundMistDensity = .008f;
-float contactShadowStrength = .28f, contactShadowRadius = 10.f, contactShadowMaxDistance = 6.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
+float directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f;
 UINT configuredShadowMapSize = 1024;
 int brightnessPercent = 0, contrastPercent = 100, gammaPercent = 100, sharpnessPercent = 35;
 int sunGlowPercent = 150;
@@ -159,7 +150,6 @@ renderer::CelestialDirectionStabilizer celestialDirectionStabilizer;
 renderer::FrameClock celestialLightClock;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
-bool localLightDebug = false;
 bool celestialMarkerDebug = false;
 bool celestialMemoryProbeDebug = false;
 std::wstring celestialProbeLogPath;
@@ -182,7 +172,7 @@ int ReadTuning(const wchar_t* key, int fallback, const wchar_t* section = L"Atmo
 
 bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
 {
-    if (owner == d && volume && blur && copy && temporal && radial && contactShadow)
+    if (owner == d && volume && blur && copy && temporal && radial)
         return true;
 
     Reset();
@@ -191,8 +181,8 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
 
     // Each shader reads the on-disk bytecode cache first (renderer::
     // shaderbytecode::GetShader) and only compiles - and stores the result -
-    // on a miss, so a repeat launch skips all ten fxc passes. GetShader
-    // also recompiles once and retries if the driver refuses a cached blob.
+    // on a miss, so a repeat launch skips the eight active shader passes.
+    // GetShader also recompiles once and retries if the driver refuses a cached blob.
     const std::wstring cacheDir = renderer::shaderbytecode::Dir(savedBasePath);
     auto createPS = [&](ID3DBlob* b, ComPtr<IDirect3DPixelShader9>& out)
     { return SUCCEEDED(d->CreatePixelShader(static_cast<DWORD*>(b->GetBufferPointer()), out.GetAddressOf())); };
@@ -207,14 +197,11 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
         return false;
     if (!renderer::shaderbytecode::GetShader(cacheDir, solarRadialPixelSource, "main", "ps_3_0", radialBytecode, [&](ID3DBlob* b) { return createPS(b, radial); }))
         return false;
-    if (!renderer::shaderbytecode::GetShader(cacheDir, contactShadowPixelSource, "main", "ps_3_0", contactShadowBytecode, [&](ID3DBlob* b) { return createPS(b, contactShadow); }))
-        return false;
 
-    // These four are optional: a compile/create failure only disables their
-    // feature, it must not abort the rest of the pass (as before).
+    // These three are optional: a compile/create failure only disables their
+    // feature, it must not abort the rest of the pass.
     renderer::shaderbytecode::GetShader(cacheDir, postProcessPixelSource, "main", "ps_3_0", postProcessBytecode, [&](ID3DBlob* b) { return createPS(b, postProcess); });
     renderer::shaderbytecode::GetShader(cacheDir, rayCompositePixelSource, "main", "ps_3_0", rayCompositeBytecode, [&](ID3DBlob* b) { return createPS(b, rayComposite); });
-    renderer::shaderbytecode::GetShader(cacheDir, localLightPixelSource, "main", "ps_3_0", localLightBytecode, [&](ID3DBlob* b) { return createPS(b, localLight); });
     renderer::shaderbytecode::GetShader(cacheDir, celestialMarkerPixelSource, "main", "ps_3_0", celestialMarkerBytecode, [&](ID3DBlob* b) { return createPS(b, celestialMarker); });
 
     return true;
@@ -227,10 +214,8 @@ void LegacyVolumeShaders::Reset()
     copy.Reset();
     temporal.Reset();
     radial.Reset();
-    contactShadow.Reset();
     postProcess.Reset();
     rayComposite.Reset();
-    localLight.Reset();
     celestialMarker.Reset();
     owner = nullptr;
 }
@@ -239,7 +224,7 @@ bool LegacyFrameTargets::Ensure(IDirect3DDevice9* d, UINT w, UINT h, D3DFORMAT f
 {
     if (owner == d && width == w && height == h && format == fmt &&
         rayWidth == rW && rayHeight == rH &&
-        scene && rayA && rayB && localA && localB)
+        scene && rayA && rayB)
     {
         return true;
     }
@@ -259,11 +244,7 @@ bool LegacyFrameTargets::Ensure(IDirect3DDevice9* d, UINT w, UINT h, D3DFORMAT f
     if (FAILED(d->CreateTexture(rW, rH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, rayA.GetAddressOf(), nullptr)) ||
         FAILED(rayA->GetSurfaceLevel(0, rayASurface.GetAddressOf())) ||
         FAILED(d->CreateTexture(rW, rH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, rayB.GetAddressOf(), nullptr)) ||
-        FAILED(rayB->GetSurfaceLevel(0, rayBSurface.GetAddressOf())) ||
-        FAILED(d->CreateTexture(rW, rH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, localA.GetAddressOf(), nullptr)) ||
-        FAILED(localA->GetSurfaceLevel(0, localASurface.GetAddressOf())) ||
-        FAILED(d->CreateTexture(rW, rH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, localB.GetAddressOf(), nullptr)) ||
-        FAILED(localB->GetSurfaceLevel(0, localBSurface.GetAddressOf())))
+        FAILED(rayB->GetSurfaceLevel(0, rayBSurface.GetAddressOf())))
         return false;
 
     if (FAILED(d->CreateTexture(rW, rH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, rayHistory.GetAddressOf(), nullptr)) ||
@@ -282,10 +263,6 @@ void LegacyFrameTargets::Reset()
     rayA.Reset();
     rayBSurface.Reset();
     rayB.Reset();
-    localASurface.Reset();
-    localA.Reset();
-    localBSurface.Reset();
-    localB.Reset();
     rayHistorySurface.Reset();
     rayHistory.Reset();
     historyValid = false;
@@ -319,17 +296,11 @@ void ReloadTuning() {
     sunVerticalScale = std::clamp(ReadTuning(L"SunVerticalProjectionPercent", 100), 10, 100) * .01f;
     sunOffsetX = std::clamp(ReadTuning(L"SunOffsetXPercent", 0), -50, 50) * .01f;
     sunOffsetY = std::clamp(ReadTuning(L"SunOffsetYPercent", 0), -50, 50) * .01f;
-    localLightStrength = std::clamp(ReadTuning(L"LocalLightPercent", 80), 0, 300) * .01f;
-    localLightThreshold = std::clamp(ReadTuning(L"LocalLightThresholdPercent", 25), 5, 95) * .01f;
-    localLightRadius = float(std::clamp(ReadTuning(L"LocalLightRadiusPixels", 140), 40, 260));
     sunSourceThreshold = std::clamp(ReadTuning(L"SunSourceThresholdPercent", 60), 10, 95) * .01f;
-    contactShadowStrength = std::clamp(ReadTuning(L"ContactShadowPercent", 25), 0, 70) * .01f;
-    contactShadowRadius = float(std::clamp(ReadTuning(L"ContactShadowRadiusPixels", 10), 2, 24));
     // Genuinely local: a "contact" shadow grounds objects and shades creases.
     // Long-range occlusion belongs to the light-space directional shadow map,
     // never to this screen-space depth raymarch (off-screen occluders don't
     // exist here, which is what produced ghosting/disocclusion at long range).
-    contactShadowMaxDistance = float(std::clamp(ReadTuning(L"ContactShadowRangeUnits", 6), 2, 20));
     directionalShadowStrength = std::clamp(ReadTuning(L"DirectionalShadowPercent", 45), 0, 100) * .01f;
     shadowMapDistance = float(std::clamp(ReadTuning(L"ShadowMapDistance", ReadTuning(L"ShadowReach", 180)), 50, 300));
     configuredShadowMapSize = UINT(std::clamp(ReadTuning(L"ShadowMapSize", 1024), 256, 4096));
@@ -357,7 +328,6 @@ void ReloadTuning() {
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
     shaftDebug = ReadTuning(L"ShaftDebugMask", 0) != 0;
-    localLightDebug = ReadTuning(L"LocalLightDebugMask", 0) != 0;
     celestialMarkerDebug = ReadTuning(L"DebugCelestialMarker", 0) != 0;
     // Read-only comparison of the current v[24]-projection marker (RED)
     // against two candidate directions read from client-process globals
@@ -401,8 +371,9 @@ void Configure(const std::wstring& base) {
 
 // Frame-scoped DEFAULT resources: persistent textures STAY ALIVE across frames!
 void Finish(IDirect3DDevice9* d) {
-    if (owner && owner != d) return;
-    renderer::DepthCapture::Instance().OnFrameEnd(d);
+    // A recreated device has a different pointer. Drop frame-owned references
+    // regardless; DepthCapture::Reset handles whether restoration is safe.
+    renderer::DepthCapture::Instance().Reset(d);
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
     watereffect::mainTargetSurface = nullptr;
@@ -466,8 +437,6 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
 
 inline bool HasOtherActiveEffects() {
     const auto& atmosphere = renderer::DirectionalVolumetricLighting::Instance().Settings();
-    const bool hasContact = kAllowScreenSpaceContactShadow && !shaftDebug &&
-        shadowsEffectEnabled && contactShadowStrength > 0;
     const bool hasFog = !shaftDebug && (fogEffectEnabled || atmosphere.localFogEnabled ||
         atmosphere.edgeFogEnabled);
     const bool hasVolumetric = shaftsEffectEnabled && atmosphere.enabled;
@@ -487,7 +456,7 @@ inline bool HasOtherActiveEffects() {
     // other effect switched off gets no mask, and the surface is shaded twice - once by the
     // water stage's own camera column and once by the medium.
     const bool hasUnderwater = !shaftDebug && renderer::Underwater::Instance().IsActive();
-    return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
+    return hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
            hasLightScatteringDebug || hasUnderwater;
 }
 
@@ -1228,62 +1197,6 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetPixelShaderConstantF(0, constants[0], 14));
     }
 
-    // Screen-space contact shadows.
-    // Rendered DIRECTLY onto the bound scene target (`target`, already the
-    // active render target here) with a ZERO/SRCCOLOR modulate blend - no
-    // intermediate render target at all. The previous version wrote this
-    // pass into `legacyTargets.rayA`, a texture allocated at HALF resolution
-    // (rayWidth/rayHeight), while setting a FULL-resolution viewport and
-    // drawing a full-resolution quad into it: the rasterizer clips to the
-    // actual half-size surface, so only a quarter of the intended shadow
-    // data was ever written, then sampled back over the full screen. That
-    // size mismatch - not the blur - is what produced the large moving
-    // ghost/projection artifacts. Writing straight to the real full-res
-    // target removes the mismatch entirely, and also removes two full-screen
-    // passes (the old copy+blend) that this used to cost.
-    // The trace range is also now genuinely local: this is a *contact*
-    // shadow (grounding/creases), not a stand-in for directional shadows -
-    // long-range occlusion belongs to the light-space shadow map below.
-    // SAFETY GATE - disabled from production regardless of ini. In-game
-    // testing reported the shadow crawling/changing shape with camera
-    // movement and jagged silhouettes even after the render-target fix.
-    // Reconstructing anything beyond a small ground-contact shadow from the
-    // screen-space depth buffer is the wrong tool (no off-screen occluder
-    // data), and this must not stand in for real directional shadows. Kept
-    // as diagnostic-only until re-scoped to ~0.5-2 unit contact range per
-    // the Phase 5 plan, layered on top of WoW's native shadows rather than
-    // replacing them.
-    if (kAllowScreenSpaceContactShadow && !shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
-        renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
-        check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
-        check(d->SetTexture(0, depth.Get()));
-        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
-        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
-        float shadowTuning[4] = { 1.f / desc.Width, 1.f / desc.Height, contactShadowStrength,
-                                  contactShadowMaxDistance };
-        float contactShadowProjection[4] = { constants[0][0], constants[0][1], constants[0][2], constants[0][3] };
-        float contactShadowLight[4] = { constants[10][0], constants[10][1], constants[10][2], constants[2][3] };
-        check(d->SetPixelShaderConstantF(0, shadowTuning, 1));
-        check(d->SetPixelShaderConstantF(1, contactShadowProjection, 1));
-        check(d->SetPixelShaderConstantF(2, contactShadowLight, 1));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
-        check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ZERO));
-        check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_SRCCOLOR));
-        if (ok) drawQuad(desc.Width, desc.Height);
-
-        check(d->SetTexture(0, nullptr));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-        // This pass wrote straight into `target`, so the scene copy the
-        // passes below sample is now stale. The cloud composite re-publishes
-        // that copy across the whole screen, so refreshing it here is what
-        // keeps a re-enabled contact shadow from being erased again.
-        check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
-        check(d->SetPixelShader(legacyShaders.volume.Get()));
-        check(d->SetTexture(1, depth.Get()));
-        check(d->SetTexture(2, resources.noise.Get()));
-        check(d->SetPixelShaderConstantF(0, constants[0], 14));
-    }
-
     // Volumetric cloud deck, integrated into the SCENE rather than painted
     // over the finished frame: it runs before local lighting, the
     // atmosphere and the glare pass, and refreshes the scene copy those
@@ -1655,117 +1568,6 @@ bool Composite(IDirect3DDevice9* d) {
     return ok;
 }
 
-bool CompositeLateLocalLights(IDirect3DDevice9* d) {
-    if (!enabled || !active || internal || owner != d || !composed || localLightStrength <= 0 ||
-        !target || !depth || !legacyTargets.sceneSurface || !legacyTargets.localASurface || !legacyTargets.localBSurface)
-        return false;
-
-    if (!legacyShaders.Ensure(d)) return false;
-
-    D3DSURFACE_DESC desc{}, localDesc{};
-    if (FAILED(target->GetDesc(&desc)) || FAILED(legacyTargets.localASurface->GetDesc(&localDesc)) ||
-        FAILED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE)))
-        return false;
-
-    renderer::ScopedPassState scopedState(d);
-    internal = true;
-    bool ok = true;
-    auto check = [&](HRESULT hr, int line = __LINE__) {
-        if (FAILED(hr) && ok) {
-            ok = false;
-            char msg[96];
-            sprintf_s(msg, sizeof(msg), "localLights:FAILED line=%d hr=0x%08lX", line, static_cast<unsigned long>(hr));
-            Log(msg);
-        }
-    };
-
-    check(setDepth(d, nullptr));
-    check(d->SetVertexShader(nullptr));
-    check(d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1));
-    for (D3DRENDERSTATETYPE s : {
-        D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE,
-        D3DRS_SCISSORTESTENABLE, D3DRS_FOGENABLE, D3DRS_LIGHTING, D3DRS_SRGBWRITEENABLE })
-    {
-        check(d->SetRenderState(s, FALSE));
-    }
-    check(d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
-    check(d->SetRenderState(D3DRS_COLORWRITEENABLE, 7));
-    check(d->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID));
-    check(d->SetRenderState(D3DRS_CLIPPLANEENABLE, 0));
-    check(d->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD));
-    check(d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE));
-
-    for (DWORD s = 0; s < 2; ++s) {
-        check(d->SetSamplerState(s, D3DSAMP_MINFILTER, s ? D3DTEXF_POINT : D3DTEXF_LINEAR));
-        check(d->SetSamplerState(s, D3DSAMP_MAGFILTER, s ? D3DTEXF_POINT : D3DTEXF_LINEAR));
-        check(d->SetSamplerState(s, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
-        check(d->SetSamplerState(s, D3DSAMP_SRGBTEXTURE, FALSE));
-        check(d->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
-        check(d->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
-    }
-
-    struct V { float x, y, z, w, u, v; };
-    auto drawQuad = [&](UINT width, UINT height) {
-        float w = float(width) - .5f, h = float(height) - .5f;
-        V q[] = { {-.5f, -.5f, 0, 1, 0, 0}, {w, -.5f, 0, 1, 1, 0}, {-.5f, h, 0, 1, 0, 1}, {w, h, 0, 1, 1, 1} };
-        check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(V)));
-    };
-
-    D3DVIEWPORT9 localVp{ 0, 0, localDesc.Width, localDesc.Height, 0, 1 };
-    check(d->SetViewport(&localVp));
-    check(d->SetRenderTarget(0, legacyTargets.localASurface.Get()));
-    check(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1, 0));
-    check(d->SetPixelShader(legacyShaders.localLight.Get()));
-    check(d->SetTexture(0, legacyTargets.scene.Get()));
-    check(d->SetTexture(1, depth.Get()));
-    check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-
-    float local[4] = { 1.f / desc.Width, 1.f / desc.Height, localLightStrength, localLightThreshold };
-    float localMode[4] = { localLightDebug ? 1.f : 0.f, localLightRadius, 0, 0 };
-    float localDepth[4] = { constants[2][3], 0, 0, 0 };
-    check(d->SetPixelShaderConstantF(0, local, 1));
-    check(d->SetPixelShaderConstantF(1, localMode, 1));
-    check(d->SetPixelShaderConstantF(2, localDepth, 1));
-    if (ok) drawQuad(localDesc.Width, localDesc.Height);
-
-    check(d->SetTexture(0, nullptr));
-    check(d->SetTexture(1, nullptr));
-    check(d->SetPixelShader(legacyShaders.blur.Get()));
-    float localBlur[4] = {};
-    for (int pass = 0; pass < 3; ++pass) {
-        check(d->SetTexture(0, legacyTargets.localA.Get()));
-        check(d->SetRenderTarget(0, legacyTargets.localBSurface.Get()));
-        check(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1, 0));
-        localBlur[0] = localLightRadius / (16.f * desc.Width); localBlur[1] = 0;
-        check(d->SetPixelShaderConstantF(0, localBlur, 1));
-        if (ok) drawQuad(localDesc.Width, localDesc.Height);
-        check(d->SetTexture(0, nullptr));
-        check(d->SetTexture(0, legacyTargets.localB.Get()));
-        check(d->SetRenderTarget(0, legacyTargets.localASurface.Get()));
-        check(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1, 0));
-        localBlur[0] = 0; localBlur[1] = localLightRadius / (16.f * desc.Height);
-        check(d->SetPixelShaderConstantF(0, localBlur, 1));
-        if (ok) drawQuad(localDesc.Width, localDesc.Height);
-        check(d->SetTexture(0, nullptr));
-    }
-
-    D3DVIEWPORT9 fullVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
-    check(d->SetViewport(&fullVp));
-    check(d->SetRenderTarget(0, target.Get()));
-    check(d->SetPixelShader(legacyShaders.copy.Get()));
-    check(d->SetTexture(0, legacyTargets.localA.Get()));
-    check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
-    check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-    check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
-    check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE));
-    check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
-    if (ok) drawQuad(desc.Width, desc.Height);
-
-    check(d->SetTexture(0, nullptr));
-    check(d->SetTexture(1, nullptr));
-    internal = false;
-    return ok;
-}
 
 bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
     // Same two independent reasons to run the pass as the composed path above, and the same rule

@@ -264,53 +264,6 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 }
 )HLSL";
 
-// Depth-derived screen-space directional contact shadows. A ray is marched
-// from each visible surface toward the real sun; only a depth crossing along
-// that ray darkens the pixel, so flat ground is never globally multiplied down.
-inline const char* contactShadowPixelSource=R"HLSL(
-sampler2D depthMap:register(s0);
-// xy=1/full render size, z=strength, w=max view-space trace distance
-float4 tuning:register(c0);
-// x=projection A, y=projection B, z=P00, w=P11
-float4 projection:register(c1);
-// xyz=view-space direction toward the sun, w=viewport depth maximum
-float4 light:register(c2);
-float linearZ(float raw) {
-    // Classify clear depth in the original viewport range, then normalize
-    // separately for projection reconstruction. MaxZ can itself be near one.
-    float clearThreshold=(light.w+1)*.5;
-    return raw>=clearThreshold ? 100000 : projection.y/(raw/max(light.w,.001)-projection.x);
-}
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float raw=tex2D(depthMap,uv).r;
-    float center=linearZ(raw);
-    if(center>99999)return 1;
-    float3 viewPos=float3((uv.x*2-1)*center/projection.z,
-                          (1-uv.y*2)*center/projection.w,center);
-    float3 towardLight=normalize(light.xyz);
-    float occlusion=0;
-    [unroll] for(int i=0;i<12;++i) {
-        float q=(i+1)/12.0;
-        float traceDistance=.30+q*q*tuning.w;
-        float3 samplePos=viewPos+towardLight*traceDistance;
-        float2 sampleUv=float2(.5+.5*samplePos.x*projection.z/max(samplePos.z,.05),
-                               .5-.5*samplePos.y*projection.w/max(samplePos.z,.05));
-        float inside=step(0,sampleUv.x)*step(sampleUv.x,1)*step(0,sampleUv.y)*step(sampleUv.y,1)*step(.05,samplePos.z);
-        float sceneZ=linearZ(tex2Dlod(depthMap,float4(sampleUv,0,0)).r);
-        float delta=samplePos.z-sceneZ;
-        float bias=.055+center*.0012;
-        float thickness=.30+traceDistance*.075;
-        float crossing=smoothstep(bias,bias+thickness*.25,delta)*
-                       (1-smoothstep(thickness,thickness*1.45,delta));
-        occlusion=max(occlusion,inside*step(sceneZ,99999)*crossing*(1-q*.35));
-    }
-    float screenEdge=saturate(min(min(uv.x,uv.y),min(1-uv.x,1-uv.y))*24);
-    float distanceFade=saturate(1-center/320.0);
-    float shade=1-tuning.z*saturate(occlusion)*distanceFade*screenEdge;
-    return float4(shade,shade,shade,1);
-}
-)HLSL";
-
 inline const char* rayCompositePixelSource=R"HLSL(
 sampler2D rays:register(s0);
 sampler2D resolvedFog:register(s1);
@@ -391,35 +344,6 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
     light.rgb+=(jitter-.5)/255.0;
     light.a=1;
     return light;
-}
-)HLSL";
-
-inline const char* localLightPixelSource=R"HLSL(
-sampler2D scene:register(s0);
-sampler2D depthMap:register(s1);
-float4 localTuning:register(c0);
-float4 localMode:register(c1);
-float4 depthInfo:register(c2); // viewport MaxZ
-float3 sourceAt(float2 uv) {
-    float3 c=tex2D(scene,uv).rgb;
-    float peak=max(c.r,max(c.g,c.b));
-    float bright=saturate((peak-localTuning.w)/max(1-localTuning.w,.01));
-    float warm=smoothstep(.010,.11,c.r-c.g)*smoothstep(.025,.20,c.g-c.b);
-    float blueShoulder=smoothstep(.001,.025,c.b);
-    float amberRatio=1-smoothstep(.90,.98,c.g/max(c.r,.01));
-    float raw=tex2D(depthMap,uv).r;
-    // Clear depth is 1 while geometry is capped by viewport MaxZ; use the
-    // gap between them rather than a fixed threshold that can leak bright
-    // foreground into the local-light source mask.
-    float worldGeometry=1-step((depthInfo.x+1)*.5,raw);
-    return c*bright*warm*blueShoulder*amberRatio*worldGeometry;
-}
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float3 raw=tex2D(scene,uv).rgb;
-    float rawPeak=max(raw.r,max(raw.g,raw.b));
-    float rawBright=saturate((rawPeak-localTuning.w)/max(1-localTuning.w,.01));
-    float3 glow=(localMode.x>.5?float3(rawBright,0,0):sourceAt(uv))*localTuning.z*24.0;
-    return float4(glow,1);
 }
 )HLSL";
 

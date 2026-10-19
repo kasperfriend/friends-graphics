@@ -23,6 +23,23 @@ int main() try
     const std::string text((std::istreambuf_iterator<char>(source)), {});
     Require(text.find("float HeightFraction(float3 p) { return saturate((p.z-layer.x)*layer.z); }") != std::string::npos,
             "production height profile uses world Z, not camera-relative curvature");
+    Require(text.find("m_fieldsDevice=d;") != std::string::npos &&
+            text.find("device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device)") != std::string::npos,
+            "cloud noise textures are recreated when the D3D device implementation changes");
+    const auto resize = text.find("// A backbuffer resize only invalidates size-dependent targets.");
+    Require(resize != std::string::npos &&
+            text.find("Reset(d);m_owner=d;m_fullWidth=w", resize) == std::string::npos,
+            "cloud target resize preserves compiled shaders instead of forcing a full pass reset");
+    Require(text.find("// A device recreation must release resources owned by the discarded device;") != std::string::npos,
+            "device replacement releases stale cloud COM resources rather than retaining the old device");
+    Require(text.find("if(!m_shaderRetry.Open(now))return false;") != std::string::npos &&
+            text.find("m_shaderRetry.Fail(now,kOptionalPassRetryMs);") != std::string::npos,
+            "transient cloud shader creation failures retry after a cooldown instead of disabling clouds until device reset");
+    const auto workerWait = text.find("const bool generating=m_fieldWorker->generating.load");
+    const auto cacheRead = text.find("if(!LoadFields(m_cachePath,shape,detail,weather))");
+    Require(text.find("std::thread([worker,cachePath]") != std::string::npos &&
+            workerWait != std::string::npos && cacheRead != std::string::npos && workerWait < cacheRead,
+            "cold-start cloud generation owns its async state and avoids per-frame cache I/O while the worker runs");
     Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
 

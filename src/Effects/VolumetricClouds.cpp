@@ -708,67 +708,81 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
   // Not exists alone: a settings change can re-enter this block while the
   // first worker is still generating, and two workers writing the same
   // cache is wasted CPU on the crossing's frame.
-  if(!std::filesystem::exists(m_cachePath,ec)&&!m_fieldsGenerating) {
-   m_fieldsGenerating=true;
-   std::thread([this]{
-    try {
-    auto shape=cloudnoise::GenerateShape(int(kShapeSize));
-    auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
-    auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
-    if(shape.size>0&&detail.size>0&&weather.width>0)
-     SaveFields(m_cachePath,shape,detail,weather);
-    else
-     m_fieldsFailed=true;
-    } catch (...) {
-    // An exception escaping a std::thread calls std::terminate and kills
-    // the game. A failed generation must only cost this launch's clouds -
-    // the file cache from a healthy launch covers the next one.
-    m_fieldsFailed=true;
-    }
-    m_fieldsGenerating=false;
-   }).detach();
+  auto worker=m_fieldWorker;
+  bool expected=false;
+  if(!std::filesystem::exists(m_cachePath,ec)&&
+     worker->generating.compare_exchange_strong(expected,true,std::memory_order_acq_rel)) {
+   const std::wstring cachePath=m_cachePath;
+   try {
+    std::thread([worker,cachePath]{
+     try {
+      auto shape=cloudnoise::GenerateShape(int(kShapeSize));
+      auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
+      auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+      if(shape.size>0&&detail.size>0&&weather.width>0)
+       SaveFields(cachePath,shape,detail,weather);
+      else
+       worker->failed.store(true,std::memory_order_release);
+     } catch (...) {
+      // A failed generation costs this launch's clouds only; it must never
+      // escape a worker thread and terminate the game process.
+      worker->failed.store(true,std::memory_order_release);
+     }
+     worker->generating.store(false,std::memory_order_release);
+    }).detach();
+   } catch (...) {
+    worker->failed.store(true,std::memory_order_release);
+    worker->generating.store(false,std::memory_order_release);
+   }
   }
  }
 }
 
 void VolumetricClouds::Reset(IDirect3DDevice9* device)
 {
- if(m_owner&&m_owner!=device)return;
+ // A device recreation must release resources owned by the discarded device;
+ // comparing the owner to the new device and returning would retain dead COM
+ // references and make every subsequent cloud allocation fail.
  m_cloudSurface.Reset();m_cloudTexture.Reset();
  m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  // A new device (or a resize, which is rare) is worth one more attempt.
- m_shadersFailed=false;
+ m_shaderRetry.Succeed();
  m_clock.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_shadowSize=0;
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
  // an alt-tab does not pay for regenerating them. Only a different device
  // invalidates them.
- if(device==nullptr)
+ if(device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device))
  {
   m_shapeTexture.Reset();m_detailTexture.Reset();m_weatherTexture.Reset();
-  m_fieldsReady=false;m_fieldsFailed=false;
+  m_fieldsDevice=nullptr;m_fieldsReady=false;m_fieldsWaitStart=0;
+  m_fieldWorker->failed.store(false,std::memory_order_release);
  }
 }
 
 bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
 {
  if(m_marchShader&&m_compositeShader&&m_shadowShader)return true;
- // Compiling a 460-slot ps_3_0 shader costs tens of milliseconds. Without
- // remembering the failure, a driver that rejects the march would be asked
- // to reject it again on every single frame - turning "this machine has no
- // clouds" into "this machine has no frames". The fields cache their own
- // failure for the same reason.
- if(m_shadersFailed)return false;
+ // Compiling a 460-slot ps_3_0 shader costs tens of milliseconds. A failed
+ // attempt is throttled, not permanently cached: transient device/driver
+ // failures get another chance after the retry cooldown without taxing every
+ // frame or leaving clouds disabled until the next device reset.
+ const uint64_t now=GetTickCount64();
+ if(!m_shaderRetry.Open(now))return false;
  if(Compile(d,kCloudMarchSource,m_shaderCacheDir,m_marchShader.GetAddressOf())&&
     Compile(d,kCloudCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&
-    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))return true;
+    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))
+ {
+  m_shaderRetry.Succeed();
+  return true;
+ }
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
- m_shadersFailed=true;
- if(!m_logPath.empty())
+ const bool firstFailure=m_shaderRetry.Fail(now,kOptionalPassRetryMs);
+ if(firstFailure&&!m_logPath.empty())
  {
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
-  out<<"clouds: pixel shader compilation failed on this device; the deck is off\n";
+  out<<"clouds: pixel shader creation failed; retrying after cooldown\n";
  }
  return false;
 }
@@ -776,12 +790,12 @@ bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
 bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
 {
  if(m_fieldsReady)return true;
- if(m_fieldsFailed)return false;
+ if(m_fieldWorker->failed.load(std::memory_order_acquire))return false;
  D3DCAPS9 caps{};
  if(FAILED(d->GetDeviceCaps(&caps))||!(caps.TextureCaps&D3DPTEXTURECAPS_VOLUMEMAP)||
     caps.MaxVolumeExtent<kShapeSize)
  {
-  m_fieldsFailed=true;
+  m_fieldWorker->failed.store(true,std::memory_order_release);
   return false;
  }
  cloudnoise::Volume3D shape,detail;
@@ -793,18 +807,22 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
  // next - the worker started seconds ago and the render thread must not
  // block on it. Past a five-second bound the worker is pathologically slow
  // or dead, and the legacy inline generation runs (its atomic save and
- // deterministic content keep a late worker write harmless).
+ // deterministic content keep a late worker write harmless). Do not reopen
+ // and scan the multi-megabyte cache on every frame while that worker runs.
+ const bool generating=m_fieldWorker->generating.load(std::memory_order_acquire);
+ const uint64_t now=GetTickCount64();
+ if(generating) {
+  if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
+  if(now-m_fieldsWaitStart<5000)return false;
+ } else {
+  m_fieldsWaitStart=0;
+ }
  if(!LoadFields(m_cachePath,shape,detail,weather))
  {
-  if(m_fieldsGenerating.load(std::memory_order_acquire)) {
-   const auto now=GetTickCount64();
-   if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
-   if(now-m_fieldsWaitStart<5000)return false;
-  }
   shape=cloudnoise::GenerateShape(int(kShapeSize));
   detail=cloudnoise::GenerateDetail(int(kDetailSize));
   weather=cloudnoise::GenerateWeather(int(kWeatherSize));
-  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldsFailed=true;return false;}
+  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldWorker->failed.store(true,std::memory_order_release);return false;}
   SaveFields(m_cachePath,shape,detail,weather);
  }
  if(!UploadVolume(d,shape,m_shapeTexture.ReleaseAndGetAddressOf())||
@@ -812,9 +830,10 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
     !UploadImage(d,weather,m_weatherTexture.ReleaseAndGetAddressOf()))
  {
   m_shapeTexture.Reset();m_detailTexture.Reset();m_weatherTexture.Reset();
-  m_fieldsFailed=true;
+  m_fieldWorker->failed.store(true,std::memory_order_release);
   return false;
  }
+ m_fieldsDevice=d;
  m_fieldsReady=true;
  return true;
 }
@@ -824,7 +843,13 @@ bool VolumetricClouds::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h
  const uint32_t lw=std::max(1u,uint32_t(float(w)*m_settings.resolutionScale));
  const uint32_t lh=std::max(1u,uint32_t(float(h)*m_settings.resolutionScale));
  if(m_owner==d&&m_fullWidth==w&&m_fullHeight==h&&m_lowWidth==lw&&m_lowHeight==lh&&m_cloudTexture)return true;
- Reset(d);m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;
+ // A backbuffer resize only invalidates size-dependent targets. Keep the
+ // expensive raymarch shaders and managed noise fields: resetting/recompiling
+ // all three cloud shaders on every resolution switch caused a long first-frame
+ // hitch and could make clouds appear to lose their shader transiently.
+ m_cloudSurface.Reset();m_cloudTexture.Reset();
+ m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;m_shadowSize=0;
+ m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;
  auto tex=[&](D3DFORMAT format){
   m_cloudTexture.Reset();m_cloudSurface.Reset();
   return SUCCEEDED(d->CreateTexture(lw,lh,1,D3DUSAGE_RENDERTARGET,format,D3DPOOL_DEFAULT,m_cloudTexture.GetAddressOf(),nullptr))&&

@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include "../Core/FrameClock.h"
+#include "../Core/DeviceHealth.h"
 #include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
 
@@ -150,14 +152,14 @@ namespace renderer
         std::wstring m_logPath;
         std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
-        bool m_shadersFailed = false;
+        RetryGate m_shaderRetry;
         bool m_fieldsReady = false;
-        bool m_fieldsFailed = false;
-        // Set by the load-time field-generation worker (see Configure) until
-        // it publishes the cache. The render thread only ever reads it
-        // (EnsureFields), so an atomic with no other synchronization is
-        // sufficient.
-        std::atomic<bool> m_fieldsGenerating{false};
+        IDirect3DDevice9* m_fieldsDevice = nullptr;
+        // Detached generation can outlive a device transition (or DLL object
+        // teardown). Shared state and a copied path keep the worker independent
+        // of this renderer instance while publishing its result safely.
+        struct FieldWorkerState { std::atomic<bool> generating{false}, failed{false}; };
+        std::shared_ptr<FieldWorkerState> m_fieldWorker = std::make_shared<FieldWorkerState>();
         uint64_t m_fieldsWaitStart = 0; // first frame that skipped for the worker
         bool m_shadowValid = false;
         Vec4 m_shadowArea;

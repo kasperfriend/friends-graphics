@@ -157,6 +157,19 @@ namespace renderer
 
     void DepthCapture::Reset(IDirect3DDevice9* device)
     {
+        // OnFrameEnd restores the captured depth surface through the device's
+        // original vtable methods. That is safe only for the device that owns
+        // the capture; on device replacement release our COM references without
+        // making calls through a different device.
+        if (m_owner && m_owner != device)
+        {
+            m_depthSurface.Reset();
+            m_depthTexture.Reset();
+            m_originalDepth.Reset();
+            m_target.Reset();
+            m_owner = nullptr;
+            return;
+        }
         OnFrameEnd(device);
     }
 }

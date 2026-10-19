@@ -190,9 +190,9 @@ mode 2 shows the final direct contribution; mode 3 remains black because the
 removed screen-space visibility pass intentionally has no duplicate-shadow
 replacement; mode 4 shows the normal-window confidence. For local-light
 volumetric scatter, use `AtmosphereDebugMode=13`, separate from the atmosphere's
-own debug modes. The older `[Atmosphere] LocalLightPercent` bright-pixel glow is a
-separate, disconnected compatibility path; use `[DynamicLighting]` for the
-selected world-space sources.
+own debug modes. The unused `[Atmosphere] LocalLightPercent` bright-pixel controls have been
+removed; `[DynamicLighting]` is the supported path for selected world-space
+sources.
 
 The per-frame source scan now rejects distant manifest/native/attached sources
 in squared-distance space and uses a partial top-four/top-eight sort rather

@@ -400,6 +400,21 @@ int main() try
     Require(!ShouldHoldLocation(HasWorldContext(false, false), false), "no-depth frame with nothing confirmed still polls, so a first location can arrive");
     Require(!ShouldHoldLocation(HasWorldContext(false, true), true), "terrain-only world frame permits location sampling");
 
+    // Cached D3DSBT_ALL blocks retain texture bindings, including DEFAULT-pool
+    // render targets. The reset hook must invalidate this cache before it
+    // forwards a real mode change to the game driver.
+    const auto passState = Read("src/D3D9/ScopedPassState.h");
+    const auto hooks = Read("ModernWoWRenderer.cpp");
+    Require(Contains(passState, "inline void ResetPassStateBlocks() noexcept") &&
+            Contains(passState, "for (auto& block : shared.block) block.Reset()") &&
+            Contains(passState, "shared.deviceRef.Reset()"),
+            "reset cleanup releases cached D3D state blocks and their device pin");
+    const auto cleanup = hooks.find("void ResetEffectStateForDeviceChange(IDirect3DDevice9* d) noexcept");
+    const auto originalReset = hooks.find("HRESULT WINAPI HookedReset", cleanup);
+    Require(cleanup != std::string::npos && originalReset != std::string::npos &&
+            hooks.find("renderer::detail::ResetPassStateBlocks();", cleanup) < originalReset,
+            "state-block references are released before the game device reset");
+
     std::printf("ALL DEVICE HEALTH TESTS PASSED\n");
     return 0;
 }
