@@ -49,6 +49,8 @@ float flowSpeed=1.f,flowRotation=.32f;
 // WATER OPACITY: the coverage floor above, 0..100 percent. Read with the other
 // tuning so a per-location override and the F7 slider land in the same place.
 float opacityPercent=85.f;
+float waterVisibilityYards=90.f;
+float horizonFogYards=900.f;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
@@ -1279,6 +1281,16 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // coverage is different: it belongs to the world, not to the camera ray or pixel grid.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
+    // THE MURK. The original game covers what is under the surface: a stone's throw
+    // out, the bottom is not visible at all, and it gets there as a gradient rather
+    // than at a line. This shader had the optics of the column (transmittance, which
+    // CLARITY drives and which a clear tropical shelf barely touches) but no range at
+    // which the water simply hides its own floor - so the bed stayed legible to the
+    // horizon and the sea read as a window rather than as water. Distance from the eye
+    // is the honest variable: it is what the player judges the depth by, and unlike a
+    // depth reading it cannot be missing.
+    float viewDistance=length(viewPos);
+    float murk=smoothstep(opacityControl.y*.35,max(opacityControl.y,.001),viewDistance)*(1-underwater);
     // The camera-to-fragment ray length, capped the way the far column is capped. Computed
     // here rather than down with the camera-column absorption because the column below now
     // needs it too, and the two have to be the same number: one is the length of water this
@@ -1781,6 +1793,10 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);
         float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);
         body=lerp(body,seaBody,opacityControl.x*bedFade);
+        // ...and then the water's own range closes over it, at the slider's authority
+        // rather than the depth reading's: this is the original's underwater cover, and
+        // it is what makes the sea read as water instead of a window onto the floor.
+        body=lerp(body,seaBody,murk);
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
         waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));
@@ -1935,6 +1951,10 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // copy silently turned every water pixel into baseAlpha over an empty background.
     float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);
     surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
+    // Past the visibility range there is nothing to see through, so the sheet is the
+    // surface: a world that is masked in colour must not still show the raw scene
+    // through 15% of alpha, which on a bright seabed is most of what a player sees.
+    surfaceAlpha=max(surfaceAlpha,murk);
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
     // silhouette itself turning away, not a second sheet behind the first.
@@ -1959,14 +1979,27 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // share therefore rises with view distance: near water keeps the air's colour (the
     // horizon still meets the sky), and past a few hundred yards the sheet converges on
     // the body instead, so distance deepens it rather than deleting it.
-    float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);
-    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);
+    // THE HANDOVER TO AIR. Two things have to be true at once at the horizon: the
+    // sea keeps its own colour through the middle distance (a sea that turns into
+    // the sky early is the "nothingness" report), and by the time the plane actually
+    // stops the air has taken it over completely, so its edge is not a line against
+    // the sky. So the sea's share of the target RISES with distance and then FALLS
+    // back to nothing as the haze finishes, and the fog factor is driven by the same
+    // distance per pixel - not by the client's per-vertex curve, which different
+    // tiles of the same sea resolve differently (that is the rectangular step in the
+    // middle of the water in the screenshots).
+    float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);
+    float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);
+    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85)*(1-airShare);
+    // Named, not assigned into the interpolant: the fog factor the result uses below
+    // is the larger of the client's curve and this distance ramp.
+    float fogFactor=max(fog,airShare);
     // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
     // body the near sheet converges on, so the fog distance stops being a visible
     // edge in the middle of one continuous plane. The remaining air share keeps the
     // horizon from becoming a hard line against the sky.
     float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);
-    result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
+    result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;
 }
@@ -2015,6 +2048,11 @@ void ReloadTuning(){
     // a property of the body. This is how much of the scene the surface is
     // allowed to leave showing, which is a property of the sheet.
     opacityPercent=float(std::clamp(ReadTuning(L"OpacityPercent",85),0,100));
+    // The two distances that make the sea behave like water at range. Both are per
+    // location like every other water key, and both are yards because that is the
+    // unit a player can picture.
+    waterVisibilityYards=float(std::clamp(ReadTuning(L"VisibilityYards",90),5,400));
+    horizonFogYards=float(std::clamp(ReadTuning(L"HorizonFogYards",900),100,3000));
     depthFogStrength=std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)*.01f;
     shoreFoamStrength=std::clamp(ReadTuning(L"ShoreFoamPercent",28),0,60)*.01f;
     shoreFoamWidth=std::clamp(ReadTuning(L"ShoreFoamWidthPercent",120),25,800)*.01f;
@@ -2832,7 +2870,14 @@ struct Scope {
             // it as the opacity floor. The other three lanes are cleared so a
             // leftover from the saved client block can never leak into them.
             pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);
-            pixelConstants[19][1]=pixelConstants[19][2]=pixelConstants[19][3]=0.f;
+            // c199's spare lanes carry the two range parameters the same stage reads:
+            // how far the bed stays visible, and where the far sea has finished
+            // dissolving into the air. They ride this register because it is already
+            // inside the block this draw uploads and restores - no new span, no new
+            // state to keep in step with the surface shader.
+            pixelConstants[19][1]=waterVisibilityYards;
+            pixelConstants[19][2]=horizonFogYards;
+            pixelConstants[19][3]=0.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops

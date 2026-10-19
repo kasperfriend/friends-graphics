@@ -1150,16 +1150,15 @@ int main() try
                     !=std::string::npos&&
                 pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);")
                     !=std::string::npos&&
-                pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
+                pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
                 "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
         // A sea's horizon is not the sky. The air fog alone painted distant water the exact
         // colour of the sky it faded into, which reads as a hole in the world; the target
         // takes the body's deep colour in proportion to the column's own saturation, above
         // water only, so a shallow shore still fades exactly as before.
         {
-            const auto farSea=pixel.find("float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);");
-            const auto share=pixel.find(
-                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);");
+            const auto farSea=pixel.find("float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);");
+            const auto share=pixel.find("float seaShare=max(",farSea);
             const auto body=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
             const auto target=pixel.find(
                 "float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);");
@@ -1171,11 +1170,15 @@ int main() try
                     "the water fogs into its own body, so the fog distance is not an edge");
             const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
             Require(farSea!=std::string::npos&&share!=std::string::npos&&target!=std::string::npos&&
-                    target==fade&&farSea<share&&share<target,
+                    target==fade&&farSea<share&&share<target&&
+                    pixel.find(")*(1-airShare);")!=std::string::npos,
                     "the distant sheet fades into the sea's own colour above water, and into the medium below it");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float farSea = Smoothstep(40.f, 600.f, viewZ);")!=std::string::npos&&
-                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f)")!=std::string::npos &&
+            Require(mirror.find("const float farSea = Smoothstep(40.f, horizonDistance * .6f, viewDistance);")
+                        !=std::string::npos&&
+                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare)")
+                        !=std::string::npos &&
+                    mirror.find("const float fogged = std::max(fog, airShare);")!=std::string::npos &&
                     mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
                     "the CPU preview fogs toward the same tinted target, deepening with distance");
         }
@@ -1201,6 +1204,38 @@ int main() try
                     gate!=std::string::npos&&trust!=std::string::npos&&fade!=std::string::npos&&
                     sea<bed&&bed<bodyLine&&bodyLine<gate&&gate<trust&&trust<fade,
                     "water opacity fades the WHOLE body toward the sea, after the refraction mix");
+            // THE MURK: the original's underwater cover. A distance ramp - not the
+            // column's transmittance, which CLARITY owns and a clear shelf barely
+            // moves - that closes the body over the bed and takes coverage to 1.
+            const auto murk=pixel.find(
+                "float murk=smoothstep(opacityControl.y*.35,max(opacityControl.y,.001),viewDistance)*(1-underwater);");
+            const auto murkBody=pixel.find("body=lerp(body,seaBody,murk);",fade);
+            const auto murkCover=pixel.find("surfaceAlpha=max(surfaceAlpha,murk);");
+            Require(murk!=std::string::npos&&murkBody!=std::string::npos&&murkCover!=std::string::npos&&
+                    fade<murkBody&&murk<fade,
+                    "the water's own murk covers the bed at range, in colour and in coverage");
+            // THE HANDOVER TO AIR: the sea keeps its colour through the middle
+            // distance, hands over to the fog at the horizon, and the fog factor is a
+            // per-pixel distance ramp - so two tiles of the same sea cannot resolve
+            // the client's per-vertex curve differently and step against each other.
+            const auto air=pixel.find(
+                "float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);");
+            const auto share=pixel.find("float seaShare=max(",air);
+            const auto fogFactor=pixel.find("float fogFactor=max(fog,airShare);",share);
+            const auto usesFog=pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);",fogFactor);
+            Require(air!=std::string::npos&&share!=std::string::npos&&fogFactor!=std::string::npos&&
+                    usesFog!=std::string::npos&&air<share&&share<fogFactor&&fogFactor<usesFog&&
+                    pixel.find(")*(1-airShare);")!=std::string::npos&&
+                    pixel.find("fog=max(fog,airShare);")==std::string::npos,
+                    "the far sea dissolves into the haze continuously, by distance");
+            // Both distances are player-facing, per-location tunables.
+            Require(code.find("waterVisibilityYards=float(std::clamp(ReadTuning(L\"VisibilityYards\",90),5,400));")
+                        !=std::string::npos&&
+                    code.find("horizonFogYards=float(std::clamp(ReadTuning(L\"HorizonFogYards\",900),100,3000));")
+                        !=std::string::npos&&
+                    code.find("pixelConstants[19][1]=waterVisibilityYards;")!=std::string::npos&&
+                    code.find("pixelConstants[19][2]=horizonFogYards;")!=std::string::npos,
+                    "the visibility range and the horizon fog are tunables, not constants");
             // An unknown or implausible bed reading must not switch the slider off.
             // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
             Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
@@ -1216,7 +1251,11 @@ int main() try
                         !=std::string::npos,
                     "the depth transition still converges on the same sea body");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
+            Require(mirror.find("const float murk = Smoothstep(murkDistance * .35f, murkDistance, viewDistance);")
+                        !=std::string::npos &&
+                    mirror.find("body = Lerp(body, Add(deep, inScatter), murk);")!=std::string::npos &&
+                    mirror.find("alpha = std::max(alpha, murk);")!=std::string::npos &&
+                    mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
                         !=std::string::npos,
@@ -1330,6 +1369,12 @@ int main() try
             const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
             Require(ini.find("OpacityPercent=85")!=std::string::npos&&
                     overlay.find("L\"Water\",L\"OpacityPercent\",\"WATER OPACITY\",0,100,5,85}")!=std::string::npos&&
+                    ini.find("VisibilityYards=90")!=std::string::npos&&
+                    ini.find("HorizonFogYards=900")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"VisibilityYards\",\"WATER VISIBILITY (YD)\",5,400,5,90}")
+                        !=std::string::npos&&
+                    overlay.find("L\"Water\",L\"HorizonFogYards\",\"HORIZON FOG (YD)\",100,3000,50,900}")
+                        !=std::string::npos&&
                     overlay.find("L\"Water\",L\"ClarityPercent\",\"WATER CLARITY\",5,200,5,100}")!=std::string::npos,
                     "opacity ships at 85 in the ini and as its own 0..100 F7 slider beside clarity");
         }

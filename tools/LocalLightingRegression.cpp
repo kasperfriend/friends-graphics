@@ -1369,11 +1369,19 @@ int main()
         // refusing the pass outright blinked every lamp as the camera turned. The hold is
         // the same one the lamps and the underwater medium use.
         Check(surface.find("const bool poseRetained = !f.cameraValid && f.PoseUsable();") != std::string::npos &&
-              surface.find("(!f.cameraValid && !poseRetained) || !f.depthAvailable") != std::string::npos &&
+              surface.find("else if (!f.cameraValid && !poseRetained) refusal = \"camera pose not usable\";")
+                  != std::string::npos &&
               frameContext.find("bool PoseUsable() const") != std::string::npos &&
               frameContext.find("return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);")
                   != std::string::npos,
               "a retained pose keeps the lamps drawn instead of blinking them by camera angle");
+        // Four different reasons all look like "the lamps are not there". The pass
+        // therefore names the gate that fired: a support case has a reason, not a
+        // reproduction. This is the line that tells a dropped LAMP from a dropped PASS.
+        Check(surface.find("Log(std::string(\"lighting pass refused: \") + refusal +") != std::string::npos &&
+              surface.find("\" selected=\" + std::to_string(lights.size())") != std::string::npos &&
+              surface.find("if (now - m_stateLogTick >= 1000)") != std::string::npos,
+              "a refused lighting pass says which gate fired, once a second");
         // One definition of "a pose this frame may use", and every pass that draws a
         // lamp's light obeys it. The volumetric march used to refuse a frame the
         // surface lighting accepted, so the shaft and halo around a lamp blinked off

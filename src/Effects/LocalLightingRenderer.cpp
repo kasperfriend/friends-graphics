@@ -445,13 +445,35 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     // world-anchored, but the gate that decided whether to draw them was not. Hold the
     // retained pose for the same window the lamps themselves use, and refuse it past that.
     const bool poseRetained = !f.cameraValid && f.PoseUsable();
-    if (!manager.Enabled() || (lights.empty() && !debugView) || !device ||
-        (!f.cameraValid && !poseRetained) || !f.depthAvailable || !f.sceneColor) return false;
-    // Only a pose this frame could not corroborate AND an eye no draw has
-    // carried for kCameraEyeHoldMs is refused. A pose held for a frame still
-    // reconstructs the scene correctly enough to light it; refusing that would
-    // flicker every lamp in the city the moment the draw stream stumbles.
-    if (f.cameraPoseStale && !(f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs)) return false;
+    // Every gate below drops the WHOLE light pass for the frame, and the four
+    // reasons are indistinguishable on screen - the lamps simply are not there.
+    // Name the one that fired, once a second, in the log a support case already
+    // looks at: "lights appear and disappear" is then a count and a reason instead
+    // of a reproduction. Cheap: one string only when a refusal actually happens.
+    const char* refusal = nullptr;
+    if (!manager.Enabled()) refusal = "DynamicLighting disabled";
+    else if (lights.empty() && !debugView) refusal = "no selected lamps";
+    else if (!device) refusal = "no device";
+    else if (!f.cameraValid && !poseRetained) refusal = "camera pose not usable";
+    else if (!f.depthAvailable) refusal = "no depth capture";
+    else if (!f.sceneColor) refusal = "no scene colour";
+    else if (f.cameraPoseStale && !(f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs))
+        refusal = "pose stale past the hold";
+    if (refusal)
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (now - m_stateLogTick >= 1000)
+        {
+            m_stateLogTick = now;
+            Log(std::string("lighting pass refused: ") + refusal +
+                " cameraValid=" + std::to_string(f.cameraValid ? 1 : 0) +
+                " poseAgeMs=" + std::to_string(int(f.cameraEyeAgeMs)) +
+                " depth=" + std::to_string(f.depthAvailable ? 1 : 0) +
+                " scene=" + std::to_string(f.sceneColor ? 1 : 0) +
+                " selected=" + std::to_string(lights.size()));
+        }
+        return false;
+    }
     if (!m_retry.Open(GetTickCount64())) return false;
     D3DSURFACE_DESC desc{};
     if (!f.sceneSurface || FAILED(f.sceneSurface->GetDesc(&desc)) || !EnsureShaders(device) ||

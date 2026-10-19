@@ -246,6 +246,19 @@ march that draws each lamp's shaft and halo was still gated on a bare
 stayed lit while the glow around it vanished - a lamp that visibly broke. There
 is now one definition, `FrameContext::PoseUsable()`, and both passes ask it.
 
+**And a refusal now says so.** Every gate in that pass drops the whole light
+pass, and the reasons look identical on screen - the lamps are simply not there.
+`LocalLighting.log` therefore names the gate that fired, at most once a second,
+with the numbers behind it:
+
+```
+lighting pass refused: camera pose not usable cameraValid=0 poseAgeMs=1400 depth=1 scene=1 selected=6
+```
+
+`selected=6` with a refusal is a gate; `selected=0` with no refusal is the pool
+or the discovery, and the two need different fixes. Without this line the
+distinction costs a reproduction.
+
 A confirmed source (`stableFrames >= 6`) is now held across
 `kNativeConfirmedHoldMs = 15000` of silence, while an unconfirmed one keeps the
 old five-part test. The window is finite on purpose: a brazier that is put out

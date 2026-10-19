@@ -2827,6 +2827,61 @@ because the slab was already the water's asymptote - just the wrong one.
   three. `WaterRegression` pins that the fog target is the body and that the old
   `lerp(fogColor.rgb, deepTint.rgb, seaShare)` spelling is gone.
 
+## Round 12: the water's own murk, and the handover to air (2026-10-19)
+
+Two things a player sees in the original and did not see here, and they are not
+the same mechanism.
+
+**The bed stayed legible to the horizon.** The only thing that ever hid the
+bottom was the column's transmittance, which CLARITY owns, and on a clear shelf
+that is nearly one - so the sea read as a window onto its own floor all the way
+out. The client's world is covered underwater by a fog volume that fills in a
+stone's throw from the eye; it is not a function of how deep the water is. The
+replacement stage now has the same range:
+
+- `viewDistance = length(viewPos)` and
+  `murk = smoothstep(VISIBILITY * .35, VISIBILITY, viewDistance)` above water,
+  applied **to the body** (`body = lerp(body, seaBody, murk)`) and to **coverage**
+  (`surfaceAlpha = max(surfaceAlpha, murk)`). Masking the colour while leaving 15%
+  of alpha open would still show the raw seabed, which is most of what a player
+  actually perceives.
+- `WATER VISIBILITY (YD)` = `VisibilityYards` = 90 ships. It is a ramp, not a
+  wall, so the cover thickens the way the original's does. `0` masks everywhere.
+  Unlike the depth gate it cannot be missing: it needs no depth reading.
+
+**The horizon was the raw edge of the plane.** Round 11 made the fog's *colour*
+the water's own, which removed the grey band but not the line where the plane
+stops against the sky. Two separate problems compounded:
+
+1. The fog factor was the client's **per-vertex** curve. Two tiles of one sea
+   resolve it differently (different vertex shaders, different tessellation), so
+   they fog to different values on either side of a boundary - the rectangular
+   step in the middle of the water in the screenshots, which no amount of
+   water-shader colour work could remove.
+2. The curve saturates over a few hundred yards, so at the plane's own edge the
+   water was only *partly* air and its silhouette stayed visible.
+
+The fix is one per-pixel ramp with two halves, both driven by the distance the
+shader already knows:
+
+```
+farSea   = smoothstep(40, HORIZON * .6, viewDistance)   // sea keeps its colour
+airShare = smoothstep(HORIZON * .6, HORIZON, viewDistance)
+seaShare = max(saturation term, farSea * .85) * (1 - airShare)
+fogFactor = max(clientFogCurve, airShare)
+```
+
+so the sea holds its own colour through the middle distance and by `HORIZON`
+it **is** the air, exactly, on every tile - the colour handover and the coverage
+handover are independent. `HORIZON FOG (YD)` = `HorizonFogYards` = 900 ships and
+is per location.
+
+This is also why the existing atmosphere/fog passes were not the right place for
+it: they see a depth buffer in which the sea is *behind* the water at infinity
+(`openOcean`), and they composite over the whole frame, so a treatment there
+would also fog the sky the water meets. The water stage knows which pixels are
+water and how far away they are, and the plane's edge is a property of the plane.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

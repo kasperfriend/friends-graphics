@@ -996,6 +996,13 @@ int main(int argc, char** argv)
                     V3 waterBody = rgb;
                     probeSunElev = sunElev; probeG = g; probePhaseDen = phaseDen;
                     probeRefracted = refracted; probeInScatter = inScatter;
+                    // The water's own murk and its handover to the air, at the shipped
+                    // distances. Same two ramps the shader uses, so a preview frame is
+                    // the same picture and not a different one that happens to compile.
+                    const float viewDistance = viewZ;
+                    const float murkDistance = 90.f, horizonDistance = 900.f;
+                    const float murk = Smoothstep(murkDistance * .35f, murkDistance, viewDistance);
+                    const float airShare = Smoothstep(horizonDistance * .6f, horizonDistance, viewDistance);
                     if (true)               // a capture exists whenever this preview has a copy
                     {
                         V3 bottom = Add(Add(Mul(refracted, transmittance), inScatter), Mul(deep, absorption));
@@ -1010,6 +1017,7 @@ int main(int argc, char** argv)
                         // which is the only way it can hide open water's bed.
                         const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;
                         body = Lerp(body, Add(deep, inScatter), .85f * bedFade);
+                        body = Lerp(body, Add(deep, inScatter), murk);
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));
                     }
                     // Same neutral-at-0x808080 contract as the shader: tint is uploaded as
@@ -1076,6 +1084,7 @@ int main(int argc, char** argv)
                     // geometry behind the sheet: a partial alpha over open water can only
                     // reveal the clear colour, which reads as glass over emptiness.
                     alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));
+                    alpha = std::max(alpha, murk);
                     const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
                     // A sea's horizon is not the sky: the shader mixes the air fog toward the
                     // body's deep colour in proportion to the column's own saturation
@@ -1086,12 +1095,13 @@ int main(int argc, char** argv)
                     // The far sea fogs into the SAME body the near sea converges on,
                     // so the distance at which the air takes over is not an edge in
                     // the middle of one plane.
-                    const float farSea = Smoothstep(40.f, 600.f, viewZ);
+                    const float farSea = Smoothstep(40.f, horizonDistance * .6f, viewDistance);
                     const V3 fogTarget = Lerp(c.fog, Add(deep, inScatter),
-                        std::max(Saturate(absorption) * .55f, farSea * .85f));
+                        std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare));
                     // The shader fogs toward that target and lets the device blend it over the
                     // copy with the water's own alpha; both happen here in that order.
-                    out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fog), alpha);
+                    const float fogged = std::max(fog, airShare);
+                    out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fogged), alpha);
                     if (c.probeX == x && c.probeY == y)
                     {
                         const auto bad=[](float f){ return !(f >= 0.f && f <= 1e9f); };   // true for NaN too
