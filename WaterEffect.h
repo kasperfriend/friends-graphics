@@ -2666,6 +2666,7 @@ struct Scope {
     // block's own Capture/Apply owns them.
     DWORD oldBlend[5]{};
     bool blendStateSaved=false;
+    bool blendSeparateSaved=false;
     bool targetState=false;
     // True while the shared D3DSBT_ALL block holds this scope's original
     // pixel/vertex shader, texture and sampler state (everything the block
@@ -3298,12 +3299,17 @@ struct Scope {
             // else; on a device without one they are saved here and written back in
             // Restore(). Only the states that decide coverage are touched.
             {
+                // The four core states are saved as one unit and are the ones whose
+                // restore must not be lost; SEPARATEALPHABLENDENABLE is optional in
+                // D3D9 (D3DPMISCCAPS_SEPARATEALPHABLEND) and is handled separately, so
+                // a device that does not know it neither fails the draw nor leaks the
+                // state it did have.
                 blendStateSaved=
                     SUCCEEDED(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&oldBlend[0]))&&
                     SUCCEEDED(d->GetRenderState(D3DRS_SRCBLEND,&oldBlend[1]))&&
                     SUCCEEDED(d->GetRenderState(D3DRS_DESTBLEND,&oldBlend[2]))&&
-                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]))&&
-                    SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
+                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]));
+                blendSeparateSaved=SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
                 if(blendStateSaved&&
                    (oldBlend[0]!=TRUE||oldBlend[1]!=D3DBLEND_SRCALPHA||
                     oldBlend[2]!=D3DBLEND_INVSRCALPHA||oldBlend[3]!=D3DBLENDOP_ADD))
@@ -3313,7 +3319,9 @@ struct Scope {
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);
-                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
+                // Best effort: alpha and colour share one blend unless the device says
+                // otherwise, and asking is harmless where it is unknown.
+                d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
                 if(FAILED(blendHr)){Restore();ReportFailure("water blend state",blendHr);return;}
             }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
@@ -3399,13 +3407,15 @@ struct Scope {
                 device->SetRenderState(D3DRS_BLENDOP,oldBlend[3]);
                 // The pass turns separate alpha factors off so SRCALPHA/INVSRCALPHA
                 // govern the whole output; the native draw may have had them on.
-                device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
+                if(blendSeparateSaved)
+                    device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
             }
         }
         // c4 is outside the block's documented water spans. Restore it after either
         // state-block or manual restoration, including every early-return path.
         if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
         device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=blendStateSaved=false;
+        blendSeparateSaved=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

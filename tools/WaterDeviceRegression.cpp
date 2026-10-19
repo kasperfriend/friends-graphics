@@ -373,6 +373,8 @@ int main() try {
     Require(memcmp(currentFog,badFog,sizeof(badFog))==0,
         "malformed native c4 is restored exactly after the water draw");
     Check(d->SetVertexShaderConstantF(4,savedFog,1));
+    DWORD savedBlendEnable=0;
+    Check(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&savedBlendEnable));
     {
         watereffect::Scope scope(d.Get());
         Require(scope.device==d.Get(),"replacement installs without scene/depth capture");
@@ -385,9 +387,32 @@ int main() try {
         Require(memcmp(gap,savedPixelConstants+68,sizeof(gap))==0,
             "batched upload preserves the untouched c197/c198 gap");
         float opacity[4];Check(d->GetPixelShaderConstantF(199,opacity,1));
-        Require(opacity[0]>=.5f&&opacity[0]<=1.f&&opacity[1]==0.f&&opacity[2]==0.f&&opacity[3]==0.f,
+        Require(opacity[0]>=.5f&&opacity[0]<=1.f&&opacity[3]==0.f,
             "the same upload writes the WATER OPACITY floor on c199");
+        // c199's spare lanes carry the two ranges the same stage reads: how far the
+        // bed stays visible, and where the far sea has finished dissolving into air.
+        Require(opacity[1]==watereffect::waterVisibilityYards&&
+                opacity[2]==watereffect::horizonFogYards&&
+                opacity[1]>=5.f&&opacity[2]>opacity[1],
+            "c199 carries the visibility range and the horizon fog distance");
+        // Coverage only means something under an alpha blend, and the native liquid
+        // material owns that state. The replaced draw must composite with
+        // SRCALPHA/INVSRCALPHA and the block above must put the original back.
+        {
+            DWORD enable=0,src=0,dst=0,op=0,separate=1;
+            Check(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&enable));
+            Check(d->GetRenderState(D3DRS_SRCBLEND,&src));
+            Check(d->GetRenderState(D3DRS_DESTBLEND,&dst));
+            Check(d->GetRenderState(D3DRS_BLENDOP,&op));
+            Require(enable==TRUE&&src==D3DBLEND_SRCALPHA&&dst==D3DBLEND_INVSRCALPHA&&op==D3DBLENDOP_ADD,
+                "the replaced draw composites with an alpha blend, whatever the client authored");
+            if(SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&separate)))
+                Require(separate==FALSE,"separate alpha factors cannot override the coverage blend");
+        }
+        const DWORD beforeEnable=savedBlendEnable;
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
+        {DWORD enable=1;Check(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&enable));
+         Require(enable==beforeEnable,"the native blend state returns exactly after the draw");}
     }
     restored();
     {
