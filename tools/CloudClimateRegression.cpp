@@ -240,7 +240,9 @@ int main() try
         crossed.ForgetWeather();
         Require(crossed.WeatherAmount()==0,"a zone change drops the previous zone's precipitation");
         const auto landed=crossed.Update(base,open,true,CloudWeather::Clear,0,12,.1f);
-        Require(Near(landed.coverage,base.coverage),"the new zone starts from its own climate, not the old zone's overcast");
+        const auto climate=ResolveCloudClimate(base,open,true);
+        Require(Near(landed.coverage,climate.coverage)&&landed.coverage<1.f,
+                "the new zone starts from its own climate, not the old zone's overcast");
         auto rebuilt=landed;
         for(int i=0;i<180;++i) rebuilt=crossed.Update(base,open,true,CloudWeather::Rain,1,12,.1f);
         Require(rebuilt.coverage>landed.coverage,"rain in the new zone still builds its own deck");
