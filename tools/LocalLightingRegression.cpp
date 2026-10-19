@@ -1380,7 +1380,9 @@ int main()
         Check(manager.find("light.stableId = StableManifestId(block);") != std::string::npos &&
               manager.find("std::isfinite(position.x)") != std::string::npos &&
               manager.find("(!slot.enabled &&") != std::string::npos &&
-              manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos,
+              manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos &&
+              manager.find("kNativeEnableGraceMs = 700") != std::string::npos &&
+              manager.find("kNativeObservationGraceMs = 1400") != std::string::npos,
               "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
         Check(settings.find("NormalSpreadPercent") == std::string::npos &&
               overlay.find("NormalSpreadPercent") == std::string::npos &&

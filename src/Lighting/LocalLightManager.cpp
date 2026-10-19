@@ -283,8 +283,16 @@ namespace renderer
             // light that D3D still reports as enabled: SetLight state persists,
             // so requiring another call every 350 ms made a valid one-shot
             // static light silently disappear.
-            const bool recentlyEnabled = slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= 180;
-            const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= 350;
+            // D3D light enables are often scoped to one batch, but nearby batches can
+            // be separated by CPU work, occlusion, or a skipped frame. A short
+            // grace window here made the entire source blink at distance as its
+            // producer crossed batch boundaries. Keep confirmed sources alive
+            // long enough to bridge those gaps; the camera/radius tests below
+            // still cull genuinely irrelevant lights.
+            constexpr ULONGLONG kNativeEnableGraceMs = 700;
+            constexpr ULONGLONG kNativeObservationGraceMs = 1400;
+            const bool recentlyEnabled = slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= kNativeEnableGraceMs;
+            const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= kNativeObservationGraceMs;
             if (!slot.valid || (!slot.enabled &&
                 (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))) continue;
             const D3DLIGHT9& d = slot.light;
