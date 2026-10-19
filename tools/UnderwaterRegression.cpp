@@ -2219,8 +2219,8 @@ void TestMirror()
                     != std::string::npos,
             "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed");
     // World +Z in view space is ROW 2 of a row-vector matrix. That is what AnchorFromModelView
-    // documents ("world axis i arrives in view space as row i") and what MaterialCacheManager
-    // transforms world vectors with; PlaneOverCamera leans on the same convention one step
+    // documents ("world axis i arrives in view space as row i") and what the renderer's
+    // world-space helpers use; PlaneOverCamera leans on the same convention one step
     // further in, taking the draw's own rows as the liquid grid's axes in view space, which
     // the reading-under-every-rotation tests above prove. Reading the components ACROSS the rows
     // yields the view axes expressed in world coordinates and applies the camera's rotation twice

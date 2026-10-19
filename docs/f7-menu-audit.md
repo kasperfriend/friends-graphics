@@ -1,7 +1,7 @@
 # F7 menu audit
 
 A full review of the F7 tuning menu: `TuningOverlay.h` (input, drawing),
-`src/Environment/OverlayItems.h` (the 107 controls), `OverlayLayout.h` (geometry and
+`src/Environment/OverlayItems.h` (the 114 controls), `OverlayLayout.h` (geometry and
 gestures), `OverlayFont.h`, `MenuDiagnostics.h`, `LocationTuning.h` (where a value is
 written) and the call sites in `ModernWoWRenderer.cpp`. Every finding below was checked
 against the code that consumes the same setting, so a control's range, default and target
@@ -51,10 +51,9 @@ if(tuningoverlay::Update()||locationTuningChanged){ReloadWindTuning();...weather
 ```
 
 During a drag the value can change on every frame, so a fast drag performs up to ~60
-`WritePrivateProfileStringW` calls (each rewriting the whole file), ~10 subsystem reloads,
-and two appended log lines per step: `MaterialCacheManager::ReloadTuning`
-(`src/Materials/MaterialCacheManager.cpp:107`) and `WaterEffect::ReloadTuning`
-(`WaterEffect.h:880`) both open a file and write on every call. This is not proven to be
+`WritePrivateProfileStringW` calls (each rewriting the whole file), ~8 subsystem reloads,
+and one appended log line per step: `WaterEffect::ReloadTuning` (`WaterEffect.h:880`)
+opens a file and writes on every call. This is not proven to be
 visible in game, but it is the most likely source of the menu feeling heavy while a slider
 is dragged. Suggested fix: coalesce saves and reloads (for example save on release or at a
 ~100 ms interval), or let `Save` report "unchanged" so only real edits reload.
@@ -63,7 +62,7 @@ is dragged. Suggested fix: coalesce saves and reloads (for example save on relea
 one was proven in the field: `locationTuningChanged` fired on every alternation of the place
 across a boundary. A real session's log holds `Location changed: Map=1 Zone=215 Area=0` and
 `Area=223` alternating for as long as the player walked the edge, each alternation running all
-nine `Reload*Tuning()` calls plus `tuningoverlay::Configure` (one `ReadEditorInt` per menu row)
+eight `Reload*Tuning()` calls plus `tuningoverlay::Configure` (one `ReadEditorInt` per menu row)
 on the spot - several full re-reads inside one second, which is the "big lag for a second" a
 crossing was reported as. Three changes: the change is applied once the place has held still for
 300 ms and at most once per second (`kLocationSettleMs`/`kLocationReloadGapMs` in
@@ -71,8 +70,8 @@ crossing was reported as. Three changes: the change is applied once the place ha
 (`ProfileSection`, `ScopedValuesFor` in `LocationTuning.h`) instead of probing each level with
 its own `GetPrivateProfileStringW` per key; and a place that resolves to the values already in
 force is skipped outright (`AppliedTuningStillInForce`), so a border walked back and forth
-costs a hash rather than nine reloads. The key-set memo the first version of this used had a
-ceiling of 96 scopes, and one apply - nine tuning reloads plus the F7 menu's hundred-odd rows,
+costs a hash rather than eight reloads. The key-set memo the first version of this used had a
+ceiling of 96 scopes, and one apply - eight tuning reloads plus the F7 menu's hundred-odd rows,
 at every level of every section - walks more than that: the ceiling was hit in the middle of
 the apply, the whole memo was dropped, and every read after it paid a whole-file parse, one per
 scope per level. That is the 46-78 ms the reload line showed for a crossing. A hand edit to
@@ -122,7 +121,7 @@ extended to the scrollbar strip if the comment is the intent.
 
 Checked in the same pass, no defect found:
 
-* Every one of the 107 controls is reachable by mouse at every tab, every scroll offset and
+* Every one of the 114 controls is reachable by mouse at every tab, every scroll offset and
   twelve resolution/DPI combinations (portable test, ASan/UBSan clean); each widget stays
   inside its own row, and the panel fits both the logical screen and the real backbuffer.
   The same sweep now runs against the real overlay on a D3D9 device in the Windows CI job

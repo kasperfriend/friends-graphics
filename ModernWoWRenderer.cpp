@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <objbase.h>
 #include <d3d9.h>
 
 #include <algorithm>
@@ -32,7 +33,6 @@
 #include "src/D3D9/CelestialTracker.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "NativeShadowDiagnostics.h"
-#include "src/Materials/MaterialCacheManager.h"
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Effects/LocalLightingRenderer.h"
 #include "src/Effects/GroundSurfaceCapture.h"
@@ -139,7 +139,7 @@ void ReloadWindTuning()
 {
     // A crossing no longer drops the cached sections. It used to, on the argument
     // that an apply is the moment every edit has to be visible - and the price
-    // was the crossing itself: with the sections gone, the nine reloads and the
+    // was the crossing itself: with the sections gone, the eight reloads and the
     // F7 menu's rows behind this call re-read every section of both files, and
     // each of those is a whole-file parse. That is the number in this line: 62 to
     // 78 ms on every settled crossing, dozens of times in one session's log, and
@@ -182,7 +182,6 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     nativeshadowdiag::DrawPreview(device);
     tuningoverlay::DrawWindDebug(device,renderer::FrameContext::Current().wind);
     tuningoverlay::Draw(device);
-    renderer::MaterialCacheManager::Instance().DrawDebugOverlay(device);
     } catch (...) {
         // An overlay exception must not strand g_drawingOverlay=true (which
         // would disable every effect for the rest of the session) nor reach
@@ -353,7 +352,6 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
     volume::Present(d);
-    renderer::MaterialCacheManager::Instance().Present(d);
     // The normal weather pass precedes the first UI draw. Some client frames
     // have no matching UI draw (or emit weather after it); compose those once
     // after the other post effects, inside a real D3D scene. Do not invoke the
@@ -366,7 +364,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     weathervisuals::Present(d,tuningoverlay::visible);
     const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
     const bool placeChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
-    // A crossing is not a reason to re-read nine subsystems and every row of the
+    // A crossing is not a reason to re-read eight subsystems and every row of the
     // F7 menu per frame. This client's place flaps across a boundary while the
     // player walks it (`Area=0` and `Area=223` alternating in a real session,
     // each alternation a full reload of both) and that reading is what the
@@ -384,7 +382,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     // An F7 edit is always applied; a settled place is applied only when what is
     // in force is NOT already that place's tuning. The place that settled being
     // the one already applied - with neither file changed underneath it - means
-    // every scoped read the nine reloads would make already returned this answer,
+    // every scoped read the eight reloads would make already returned this answer,
     // so there is nothing to re-read, nothing to reconfigure and nothing for the
     // player to feel. That is the case this client's `Area=0`/`Area=223` flap
     // produces on every other sample of a walk across a border.
@@ -398,7 +396,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         g_placePending=false;g_locationConfigured=true;
         if(placeTuningStale){g_locationAppliedAt=now;tuningoverlay::Configure(g_basePath);}
         else if(!f7Edited){
-            // The place that settled adds nothing to the files, so the nine reloads
+            // The place that settled adds nothing to the files, so the eight reloads
             // are let alone - and the line is written at most once a second. A walk
             // along a border hands a fresh place to this branch several times a
             // second, and a log line is a file open, a write and a close; the line
@@ -407,7 +405,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             if(now-g_staleLoggedAt>=1000){
                 g_staleLoggedAt=now;
                 Log("Location tuning reloaded in 0 us - the place that settled is the one already in force: its own scoped "
-                    "settings resolve to the values the nine subsystems are already running with, and neither file changed");
+                    "settings resolve to the values the eight subsystems are already running with, and neither file changed");
             }
         }
     }
@@ -428,7 +426,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         // that reads a few cached numbers costs single-digit microseconds, and a
         // timer that cannot see that is a timer that says 16 ms for every stage
         // and 47 ms for a chain that costs two.
-        std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tMaterial=0,tLights=0,tWeather=0;
+        std::int64_t mark=reloadBegan,tWind=0,tWater=0,tFog=0,tVolume=0,tCelestial=0,tShadow=0,tLights=0,tWeather=0;
         const auto stage=[&mark,reloadFrequency](std::int64_t& out){const std::int64_t nowTick=renderer::PerformanceCounter();out=nowTick-mark;mark=nowTick;};
         // What the settings reads behind this apply actually did, so the next report
         // can answer the one question a stall asks: was the cost in the reads, and
@@ -441,21 +439,20 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         volume::ReloadTuning();stage(tVolume);
         celestialhighlight::ReloadTuning(g_basePath);stage(tCelestial);
         nativeshadowdiag::ReloadEnhancement();stage(tShadow);
-        renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);stage(tMaterial);
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
         weathervisuals::ReloadTuning();stage(tWeather);
         const auto micros=[reloadFrequency](std::int64_t ticks){return ticks*1000000/reloadFrequency;};
         char reloadLine[512]{};
         std::snprintf(reloadLine,sizeof(reloadLine),
             "Location tuning reloaded in %lld us (wind %lld water %lld fog %lld volume %lld celestial %lld shadow %lld "
-            "material %lld lights %lld weather %lld) - the place was seen %lld ms before this line, and the "
+            "lights %lld weather %lld) - the place was seen %lld ms before this line, and the "
             "settings behind it answered %llu read(s) from memory with %llu whole-file parse(s), after %u settled "
             "place(s) that needed nothing re-read",
             static_cast<long long>(micros(renderer::PerformanceCounter()-reloadBegan)),
             static_cast<long long>(micros(tWind)),static_cast<long long>(micros(tWater)),
             static_cast<long long>(micros(tFog)),static_cast<long long>(micros(tVolume)),
             static_cast<long long>(micros(tCelestial)),static_cast<long long>(micros(tShadow)),
-            static_cast<long long>(micros(tMaterial)),static_cast<long long>(micros(tLights)),
+            static_cast<long long>(micros(tLights)),
             static_cast<long long>(micros(tWeather)),
             static_cast<long long>(now-g_placeChangedAt),
             static_cast<unsigned long long>(renderer::locationtuning::profileReads-readsBefore),
@@ -478,7 +475,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;
-        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
@@ -533,7 +530,6 @@ void ResetEffectStateForDeviceChange(IDirect3DDevice9* d) noexcept
     waterdiag::Reset(d);
     celestialdiag::Reset(d);
     nativeshadowdiag::Reset();
-    renderer::MaterialCacheManager::Instance().Reset(d);
     renderer::LocalLightingRenderer::Instance().Reset(d);
     renderer::LocalLightManager::Instance().Reset();
     weathervisuals::Reset(d);
@@ -597,8 +593,7 @@ SetPixelShaderFn originalSetPixelShader = nullptr;
 HRESULT WINAPI HookedSetLight(IDirect3DDevice9* d, DWORD index, const D3DLIGHT9* light)
 {
     const HRESULT hr = originalSetLight(d, index, light);
-    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
-        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
     {
         // The observer grows an unordered_map: an allocation throw must not
         // escape the hook (see the draw-entry guards).
@@ -610,8 +605,7 @@ HRESULT WINAPI HookedSetLight(IDirect3DDevice9* d, DWORD index, const D3DLIGHT9*
 HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
 {
     const HRESULT hr = originalLightEnable(d, index, enabled);
-    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
-        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
     {
         try { renderer::LocalLightManager::Instance().OnLightEnable(index, enabled); } catch (...) {}
     }
@@ -621,8 +615,7 @@ HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
 HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3DSurface9* surface)
 {
     const HRESULT hr = originalSetRenderTarget(d, index, surface);
-    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
-        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
         try { nativeshadowdiag::OnSetRenderTarget(index, surface); } catch (...) {}
     return hr;
 }
@@ -630,12 +623,10 @@ HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3D
 HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* texture)
 {
     const HRESULT hr = originalSetTexture(d, stage, texture);
-    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
-        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
     {
         try {
             nativeshadowdiag::OnSetTexture(stage, texture);
-            renderer::MaterialCacheManager::Instance().OnSetTexture(stage, texture);
         } catch (...) {}
     }
     return hr;
@@ -750,8 +741,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround||
-        renderer::MaterialCacheManager::Instance().IsActive();
+    const bool needsWaterMaterial=updateShadows||captureGround;
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
@@ -806,8 +796,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround||
-        renderer::MaterialCacheManager::Instance().IsActive();
+    const bool needsWaterMaterial=updateShadows||captureGround;
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
@@ -829,15 +818,6 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
     gameDrawRan=true;
-    if(SUCCEEDED(hr)&&!g_drawingOverlay&&renderer::MaterialCacheManager::Instance().IsActive()){
-            auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
-            if(dc.material==renderer::MaterialType::Terrain){
-                renderer::MaterialCacheManager::Instance().ApplyNormalModulation(d,t,base,min,vertices,start,n,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
-            }
-            else if(dc.material==renderer::MaterialType::WMO||dc.material==renderer::MaterialType::M2){
-                renderer::MaterialCacheManager::Instance().ApplyObjectMaterial(d,n,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
-            }
-        }
         if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
         return hr;
     } catch (...) {
@@ -871,8 +851,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround||
-        renderer::MaterialCacheManager::Instance().IsActive();
+    const bool needsWaterMaterial=updateShadows||captureGround;
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
@@ -928,8 +907,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround||
-        renderer::MaterialCacheManager::Instance().IsActive();
+    const bool needsWaterMaterial=updateShadows||captureGround;
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
@@ -1181,6 +1159,11 @@ void Initialize()
         return;
     g_realCreate9 = reinterpret_cast<Direct3DCreate9Fn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9"));
     g_realCreate9Ex = reinterpret_cast<Direct3DCreate9ExFn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9Ex"));
+    // Weather particle atlases are decoded through WIC, whose factory is created
+    // with CoCreateInstance, so the render thread needs COM. The removed AI
+    // Materials manager used to do this; keep it here so that cut cannot take the
+    // weather textures with it.
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     waterdiag::Configure(g_basePath);
     celestialdiag::Configure(g_basePath);
     waterhighlight::Configure(g_basePath);
@@ -1196,7 +1179,6 @@ void Initialize()
     tuningoverlay::Configure(g_basePath);
     renderer::EnvironmentProfileManager::Instance().Configure(g_basePath);
     nativeshadowdiag::Configure(g_basePath);
-    renderer::MaterialCacheManager::Instance().Configure(g_basePath);
     renderer::LocalLightManager::Instance().Configure(g_basePath);
     renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");

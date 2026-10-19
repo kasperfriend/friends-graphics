@@ -58,7 +58,7 @@ namespace renderer
         // No lock and no device read on purpose: this is called from every draw
         // hook, and the line it feeds is read by anyone asking what the renderer
         // is doing. It used to be that NOTHING fed it unless the shadow map or the
-        // material cache happened to want a classification, so a session with a
+        // water capture happened to want a classification, so a session with a
         // million draws logged `draws=0` - a number that reads like a renderer
         // that never ran.
         //
@@ -154,7 +154,7 @@ namespace renderer
         auto& sc = ShaderCache::Instance();
         // `draws=` is every draw the client made; the four numbers after it are
         // the subset a feature had to classify (the shadow map's casters, the
-        // material cache's surfaces), so a session whose features are switched
+        // water and ground surfaces), so a session whose features are switched
         // off reads its true draw count with zeros next to it - which is the
         // difference between the line and the `draws=0` it used to print for a
         // renderer that was drawing a million of them.

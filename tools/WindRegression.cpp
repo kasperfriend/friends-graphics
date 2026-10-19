@@ -773,9 +773,8 @@ static void TestConfigurationAndWiring()
     Check(nativeFog.find("ReadTuning(L\"DistancePercent\",100)") != nativeFog.npos &&
           nativeFog.find("ReadTuning(L\"PowerPercent\",100)") != nativeFog.npos &&
           volumeFog.find("ReadInt(L\"DistanceFog\",L\"DistancePercent\",100") != volumeFog.npos &&
-          volumeFog.find("ReadInt(L\"DistanceFog\",L\"PowerPercent\",100") != volumeFog.npos &&
-          Read("src/Materials/MaterialCacheManager.cpp").find("ReadInt(L\"AIMaterials\", L\"Enabled\", 0") != std::string::npos,
-          "fallbacks match F7/INI neutral fog and keep unfinished materials off");
+          volumeFog.find("ReadInt(L\"DistanceFog\",L\"PowerPercent\",100") != volumeFog.npos,
+          "fallbacks match the F7 and INI neutral edge fog");
     const auto present = main.find("HRESULT WINAPI HookedPresent");
     const auto fallback = main.find("    volume::Present(d);", present);
     const auto weather = main.find("    weathervisuals::Present(d,tuningoverlay::visible);", present);
@@ -858,7 +857,7 @@ static void TestConfigurationAndWiring()
           "and every write it makes drops the cached values, so a saved toggle is what the next read answers");
     // ONE cache, and that is a correctness fact rather than a tidying: until this
     // sweep the key sets of a scope lived in a second cache with a ceiling of 96
-    // scopes, and a real apply - nine tuning reloads plus the F7 menu's hundred-odd
+    // scopes, and a real apply - eight tuning reloads plus the F7 menu's hundred-odd
     // rows, each read at every level of its own section - asks about more scopes
     // than that. The ceiling was reached in the middle of the apply, the whole key
     // cache was dropped, and every read after it paid a GetPrivateProfileSectionW:
@@ -883,17 +882,16 @@ static void TestConfigurationAndWiring()
           "a different base directory, a file changed underneath the memo and an editor save all drop what was read "
           "out of the scoped file - and a PLACE change does not, which is what a crossing used to spend its second "
           "re-reading section by section");
-    // And a crossing must not WRITE for the sake of writing. Three stages appended a
+    // And a crossing must not WRITE for the sake of writing. Two stages appended a
     // line about their own tuning on every settled place, and in the game folder a
     // line is an open, a write and a close - milliseconds each on a machine whose
     // antivirus watches that folder, on exactly the path a player walks a border on.
-    // Each of them now writes only when its numbers change, which is the only time
-    // the line says anything new.
+    // Both now write only when their numbers change, which is the only time the
+    // line says anything new.
     Check(Read("WaterEffect.h").find("if(lastRow!=row.str()){lastRow=row.str();") != std::string::npos &&
           Read("VolumeIntegration.h").find(
               "if(!logPath.empty()&&lastPostProcessLine!=message){lastPostProcessLine=message;Log(message);}") !=
-              std::string::npos &&
-          Read("src/Materials/MaterialCacheManager.cpp").find("if (lastTuningLine != line)") != std::string::npos,
+              std::string::npos,
         "the per-crossing log lines are written when their numbers change, not once per settled place");
     // And the stall itself, measured rather than described. "Still very hard lag
     // on area change" has two possible owners - the client loading the place, or
@@ -1012,7 +1010,7 @@ static void TestConfigurationAndWiring()
     SettleHandEdit(file, beforeGlobalEdit);
     Check(load().direction == WindDirection::NorthWest, "reload reads edited file without restarting wind");
     // The crossing gate, against the real profile API: a settle of a place whose own
-    // scoped settings already resolve to what the nine subsystems are running must be
+    // scoped settings already resolve to what the eight subsystems are running must be
     // skippable, and a place whose scope holds anything a read would pick up must
     // NEVER be skipped. The second half is what keeps this from trading a stall for a
     // setting that quietly stops working: a skip decided from what was cached instead
@@ -1028,7 +1026,7 @@ static void TestConfigurationAndWiring()
     locationtuning::Sync(base, neighbour, true);
     Check(locationtuning::AppliedTuningStillInForce(neighbour, true),
           "an area that overrides nothing answers every scoped read the way the neighbouring area does, so walking "
-          "into it is skipped without re-reading nine subsystems");
+          "into it is skipped without re-reading eight subsystems");
     SettleBeforeHandEdit();
     const auto beforeScopeEdit = StampOf(scoped);
     Check(WritePrivateProfileStringW(L"Map.0.Zone.12.Area.88.Wind", L"Direction", L"4", scoped.c_str()) != 0,
@@ -1068,14 +1066,14 @@ static void TestConfigurationAndWiring()
     Check(!locationtuning::AppliedTuningStillInForce(saved, true),
           "an edited value refuses the skip with nothing else changed");
     // And what a crossing COSTS, counted rather than argued: a walk that walks more
-    // scopes than the old key memo could hold - nine tuning reloads and the F7
+    // scopes than the old key memo could hold - eight tuning reloads and the F7
     // menu's hundred-odd rows, every level of every section - must be answered out
     // of the sections already in memory, with no whole-file parse behind it however
     // many samples the place flaps across. This is the assertion that fails if a
     // crossing ever re-reads the file again: whether the memo comes back with a
     // ceiling, or the values are dropped because the PLACE changed rather than
     // because the FILE did.
-    // One crossing, exactly as the chain reads one: the nine tuning reloads' own
+    // One crossing, exactly as the chain reads one: the eight tuning reloads' own
     // keys, the water colours' "does this scope hold it" question, and a row of the
     // F7 menu - against a place that flaps between two areas.
     const auto crossing = [&](int sample) {

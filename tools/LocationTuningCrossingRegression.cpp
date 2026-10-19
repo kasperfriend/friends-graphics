@@ -60,12 +60,12 @@ static void Require(bool ok, const std::string& message)
 }
 
 // ---------------------------------------------------------------------------
-// The workload. GraphicsEffects.ini ships 13 sections and 191 keys; a full
+// The workload. GraphicsEffects.ini ships 13 sections and 206 keys; a full
 // re-apply reads them through three different doors - the runtime read
 // (ReadInt/ReadString), the F7 editor read (ReadEditorInt, which walks the
 // location levels) and the presence probe the water colours use
 // (HasScopedValue). Reproducing all three is what makes the sweep below the same
-// shape as the eleven ReloadTuning calls plus tuningoverlay::Configure.
+// shape as the eight ReloadTuning calls plus tuningoverlay::Configure.
 struct TuningKey { std::wstring section, key; };
 
 // The shim writes narrow bytes on purpose (Linux wide streams are unreliable
@@ -82,11 +82,11 @@ static const std::vector<std::pair<const wchar_t*, int>>& ShippedSections()
 {
     // Section name and key count, as shipped in GraphicsEffects.ini.
     static const std::vector<std::pair<const wchar_t*, int>> sections = {
-        {L"Atmosphere", 46}, {L"Water", 43}, {L"VolumetricClouds", 43}, {L"Wind", 12},
-        {L"WeatherVisuals", 8}, {L"LocalFog", 7}, {L"DynamicLighting", 6},
-        {L"ShadowDiagnostics", 5}, {L"PostProcess", 5},
-        {L"AmbientOcclusion", 5}, {L"AIMaterials", 5}, {L"NativeShadows", 3},
-        {L"DistanceFog", 3},
+        {L"Atmosphere", 47}, {L"Water", 46}, {L"VolumetricClouds", 44}, {L"Wind", 12},
+        {L"WeatherVisuals", 15}, {L"LocalFog", 7}, {L"DynamicLighting", 5},
+        {L"ShadowDiagnostics", 5}, {L"PostProcess", 6},
+        {L"AmbientOcclusion", 5}, {L"NativeShadows", 3},
+        {L"DistanceFog", 3}, {L"Underwater", 8},
     };
     return sections;
 }

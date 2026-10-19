@@ -14,7 +14,7 @@ namespace renderer
         // draw feeds, and it is an atomic so that feeding it costs no lock (see
         // RendererDiagnostics::RecordDrawCall). Everything below is counted for
         // the draws a feature actually had to CLASSIFY - the shadow map's
-        // casters, the material cache's surfaces - which is a much smaller set.
+        // casters, the water and ground surfaces - which is a much smaller set.
         uint64_t classifiedDrawCalls = 0;
         uint64_t unknownDrawCalls = 0;
         uint64_t shadowCasterDraws = 0;

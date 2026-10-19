@@ -72,11 +72,16 @@ static void ReachEverySetting(OverlayLayout& l) {
     assert(count==int(seen.size()));
 }
 int main() {
-    // Pinned so adding a tab is a deliberate act: the loop below then proves
-    // every control in it is still reachable and hit-testable at every
-    // supported resolution and DPI. Was 10 before AMBIENT OCCLUSION, 11
-    // before GLOBAL ILLUMINATION, and 12 before that tab was removed again.
-    assert(Tabs().size()==11);
+    // Pinned so adding or removing a tab is a deliberate act: the loop below
+    // then proves every control in it is still reachable and hit-testable at
+    // every supported resolution and DPI. 10 after the unfinished AI Materials
+    // & Relief tab was cut out (11 before it, 10 before AMBIENT OCCLUSION and
+    // 12 before the GLOBAL ILLUMINATION tab was removed again).
+    assert(Tabs().size()==10);
+    // The cut was the whole feature, not only its header: no menu row may name
+    // the removed AIMaterials section, which would save settings nothing reads.
+    for(const auto& item:items)
+        assert(!item.section||std::wcscmp(item.section,L"AIMaterials")!=0);
     std::set<std::pair<std::wstring,std::wstring>> keys;
     for(const auto& item:items)if(item.kind!=KIND_HEADER) {
         assert(keys.emplace(item.section,item.key).second);

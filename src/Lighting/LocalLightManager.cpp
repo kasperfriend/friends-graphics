@@ -12,7 +12,7 @@
 #include "../Core/FrameContext.h"
 #include "../D3D9/TrackedRenderState.h"
 #include "../D3D9/CameraContinuity.h"
-#include "../Materials/TextureHashLookup.h"
+#include "../D3D9/TextureHashLookup.h"
 #include "TorchSignatures.h"
 
 namespace renderer
