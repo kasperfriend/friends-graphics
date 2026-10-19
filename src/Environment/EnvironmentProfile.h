@@ -7,13 +7,15 @@
 namespace renderer {
 enum EnvironmentParameter : size_t { FogDensity, LocalFog, Atmosphere, Rays, Lighting, Weather, DistanceFogPower,
     CloudCoverage, CloudType, CloudFeatureSize, CloudThickness, CloudDetail, CloudEvolution,
-    WaterAgitation, ParameterCount };
+    WaterAgitation, WaterClarity, UnderwaterTurbidity, UnderwaterCaustics, UnderwaterShafts,
+    UnderwaterGlow, ParameterCount };
 inline constexpr const char* EnvironmentKeys[ParameterCount]={"FogDensityMultiplier","LocalFogMultiplier","AtmosphereMultiplier","RayIntensityMultiplier","LightingMultiplier","WeatherIntensityMultiplier","DistanceFogPowerMultiplier",
     "CloudCoverageMultiplier","CloudTypeOffset","CloudFeatureSizeMultiplier",
     "CloudThicknessMultiplier","CloudDetailMultiplier","CloudEvolutionMultiplier",
-    "WaterAgitationMultiplier"};
-inline constexpr float EnvironmentMinimum[ParameterCount]={0,0,0,0,0,0,0,0,-1,.25f,.25f,0,0,0};
-inline constexpr float EnvironmentMaximum[ParameterCount]={4,4,4,4,4,4,4,2,1,4,4,2,4,4};
+    "WaterAgitationMultiplier","WaterClarityMultiplier","UnderwaterTurbidityMultiplier",
+    "UnderwaterCausticMultiplier","UnderwaterShaftMultiplier","UnderwaterGlowMultiplier"};
+inline constexpr float EnvironmentMinimum[ParameterCount]={0,0,0,0,0,0,0,0,-1,.25f,.25f,0,0,0,.1f,0,0,0,0};
+inline constexpr float EnvironmentMaximum[ParameterCount]={4,4,4,4,4,4,4,2,1,4,4,2,4,4,4,4,2,2,2};
 struct EnvironmentProfile {
     std::string profile;
     std::array<std::optional<float>,ParameterCount> values;
@@ -38,7 +40,7 @@ struct ResolvedWaterColours {
     bool authored=false;
 };
 struct ResolvedEnvironmentState {
-    std::array<float,ParameterCount> values{1,1,1,1,1,1,1,1,0,1,1,1,1,1};
+    std::array<float,ParameterCount> values{1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,1};
     ResolvedWaterColours water;
     float operator[](EnvironmentParameter key) const { return values[key]; }
 };

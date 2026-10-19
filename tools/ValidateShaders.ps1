@@ -38,7 +38,8 @@ $jobs = @(
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'rainHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
     @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
-    @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') }
+    @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') },
+    @{ File = 'src\Effects\Underwater.h'; Names = @('kUnderwaterSource') }
 )
 
 # A ps_3_0 device has to support at least 512 instruction slots and may report more, up to
@@ -68,6 +69,18 @@ $budgets = @{
     'kCloudCompositeSource'  = 512
     'kAmbientOcclusionSource' = 512
     'kAmbientOcclusionApplySource' = 512
+    # The medium the world is shaded through: five noise evaluations (two for the caustic net,
+    # three for the beam march), six point fetches and one exp per channel, though the two caustic
+    # ones sit behind a [branch] and are skipped on every wall, every pixel of sky and every frame
+    # with the net off. Measured **481** on the Windows runner (456 before the column met the
+    # liquid plane) against an estimate of 250-350 while it was being written, which is the usual
+    # direction of error here - vectorised work costs more than it reads - and 31 slots of
+    # headroom under the floor. The budget is the ps_3_0 device floor,
+    # the same one kAmbientOcclusionSource (501) sits under: a card reporting the minimum still
+    # fits the pass, and one that does not fails CreatePixelShader, logs it in Underwater.log
+    # and leaves the frame alone. A change that needs more than the floor should argue for it in
+    # the pull request rather than discover itself on a player's card.
+    'kUnderwaterSource'        = 512
 }
 
 # Measured, reported, not capped. This used to hold the water pixel stage: it sat in $budgets at

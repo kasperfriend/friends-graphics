@@ -120,6 +120,13 @@ inline std::vector<Item> items={
  {KIND_TOGGLE,L"Water",L"RefractionEnabled","REFRACTION",0,1,1,1},
  {KIND_SLIDER,L"Water",L"RefractionPercent","REFRACT AMOUNT",0,50,1,14},
  {KIND_SLIDER,L"Water",L"DepthAbsorptionPercent","WATER DEPTH",0,100,1,38},
+ // The sunlight's trip down to the bed, which the client's shading of the bed never paid:
+ // past 100 the view down into the water charges both legs of the path, so submerged
+ // terrain dissolves into the water body with depth instead of standing dark under it.
+ // 100 with the toggle off is the previous look exactly. The bounds match the clamp in
+ // WaterEffect.h (`std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)`).
+ {KIND_TOGGLE,L"Water",L"DepthFogEnabled","DEPTH FOG",0,1,1,1},
+ {KIND_SLIDER,L"Water",L"DepthFogPercent","DEPTH FOG AMOUNT",100,400,5,200},
  {KIND_TOGGLE,L"Water",L"FoamEnabled","FOAM",0,1,1,1},
  {KIND_SLIDER,L"Water",L"ShoreFoamPercent","FOAM AMOUNT",0,60,1,28},
  {KIND_SLIDER,L"Water",L"SpecularPercent","WATER SHINE",0,400,5,115},
@@ -135,6 +142,23 @@ inline std::vector<Item> items={
  // Wave-energy response only; wind-driven foam still stops in calm air.
  {KIND_SLIDER,L"Water",L"WeatherResponsePercent","SEA ENERGY RESPONSE (WIND OR NATIVE WEATHER)",0,200,5,100},
  {KIND_TOGGLE,L"Water",L"ZoneWaves","PER-ZONE SEA STATE",0,1,1,1},
+ // The world seen from inside the water. These live in the WATER tab and in their own
+ // [Underwater] ini section, because they are the same water: the medium itself is WATER
+ // CLARITY, WATER DEPTH, DeepColour and AbsorptionColour above, resolved per zone exactly as
+ // the surface resolves them, so a murk a zone asked for is the same murk under the surface as
+ // in it. What is here is the light inside that medium, and the switch. Which side of the
+ // interface the camera is on is not a switch and cannot be made one - the water stage reads it
+ // from the liquid draws' own matrices and uses it to march the camera-to-surface column instead
+ // of a column of air, which is the fix for seeing the front faces of waves through the backs of
+ // them; UNDERWATER off turns the medium off, it does not turn that back on.
+ {KIND_TOGGLE,L"Underwater",L"Enabled","UNDERWATER",0,1,1,1},
+ {KIND_SLIDER,L"Underwater",L"StrengthPercent","UNDERWATER MEDIUM",0,100,5,100},
+ {KIND_SLIDER,L"Underwater",L"CausticPercent","UNDERWATER CAUSTICS",0,100,5,55},
+ {KIND_SLIDER,L"Underwater",L"ShaftPercent","UNDERWATER LIGHT SHAFTS",0,100,5,60},
+ {KIND_SLIDER,L"Underwater",L"SurfaceGlowPercent","UNDERWATER SURFACE GLOW",0,100,5,55},
+ {KIND_SLIDER,L"Underwater",L"WobblePercent","UNDERWATER WOBBLE",0,100,5,50},
+ {KIND_SLIDER,L"Underwater",L"TurbidityPercent","UNDERWATER DIRT",0,300,5,100},
+ {KIND_SLIDER,L"Underwater",L"DebugMode","UNDERWATER DEBUG",0,4,1,0},
 
  // === LOCAL LIGHTING ===
  {KIND_HEADER,nullptr,nullptr,"--- LOCAL LIGHTING ---",0,0,0,0},

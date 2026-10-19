@@ -766,6 +766,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
+    watereffect::SetNextDrawHint(false,0,start,0,nullptr,nullptr,D3DFMT_INDEX16,0,t,n);
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
@@ -821,6 +822,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
+    watereffect::SetNextDrawHint(true,base,0,start,nullptr,nullptr,D3DFMT_INDEX16,0,t,n);
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
@@ -885,6 +887,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
+    watereffect::SetNextDrawHint(false,0,0,0,v,nullptr,D3DFMT_INDEX16,stride,t,n);
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
@@ -941,6 +944,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||tint.changed);
+    watereffect::SetNextDrawHint(true,0,0,0,v,indices,f,stride,t,n);
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);

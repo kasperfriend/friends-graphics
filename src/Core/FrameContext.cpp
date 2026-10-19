@@ -40,6 +40,10 @@ namespace renderer
         shadowMapDistance = 180.0f;
 
         waterMaskTexture = waterDepthTexture = nullptr;
+        // Published by the compositor from the water stage's own tracker before any pass
+        // reads it, so a frame that never reaches the composite must not inherit the medium
+        // the last one left behind.
+        underwaterRamp = 0.f;
         depthTexture = nullptr;
         depthSurface = nullptr;
         sceneColor = nullptr;

@@ -116,12 +116,61 @@ int main() try
     Require(ResolveEnvironment(config,{9999,9999,0,true}).state[WaterAgitation]==1.f,
             "an unknown zone keeps the neutral sea state");
     {
+        // The water-zone sweep: 199 root zones author a complete colour set and a
+        // complete underwater tuple together (clarity / turbidity / caustics /
+        // shafts / glow, each a multiplier on the player's own dial). Pin the
+        // count and the shape on names a reader can check against the world:
+        // red contaminated shallows, swamp soup, a clear dammed reservoir, and a
+        // lava zone that authors nothing and must stay exactly neutral.
+        size_t swept=0;
+        for (const auto& [id,profile]:config.zones)
+        {
+            const bool colours=profile.waterTint&&profile.waterDeep&&profile.waterAbsorption;
+            const bool dials=profile.values[WaterClarity]&&profile.values[UnderwaterTurbidity]
+                &&profile.values[UnderwaterCaustics]&&profile.values[UnderwaterShafts]
+                &&profile.values[UnderwaterGlow];
+            if (colours!=dials) throw std::runtime_error("Zone authors colours without underwater dials (or the reverse): "+std::to_string(id));
+            swept+=colours?1:0;
+        }
+        Require(swept==199,"199 water-bearing root zones carry colours and underwater dials as one authored set");
+        const auto blood=env(3525),swamp=env(8),loch=env(38),dry=env(46);
+        Require(Near(blood[WaterClarity],.45f)&&Near(blood[UnderwaterTurbidity],1.9f)
+                &&blood.water.authored&&blood.water.tint[0]>blood.water.tint[1],
+                "Bloodmyst is murky and its authored tint is red");
+        Require(swamp[WaterClarity]<.4f&&swamp[UnderwaterTurbidity]>2.f
+                &&loch[WaterClarity]>1.4f&&loch[UnderwaterTurbidity]<.6f,
+                "Swamp of Sorrows is soup and Loch Modan is a clear reservoir");
+        Require(dry[WaterClarity]==1.f&&dry[UnderwaterTurbidity]==1.f&&dry[UnderwaterCaustics]==1.f
+                &&dry[UnderwaterShafts]==1.f&&dry[UnderwaterGlow]==1.f&&!dry.water.authored,
+                "a zone outside the sweep keeps the player's dials and the global colours untouched");
+        const auto booty=ResolveEnvironment(config,{0,33,35,true}).state;
+        Require(Near(booty[WaterClarity],1.7f)&&Near(booty[UnderwaterTurbidity],.45f)
+                &&booty.water.authored&&booty.water.tint[2]>booty.water.tint[0],
+                "Booty Bay's area override gives the harbour its azure water inside Stranglethorn");
+        Require(Near(BlendEnvironment(swamp,loch,.5f)[WaterClarity],
+                     (swamp[WaterClarity]+loch[WaterClarity])*.5f),
+                "zone borders blend the underwater dials rather than swapping the medium");
+    }
+    {
         EnvironmentConfiguration tuned;std::string waterError;
         Require(ParseEnvironmentConfiguration("[Default]\nWaterAgitationMultiplier=4\n",tuned,waterError)&&
                 tuned.defaults.values[WaterAgitation]&&*tuned.defaults.values[WaterAgitation]==4.f,
                 "the accepted top of the sea-state range parses exactly");
         Require(!ParseEnvironmentConfiguration("[Default]\nWaterAgitationMultiplier=41\n",tuned,waterError),
                 "an out-of-range sea state is refused rather than quietly clamped");
+        Require(ParseEnvironmentConfiguration(
+                    "[Default]\nWaterClarityMultiplier=4\nUnderwaterTurbidityMultiplier=4\n"
+                    "UnderwaterCausticMultiplier=2\nUnderwaterShaftMultiplier=2\nUnderwaterGlowMultiplier=2\n",
+                    tuned,waterError)
+                &&*tuned.defaults.values[WaterClarity]==4.f
+                &&*tuned.defaults.values[UnderwaterGlow]==2.f,
+                "the tops of the underwater dial ranges parse exactly");
+        for (const auto* invalid:{"WaterClarityMultiplier=0.05","UnderwaterTurbidityMultiplier=4.1",
+             "UnderwaterCausticMultiplier=2.1","UnderwaterShaftMultiplier=-0.1","UnderwaterGlowMultiplier=nan"})
+            if (ParseEnvironmentConfiguration(std::string("[Default]\n")+invalid,tuned,waterError))
+                throw std::runtime_error("Accepted corrupt underwater dial");
+        Require(*tuned.defaults.values[WaterClarity]==4.f,
+                "corrupt underwater dials are rejected transactionally");
     }
     config.enabled=false;
     Require(ResolveEnvironment(config,{1,440,0,true}).state[CloudCoverage]==1,"disabled environment is neutral");
@@ -291,7 +340,7 @@ int main() try
                 "Stranglethorn keeps its own teal under the Booty Bay override");
         // A zone that authors nothing keeps the shipped global base, unauthored,
         // so WaterEffect leaves GraphicsEffects.ini in charge there.
-        const auto plain=ResolveEnvironment(config,{0,400,0,true}).state;
+        const auto plain=ResolveEnvironment(config,{0,46,0,true}).state;
         Require(!plain.water.authored&&Near(plain.water.deep[1],42.f/255.f),
                 "an unauthored zone keeps the global water colours");
         for (const uint32_t darkZone : {10u,8u,139u,361u,3520u,210u}) {
@@ -306,8 +355,15 @@ int main() try
         Require(!ParseEnvironmentConfiguration("[Default]\nWaterColour=0xZZZZZZ\n",broken,colourError)&&
                 !ParseEnvironmentConfiguration("[Zone.33]\nDeepColour=red\n",broken,colourError),
                 "malformed water colours are rejected, not guessed at");
+        // The precedence itself, pinned where it is now written: one resolver takes the zone
+        // layer as an argument (so the draw and the underwater medium cannot resolve their
+        // colours from different frames), replaces the global GraphicsEffects values with it
+        // only where the zone authored one, and only where LocationGraphics.ini did not scope
+        // an explicit override for this exact place.
         const auto waterEffect=Read("WaterEffect.h");
-        Require(waterEffect.find("waveFrame.environment.water.authored")!=std::string::npos&&
+        Require(waterEffect.find("ResolveWaterColourSet(const renderer::ResolvedWaterColours& zoneWater)")!=std::string::npos&&
+                waterEffect.find("if(zoneWater.authored) {")!=std::string::npos&&
+                waterEffect.find("ResolveWaterColourSet(waveFrame.environment.water)")!=std::string::npos&&
                 waterEffect.find("HasScopedValue(L\"Water\",L\"WaterColour\")")!=std::string::npos&&
                 waterEffect.find("HasScopedValue(L\"Water\",L\"DeepColour\")")!=std::string::npos&&
                 waterEffect.find("HasScopedValue(L\"Water\",L\"AbsorptionColour\")")!=std::string::npos,

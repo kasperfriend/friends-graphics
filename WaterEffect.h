@@ -26,6 +26,7 @@
 #include "src/Water/WaveField.h"
 #include "src/Water/WaterSeaState.h"
 #include "src/Water/WaveMotion.h"
+#include "src/Water/UnderwaterMedium.h"
 #include "src/Water/WaterQuality.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
@@ -39,12 +40,12 @@ std::atomic<bool> enabled{false};
 std::atomic<bool> compiling{false}; // true from Configure until the compile thread publishes
 inline std::mutex waterCompileMutex; // guards the code/vertexCode publish in Configure
 bool active=true, keyDown=false, hotkey=true;
-bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=true,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,foamEnabled=true,sunGlintEnabled=true;
+bool effectEnabled=true,wavesEnabled=true,geometryWavesEnabled=true,reflectionsEnabled=true,refractionEnabled=true,depthEnabled=true,depthFogEnabled=true,foamEnabled=true,sunGlintEnabled=true;
 float strength=.003f;
 float normalStrength=.16f, specularStrength=.55f;
 float reflectionStrength=.70f,environmentStrength=.24f,reflectionDistance=120.f,reflectionThickness=1.8f;
 float flowSpeed=1.f,flowRotation=.32f;
-float refractionStrength=.12f,absorptionStrength=.18f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
+float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
 // of a real amplitude in world yards rather than an amplitude itself, so the number a
@@ -71,6 +72,124 @@ unsigned waterColourTint=0x808080u,deepColour=0x0e2a28u,absorptionColour=0xff8c6
 // The location cannot change in the middle of a draw; Sync() always causes
 // ReloadTuning before the next frame.
 bool scopedWaterColour=false,scopedDeepColour=false,scopedAbsorptionColour=false;
+
+// Whether the camera is inside the liquid, and how far under it. The water draws below
+// report the camera against every liquid plane they belong to; the tracker in
+// src/Water/UnderwaterMedium.h turns those reports into a ramp that cannot blink. The water
+// pixel stage gets its camera-side classification from controls[75] (c218.w), the
+// full-screen pass that renders the world inside the medium (src/Effects/Underwater.h) gets
+// its submersion from the same tracker, and so do the air passes that fade out on it, so
+// there is exactly one camera-vs-water answer per frame and every stage agrees with it.
+//
+// Note what is NOT here: a switch. Which side of the interface the camera is on is a fact
+// about the camera, and the water stage's use of it - classifying by that fact instead of by
+// triangle facing, marching the camera-to-surface column instead of a column of air, and
+// covering a face by what its own column extinguishes - is the fix for seeing the front of
+// one wave through the back of the next. A tuning key that could turn that off would be a key
+// that could turn the bug back on. What [Underwater] in GraphicsEffects.ini switches is the
+// medium: the full-screen pass and the ramp the air passes fade out on, both gated on
+// renderer::Underwater::IsActive() where the ramp is published (VolumeIntegration.h).
+renderer::underwater::Tracker submersionTracker;
+float underwaterSeconds=0.f;
+
+// What the water draws resolved for the medium this frame. Published per draw because the
+// colours and this draw's light belong to the draw that authored them; held across frames
+// so a camera under the surface keeps its medium while the sea is behind it and out of
+// view. The WAVE FIELD is deliberately not here: its phases are anchored to a camera, and
+// the only camera they may be anchored to is the one the full-screen pass reconstructs
+// world positions against at composite time - a field published by a draw, or rebuilt at
+// the previous frame's Present, is anchored to a camera a frame's worth of swimming away,
+// which slides the caustic net across the bed by exactly that much. The composite builds
+// its own through UnderwaterFieldAt, below.
+struct UnderwaterFrame {
+    renderer::underwater::Medium medium;
+    float up[3]={0.f,0.f,1.f};
+    float lightDir[3]={0.f,0.f,1.f};
+    float lightColour[3]={0.f,0.f,0.f};
+    float sunElevation=0.f;
+    // The player's own [Underwater] turbidity dial, published by the compositor's
+    // tuning reload - the one medium dial this stage cannot read for itself,
+    // because its section belongs to the full-screen pass. Each draw scales it by
+    // its own frame's zone multiplier (exactly as clarity is scaled beside it) and
+    // spends it on the liquid's own pixels: the exit wash the pass applies to the
+    // pixels around the plane has to apply through the plane as well, or dirty
+    // water would fog the world everywhere except where the water itself is.
+    float turbidity=1.f;
+    bool published=false;
+};
+UnderwaterFrame underwaterFrame;
+
+// The three authored water colours, resolved once, exactly as the water draw's own controls
+// resolve them: the tuned value, replaced by the loaded world location's colour when that
+// location authored one, and kept as the tuned value where LocationGraphics.ini scoped an
+// explicit override for this place. Both the water draws and the frame's medium go through
+// this, so the pass that renders the world under the surface cannot drift from the water it
+// is under - and so a clarity or colour change reaches a camera that is not looking at any
+// liquid right now, which a diver with the F7 menu open is.
+struct WaterColourSet {
+    float tint[3]={1.f,1.f,1.f};
+    float deep[3]={1.f,1.f,1.f};
+    float absorb[3]={1.f,1.f,1.f};
+};
+// `zoneWater` is the environment the CALLER is drawing under: the draw passes its own
+// waveFrame.environment.water, the frame's medium passes the frame it was settled for.
+// Taking it rather than reaching for the current frame is what makes the two unable to
+// resolve their colours from different frames - the resolver is a function of the globals,
+// the zone layer and the location overrides, and nothing else.
+WaterColourSet ResolveWaterColourSet(const renderer::ResolvedWaterColours& zoneWater) {
+    auto byte=[&](unsigned colour,unsigned shift,float divisor) {
+        return float((colour>>shift)&255u)/divisor;
+    };
+    WaterColourSet out;
+    out.tint[0]=byte(waterColourTint,16,128.f);out.tint[1]=byte(waterColourTint,8,128.f);
+    out.tint[2]=byte(waterColourTint,0,128.f);
+    out.deep[0]=byte(deepColour,16,255.f);out.deep[1]=byte(deepColour,8,255.f);
+    out.deep[2]=byte(deepColour,0,255.f);
+    out.absorb[0]=byte(absorptionColour,16,128.f);out.absorb[1]=byte(absorptionColour,8,128.f);
+    out.absorb[2]=byte(absorptionColour,0,128.f);
+    if(zoneWater.authored) {
+        if(!scopedWaterColour)
+            {out.tint[0]=zoneWater.tint[0];out.tint[1]=zoneWater.tint[1];out.tint[2]=zoneWater.tint[2];}
+        if(!scopedDeepColour)
+            {out.deep[0]=zoneWater.deep[0];out.deep[1]=zoneWater.deep[1];out.deep[2]=zoneWater.deep[2];}
+        if(!scopedAbsorptionColour)
+            {out.absorb[0]=zoneWater.absorption[0];out.absorb[1]=zoneWater.absorption[1];
+             out.absorb[2]=zoneWater.absorption[2];}
+    }
+    return out;
+}
+
+// The medium the frame is inside: the same clarity, the same absorption strength and the
+// same three authored colours the water draw's Beer-Lambert uses, so a seabed under the
+// surface fades out with the same coefficient the water above it fades out with and the two
+// meet without a seam. There is no second clarity for the underwater view: [Underwater]
+// authors the light inside this medium, and WATER CLARITY above authors the medium, so a
+// zone that asked for swamp soup is swamp soup under the surface exactly as in it.
+renderer::underwater::Medium UnderwaterMediumForFrame(const WaterColourSet& colours,
+                                                      float clarityMultiplier=1.f) {
+    using renderer::underwater::Vec3;
+    // Named in the register order the medium takes them - absorption rate, deep colour, tint -
+    // because all three are the same type and a swapped pair would compile and quietly paint
+    // every ocean with its own absorption curve.
+    const Vec3 absorb{colours.absorb[0],colours.absorb[1],colours.absorb[2]};
+    const Vec3 deep{colours.deep[0],colours.deep[1],colours.deep[2]};
+    const Vec3 tint{colours.tint[0],colours.tint[1],colours.tint[2]};
+    // WATER CLARITY and WATER DEPTH are the medium's own two numbers: how far light reaches,
+    // and how much of the column's extinction the depth term is allowed to contribute. There
+    // is deliberately no second clarity for the underwater view, because there is one water.
+    // With DEPTH off the water stage measures no column at all, so the medium reports itself
+    // invalid and the pass does not run - the client's own underwater fog is left standing
+    // alone, which is what switching that feature off has always meant.
+    // The zone's clarity multiplier is the same number the surface draw uploads
+    // in bodyStyle.x, resolved from the same frame's environment at both call
+    // sites - one water, one clarity, with the place allowed to say how clear
+    // its own water is and the player's WATER CLARITY still the master dial.
+    const float zoneClarity=std::isfinite(clarityMultiplier)
+        ?std::clamp(clarityMultiplier,.1f,4.f):1.f;
+    return renderer::underwater::MediumFor(clarityPercent*zoneClarity,absorptionStrength,absorb,deep,tint,
+                                           depthEnabled);
+}
+
 // The sea state: what this zone asked for and what the sky is doing, eased once per frame in
 // Present() and multiplied into the controls below. It is the identity when a zone is untuned and
 // the weather is clear, which is what lets `ZoneWaves` default to on.
@@ -83,6 +202,276 @@ renderer::water::WaveMotion waveMotion;
 renderer::water::DrawAnchor lastWaveAnchor;
 renderer::FrameClock seaFrameClock;
 void AdvanceSea(float dt);
+
+// One frame of the underwater ramp, and the frame the full-screen medium reads. Called
+// from Present, after the water draws have had their say and before the counters reset, so
+// the reports belong to the frame that is over. Defined below the sea state rather than next
+// to the medium it publishes, because a frame that drew no liquid has to rebuild the wave
+// field, and that is built by the motion and anchored on the draw the sea state remembers.
+// Why the camera's side of the water never arrives, counted per frame for the status line:
+// a player report of "the medium does nothing" is undiagnosable without knowing which of the
+// reading's refusals the draws are hitting, or whether any liquid draw matched at all.
+int uwPlaneValid=0,uwPlaneRigid=0,uwPlaneRot=0,uwPlaneRange=0,uwPlaneOffscreen=0,uwPlaneNoVertex=0;
+int uwPlaneDetNeg=0,uwPlaneFar=0;
+int uwPlaneOutside=0,uwLastCoverage=0,uwLastContains=0;
+float uwLastYards=0.f,uwLastVertexZ=0.f,uwLastHorizontal=0.f,uwLastFootprint=0.f;
+float uwLastLane=0.f;
+int uwPublished=0;
+// The render target the player's own view is being drawn into this frame: the
+// volume composite's scene target while that path runs, published by
+// VolumeIntegration every frame it prepares one, null when the client draws to
+// the backbuffer directly. A liquid draw landing anywhere else - the client's
+// reflection texture above all - describes a mirrored camera's water, and its
+// plane reading must never reach the submersion tracker. This target identity is
+// what replaced the old "negative determinant means reflection" test: that sign
+// is a handedness convention this tree never established, and guessing it can
+// refuse every ordinary draw while admitting the mirrored one.
+IDirect3DSurface9* mainTargetSurface=nullptr;
+// The draw the next Scope belongs to, handed over by the draw detours, which are
+// the only place the primitive's own parameters exist. The plane reading needs
+// the local positions of vertices the draw actually consumes - its first and its
+// last: tiles may carry their water level in the vertices rather than the matrix
+// (measuring the draw origin's plane then answers for a plane one water level
+// away), and the pair is what says how far the measured water is from the camera
+// horizontally and how much of it there is, without which a raised lake anywhere
+// in view reads exactly like the lake the camera is in. Every detour sets this
+// immediately before constructing its Scope and ReadLiquidVertices consumes it,
+// so a hint can never label a draw it did not come from. The primitive type and
+// count ride along because locating the LAST consumed element needs both.
+bool nextDrawHintValid=false,nextDrawIndexed=false;
+int nextDrawBaseVertexIndex=0;
+D3DPRIMITIVETYPE nextDrawPrimitiveType=D3DPT_TRIANGLELIST;
+UINT nextDrawPrimitiveCount=0;
+UINT nextDrawStartVertex=0,nextDrawStartIndex=0,nextDrawStrideUP=0;
+const void* nextDrawVerticesUP=nullptr;
+const void* nextDrawIndicesUP=nullptr;
+D3DFORMAT nextDrawIndexFormatUP=D3DFMT_INDEX16;
+inline void SetNextDrawHint(bool indexed,int baseVertexIndex,UINT startVertex,
+    UINT startIndex,const void* verticesUP,const void* indicesUP,
+    D3DFORMAT indexFormatUP,UINT strideUP,
+    D3DPRIMITIVETYPE primitiveType=D3DPT_TRIANGLELIST,UINT primitiveCount=0) noexcept {
+    nextDrawPrimitiveType=primitiveType;nextDrawPrimitiveCount=primitiveCount;
+    nextDrawIndexed=indexed;nextDrawBaseVertexIndex=baseVertexIndex;
+    nextDrawStartVertex=startVertex;nextDrawStartIndex=startIndex;
+    nextDrawVerticesUP=verticesUP;nextDrawIndicesUP=indicesUP;
+    nextDrawIndexFormatUP=indexFormatUP;nextDrawStrideUP=strideUP;
+    nextDrawHintValid=true;
+}
+// One consumed vertex pair per (buffers, offsets, primitive) the client keeps
+// drawing: liquid chunks are static geometry and their vertices never change, so
+// a chunk is locked and read once and answered from here afterwards. The entries
+// hold the buffers themselves - a bare pointer could name a different buffer
+// after the client frees and reallocates - which is why Reset clears the cache:
+// an extra reference to a default-pool buffer would make the client's own Reset
+// fail. The primitive is part of the key: the same buffer drawn with a different
+// count consumes a different LAST vertex, and a height remembered for one extent
+// of a buffer must never answer for another - one buffer can hold two lakes.
+// How many emitted vertices of one liquid draw the coverage read copies.
+// A liquid chunk is an 8x8 tile grid - a few hundred indices - and even a
+// WMO sheet is far under this; a draw past it answers from the first/last
+// pair as before rather than copying a merged ocean to ask where it ends.
+inline constexpr UINT kMaxLiquidCoverageElements=4096;
+struct LiquidVertexSamples {
+    float first[3]={0.f,0.f,0.f};
+    float last[3]={0.f,0.f,0.f};
+    bool haveFirst=false,haveLast=false;
+    // Every vertex the draw emits, in emitted order, when the whole draw
+    // could be read: PlaneOverCamera measures the camera against these
+    // triangles instead of against the first/last rectangle. Points into
+    // the cache entry (or the user-pointer scratch below); valid only for
+    // the Scope that read it, which is the only consumer.
+    const renderer::underwater::Vec3* coverage=nullptr;
+    UINT coverageCount=0;
+    renderer::underwater::LiquidTopology coverageTopology=
+        renderer::underwater::LiquidTopology::TriangleList;
+    bool haveCoverage=false;
+    // The coverage vertices' exact local x/y extremes, measured as the draw
+    // was read in (every position the read accepts is finite by its own
+    // check): with them the plane reading refuses a far sheet from its box
+    // alone instead of scanning its triangles every frame.
+    float coverageMinX=0.f,coverageMaxX=0.f,coverageMinY=0.f,coverageMaxY=0.f;
+    bool haveCoverageBounds=false;
+};
+struct LiquidVertexZEntry {
+    ComPtr<IDirect3DVertexBuffer9> vertices;
+    ComPtr<IDirect3DIndexBuffer9> indices;
+    UINT streamOffset=0,stride=0,startIndex=0,startVertex=0,positionOffset=0;
+    int baseVertexIndex=0;
+    D3DPRIMITIVETYPE primitiveType=D3DPT_TRIANGLELIST;
+    UINT primitiveCount=0;
+    bool indexed=false;
+    float first[3]={0.f,0.f,0.f};
+    float last[3]={0.f,0.f,0.f};
+    bool haveLast=false;
+    bool valid=false;
+    renderer::underwater::Vec3 coverage[kMaxLiquidCoverageElements]{};
+    UINT coverageCount=0;
+    bool haveCoverage=false;
+    float coverageMinX=0.f,coverageMaxX=0.f,coverageMinY=0.f,coverageMaxY=0.f;
+    bool haveCoverageBounds=false;
+};
+LiquidVertexZEntry liquidVertexZCache[64]{};
+unsigned liquidVertexZNext=0;
+// The coverage read's staging: one draw's worth of emitted positions (and
+// the vertex numbers that produced them), filled under one range lock per
+// buffer and copied into the cache entry before the next draw reuses it.
+// Static rather than stack - 48 KB is not a Scope local's business - and
+// safe because Scope runs on the one render thread.
+renderer::underwater::Vec3 liquidCoverageScratch[kMaxLiquidCoverageElements]{};
+long long liquidCoverageIndexScratch[kMaxLiquidCoverageElements]{};
+// Bumped once per Present. A cache miss locks a client buffer, and a read-only
+// lock can still wait for the GPU to be finished with it, so at most one new
+// chunk is read per frame: a whole coast arriving in a single frame must not
+// pay that wait dozens of times over (a first dive once stopped rendering
+// that way, on a cold cache and a cold driver). Draws past the budget answer
+// from their origin's plane until their turn comes, which is within a second
+// of looking at any body of water, and the answer by then is exact.
+unsigned presentSerial=0;
+unsigned liquidVertexZLockSerial=~0u;
+// The exact local x/y extremes of a coverage read, measured once while the
+// positions are already in hand (and already known finite - the read checks
+// every one): PlaneOverCamera spends them to refuse a far sheet from its
+// bounding box instead of re-scanning its triangles on every frame.
+inline void MeasureLiquidCoverageBounds(const renderer::underwater::Vec3* verts,UINT count,
+    float& minX,float& maxX,float& minY,float& maxY) noexcept {
+    minX=minY=1e30f;maxX=maxY=-1e30f;
+    for(UINT i=0;i<count;++i) {
+        minX=std::min(minX,verts[i].x);maxX=std::max(maxX,verts[i].x);
+        minY=std::min(minY,verts[i].y);maxY=std::max(maxY,verts[i].y);
+    }
+}
+// The last vertex declaration the liquid read parsed, and where it said the
+// position lives. Liquid draws overwhelmingly share one declaration, and
+// re-reading its element array on every liquid draw of every frame was a
+// driver call (and a 17-element copy) spent rediscovering the same stream
+// and offset. One remembered declaration, held like the buffers beside it
+// and dropped with them at reset.
+ComPtr<IDirect3DVertexDeclaration9> liquidDeclarationCache;
+UINT liquidDeclarationPositionStream=0,liquidDeclarationPositionOffset=0;
+bool liquidDeclarationCacheValid=false,liquidDeclarationHavePosition=false;
+inline void ClearLiquidVertexZCache() noexcept {
+    // Release the buffers and invalidate; the scalar key fields and the
+    // coverage array are dead while `valid` is false, and clearing the
+    // array entry by entry would only spend the reset rewriting it.
+    for(auto& entry:liquidVertexZCache) {
+        entry.vertices.Reset();entry.indices.Reset();
+        entry.coverageCount=0;entry.haveCoverage=false;entry.haveCoverageBounds=false;
+        entry.valid=false;
+    }
+    liquidDeclarationCache.Reset();
+    liquidDeclarationCacheValid=false;
+}
+void AdvanceUnderwater(float dt) {
+    // Wrapped here rather than only in the consumer, because a clock that grows without bound
+    // loses its fraction bits: renderer::underwater::Wobble wraps its own argument into the
+    // wobble period, but `seconds-floor(seconds/period)*period` is only as precise as
+    // `seconds`, and after a few days un-wrapped that is not precise enough to animate
+    // anything. Keeping the published clock inside one period keeps every consumer of it
+    // exact, at any session length.
+    underwaterSeconds+=dt;
+    const float wobblePeriod=renderer::underwater::kWobblePeriodSeconds;
+    if(!(underwaterSeconds>=0.f&&underwaterSeconds<1e6f)) {
+        underwaterSeconds=0.f;   // a NaN, an infinity or a negative dt: start the clock again
+    } else {
+        // Subtracting whole periods rather than resetting to zero, so the four wobble rates -
+        // 1.7, 1.1, 1.3 and .9 times the clock, all even multiples of pi over 20pi - stay
+        // continuous across the wrap instead of jumping a frame's worth of phase.
+        underwaterSeconds-=std::floor(underwaterSeconds/wobblePeriod)*wobblePeriod;
+    }
+    if(!enabled||!effectEnabled) {
+        // No water means no interface to be on either side of: no held submersion, no ramp,
+        // and nothing left over from a swim that ended before the effect was turned back on.
+        submersionTracker=renderer::underwater::Tracker{};
+        underwaterFrame.published=false;
+        return;
+    }
+    const auto& frame=renderer::FrameContext::Current();
+    const float camera[3]={frame.cameraPosition.x,frame.cameraPosition.y,frame.cameraPosition.z};
+    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid);
+    submersionTracker.BeginFrame();
+    // Keep the published frame current on a frame that drew no liquid at all - which, for a
+    // diver looking at the seabed, is most frames: the surface is behind the camera and
+    // frustum-culled, so no Scope runs and nothing publishes. Clarity and the authored colours
+    // live outside the draw, and so do the up axis and the light: world +Z in view space is a
+    // row of this frame's captured view, and the source the surface is lit by is
+    // CelestialTracker's confirmed disc, which is a singleton rather than a per-draw constant.
+    // Only the light's COLOUR is a per-draw constant (c35), so that one is held - it moves on
+    // the scale of a weather front, not of a frame. The wave field is not kept current here at
+    // all: the composite builds it fresh for its own camera every frame (UnderwaterFieldAt),
+    // which is also what keeps the caustic net alive while no surface is in view. Holding the
+    // up axis instead of refreshing it was a visible bug in the most common underwater view
+    // there is: it stayed pointed where the camera was looking when it last saw water, which
+    // puts the beams, the sky glow and the bed's facing test on the wrong axis for every turn
+    // of the diver's head after that.
+    if(!underwaterFrame.published) {
+        underwaterFrame.medium=UnderwaterMediumForFrame(ResolveWaterColourSet(frame.environment.water),
+            zoneWavesEnabled?frame.environment[renderer::WaterClarity]:1.f);
+        if(frame.viewRawValid) {
+            for(int i=0;i<3;++i)underwaterFrame.up[i]=frame.viewRaw.m[2][i];
+        }
+        // viewSpaceDirection already points TOWARD the source, which is the direction the pass
+        // wants; the draw path arrives at the same vector by negating c201, which the draw path
+        // itself uploaded pre-negated.
+        const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
+        const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
+        const renderer::CelestialBody* body=sunBody.visible?&sunBody
+            :(moonBody.visible?&moonBody:nullptr);
+        if(body) {
+            const float lx=body->viewSpaceDirection.x,ly=body->viewSpaceDirection.y,
+                lz=body->viewSpaceDirection.z;
+            const float ll=std::sqrt(lx*lx+ly*ly+lz*lz);
+            if(ll>1e-5f) {
+                underwaterFrame.lightDir[0]=lx/ll;
+                underwaterFrame.lightDir[1]=ly/ll;
+                underwaterFrame.lightDir[2]=lz/ll;
+            }
+        }
+        underwaterFrame.sunElevation=underwaterFrame.lightDir[0]*underwaterFrame.up[0]
+            +underwaterFrame.lightDir[1]*underwaterFrame.up[1]
+            +underwaterFrame.lightDir[2]*underwaterFrame.up[2];
+    }
+    uwPublished=underwaterFrame.published?1:0;
+    underwaterFrame.published=false;
+}
+
+// The wave field for the full-screen pass, built for the very camera the pass
+// will reconstruct world positions against. The pass shades a bed point from its
+// camera-relative world offset; the field's phases carry an anchor camera's own
+// place in the lattice, so offset-plus-phase lands on an absolute world cell -
+// but ONLY when the anchor is that same camera. The field used to be published
+// by the last water draw (anchored to the draw's camera, possibly a frame of
+// swimming away) or, on frames that drew no liquid, rebuilt here at Present for
+// the frame that was ENDING and then consumed by the next frame's composite -
+// which runs before this Present does. Either way the net was shaded against a
+// camera it was not built for and crawled across the bed by exactly the
+// difference, which is why the caustics moved with the camera. There is now
+// exactly one place the field comes from, this builds it, and the composite
+// calls it with the frame context it shades from. The motion clock is the same
+// integrated one every draw built its field from, so the surface and the net it
+// casts still move as one.
+inline renderer::underwater::Field UnderwaterFieldAt(float cameraX,float cameraY,
+    bool cameraValid) noexcept {
+    const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];
+    const float anchorY=cameraValid?cameraY:lastWaveAnchor.camera[1];
+    const auto wave=waveMotion.Build(anchorX,anchorY,
+        cameraValid||lastWaveAnchor.valid,wavesEnabled);
+    renderer::underwater::Field field;
+    for(int i=0;i<4;++i)field.lattice[i]=wave.lattice[i];
+    field.chopPhase[0]=wave.ripplePhase[0];
+    field.chopPhase[1]=wave.ripplePhase[1];
+    // The fine octave's phase: the chop phase doubled, exactly the frequency the
+    // net applies to the cell, so fineSample = 2*(cell + phase) sits on the bed
+    // like the base octave does. Not the surface fine ripple's 2.17/1.31 spelling:
+    // under that one the two octaves of the net move at two different rates as
+    // the camera moves, and the net crawls (CausticNet).
+    field.finePhase[0]=wave.ripplePhase[0]*2.f;
+    field.finePhase[1]=wave.ripplePhase[1]*2.f;
+    field.warpPhase[0]=wave.warpPhase[0];
+    field.warpPhase[1]=wave.warpPhase[1];
+    field.seconds=underwaterSeconds;
+    return field;
+}
+
 // WATER QUALITY, 0..10, and the plan it resolves to. The level is the authored number; the
 // plan is everything both shader stages and this file are allowed to ask about it, and it is
 // resolved once per tuning reload rather than per tile, because the ladder lives in
@@ -429,6 +818,10 @@ float4 fogColor:register(c4);
 // surface that is actually there. y=ripple uv offset,z=normal response,w=specular.
 float4 controls:register(c200);
 float4 lightDirection:register(c201); // xyz=direction toward the sun/moon
+// rgb=the light's colour, w=the exit-wash turbidity (renderer::underwater::ExitWash
+// with its 1 removed, folded on the CPU from the submersion this draw measured):
+// the lane the native diffuse left unread is where the medium's dirt reaches the
+// liquid's own pixels, the ones the full-screen pass leaves to this stage.
 float4 lightColor:register(c202);
 // x=depth unpack A,y=depth unpack B with the viewport MaxZ folded in, so a
 // captured depth costs one subtraction and one divide; z,w=screen scale.
@@ -437,8 +830,9 @@ float4 reflectionProjection:register(c203);
 // steps. Both counts come from the WATER QUALITY ladder in src/Water/WaterQuality.h and
 // are trip counts, not gates: 0 skips the loop through the same test that already
 // stopped it, and the loops are written against 12 so a level can hand them any count
-// up to that without a second compiled shader. w=the capture's depth range, uploaded
-// with the block and not read by this stage.
+// up to that without a second compiled shader. w=the depth fog factor on the column
+// seen looking down into the water (DEPTH FOG; the capture depth range this lane once
+// carried unread is folded into c203 on the CPU).
 float4 reflectionControl:register(c204);
 // x=environment strength,y=max trace distance,z=base thickness,w=capture valid
 float4 reflectionStyle:register(c205);
@@ -490,7 +884,8 @@ float4 absorbTint:register(c216);
 float4 waveSwell:register(c217);
 // xy=the phase of swell trains G and H, in the same units as c217; z=the shore back-flow
 // run-up in yards, 0 with the feature off (which is how every gate that reads it also reads
-// "no", so a level below it cannot move a shoreline); w unused. The two shortest trains get
+// "no", so a level below it cannot move a shoreline); w=the camera's side of this draw's
+// liquid plane in units of the wave's own lift (controls[75]). The two shortest trains get
 // their own register for the same reason C-F share one: a phase has to arrive contiguous to
 // be added to a batch of projections in one instruction.
 float4 waveSwell2:register(c218);
@@ -562,6 +957,11 @@ static const float kSwellToUnit=0.20550760;
 // multiplied the noise by them, and as src/Water/WaveField.h declares them.
 static const float kGroupBase=0.52;
 static const float kGroupDepth=0.62;
+// Half the baseline the bed slope below is measured over, in world yards either side of
+// the pixel: the same +-1.5 yards tools/WaterPreview.cpp's FieldSlope samples the
+// authored bed over, so the shoal and beach foam read the number the look was tuned
+// against at any resolution, distance or depth-buffer precision.
+static const float kBedSlopeSpanYards=1.5;
 // Second output (COLOR1): marks this pixel as water, so the atmosphere
 // pass knows where the water surface actually is (not the seabed depth
 // already sitting in the main depth buffer - water doesn't write that).
@@ -577,14 +977,77 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
     result_.mask=float4(1,1,1,1);
-    // Preserve the original alpha: surfaceTexture never contributes alpha.
-    // uv0.zw/uv1.zw carry long-wave values; native texture addressing remains xy.
-    float4 base=tex2D(baseTexture,uv0.xy);
     // One world-anchored lattice carries every scale. The swell is analytic - rounded
     // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
     // crest and the light on it cannot drift apart - and only the chop on top of it is
-    // noise.
+    // noise. The lattice coordinate and the pixel's size in it are taken here, above the
+    // sheet test, because that test is only a fact while a pixel resolves the wave it
+    // sits in, which is the footprint's own question.
     float2 plane=float2(dot(worldRel.xy,waveLattice.xy),dot(worldRel.xy,waveLattice.zw));
+    float2 footprint=fwidth(plane);
+    // The pixel's own size in lattice cells, squared. The chop fade below reads it as a
+    // fade; the shore block further down reads the SAME number, divided back through the lattice's
+    // own cell size, as the pixel's footprint in world yards, which is what sizes the
+    // bed-slope taps' world span so the slope does not move with the resolution or the
+    // camera. Two derivatives, computed once.
+    float footprintSquared=dot(footprint,footprint);
+    // ONE SIDE OF THE SHEET, decided before any of the work below is paid for. The liquid is
+    // drawn two-sided and writes no depth, so a ray that crosses a crest produces TWO
+    // fragments for that crest: the face it enters by and the far face it would leave by. The
+    // far one is not a second view of the water - it is the wave seen from inside itself,
+    // carrying the same foam and the same glint as the face in front of it, and blended over
+    // (or under) that face in whatever order the mesh happened to be indexed in. That second
+    // sheet is the "front face of the wave visible through the back of it": raising its alpha
+    // (the coverage fix at the end of this stage) cannot remove it, because alpha only says
+    // how strongly the wrong sheet paints when it is drawn after the right one. It has to not
+    // be drawn.
+    //
+    // Which side is the far one is a fact about the MESH, so it is read off the mesh: the
+    // screen-space derivatives of the displaced position give this triangle's own plane (the
+    // bed slope below is the same move at a yard scale, a cross of reconstructed tangents),
+    // oriented to the surface's top by world up, so neither triangle winding nor a mirrored
+    // reflection view can turn the
+    // answer around - a cross product flips under a mirror and re-orienting by up flips it
+    // back. The interpolated vertex normal cannot answer this question: it is the flat tile's
+    // up vector, which knows nothing about the wave the vertex stage displaced, and the
+    // shading normal cannot either, because its slope is scaled by NORMAL STRENGTH rather
+    // than by the lift that is actually in the geometry.
+    //
+    // `wrongSide` is positive when this fragment is the far side of its own wave from where
+    // the camera sits: the underside as seen from the air, or the top as seen from inside the
+    // medium (which is the same statement - the part of the wave that is underwater from the
+    // camera's side of it). It fades over about fifteen degrees past the silhouette instead
+    // of cutting on the sign, so the boundary is the soft edge of a turning surface rather
+    // than a triangle-sized notch, and it is exactly zero at the middle of the camera-side
+    // band (waveSwell2.w), where the eye is in the surface and both sides are legitimately
+    // in front of it. A facet standing near vertical - a sheet the up vector cannot orient -
+    // fades the test out rather than guessing at it. Past the fade the fragment is discarded
+    // outright, not blended at zero alpha: the discard also stops it writing the mask and
+    // the surface-depth outputs, and it stops the eight trains, three noise octaves and two
+    // ray marches below being paid for on a sheet nobody may see, which at a low camera is
+    // near half the sea. Debug modes keep every fragment, because a debug view that hides
+    // half the draws is not a debug view.
+    float3 faceCross=cross(ddx(viewPos),ddy(viewPos));
+    float3 faceNormal=faceCross*(dot(faceCross,upWind.xyz)<0?-1:1);
+    faceNormal=safeNormalize(faceNormal);
+    float faceSide=dot(faceNormal,safeNormalize(-viewPos));
+    float wrongSide=lerp(-faceSide,faceSide,smoothstep(-1.0,1.0,waveSwell2.w))
+        *saturate(dot(faceNormal,upWind.xyz)*4.0);
+    // Only while the pixel resolves the wave. Past a few lattice cells a pixel spans
+    // whole triangles of the liquid grid (some four yards, 1.6 cells at the shipped cell)
+    // and at a grazing view whole wave faces, so which sheet covers the pixel centre is
+    // sampling luck - and a pixel whose only fragment is a far slope would be discarded
+    // into a hole with the sky and the land behind the sea showing through it, which at
+    // the horizon is most of the far water. There the two sheets shade within a fog
+    // colour of each other anyway and the column's coverage at the end of this stage is
+    // already opaque, so the discard fades out with the footprint, on the same ground
+    // the unresolved chop fades on below. Where the waves are resolved the factor is
+    // exactly one and nothing about the near sea moves.
+    wrongSide*=1.0-smoothstep(1.2,3.6,max(footprint.x,footprint.y));
+    clip(flowControl.w<.5?.25-wrongSide:1.0);
+    // Preserve the original alpha: surfaceTexture never contributes alpha.
+    // uv0.zw/uv1.zw carry long-wave values; native texture addressing remains xy.
+    float4 base=tex2D(baseTexture,uv0.xy);
     // The vertex stage sampled this broad, world-anchored warp and its gradient
     // at the same lattice point. Its fifty yard scale is smooth over the liquid mesh,
     // so interpolating it here preserves the bent crests without another pixel-noise
@@ -601,12 +1064,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // the warp's spare lane and the gradient in worldRel.zw, for the register-count reason
     // spelled out on the vertex stage's Output struct.
     float gain=kGroupBase+kGroupDepth*waveWarp.w;
-    float2 footprint=fwidth(plane);
-    // The pixel's own size in lattice cells, squared. The chop fade below reads it as a
-    // fade; the shore block further down reads the SAME number as the pixel's footprint in
-    // world yards, which is what turns a per-pixel depth difference into a bed slope that
-    // does not move with the resolution or the camera. Two derivatives, computed once.
-    float footprintSquared=dot(footprint,footprint);
     // Fade the unresolved octave by the pixel's own footprint. The swell is never
     // faded: a forty yard wave is still resolvable at any distance a lake can be
     // seen, and fading it with the chop is what made distant water go flat.
@@ -719,16 +1176,34 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // other way, so highlights sat in the troughs. Invisible while the surface was
     // flat, obvious the moment the geometry started lifting crests.
     float cameraSide=dot(n,v);
-    // This draw is being viewed from the water side when the un-oriented normal points
-    // away from the camera. Keep that fact after flipping the normal: flipping alone makes
-    // the lighting two-sided, but it does not give an underwater view its different optical
-    // path or the water-to-air critical angle.
-    float underwater=1-step(-1e-4,cameraSide);
+    // Which side of the interface the CAMERA is on is a property of the camera, not of the
+    // triangle this pixel happens to belong to, and asking a triangle for it is what made
+    // the front faces of waves show through the backs of them. A facing test
+    // (dot(normal,view)<0) is true of every face near edge-on, and at a low camera above
+    // water the whole sea out toward the horizon is within a degree or two of edge-on, so
+    // half of it took the underwater optical path while the camera stood in the air: the
+    // water-to-air critical-angle mirror, the camera-column absorption over the full
+    // distance to that face, and the coverage floor that goes with them - a dark sheet with
+    // the crest in front of it composited on top, twice, one face through the other.
+    // c218.w is the camera's own answer instead, in units of the wave's own lift: this
+    // draw's liquid plane over the camera, read on the CPU from this draw's own matrices
+    // and divided by the band the sea is rough enough to need (see
+    // renderer::underwater::PlaneOverCamera and the controls[75] upload). It is the same
+    // number for every face of the tile, it is -1 or lower in air and +1 or higher under
+    // water, and it fades across the band rather than snapping, which is what a swimmer's
+    // eye crossing the surface does. Above water this is now exactly zero for every pixel
+    // of every tile, which is the identity the whole underwater path is documented to keep.
+    float underwater=smoothstep(-1.0,1.0,waveSwell2.w);
     float flip=cameraSide<0?-1:1;
     n*=flip;
     float2 tilt=-slopes*(controls.z/jacobian)*flip;
     float3 wave=safeNormalize(n+waveTangent*tilt.x+waveBitangent*tilt.y);
     float3 l=safeNormalize(-lightDirection.xyz);
+    // Taken here rather than down with the Fresnel because the optical column
+    // below needs it first: from inside the medium this cosine is the ray's
+    // answer to Snell's window, and the column a transmitted picture may use
+    // depends on it (renderer::underwater::InterfaceYards). One dot, two readers.
+    float NoV=max(dot(wave,v),1e-4);
     float NoL=dot(wave,l);
     float sunElev=dot(l,upWind.xyz);
     // A wave has to change the BODY of the water, not only its highlight. What makes
@@ -767,7 +1242,43 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // coverage is different: it belongs to the world, not to the camera ray or pixel grid.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
-    float column=min(effectiveDepth,400.0);
+    // The camera-to-fragment ray length, capped the way the far column is capped. Computed
+    // here rather than down with the camera-column absorption because the column below now
+    // needs it too, and the two have to be the same number: one is the length of water this
+    // ray crosses, the other is what that length extinguishes.
+    float cameraColumn=min(length(viewPos),250.0);
+    // Under the surface, what is "behind" this fragment is AIR - the sky, a shore, a hull,
+    // a sail - and the column measured from the surface down to the captured depth behind
+    // it is a length of air being mistaken for a length of water. It is a hundred yards of
+    // murk when the camera is three yards under the surface, so every upward view collapsed
+    // onto the body's deep colour and there was nothing left of the world above to see
+    // through it. The water this ray really travels through is the camera-to-surface
+    // segment, so that is the column: looking up from just under the surface shows the sky
+    // and the shore almost undimmed, and the murk grows as the swimmer goes down, which is
+    // both the honest integral and the one the eye expects. Above water the lerp takes the
+    // captured-depth branch it always took, scaled by DEPTH FOG: the captured bed was lit
+    // by the client as though in air, so the one-way column only ever charged the light's
+    // trip back UP to the camera and never the sunlight's trip DOWN to the bed - which is
+    // why a submerged hillside could stand dark and crisp under water that was shading
+    // every other term as a body. The factor is authored in yards of that missing leg:
+    // 1 is the one-way column this stage always marched, 2 charges both legs of the path
+    // (the shipped look), and past that it is simply murk a player may ask a lake for.
+    // It multiplies yards, not colour, so ankle-deep water at a shoreline stays clear at
+    // any setting and only depth earns the fog; the submerged branch is the medium's own
+    // column, which the underwater pass already marches in full on every pixel EXCEPT
+    // these ones, the liquid's own - and the pass's column is not the plain segment any
+    // more (renderer::underwater::InterfaceYards): inside Snell's window the exiting
+    // picture pays the turbidity wash including the near-surface layer's equivalent
+    // yards (lightColor.w, folded on the CPU), and outside the window there is no
+    // transmitted picture at all, so the column is the far one and the body, the
+    // in-scatter and the coverage below all converge on the medium instead of on
+    // whatever the client drew beyond a mirror. Letting these pixels ride the plain
+    // segment while their neighbours marched the washed one was the far shore standing
+    // crisp through the plane of a dirty lake. The Snell band is the Fresnel's own,
+    // taken here because the column needs it first.
+    float totalInternal=1-smoothstep(.63,.69,NoV);
+    float interfaceYards=lerp(250.0,cameraColumn*(1.0+clamp(lightColor.w,0.0,15.0)),1.0-totalInternal);
+    float column=min(lerp(effectiveDepth*reflectionControl.w,interfaceYards,underwater),400.0);
     // Reconstruct the captured seabed point in this draw's view space. screenUV is the
     // inverse projection of viewPos, so the same pixel ray at behindZ gives the actual
     // world point under this water fragment. Projecting the point-to-point vector onto
@@ -778,12 +1289,53 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);
     float foamDepth=max(foamDepthSigned,0);
     float foamDepthValid=captureValid*step(behindZ,99999)*step(0,foamDepthSigned);
-    // Recover the seabed's plane normal from reconstructed neighbouring world points,
-    // then measure its inclination to world-up. ddx/ddy are only the sampling stencil;
-    // their screen orientation, pixel size and camera tilt cancel out in this ratio.
-    // This matches the CPU preview's world-space bed slope and keeps shoal/beach foam
-    // attached to the terrain instead of crawling as the view pans, zooms or rotates.
-    float3 bedNormal=cross(ddx(bottomView),ddy(bottomView));
+    // Recover the seabed's plane normal from reconstructed bed points, then measure its
+    // inclination to world-up. The points stand a fixed WORLD distance apart -
+    // kBedSlopeSpanYards either side of this pixel, along its own screen axes - and not
+    // one pixel apart. The one-pixel stencil this used to read (ddx/ddy of bottomView)
+    // divides the captured depth's own storage step by a bed footprint that is inches
+    // across near a shore; the ratio is exact for a plane in exact arithmetic, but the
+    // depth that reaches this stage is not exact. On hardware whose INTZ fetch hands
+    // back a floating-point depth with a short mantissa instead of the 24-bit fixed
+    // layout, the step is a sizeable fraction of the bed's own rise between neighbouring
+    // pixels, and the normal came back as 2x2-quad speckle: over any shallow bed whose
+    // true slope sits near the shoal threshold below (a sand bar, a beach's underwater
+    // apron) that speckle switched the shoal term and the beach/wall split on and off a
+    // quad at a time, and the foam printed it as rows of dark ticks along the depth
+    // contours. Over a three-yard baseline the same storage step is a rounding error at
+    // any precision the capture can produce, and the reading matches the CPU preview's
+    // world-space FieldSlope the look was tuned against. The taps march along the
+    // derivatives of screenUV - this pixel's own texel steps, which stay smooth whatever
+    // the depth does - far enough out to span the yards (the footprint converted back
+    // through the lattice's own cell size and grown by the bed's extra distance along
+    // the ray), and never more than sixteen texels: by the range where that cap binds a
+    // single texel is already most of the span wide on the bed. A tap that lands on sky
+    // falls back to the centre point, which turns that axis into a one-sided reading
+    // instead of a cliff invented out of the far sentinel.
+    float2 bedStepX=float2(ddx(screenUV.x),ddx(screenUV.y));
+    float2 bedStepY=float2(ddy(screenUV.x),ddy(screenUV.y));
+    float bedPixelYards=max(footprint.x,footprint.y)/max(length(waveLattice.xy),1e-6)
+        *clamp(behindZ/max(viewPos.z,.05),1.0,64.0);
+    float bedTap=clamp(kBedSlopeSpanYards/max(bedPixelYards,1e-4),1.0,16.0);
+    float2 bedUvE=screenUV+bedTap*bedStepX,bedUvW=screenUV-bedTap*bedStepX;
+    float2 bedUvS=screenUV+bedTap*bedStepY,bedUvN=screenUV-bedTap*bedStepY;
+    float bedRawE=tex2Dlod(sceneDepth,float4(bedUvE,0,0)).r;
+    float bedRawW=tex2Dlod(sceneDepth,float4(bedUvW,0,0)).r;
+    float bedRawS=tex2Dlod(sceneDepth,float4(bedUvS,0,0)).r;
+    float bedRawN=tex2Dlod(sceneDepth,float4(bedUvN,0,0)).r;
+    float bedZE=bedRawE>=.9999?100000:reflectionProjection.y/(bedRawE-reflectionProjection.x);
+    float bedZW=bedRawW>=.9999?100000:reflectionProjection.y/(bedRawW-reflectionProjection.x);
+    float bedZS=bedRawS>=.9999?100000:reflectionProjection.y/(bedRawS-reflectionProjection.x);
+    float bedZN=bedRawN>=.9999?100000:reflectionProjection.y/(bedRawN-reflectionProjection.x);
+    float3 bedE=float3((2*bedUvE.x-1)*bedZE/max(reflectionProjection.z,1e-6),(1-2*bedUvE.y)*bedZE/max(reflectionProjection.w,1e-6),bedZE);
+    float3 bedW=float3((2*bedUvW.x-1)*bedZW/max(reflectionProjection.z,1e-6),(1-2*bedUvW.y)*bedZW/max(reflectionProjection.w,1e-6),bedZW);
+    float3 bedS=float3((2*bedUvS.x-1)*bedZS/max(reflectionProjection.z,1e-6),(1-2*bedUvS.y)*bedZS/max(reflectionProjection.w,1e-6),bedZS);
+    float3 bedN=float3((2*bedUvN.x-1)*bedZN/max(reflectionProjection.z,1e-6),(1-2*bedUvN.y)*bedZN/max(reflectionProjection.w,1e-6),bedZN);
+    bedE=bedZE>=99999?bottomView:bedE;
+    bedW=bedZW>=99999?bottomView:bedW;
+    bedS=bedZS>=99999?bottomView:bedS;
+    bedN=bedZN>=99999?bottomView:bedN;
+    float3 bedNormal=cross(bedE-bedW,bedS-bedN);
     float bedNormalUp=dot(bedNormal,upWind.xyz);
     float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);
     // A gentle beach and a rock wall both read as "the bottom comes up fast", and they are
@@ -936,7 +1488,25 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // of 43.1%.
     float lace=1;
     [branch] if(qualityLevel>=6.5) {
-        float fine=lerp(.5,rippleFine.x,filter*filter);
+        // The fleck is NOT the fine chop octave. That octave is counter-phased - plane*2.17
+        // against the phase lanes swapped and scaled by 1.31 - so its coordinate at a fixed
+        // world point still moves with the camera. As a wave slope that is a surface grain
+        // drifting under a drifting sea; as this bright foam mask over a stable bed it made
+        // the flecks crawl across shoal foam as hash. The fleck below is the absolute cell
+        // (plane+wavePhase.xy, the same anchoring the base octave uses) under the integer
+        // matrix [[2,1],[-1,2]] - a scaled rotation, sqrt(5) times finer than the base and
+        // exact under the 64-cell wrap - riding the swell by the fine octave's own offset.
+        // Its fade is its own too: sqrt(5) times the larger footprint component is fleck
+        // cells per pixel, and the fleck returns to neutral between .18 and .45 of those
+        // (five pixels per cell down to two), where a point sample stops being foam texture
+        // and starts breaking into ticks. The broad warp keeps the slower filter fade, so
+        // the tongues outlive the flecks. WaterNoise.h FoamLaceFineValue/FoamLaceFilter are
+        // this same sample and fade for the preview and the anchoring regression.
+        float2 laceAbsolute=plane+wavePhase.xy;
+        float2 laceCell=float2(laceAbsolute.x*2+laceAbsolute.y,
+                               -laceAbsolute.x+laceAbsolute.y*2)+swell*float2(.9,.47);
+        float laceFade=1-smoothstep(.18,.45,2.2360679*max(footprint.x,footprint.y));
+        float fine=lerp(.5,noiseGradient(laceCell).x,laceFade);
         // The mid octave is deliberately NOT a foam input. It is the level-7 value that
         // brought the visible lattice back even after the clipped saturate was removed;
         // its screen projection is exactly the grid reported at quality 7 and above.
@@ -956,7 +1526,11 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // rather than a run-up: the streaks are only there while the sheet is leaving.
     float backwash=0;
     [branch] if(qualityLevel>=6.5)
-        backwash=saturate(.55+.45*sin(swashDepth*2.4-sin01.x*2.1))*(.30+.70*foamPattern)
+        // foamDepthValid gates this like it gates the shore and shoal terms: without it a
+        // pixel whose captured depth is sky (open sea running to the horizon, no bed in
+        // the capture at all) clamps its foam depth to zero, reads itself as ankle-deep
+        // swash, and paints backwash streaks across deep water whenever the sheet drains.
+        backwash=foamDepthValid*saturate(.55+.45*sin(swashDepth*2.4-sin01.x*2.1))*(.30+.70*foamPattern)
             *saturate(shallowEdge*2.2)*draining;
     float foamAmount=saturate((shore*waterStyle.z*(.35+.65*foamWind)*lerp(1,lace,.45)*(1+.45*draining)
         +(crestMask*.45+whitecap*1.15+shoal*.6)*foamWind*foreverStyle.w*lace
@@ -983,14 +1557,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // by it on the way to the screen, and that product is the only honest answer to
     // "is this pixel worth twelve depth reads".
     float3 H=safeNormalize(v+l);
-    float NoV=max(dot(wave,v),1e-4);
     float foreverFresnel=saturate(1-NoV);
     float fresnel=(.02+.98*pow(foreverFresnel,5.0))*foreverStyle.z;
     // Water-to-air rays from below undergo total internal reflection above the critical
     // angle (cos(theta_c)=sqrt(1-(1/1.333)^2) ~= .661). A Schlick curve alone tops out
     // below one, so it incorrectly kept showing the sky/terrain through a grazing underside.
-    // Smooth only across a narrow angular band to avoid a visible branch boundary.
-    float totalInternal=1-smoothstep(.63,.69,NoV);
+    // Smooth only across a narrow angular band to avoid a visible branch boundary;
+    // totalInternal itself was taken up with the column, which needs it first.
     fresnel=max(fresnel,underwater*totalInternal*foreverStyle.z);
     // 2. Screen-space reflections against the pre-water copy, perturbed by the
     // wave normal. WATER QUALITY hands this loop its trip count - 0 skips it through
@@ -998,9 +1571,20 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // against, 8 is what this shader always ran. Fewer steps is a coarser hit, and a
     // coarse hit on a surface this rough is indistinguishable from a sharp one once
     // the roughness mix below has spread it back toward the sky.
-    float3 environment=sky;
+    // The environment a MISS reflects has to be the side of the interface the camera
+    // is on. From below, the reflected ray points back down into the medium - rayUp
+    // saturates at zero and `sky` collapses to the bare fog colour - so handing the
+    // underside the sky term paints it whatever colour the air's horizon happens to
+    // be (a warm evening made a blue lake's underside orange from below while its
+    // surface stayed blue from above). What a mirrored underside with nothing in
+    // reach actually shows is the water around it: the body's own asymptote, the
+    // deep colour with this column's in-scatter in it, tinted the way the body is
+    // tinted below. Above water the lerp is the sky it always was.
+    float3 underEnvironment=(deepTint.rgb+inScatter)*waterTint.rgb;
+    float3 environment=lerp(sky,underEnvironment,underwater);
     float3 reflected=environment;
     float hit=0;
+    float hitDistance=0;
     // The wave offset is the same on every step of the march: evaluate it
     // once instead of eight times.
     float3 waveSample=wave*.15;
@@ -1041,6 +1625,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
             // the colour fetch is output-identical, and a full first hit makes
             // every later contribution exactly zero, so stop the march there.
             [branch] if(confidence>0) {
+                if(hit<=0)hitDistance=traceDistance;
                 hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,
                               confidence*(1-hit));
                 hit=max(hit,confidence);
@@ -1052,6 +1637,17 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // sharp screen-space hit back toward the smooth sky by the wave's own roughness
     // is the cheap stand-in for the blurred mip chain this pass cannot sample.
     reflected=lerp(reflected,environment,saturate(rough*1.6));
+    // A hit found from BELOW is a piece of the underwater world - the bed, a cliff
+    // foot, a wreck - sampled out of the pre-water copy, which is the client's own
+    // in-air shading of it. The direct view of that same rock gets the medium from
+    // the full-screen pass; its reflection in the underside got nothing, because
+    // these are the liquid's own pixels and the pass leaves them alone - which is
+    // how a mirrored underside showed the bed in its dry colours (Mulgore's orange
+    // dirt) over water that was blue in every other pixel. The reflected leg is a
+    // water column like any other: march the hit through the segment it travelled
+    // (the surface-to-camera leg is charged once, to the whole pixel, at the end).
+    float3 reflectionTransmittance=exp(-bodyStyle.x*waterStyle.y*hitDistance*absorbTint.rgb);
+    reflected=lerp(reflected,reflected*reflectionTransmittance+deepTint.rgb*(1-reflectionTransmittance),underwater);
     // One GGX lobe, widened by the sun's own angular disc. That widening is what
     // stretches a low sun into the long shimmering band in the reference while a
     // high sun keeps a short tight one - and it costs nothing per step. This shader
@@ -1134,11 +1730,14 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Use the actual camera-to-fragment ray length, not view-Z (which shortens the column at
     // grazing angles), and the same per-channel Beer-Lambert coefficient as the bottom path.
     // With the camera above water this is an exact identity; underwater it converges toward
-    // the authored deep colour as the surface gets farther away.
-    float cameraColumn=min(length(viewPos),250.0);
+    // the authored deep colour as the surface gets farther away. cameraColumn was computed
+    // with the optical column above, where the underwater branch of that column needs it.
+    // The transmittance is only TAKEN here - it is spent once, after the reflection,
+    // the local lights and the foam are in, because every one of those leaves this
+    // surface toward the same submerged camera and owes the same segment. Spending
+    // it on the body alone let the underside's reflection arrive as though the
+    // water between the surface and the eye were air.
     float3 cameraTransmittance=exp(-bodyStyle.x*waterStyle.y*cameraColumn*absorbTint.rgb);
-    float3 underwaterBody=rgb*cameraTransmittance+deepTint.rgb*(1-cameraTransmittance);
-    rgb=lerp(rgb,underwaterBody,underwater);
     // Direct reflection of actual local emitters on the same wave normal.
     // This does not depend on SSR finding an opaque flame in scene depth.
     float3 localReflection=0;
@@ -1190,10 +1789,31 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     [branch] if(qualityLevel>=9.5)
         rgb+=foamColour*(1-saturate(foamAmount*1.35))*foamAmount*saturate(-vDotL*1.4-.35)
             *saturate(sunElev*2.+.2)*.55*deepTint.a;
+    // The camera's own segment, charged once to everything this surface sends
+    // toward a submerged eye - body, reflection, glint and foam alike (see
+    // cameraTransmittance above). Above water `underwater` is exactly 0 and
+    // this is the identity it always was.
+    float3 underwaterBody=rgb*cameraTransmittance+deepTint.rgb*(1-cameraTransmittance);
+    rgb=lerp(rgb,underwaterBody,underwater);
     if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
-    float depthAlpha=absorption*(.78-.20*fresnel);
+    // Coverage is the column's own extinction, not a hand-tuned fraction of it. Water
+    // writes no depth and blends, so whatever is behind a water face shows through by
+    // exactly (1-alpha) - and behind the face of a wave is very often another face of the
+    // same wave. The .78 ceiling leaked 22% of the sea behind into the sea in front at
+    // every depth past the first e-fold, and the fresnel term took that to 42% at the
+    // grazing angles where wave faces overlap most, which is half of the double wave a
+    // player reads as seeing the front of one through the back of the next (the other half
+    // is the far sheet itself, discarded at the top of this stage: coverage decides how
+    // strongly a face paints, it cannot decide that a face should not have painted). 1-T is
+    // the fraction of what
+    // is behind that this column really extinguishes, and it is the same number the colour
+    // above converged to the deep tint by, so deep water is now the deep colour rather than
+    // the deep colour over a fifth of whatever was standing behind it. Shallow water is
+    // untouched: there T is near one and the bottom still shows through, which is the only
+    // translucency this pass owes.
+    float depthAlpha=absorption;
     float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);
     // `rgb` already contains the water/reflection mix. If alpha stays at the native
     // translucent base while reflectionAmount is high, the fixed-function blend mixes
@@ -1201,7 +1821,29 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // one - the underwater silhouette/seam seen while crossing the interface. Keep the
     // output coverage at least as strong as the reflection we already placed in rgb.
     surfaceAlpha=max(surfaceAlpha,reflectionAmount);
-    result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,surfaceAlpha);
+    // From inside the medium, coverage is also an optics statement, and reflection
+    // strength is not one: turning REFLECTIONS down authors how bright the mirror
+    // is, not whether the world above may leak through it. Outside Snell's window
+    // nothing is transmitted at all, so the sheet is opaque there whatever the
+    // native alpha or the reflection dial say; inside it, coverage is what the
+    // interface column - wash, near-surface layer and all - actually extinguishes
+    // (transmittance above is that column's own), so a dirty lake fogs the shore
+    // overhead out of its plane exactly as the pass fogs it out of the gaps.
+    // Riding the native alpha alone left three quarters of the live scene blended
+    // through a shallow sheet at grazing angles, mirror or no mirror.
+    surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));
+    // The far side of this fragment's own wave, in its fifteen degrees of fade before the
+    // discard at the top of the stage removes it entirely: what survives the fade is the
+    // silhouette itself turning away, not a second sheet behind the first.
+    surfaceAlpha*=1-smoothstep(0.0,.25,wrongSide);
+    // And the fog this sheet fades into is the medium it is in: the client's fog
+    // colour is the air's, and fading a far underside into it handed the horizon
+    // of the plane back to the sky's palette (the same orange the reflection
+    // fallback used to supply). Under water the sheet converges on the body's
+    // own asymptote instead, which is also what the non-liquid pixels around it
+    // converge on, so the plane and its gaps meet at one colour at range.
+    float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);
+    result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;
 }
@@ -1226,7 +1868,7 @@ void ReloadTuning(){
     effectEnabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",1,tuningIni.c_str())!=0;
     wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",1)!=0;
     reflectionsEnabled=ReadTuning(L"ReflectionsEnabled",1)!=0;refractionEnabled=ReadTuning(L"RefractionEnabled",1)!=0;
-    depthEnabled=ReadTuning(L"DepthEnabled",1)!=0;foamEnabled=ReadTuning(L"FoamEnabled",1)!=0;sunGlintEnabled=ReadTuning(L"SunGlintEnabled",1)!=0;
+    depthEnabled=ReadTuning(L"DepthEnabled",1)!=0;depthFogEnabled=ReadTuning(L"DepthFogEnabled",1)!=0;foamEnabled=ReadTuning(L"FoamEnabled",1)!=0;sunGlintEnabled=ReadTuning(L"SunGlintEnabled",1)!=0;
     // WATER QUALITY owns how much work the surface is allowed to take; every other number in
     // this block owns how it looks. It is read before them because both the capture decision
     // above and the constants this file uploads come out of the plan it resolves to, and the
@@ -1246,6 +1888,7 @@ void ReloadTuning(){
     flowRotation=std::clamp(ReadTuning(L"FlowRotationPercent",32),0,100)*.01f;
     refractionStrength=std::clamp(ReadTuning(L"RefractionPercent",14),0,100)*.01f;
     absorptionStrength=std::clamp(ReadTuning(L"DepthAbsorptionPercent",38),0,100)*.01f;
+    depthFogStrength=std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)*.01f;
     shoreFoamStrength=std::clamp(ReadTuning(L"ShoreFoamPercent",28),0,60)*.01f;
     shoreFoamWidth=std::clamp(ReadTuning(L"ShoreFoamWidthPercent",120),25,800)*.01f;
     swellStrength=std::clamp(ReadTuning(L"SwellPercent",55),0,150)*.01f;
@@ -1408,9 +2051,16 @@ void AdvanceSea(float dt) {
 }
 void Present() {
     if(!enabled)return;
+    presentSerial++;
     const auto& wind=renderer::FrameContext::Current().wind;
-    AdvanceSea(wind.sequence?wind.deltaSeconds:
-        seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency()));
+    const float dt=wind.sequence?wind.deltaSeconds:
+        seaFrameClock.Observe(renderer::PerformanceCounter(),renderer::PerformanceFrequency());
+    AdvanceSea(dt);
+    // Every liquid draw of the frame that is over has reported the camera against its own
+    // plane by now, so this is where the frame's answer is settled and smoothed. One frame
+    // of latency is the price of asking draws instead of asking the client, and it is not
+    // visible: the ramp it feeds crosses in a third of a second.
+    AdvanceUnderwater(dt);
     const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
     if(hotkey&&down&&!keyDown&&renderer::FrameContext::Current().wowFocused) {active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
     keyDown=down;
@@ -1421,14 +2071,38 @@ void Present() {
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
             <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed
             <<" sea="<<seaAgitation<<","<<seaMotion<<","<<seaShear<<" weather="<<seaWeather.kind
-            <<','<<seaWeather.strength<<'\n';
+            <<','<<seaWeather.strength
+            <<" underwater="<<submersionTracker.yards<<","<<submersionTracker.ramp
+            <<(submersionTracker.submerged?" submerged":" surfaced")
+            <<" clarityYards="<<underwaterFrame.medium.clarityYards
+            // The diagnosis half of the line: how many liquid draws reported a plane this
+            // interval and, of the ones that could not, which refusal fired - degenerate(1),
+            // sheared(3), range(4), off-screen target, or no vertex height readable (still a
+            // reading, from the draw's origin) - plus the last reading itself, the vertex
+            // height behind it, how many readings carried a negative-determinant basis (the
+            // sign an earlier version wrongly refused whole draws over), the lane the last
+            // draw uploaded (c218.w), whether a frame published the medium, and whether the
+            // medium it published extinguishes anything at all. With these, "nothing happens"
+            // on any client says exactly where it stopped.
+            <<" uwPlane="<<uwPlaneValid<<"/"<<uwPlaneRigid<<"/"<<uwPlaneRot<<"/"<<uwPlaneRange
+            <<"/"<<uwPlaneOffscreen<<"/"<<uwPlaneNoVertex<<"/"<<uwPlaneFar<<"/"<<uwPlaneOutside
+            <<" yards="<<uwLastYards<<" horiz="<<uwLastHorizontal<<" foot="<<uwLastFootprint
+            <<" cover="<<uwLastCoverage<<" contains="<<uwLastContains
+            <<" vertexZ="<<uwLastVertexZ<<" detNeg="<<uwPlaneDetNeg
+            <<" lane="<<uwLastLane<<" published="<<uwPublished
+            <<" mediumValid="<<(underwaterFrame.medium.valid?1:0)<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
+    uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
     // Drop cached texture references before D3D9 Reset: keeping even a lookup
     // texture alive here can make the device reject reset of default-pool assets.
     renderer::water::ResetObservationCache(d);
     ResetMrtCapabilities(d);
+    // The vertex-height cache holds the client's own buffers; an extra reference
+    // to a default-pool buffer here would make the client's Reset fail outright.
+    ClearLiquidVertexZCache();
+    mainTargetSurface=nullptr;
     waterTargetDesc = {}; waterTargetDescValid = false;
     // Wind, sea state and accumulated phases survive GPU loss. They are CPU
     // state, not device resources; forgetting them would pop every crest.
@@ -1457,6 +2131,337 @@ void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0
         DWORD color=strstr(label,"OFF")?0xffaaaaaa:strstr(label,"WAIT")?0xffffcc55:0xff66ff99;
         for(unsigned i=0;label[i];++i){const char* found=strchr(letters,label[i]);if(!found)continue;auto glyph=glyphs[found-letters];for(int y=0;y<7;++y)for(int x=0;x<5;++x)if(glyph[y*5+x]=='1')rect(22.f+i*12.f+x*2.f,46.f+y*2.f,2,2,color);}
     }catch(...){}
+}
+// The local positions of the vertices this draw actually consumes: its
+// first and last, and - when the whole draw is small enough, which a liquid
+// chunk's few hundred indices always are - every emitted vertex in order,
+// so the plane reading can measure the camera against the triangles the
+// draw emits rather than against the rectangle two corners imply (a chunk
+// enables its tiles one by one; the rectangle covers dry shore the draw
+// never drew). The read itself is LocalLightManager's torch pattern, which
+// has years on real clients: the declaration names the position, every
+// offset is bounds-checked against the buffer's own descriptor, the locks
+// are read-only - one range per buffer for the coverage read, single-vertex
+// for the first/last fallback - and any failure simply means the reading
+// falls back to the draw origin's plane. The plane reading answers WHERE
+// the measured water is, sideways, as well as how high (PlaneOverCamera):
+// a height alone cannot tell the lake the camera is in from a lake the same
+// height over it somewhere else. Runs inside Scope, where the
+// stream and index state is still the draw's own. Returns true when the first
+// vertex was read; `haveLast` in the samples says whether the second was too.
+inline UINT LiquidElementCount(D3DPRIMITIVETYPE type,UINT primitiveCount) noexcept {
+    // In 64-bit, under a ceiling. Spelled in UINT, 3*primitiveCount wraps
+    // past about 1.4e9 primitives - and a count wrapped small would have
+    // the coverage read below swear that the first few emitted vertices
+    // were the whole draw, footprint and all. No liquid draw comes within
+    // orders of magnitude of the ceiling; past it the read samples the
+    // first vertex only, which is the fail-safe answer it gives for a
+    // primitive type it does not know.
+    const UINT64 count=primitiveCount;
+    UINT64 elements=0;
+    switch(type) {
+        case D3DPT_POINTLIST:elements=count;break;
+        case D3DPT_LINELIST:elements=2*count;break;
+        case D3DPT_LINESTRIP:elements=count?count+1:0;break;
+        case D3DPT_TRIANGLELIST:elements=3*count;break;
+        case D3DPT_TRIANGLESTRIP:
+        case D3DPT_TRIANGLEFAN:elements=count?count+2:0;break;
+        default:return 0;
+    }
+    return elements<=(UINT64(1)<<24)?static_cast<UINT>(elements):0;
+}
+inline bool LiquidCoverageTopology(D3DPRIMITIVETYPE type,
+    renderer::underwater::LiquidTopology& out) noexcept {
+    switch(type) {
+        case D3DPT_TRIANGLELIST:out=renderer::underwater::LiquidTopology::TriangleList;return true;
+        case D3DPT_TRIANGLESTRIP:out=renderer::underwater::LiquidTopology::TriangleStrip;return true;
+        case D3DPT_TRIANGLEFAN:out=renderer::underwater::LiquidTopology::TriangleFan;return true;
+        default:return false;
+    }
+}
+inline bool ReadLiquidVertices(IDirect3DDevice9* d,LiquidVertexSamples& out) noexcept {
+    if(!d||!nextDrawHintValid)return false;
+    const bool indexed=nextDrawIndexed;
+    const int baseVertexIndex=nextDrawBaseVertexIndex;
+    const UINT startVertex=nextDrawStartVertex,startIndex=nextDrawStartIndex;
+    const void* verticesUP=nextDrawVerticesUP;
+    const void* indicesUP=nextDrawIndicesUP;
+    const D3DFORMAT indexFormatUP=nextDrawIndexFormatUP;
+    const UINT strideUP=nextDrawStrideUP;
+    const D3DPRIMITIVETYPE primitiveType=nextDrawPrimitiveType;
+    const UINT primitiveCount=nextDrawPrimitiveCount;
+    const UINT consumedElements=LiquidElementCount(primitiveType,primitiveCount);
+    nextDrawHintValid=false;
+    ComPtr<IDirect3DVertexDeclaration9> declaration;
+    if(FAILED(d->GetVertexDeclaration(declaration.GetAddressOf()))||!declaration)return false;
+    bool havePosition=false;
+    UINT positionStream=0,positionOffset=0;
+    if(liquidDeclarationCacheValid&&liquidDeclarationCache.Get()==declaration.Get()) {
+        // The declaration this parse already answered for (liquid draws
+        // share one, frame after frame): where its position lives is a
+        // fact about the declaration, not about the draw.
+        havePosition=liquidDeclarationHavePosition;
+        positionStream=liquidDeclarationPositionStream;
+        positionOffset=liquidDeclarationPositionOffset;
+    } else {
+        D3DVERTEXELEMENT9 elements[MAXD3DDECLLENGTH+1]{};
+        UINT elementCount=MAXD3DDECLLENGTH+1;
+        if(FAILED(declaration->GetDeclaration(elements,&elementCount)))return false;
+        for(UINT i=0;i<elementCount&&i<std::size(elements);++i) {
+            const auto& e=elements[i];
+            if(e.Stream==0xFF)break;
+            if(e.Usage==D3DDECLUSAGE_POSITION&&e.UsageIndex==0&&
+               (e.Type==D3DDECLTYPE_FLOAT3||e.Type==D3DDECLTYPE_FLOAT4)) {
+                havePosition=true;positionStream=e.Stream;positionOffset=e.Offset;break;
+            }
+        }
+        liquidDeclarationCache=declaration;
+        liquidDeclarationPositionStream=positionStream;
+        liquidDeclarationPositionOffset=positionOffset;
+        liquidDeclarationHavePosition=havePosition;
+        liquidDeclarationCacheValid=true;
+    }
+    if(!havePosition)return false;
+    const auto sanePosition=[](const float* p){
+        return std::isfinite(p[0])&&std::isfinite(p[1])&&std::isfinite(p[2])
+            &&std::fabs(p[0])<=20000.f&&std::fabs(p[1])<=20000.f&&std::fabs(p[2])<=20000.f;};
+    renderer::underwater::LiquidTopology coverageTopology=
+        renderer::underwater::LiquidTopology::TriangleList;
+    const bool wantCoverage=LiquidCoverageTopology(primitiveType,coverageTopology)
+        &&consumedElements>=3&&consumedElements<=kMaxLiquidCoverageElements;
+    out.coverageTopology=coverageTopology;
+    if(verticesUP) {
+        // User-pointer draws hand the memory over directly; there is no buffer
+        // descriptor to bounds-check against, so the stride itself must at
+        // least contain the position being read, and every vertex number is
+        // kept under a hard cap: a liquid chunk is thousands of vertices, so
+        // anything past a million is a misread index array.
+        if(!strideUP||UINT64(positionOffset)+3*sizeof(float)>strideUP)return false;
+        const auto readOneUP=[&](UINT element,float* target)->bool {
+            long long vertexIndex=startVertex;
+            if(indexed) {
+                if(!indicesUP)return false;
+                const auto* bytes=static_cast<const unsigned char*>(indicesUP);
+                UINT index=0;
+                if(indexFormatUP==D3DFMT_INDEX32)std::memcpy(&index,bytes+UINT64(startIndex+element)*4,4);
+                else if(indexFormatUP==D3DFMT_INDEX16){unsigned short s16=0;std::memcpy(&s16,bytes+UINT64(startIndex+element)*2,2);index=s16;}
+                else return false;
+                vertexIndex=static_cast<long long>(baseVertexIndex)+static_cast<long long>(index);
+            } else vertexIndex+=element;
+            if(vertexIndex<0||vertexIndex>=1000000)return false;
+            std::memcpy(target,static_cast<const unsigned char*>(verticesUP)+
+                UINT64(vertexIndex)*strideUP+positionOffset,3*sizeof(float));
+            return sanePosition(target);
+        };
+        if(wantCoverage) {
+            bool coverageOk=true;
+            for(UINT element=0;element<consumedElements;++element) {
+                if(!readOneUP(element,&liquidCoverageScratch[element].x)) {
+                    if(!element)return false;
+                    coverageOk=false;break;
+                }
+            }
+            if(coverageOk) {
+                for(int axis=0;axis<3;++axis){
+                    out.first[axis]=(&liquidCoverageScratch[0].x)[axis];
+                    out.last[axis]=(&liquidCoverageScratch[consumedElements-1].x)[axis];
+                }
+                out.haveFirst=true;out.haveLast=true;
+                out.coverage=liquidCoverageScratch;
+                out.coverageCount=consumedElements;
+                out.haveCoverage=true;
+                MeasureLiquidCoverageBounds(liquidCoverageScratch,consumedElements,
+                    out.coverageMinX,out.coverageMaxX,out.coverageMinY,out.coverageMaxY);
+                out.haveCoverageBounds=true;
+                return true;
+            }
+        }
+        if(!readOneUP(0,out.first))return false;
+        out.haveFirst=true;
+        out.haveLast=consumedElements>1&&readOneUP(consumedElements-1,out.last);
+        return true;
+    }
+    ComPtr<IDirect3DVertexBuffer9> vertexBuffer;
+    UINT streamOffset=0,stride=0;
+    if(FAILED(d->GetStreamSource(positionStream,vertexBuffer.GetAddressOf(),&streamOffset,&stride))||
+       !vertexBuffer||!stride)
+        return false;
+    ComPtr<IDirect3DIndexBuffer9> indexBuffer;
+    if(indexed&&(FAILED(d->GetIndices(indexBuffer.GetAddressOf()))||!indexBuffer))return false;
+    for(const auto& entry:liquidVertexZCache) {
+        if(entry.valid&&entry.vertices.Get()==vertexBuffer.Get()&&
+           entry.indices.Get()==indexBuffer.Get()&&entry.indexed==indexed&&
+           entry.streamOffset==streamOffset&&entry.stride==stride&&
+           entry.baseVertexIndex==baseVertexIndex&&entry.startIndex==startIndex&&
+           entry.startVertex==startVertex&&
+           entry.primitiveType==primitiveType&&entry.primitiveCount==primitiveCount&&
+           entry.positionOffset==positionOffset) {
+            for(int axis=0;axis<3;++axis){out.first[axis]=entry.first[axis];out.last[axis]=entry.last[axis];}
+            out.haveFirst=true;out.haveLast=entry.haveLast;
+            if(entry.haveCoverage) {
+                out.coverage=entry.coverage;
+                out.coverageCount=entry.coverageCount;
+                out.haveCoverage=true;
+                out.coverageMinX=entry.coverageMinX;out.coverageMaxX=entry.coverageMaxX;
+                out.coverageMinY=entry.coverageMinY;out.coverageMaxY=entry.coverageMaxY;
+                out.haveCoverageBounds=entry.haveCoverageBounds;
+            }
+            return true;
+        }
+    }
+    D3DVERTEXBUFFER_DESC desc{};
+    if(FAILED(vertexBuffer->GetDesc(&desc)))return false;
+    // From here the read locks. Spend this frame's one lock budget (see the
+    // serial above) or leave the chunk for a later frame. Every pool and usage
+    // is read now: an earlier version skipped dynamic default-pool buffers
+    // outright, reasoning that liquid chunks are static - and wherever a
+    // client's chunks ARE dynamic (or merely flagged so), that skip made every
+    // reading answer from the draw origin's plane forever, which is one way a
+    // whole zone's water never engages the medium at all. The budget is what
+    // keeps a first dive from waiting on dozens of locks; the pool was never
+    // the safety, and cached answers make each chunk pay it once.
+    if(liquidVertexZLockSerial==presentSerial)return false;
+    liquidVertexZLockSerial=presentSerial;
+    D3DINDEXBUFFER_DESC indexDesc{};
+    UINT indexSize=0;
+    if(indexed) {
+        if(FAILED(indexBuffer->GetDesc(&indexDesc)))return false;
+        indexSize=indexDesc.Format==D3DFMT_INDEX32?4u:indexDesc.Format==D3DFMT_INDEX16?2u:0u;
+        if(!indexSize)return false;
+    }
+    LiquidVertexSamples samples;
+    bool coverageRead=false;
+    if(wantCoverage) {
+        // The whole draw, under one range lock per buffer: the index range
+        // this draw consumes, then the vertex span those indices actually
+        // touch. That is two locks where first/last took four, it stays
+        // inside the one-new-chunk-per-frame budget above, and the span cap
+        // keeps a pathological merged buffer on the first/last fallback
+        // instead of mapping a megabyte to find a shoreline.
+        bool ok=stride>=positionOffset+3*sizeof(float);
+        long long minVertex=0,maxVertex=0;
+        if(ok&&indexed) {
+            const UINT64 indexOffset=UINT64(startIndex)*indexSize;
+            const UINT64 indexBytes=UINT64(consumedElements)*indexSize;
+            void* locked=nullptr;
+            if(indexOffset+indexBytes>indexDesc.Size||
+               FAILED(indexBuffer->Lock(static_cast<UINT>(indexOffset),
+                   static_cast<UINT>(indexBytes),&locked,D3DLOCK_READONLY))||!locked)
+                ok=false;
+            if(ok) {
+                const auto* bytes=static_cast<const unsigned char*>(locked);
+                for(UINT element=0;element<consumedElements;++element) {
+                    UINT index=0;
+                    if(indexSize==4)std::memcpy(&index,bytes+UINT64(element)*4,4);
+                    else{unsigned short s16=0;std::memcpy(&s16,bytes+UINT64(element)*2,2);index=s16;}
+                    const long long vertexIndex=static_cast<long long>(baseVertexIndex)
+                        +static_cast<long long>(index);
+                    if(vertexIndex<0){ok=false;break;}
+                    liquidCoverageIndexScratch[element]=vertexIndex;
+                    if(!element||vertexIndex<minVertex)minVertex=vertexIndex;
+                    if(!element||vertexIndex>maxVertex)maxVertex=vertexIndex;
+                }
+                indexBuffer->Unlock();
+            }
+        } else if(ok) {
+            minVertex=startVertex;
+            maxVertex=static_cast<long long>(startVertex)+consumedElements-1;
+            for(UINT element=0;element<consumedElements;++element)
+                liquidCoverageIndexScratch[element]=minVertex+static_cast<long long>(element);
+        }
+        if(ok) {
+            const UINT64 firstOffset=UINT64(streamOffset)+UINT64(minVertex)*stride+positionOffset;
+            const UINT64 endOffset=UINT64(streamOffset)+UINT64(maxVertex)*stride
+                +positionOffset+3*sizeof(float);
+            void* locked=nullptr;
+            if(endOffset>desc.Size||endOffset-firstOffset>(1u<<20)||
+               FAILED(vertexBuffer->Lock(static_cast<UINT>(firstOffset),
+                   static_cast<UINT>(endOffset-firstOffset),&locked,D3DLOCK_READONLY))||!locked)
+                ok=false;
+            if(ok) {
+                const auto* bytes=static_cast<const unsigned char*>(locked);
+                for(UINT element=0;element<consumedElements;++element) {
+                    float* target=&liquidCoverageScratch[element].x;
+                    std::memcpy(target,bytes+UINT64(liquidCoverageIndexScratch[element]-minVertex)*stride,
+                        3*sizeof(float));
+                    if(!sanePosition(target)){ok=false;break;}
+                }
+                vertexBuffer->Unlock();
+            }
+        }
+        if(ok) {
+            coverageRead=true;
+            for(int axis=0;axis<3;++axis){
+                samples.first[axis]=(&liquidCoverageScratch[0].x)[axis];
+                samples.last[axis]=(&liquidCoverageScratch[consumedElements-1].x)[axis];
+            }
+            samples.haveFirst=true;samples.haveLast=true;
+            MeasureLiquidCoverageBounds(liquidCoverageScratch,consumedElements,
+                samples.coverageMinX,samples.coverageMaxX,
+                samples.coverageMinY,samples.coverageMaxY);
+            samples.haveCoverageBounds=true;
+        }
+    }
+    const auto readOne=[&](UINT element,float* target)->bool {
+        long long vertexIndex=startVertex;
+        if(indexed) {
+            const UINT64 indexOffset=UINT64(startIndex+element)*indexSize;
+            if(indexOffset+indexSize>indexDesc.Size)return false;
+            void* locked=nullptr;
+            if(FAILED(indexBuffer->Lock(static_cast<UINT>(indexOffset),indexSize,&locked,D3DLOCK_READONLY))||!locked)
+                return false;
+            UINT index=0;
+            if(indexSize==4)std::memcpy(&index,locked,4);
+            else{unsigned short s16=0;std::memcpy(&s16,locked,2);index=s16;}
+            indexBuffer->Unlock();
+            vertexIndex=static_cast<long long>(baseVertexIndex)+static_cast<long long>(index);
+            if(vertexIndex<0)return false;
+        } else vertexIndex+=element;
+        const UINT64 offset=UINT64(streamOffset)+UINT64(vertexIndex)*stride+positionOffset;
+        if(offset+3*sizeof(float)>desc.Size)return false;
+        void* locked=nullptr;
+        if(FAILED(vertexBuffer->Lock(static_cast<UINT>(offset),3*sizeof(float),&locked,D3DLOCK_READONLY))||!locked)
+            return false;
+        std::memcpy(target,locked,3*sizeof(float));
+        vertexBuffer->Unlock();
+        return sanePosition(target);
+    };
+    if(!coverageRead) {
+        if(!readOne(0,samples.first))return false;
+        samples.haveFirst=true;
+        samples.haveLast=consumedElements>1&&readOne(consumedElements-1,samples.last);
+    }
+    auto& entry=liquidVertexZCache[liquidVertexZNext++%64];
+    // Field by field, not a whole-entry assignment: an entry now carries a
+    // 48 KB coverage array, and default-constructing a temporary to clear
+    // the slot would put that array on this function's stack frame.
+    entry.vertices.Reset();entry.indices.Reset();
+    entry.coverageCount=0;entry.haveCoverage=false;entry.haveCoverageBounds=false;
+    entry.valid=false;
+    entry.vertices=vertexBuffer;entry.indices=indexBuffer;
+    entry.streamOffset=streamOffset;entry.stride=stride;
+    entry.baseVertexIndex=baseVertexIndex;entry.startIndex=startIndex;entry.startVertex=startVertex;
+    entry.primitiveType=primitiveType;entry.primitiveCount=primitiveCount;
+    entry.positionOffset=positionOffset;entry.indexed=indexed;
+    for(int axis=0;axis<3;++axis){entry.first[axis]=samples.first[axis];entry.last[axis]=samples.last[axis];}
+    entry.haveLast=samples.haveLast;entry.valid=true;
+    if(coverageRead) {
+        for(UINT element=0;element<consumedElements;++element)
+            entry.coverage[element]=liquidCoverageScratch[element];
+        entry.coverageCount=consumedElements;
+        entry.haveCoverage=true;
+        entry.coverageMinX=samples.coverageMinX;entry.coverageMaxX=samples.coverageMaxX;
+        entry.coverageMinY=samples.coverageMinY;entry.coverageMaxY=samples.coverageMaxY;
+        entry.haveCoverageBounds=samples.haveCoverageBounds;
+    }
+    out=samples;
+    if(coverageRead) {
+        out.coverage=entry.coverage;
+        out.coverageCount=entry.coverageCount;
+        out.coverageTopology=coverageTopology;
+        out.haveCoverage=true;
+    }
+    return true;
 }
 struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
@@ -1646,7 +2651,10 @@ struct Scope {
             controls[13]=(haveCapture?reflectionData[1]:-.1f)*depthRange;
             controls[14]=haveCapture?reflectionData[2]:1.f;
             controls[15]=haveCapture?reflectionData[3]:1.f;
-            controls[19]=depthRange;
+            // c204.w once carried the depth range unread (it is folded into c203
+            // above); it now carries DEPTH FOG - the second leg of the bed's path,
+            // 1 with the toggle off, which makes the column below bit-identical.
+            controls[19]=depthFogEnabled?depthFogStrength:1.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops
@@ -1693,11 +2701,85 @@ struct Scope {
             // Query the live VIEW transform on this draw (including reflection views) and
             // use its global camera only when the rigid bases match the vertex matrix.
             D3DMATRIX liveView{};
+            float viewRows[4][4]{};
             if(SUCCEEDED(d->GetTransform(D3DTS_VIEW,&liveView))) {
-                float viewRows[4][4]{};
                 std::memcpy(viewRows,&liveView,sizeof(viewRows));
                 anchor=renderer::water::AnchorForWaterDraw(modelView,viewRows);
             }
+            // The camera against THIS tile's liquid plane, in yards, positive under
+            // it - from this draw's own matrix and one of its own vertices, nothing
+            // else (renderer::underwater::PlaneOverCamera derives it, and says why
+            // the live VIEW state and the determinant's sign are no longer asked).
+            // Which pass the draw belongs to is read off the render target instead:
+            // the client's reflection pass draws the same water under a camera
+            // mirrored about the plane, and ITS reading is the player's own depth
+            // with the wrong sign, so only a draw aimed at the player's own view
+            // may speak. A target query that fails answers "main": treating an
+            // unqueryable driver as a reflection would silence every draw, which
+            // is the failure this replaced.
+            bool mainTarget=true;
+            {
+                ComPtr<IDirect3DSurface9> currentTarget;
+                if(SUCCEEDED(d->GetRenderTarget(0,currentTarget.GetAddressOf()))&&currentTarget) {
+                    mainTarget=mainTargetSurface&&currentTarget.Get()==mainTargetSurface;
+                    if(!mainTarget) {
+                        // The backbuffer is always the player's view, published
+                        // target or not; aliasing it with a reflection's target
+                        // is not possible, and the alias keeps a stale published
+                        // pointer (volume toggled off mid-session) from reading
+                        // as "off-screen" forever.
+                        ComPtr<IDirect3DSurface9> backBuffer;
+                        if(SUCCEEDED(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,backBuffer.GetAddressOf()))&&backBuffer)
+                            mainTarget=currentTarget.Get()==backBuffer.Get();
+                        else if(!mainTargetSurface)mainTarget=true;
+                    }
+                }
+            }
+            LiquidVertexSamples vertexSamples;
+            const bool haveVertices=mainTarget&&ReadLiquidVertices(d,vertexSamples);
+            const renderer::underwater::Vec3 firstVertex{vertexSamples.first[0],
+                vertexSamples.first[1],vertexSamples.first[2]};
+            const renderer::underwater::Vec3 lastVertex{vertexSamples.last[0],
+                vertexSamples.last[1],vertexSamples.last[2]};
+            const renderer::underwater::LiquidCoverage liquidCoverage{
+                vertexSamples.coverage,vertexSamples.coverageCount,
+                vertexSamples.coverageTopology,
+                vertexSamples.coverageMinX,vertexSamples.coverageMaxX,
+                vertexSamples.coverageMinY,vertexSamples.coverageMaxY,
+                vertexSamples.haveCoverageBounds};
+            const auto planeReading=mainTarget
+                ?renderer::underwater::PlaneOverCamera(modelView,
+                    haveVertices?&firstVertex:nullptr,
+                    (haveVertices&&vertexSamples.haveLast)?&lastVertex:nullptr,
+                    (haveVertices&&vertexSamples.haveCoverage)?&liquidCoverage:nullptr)
+                :renderer::underwater::PlaneReading{};
+            if(planeReading.valid&&planeReading.local) {
+                submersionTracker.Observe(planeReading);uwPlaneValid++;
+                uwLastYards=planeReading.yards;
+                uwLastHorizontal=planeReading.horizontalYards;
+                uwLastFootprint=planeReading.footprintYards;
+                uwLastCoverage=planeReading.coverageKnown?1:0;
+                uwLastContains=planeReading.containsCamera?1:0;
+                if(planeReading.yards>renderer::underwater::Tracker::kExitYards
+                   &&planeReading.footprintKnown&&!planeReading.containsCamera)uwPlaneOutside++;
+                if(planeReading.negativeDeterminant)uwPlaneDetNeg++;
+                if(haveVertices)uwLastVertexZ=vertexSamples.first[2];else uwPlaneNoVertex++;
+            }
+            else if(planeReading.valid) {
+                // A real height, but the water it belongs to is somewhere else: a
+                // raised lake in view over dry land. Counted apart so the log shows
+                // the locality gate working (and how far away that water was).
+                uwPlaneFar++;
+                uwLastYards=planeReading.yards;
+                uwLastHorizontal=planeReading.horizontalYards;
+                uwLastFootprint=planeReading.footprintYards;
+                uwLastCoverage=planeReading.coverageKnown?1:0;
+                uwLastContains=planeReading.containsCamera?1:0;
+            }
+            else if(!mainTarget)uwPlaneOffscreen++;
+            else if(planeReading.reason==1)uwPlaneRigid++;
+            else if(planeReading.reason==3)uwPlaneRot++;
+            else uwPlaneRange++;
             if(!anchor.valid) {
                 // No rigid basis on this draw (an unfilled constant register, a fixture):
                 // fall back to the captured camera, which is at least the right world, and
@@ -1706,9 +2788,17 @@ struct Scope {
                 anchor.camera[0]=waveFrame.cameraPosition.x;
                 anchor.camera[1]=waveFrame.cameraPosition.y;
                 anchor.valid=waveFrame.cameraValid;
+                // World +Z in view space is ROW 2 of the captured view, which is the
+                // convention AnchorFromModelView documents ("world axis i arrives in view
+                // space as row i") and the one MaterialCacheManager transforms world
+                // vectors with. Reading the components across the rows instead yields the
+                // view axes expressed in world coordinates - the exact mistake that
+                // comment names - so this fallback used to hand the pixel stage, and the
+                // medium published below, an up axis with the camera's rotation applied
+                // twice over, on the rare draw with no rigid basis of its own.
                 const bool viewValid=waveFrame.viewRawValid;
-                anchor.up[0]=viewValid?waveFrame.viewRaw.m[0][2]:0.f;
-                anchor.up[1]=viewValid?waveFrame.viewRaw.m[1][2]:0.f;
+                anchor.up[0]=viewValid?waveFrame.viewRaw.m[2][0]:0.f;
+                anchor.up[1]=viewValid?waveFrame.viewRaw.m[2][1]:0.f;
                 anchor.up[2]=viewValid?waveFrame.viewRaw.m[2][2]:1.f;
             }
             if(anchor.valid)lastWaveAnchor=anchor;
@@ -1750,7 +2840,9 @@ struct Scope {
             // absorption coefficient, which is how the reference describes it: 200 is a
             // clear mountain lake, 5 is swamp soup. 0.088 per view unit of column puts
             // the first e-fold near thirty yards at the shipped default.
-            controls[52]=.088f*(100.f/clarityPercent);
+            const float clarityMultiplier=zoneWavesEnabled
+                ?std::clamp(waveFrame.environment[renderer::WaterClarity],.1f,4.f):1.f;
+            controls[52]=.088f*(100.f/(clarityPercent*clarityMultiplier));
             controls[53]=.25f*roughnessPercent*.01f;
             controls[54]=.02f+.06f*sheenPercent*.01f;
             controls[55]=shoalFoamPercent*.01f;
@@ -1759,15 +2851,13 @@ struct Scope {
             // because it is what the column converges to, and the absorption triple is
             // per-channel rate: a red-heavy value kills red first, which is why a deep
             // pool reads teal rather than as a darker grey.
-            const auto byte=[&](unsigned colour,unsigned shift,float divisor) {
-                return float((colour>>shift)&255u)/divisor;
-            };
-            controls[56]=byte(waterColourTint,16,128.f);controls[57]=byte(waterColourTint,8,128.f);
-            controls[58]=byte(waterColourTint,0,128.f);controls[59]=sunDiscPercent*.004f;
-            controls[60]=byte(deepColour,16,255.f);controls[61]=byte(deepColour,8,255.f);
-            controls[62]=byte(deepColour,0,255.f);controls[63]=foamBrightPercent*.01f;
-            controls[64]=byte(absorptionColour,16,128.f);controls[65]=byte(absorptionColour,8,128.f);
-            controls[66]=byte(absorptionColour,0,128.f);controls[67]=sparklePercent*.01f;
+            const auto colourSet=ResolveWaterColourSet(waveFrame.environment.water);
+            controls[56]=colourSet.tint[0];controls[57]=colourSet.tint[1];
+            controls[58]=colourSet.tint[2];controls[59]=sunDiscPercent*.004f;
+            controls[60]=colourSet.deep[0];controls[61]=colourSet.deep[1];
+            controls[62]=colourSet.deep[2];controls[63]=foamBrightPercent*.01f;
+            controls[64]=colourSet.absorb[0];controls[65]=colourSet.absorb[1];
+            controls[66]=colourSet.absorb[2];controls[67]=sparklePercent*.01f;
             // Per-zone colours (EnvironmentProfiles.ini [Zone.N]/[Area.N], resolved and
             // blended by the environment manager) sit between the two authored layers:
             // they replace the global GraphicsEffects colours above, because azure in
@@ -1776,15 +2866,9 @@ struct Scope {
             // exactly this place, so it still wins, key by key. The resolved values
             // are already in register space (tint/absorption over 128, deep over 255),
             // so this is a copy, not a second conversion that could drift from it.
-            if(waveFrame.environment.water.authored) {
-                const auto& zoneWater=waveFrame.environment.water;
-                if(!scopedWaterColour)
-                    {controls[56]=zoneWater.tint[0];controls[57]=zoneWater.tint[1];controls[58]=zoneWater.tint[2];}
-                if(!scopedDeepColour)
-                    {controls[60]=zoneWater.deep[0];controls[61]=zoneWater.deep[1];controls[62]=zoneWater.deep[2];}
-                if(!scopedAbsorptionColour)
-                    {controls[64]=zoneWater.absorption[0];controls[65]=zoneWater.absorption[1];controls[66]=zoneWater.absorption[2];}
-            }
+            // (The zone layer itself moved into ResolveWaterColourSet above, which is the
+            // same three-way precedence it had here, so that the underwater medium and this
+            // draw cannot resolve their colours differently.)
             // c217: the four trains only the shading carries, in one contiguous float4.
             controls[68]=wave.swellPhase[2];controls[69]=wave.swellPhase[3];
             controls[70]=wave.swellPhase[4];controls[71]=wave.swellPhase[5];
@@ -1798,6 +2882,68 @@ struct Scope {
             // the WAVES switch without a second authoring path, and it is zero on water that was
             // authored flat or at a level below the feature, where nothing arrives to run up.
             controls[74]=renderer::water::SwashYards(qualityPlan,geometry.amplitude);
+            // c218.w: the camera's side of this draw's liquid plane, in units of the wave's
+            // own lift. Dividing by the lift is what makes the classification fade across
+            // the band the sea is actually rough enough to need instead of snapping at the
+            // mean plane: on a flat lake that band is a third of a yard, and on a swell
+            // lifting three yards a camera floating at the surface spends seconds crossing
+            // it, which is what a swimmer's eye does. -1 or below is air, +1 or above is
+            // water, and everything between is the transition. When this draw cannot answer
+            // (a mirrored reflection view, a fixture, a rotated tile) the tracker's held
+            // value is used instead of zeroing the lane, so one unreadable draw cannot
+            // blink the whole sea back to "above water" for a frame. ClassifiedYards spends
+            // the tracker's own entry rule here too: a local sheet the camera is beside
+            // and below the level of reads positive yards, and spending those yards raw
+            // shaded that sheet as seen from under water by a camera on dry ground -
+            // the full-screen gate's twin, in this stage.
+            const float planeBand=std::max(renderer::underwater::kShaderBandYards,
+                geometry.amplitude*renderer::water::kGroupMax);
+            const float submersion=renderer::underwater::ClassifiedYards(
+                planeReading,submersionTracker);
+            controls[75]=std::clamp(submersion/planeBand,-2.f,2.f);
+            uwLastLane=controls[75];
+            // c202.w: the exit-wash turbidity for this draw's own pixels - the
+            // player's [Underwater] dial as the compositor published it
+            // (underwaterFrame.turbidity), scaled by this frame's zone multiplier
+            // behind the same ZoneWaves gate as the clarity above, then folded by
+            // ExitWash against the very submersion this draw measured. The pixel
+            // stage spends it on the interface column, so the plane and the gaps
+            // in the plane wash the world above out by the same dirt.
+            const float turbidityMultiplier=zoneWavesEnabled
+                ?(std::isfinite(waveFrame.environment[renderer::UnderwaterTurbidity])
+                    ?std::clamp(waveFrame.environment[renderer::UnderwaterTurbidity],0.f,4.f):1.f)
+                :1.f;
+            const float effectiveTurbidity=std::clamp(
+                underwaterFrame.turbidity*turbidityMultiplier,0.f,3.f);
+            controls[11]=renderer::underwater::ExitWash(effectiveTurbidity,submersion,true)-1.f;
+            // Publish the medium this draw was handed, for the full-screen pass that renders
+            // the world the camera is inside. It reads these rather than resolving a second
+            // set of colours, so a zone's authored water is the same water under the surface
+            // as in it, and the line where a seabed meets the sea above it is not a line. An
+            // off-screen draw is skipped: its light and up axes are the reflection camera's,
+            // and its medium would be right for a camera that does not exist. The wave field
+            // is NOT published (see UnderwaterFrame): the composite builds it against the
+            // camera it reconstructs with, because this draw's anchor is another camera.
+            if(mainTarget) {
+                auto& published=underwaterFrame;
+                published.medium=UnderwaterMediumForFrame(colourSet,clarityMultiplier);
+                for(int i=0;i<3;++i)published.up[i]=controls[48+i];
+                // c201 is uploaded pre-negated, because the pixel stage negates it to get a
+                // direction pointing at the source; the pass wants that direction directly.
+                const float lx=-controls[4],ly=-controls[5],lz=-controls[6];
+                const float ll=std::sqrt(lx*lx+ly*ly+lz*lz);
+                if(ll>1e-5f) {
+                    published.lightDir[0]=lx/ll;published.lightDir[1]=ly/ll;published.lightDir[2]=lz/ll;
+                }
+                published.lightColour[0]=controls[8];published.lightColour[1]=controls[9];
+                published.lightColour[2]=controls[10];
+                // Elevation of the source over this draw's own horizon: the same dot the
+                // pixel stage takes to gate its in-scatter and its sky gradient, so the light
+                // under the surface is the light the surface is in.
+                published.sunElevation=published.lightDir[0]*published.up[0]
+                    +published.lightDir[1]*published.up[1]+published.lightDir[2]*published.up[2];
+                published.published=true;
+            }
             // Both stages share the swell phases of the trains they both carry - and at WATER
             // QUALITY 8 and above that is three trains, not two: c202.z carries train C's own
             // wrapped phase, the same number c217.x gives the pixel stage, so the mid-scale

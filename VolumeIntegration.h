@@ -19,6 +19,7 @@
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Effects/VolumetricClouds.h"
 #include "src/Effects/AmbientOcclusion.h"
+#include "src/Effects/Underwater.h"
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Effects/LocalLightingCore.h"
 #include "src/Effects/LocalLightingRenderer.h"
@@ -370,6 +371,16 @@ void ReloadTuning() {
         renderer::DirectionalVolumetricLighting::Instance().Configure(savedBasePath);
         renderer::VolumetricClouds::Instance().Configure(savedBasePath);
         renderer::AmbientOcclusion::Instance().Configure(savedBasePath);
+        renderer::Underwater::Instance().Configure(savedBasePath);
+        // The water stage shades the liquid's own pixels - the ones this pass
+        // deliberately leaves alone - so the dirt in the water has to reach it:
+        // the player's turbidity dial is published here, where its section is
+        // read, and each water draw scales it by its zone's multiplier beside
+        // the clarity it already scales. A disabled pass publishes 0, which
+        // keeps the surface's exit wash under the same switch as the medium.
+        const auto& underwaterSettings = renderer::Underwater::Instance().Settings();
+        watereffect::underwaterFrame.turbidity = underwaterSettings.enabled
+            ? underwaterSettings.turbidity : 0.f;
     }
     cloudsEffectEnabled = renderer::VolumetricClouds::Instance().Settings().enabled;
 }
@@ -383,6 +394,7 @@ void Configure(const std::wstring& base) {
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
     renderer::VolumetricClouds::Instance().Configure(base);
+    renderer::Underwater::Instance().Configure(base);
     enabled = renderer::locationtuning::ReadInt(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
     ReloadTuning();
 }
@@ -393,6 +405,7 @@ void Finish(IDirect3DDevice9* d) {
     renderer::DepthCapture::Instance().OnFrameEnd(d);
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
+    watereffect::mainTargetSurface = nullptr;
     watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
     watereffect::waterTargetDesc = {}; watereffect::waterTargetDescValid = false;
     auto& frame = renderer::FrameContext::Current();
@@ -410,6 +423,7 @@ void Reset(IDirect3DDevice9* d) {
     renderer::DirectionalVolumetricLighting::Instance().Reset(d);
     renderer::VolumetricClouds::Instance().Reset(d);
     renderer::AmbientOcclusion::Instance().Reset(d);
+    renderer::Underwater::Instance().Reset(d);
     renderer::GroundSurfaceCapture::Instance().Reset();
     renderer::PerformanceProfiler::Instance().Reset(d);
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
@@ -467,8 +481,14 @@ inline bool HasOtherActiveEffects() {
     const bool hasAO = !shaftDebug && renderer::AmbientOcclusion::Instance().IsActive();
     const bool hasLightScatteringDebug = atmosphere.enabled &&
         atmosphere.debugMode == renderer::VolumetricDebugMode::LocalLightScattering;
+    // The underwater pass is here for a reason that is not about drawing: it reads the water
+    // mask to leave the liquid's own pixels alone, and that mask is allocated below only when
+    // this function says some effect will consume it. Without this line a diver with every
+    // other effect switched off gets no mask, and the surface is shaded twice - once by the
+    // water stage's own camera column and once by the medium.
+    const bool hasUnderwater = !shaftDebug && renderer::Underwater::Instance().IsActive();
     return hasContact || hasFog || hasVolumetric || hasGlare || hasClouds || hasPost || hasAO ||
-           hasLightScatteringDebug;
+           hasLightScatteringDebug || hasUnderwater;
 }
 
 inline bool HasActiveEffects() {
@@ -491,6 +511,17 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     surface = renderer::DepthCapture::Instance().GetDepthSurface();
     originalDepth = renderer::DepthCapture::Instance().GetOriginalDepth();
     target = renderer::DepthCapture::Instance().GetRenderTarget();
+    // The surface the player's own view is rendered into this frame, published
+    // for the water draws: their plane readings accept only draws aimed here,
+    // which is what keeps the client's reflection pass (its own target, a
+    // mirrored camera) out of the submersion tracker.
+    watereffect::mainTargetSurface = target.Get();
+    // The underwater pass counts presented frames here toward building its
+    // DEVICE shader (its bytecode is compiled on a worker from Configure), so
+    // neither a cold fxc run nor a cold driver JIT is ever paid inside the
+    // first frames of a launch - the white login window that synchronous
+    // preparation in this hook used to produce - nor mid-dive.
+    renderer::Underwater::Instance().Prewarm(d);
     owner = renderer::DepthCapture::Instance().GetOwner();
     depthFrames = renderer::DepthCapture::Instance().GetDepthFrames();
     if (renderer::DepthCapture::Instance().HasDepth()) {
@@ -1108,6 +1139,17 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.sceneColor = legacyTargets.scene.Get();
     frameCtx.sceneSurface = legacyTargets.sceneSurface.Get();
     frameCtx.atmosphereNoise = resources.noise.Get();
+    // The camera's own medium, settled by the water stage from the liquid draws of the frame
+    // that just finished (see AdvanceUnderwater in WaterEffect.h). Published first, before any
+    // pass reads it, because three of them do: the atmosphere fades its air densities out on
+    // the ramp, the cloud deck stops landing on a surface seen from underneath, and the
+    // underwater pass fades its own medium in on it. One number, one answer, no pass guessing.
+    // Gated on the medium's own switch, so UNDERWATER=0 restores the air passes exactly as
+    // they were: the tracker still settles (the water pixel stage classifies from it, and
+    // that classification is a bug fix rather than a feature), but nothing fades on it.
+    const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();
+    frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;
+    frameCtx.underwaterYards = watereffect::submersionTracker.yards;
 
     // One Capture on the shared D3DSBT_ALL stack replaces the ~170-call
     // manual save; the passes nested inside (AO, clouds, local lights)
@@ -1467,6 +1509,47 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(0, nullptr));
         check(d->SetTexture(1, nullptr));
         check(d->SetTexture(2, nullptr));
+    }
+
+    // The world the camera is inside. Last of the light terms and before the grade, which is
+    // where the medium physically is: a diver looks at everything this compositor built - the
+    // occluded world, the deck, the local lights, the air, the glare - through water, so the
+    // water goes on after all of them and before the frame is graded. It reads the scene copy
+    // and writes the mixed frame back into `target` with blending off, leaves the liquid's own
+    // pixels to the water stage that marched that column with the same coefficient, and above
+    // water it does not run at all.
+    if (underwaterActive) {
+        renderer::UnderwaterInputs inputs;
+        inputs.medium = watereffect::underwaterFrame.medium;
+        // The wave field is built HERE, for this frame context's camera - the one
+        // the pass reconstructs world positions against from the captured view's
+        // inverse. A field carried over from a draw or from the previous frame's
+        // Present would be anchored to another camera, and the caustic net, the
+        // shaft pattern and the sediment patches would crawl with every move.
+        inputs.field = watereffect::UnderwaterFieldAt(frameCtx.cameraPosition.x,
+            frameCtx.cameraPosition.y, frameCtx.cameraValid);
+        for (int axis = 0; axis < 3; ++axis) {
+            inputs.up[axis] = watereffect::underwaterFrame.up[axis];
+            inputs.lightDir[axis] = watereffect::underwaterFrame.lightDir[axis];
+            inputs.lightColour[axis] = watereffect::underwaterFrame.lightColour[axis];
+        }
+        inputs.sunElevation = watereffect::underwaterFrame.sunElevation;
+        // The place's underwater defaults ride the same resolved environment the
+        // medium was built from, gated by the same ZoneWaves switch that gates
+        // the zone sea state: ZoneWaves=0 pins every shore to the global dials.
+        if (watereffect::zoneWavesEnabled) {
+            inputs.turbidityMultiplier = frameCtx.environment[renderer::UnderwaterTurbidity];
+            inputs.causticMultiplier = frameCtx.environment[renderer::UnderwaterCaustics];
+            inputs.shaftMultiplier = frameCtx.environment[renderer::UnderwaterShafts];
+            inputs.glowMultiplier = frameCtx.environment[renderer::UnderwaterGlow];
+        }
+        if (renderer::Underwater::Instance().Render(d, frameCtx, target.Get(), depth.Get(), inputs))
+        {
+            // The pass wrote the whole frame, so the copy every downstream pass samples - the
+            // grade and the anti-aliasing both read it as their scratch source - has to carry
+            // the medium too.
+            check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
+        }
     }
 
     // Independent post pass: optional glare failures must not suppress grading. Anti-aliasing rides

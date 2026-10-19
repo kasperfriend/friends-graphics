@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include "WaveField.h"
 
@@ -64,6 +65,40 @@ namespace renderer::water
         float gradientX = 0.f; // derivative of the scalar warp with respect to cell X
         float gradientY = 0.f; // derivative of the scalar warp with respect to cell Y
     };
+
+    // The foam lace's fine fleck. It cannot read the fine chop octave: that octave is a moving
+    // surface grain, sampled counter-phased (plane*2.17 with the phase lanes swapped and
+    // scaled by 1.31), so at a fixed world point its coordinate still moves when the camera
+    // moves. As a wave slope that drift is invisible under a drifting sea; as a high-contrast
+    // foam mask laid over a stable bed it crawls - the flecks swim across shoal foam and read
+    // as hash. This sample is the anchored alternative: the absolute cell (relative plane plus
+    // the camera-carrying ripple phase) under the integer matrix [[2,1],[-1,2]], a rotation by
+    // -26.6 degrees scaled by sqrt(5)=2.236. Integer entries keep the 64-cell wrap exact (a
+    // 64-cell step in the absolute cell is a whole number of 64-cell steps here), and because
+    // the matrix is a scaled rotation the fleck cells stay square, at 2.5/2.236 yards - the
+    // fine octave's own scale, without its camera drift. The swell offset matches the fine
+    // octave's, so the flecks still ride the swell they tear.
+    inline float FoamLaceFineValue(const WaveField& field, float planeX, float planeY, float swell)
+    {
+        const float absoluteX = planeX + field.ripplePhase[0];
+        const float absoluteY = planeY + field.ripplePhase[1];
+        return NoiseGradient(2.f * absoluteX + absoluteY + swell * .9f,
+                             -absoluteX + 2.f * absoluteY + swell * .47f).value;
+    }
+
+    // How much of the lace fleck survives at this pixel footprint, in base lattice cells per
+    // pixel (the shader's fwidth(plane)). The fleck lattice is sqrt(5) times finer than the
+    // base, so its own footprint is sqrt(5) times the larger component here; the fleck fades
+    // to the neutral .5 between 0.18 and 0.45 fleck cells per pixel - between about five
+    // pixels per fleck cell and two, below which a point-sampled fleck is no longer foam
+    // texture but aliasing that breaks into ticks and crawls as the phase drifts. The broad
+    // foam warp keeps its own slower fade, so foam tongues remain after the flecks go.
+    inline float FoamLaceFilter(float footprintX, float footprintY)
+    {
+        const float cells = 2.2360679f * std::max(std::fabs(footprintX), std::fabs(footprintY));
+        const float t = std::clamp((cells - .18f) / (.45f - .18f), 0.f, 1.f);
+        return 1.f - t * t * (3.f - 2.f * t);
+    }
 
     // Bend the broad, analytic swell with a smooth pseudorandom scalar field
     // along one oblique direction. The first derivatives come from the same

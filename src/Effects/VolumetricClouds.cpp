@@ -386,6 +386,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 const char* kCloudCompositeSource = R"HLSL(
 sampler2D sceneMap:register(s0); sampler2D cloudMap:register(s1);
 sampler2D depthMap:register(s2); sampler2D shadowMap:register(s3);
+sampler2D waterMask:register(s4);
 float4 texels:register(c0);      // x=1/full width, y=1/full height, z=1/low width, w=1/low height
 float4 depthRange:register(c1);  // x=viewport MinZ, y=depth range, z=viewport MaxZ, w=debug
 float4 cameraPos:register(c2);
@@ -395,6 +396,7 @@ float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow
 float4 lightProjection:register(c8); // xy=light XY/Z, z=cloud base, w=thickness
 float4 moonDisc:register(c9); // xy=tracked screen centre, z=disc view depth
 float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z=valid, w=horizontal scale
+float4 mediumControl:register(c11); // x=how far the camera is under water (0 air, 1 submerged)
 float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth) {
  float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
  float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
@@ -446,6 +448,17 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
  float sky=max(step((depthRange.z+1)*.5,linearRaw),moonCentre);
+ // The deck is air, and this pass is the last thing that touches a pixel before the frame is
+ // graded. Water writes no depth, so a liquid pixel reads as sky to the march above and the
+ // deck lands on it at full air brightness - which is right when the camera is standing in
+ // that air, and wrong when the camera is under the surface looking up at the underside of
+ // it: the water stage has already shaded, absorbed and in-scattered that pixel through its
+ // own camera column, and a cloud painted over it afterwards is a full-brightness cloud ten
+ // yards under water. The ramp gates it, so above water this is an exact identity and the
+ // sea keeps the deck it has always had.
+ float submergedWater=step(.35,tex2D(waterMask,uv).r)*saturate(mediumControl.x);
+ cloud.rgb*=1-submergedWater;
+ cloud.a=lerp(cloud.a,1,submergedWater);
  // Reconstruct where this pixel is in the world and read the deck's
  // transmittance toward the sun. Unconditionally: a texture fetch
  // inside flow control would force fxc to hoist it anyway, and sky pixels
@@ -1090,6 +1103,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetTexture(1,m_cloudTexture.Get());SetSampler(d,1,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   d->SetTexture(2,f.depthTexture);SetSampler(d,2,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   d->SetTexture(3,shadowsOn?m_shadowTexture.Get():nullptr);SetSampler(d,3,D3DTEXF_LINEAR,D3DTADDRESS_CLAMP);
+  // No mask this frame samples as zero, which means no water anywhere and therefore no
+  // exclusion - the identity this pass has always had.
+  d->SetTexture(4,f.waterMaskTexture);SetSampler(d,4,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
   const float c0[4]={1.f/float(m_fullWidth),1.f/float(m_fullHeight),1.f/float(m_lowWidth),1.f/float(m_lowHeight)};
   const float c1c[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,float(uint32_t(settings.debugMode))};
   const float c2[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};
@@ -1105,8 +1121,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
   d->SetPixelShaderConstantF(8,c8c,1);
   d->SetPixelShaderConstantF(9,moonDisc,1);d->SetPixelShaderConstantF(10,moonControl,1);
+  const float c11[4]={std::clamp(f.underwaterRamp,0.f,1.f),0,0,0};
+  d->SetPixelShaderConstantF(11,c11,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
-  for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);
+  for(DWORD s=0;s<5;++s)d->SetTexture(s,nullptr);
  }
  return true;
 }

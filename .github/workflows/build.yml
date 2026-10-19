@@ -331,6 +331,18 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/AmbientOcclusionRegression.cpp -o build/ambient-occlusion-test
           ./build/ambient-occlusion-test
 
+      # The camera's side of the water is read from the liquid draws' own matrices and the
+      # medium the world is shaded through is a handful of closed-form terms, so the whole
+      # contract is checkable on the CPU: the plane reading under any camera rotation and its
+      # refusals, the tracker's hysteresis/hold/jump-reset, the medium's identity with the
+      # water stage's own coefficient, the caustic net's measured mean and its plateau count,
+      # the beam statistics, and the ps_3_0 stage's mirror of all of it.
+      - name: Underwater regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/UnderwaterRegression.cpp -o build/underwater-test
+          ./build/underwater-test
+
       # A lamp pool sees only a depth buffer, a camera and the light table too,
       # and the noise a player reports lives exactly there: the built-in scene
       # carries ground whose true normal is exactly straight up, so what the

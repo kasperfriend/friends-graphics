@@ -97,6 +97,10 @@ namespace renderer
         void Reset(IDirect3DDevice9* device);
         // Drops temporal history after a frame-stream break (Alt+Tab, minimise, loading).
         void InvalidateHistory() { m_historyValid = false; }
+        // Every term this pass integrates is an integral over AIR, and the camera's own medium
+        // is published in FrameContext::underwaterRamp: a camera inside the liquid is not
+        // inside this one, so the densities are scaled by what is left of the air (see the
+        // definition) and the pass does not run at all once the ramp reaches 1.
         bool Render(IDirect3DDevice9* device, const FrameContext& frameContext,
                     IDirect3DSurface9* targetSurface, bool globalFogEnabled = true);
         VolumetricSettings& Settings() { return m_settings; }

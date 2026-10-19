@@ -692,6 +692,17 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  settings.localFogDensity*=f.environment[LocalFog];
  settings.scatterStrength*=f.environment[Atmosphere];
  settings.edgeFogPower*=f.environment[DistanceFogPower];
+ // How much of this medium the camera is still standing in: 1 in air, 0 a yard and a half
+ // under water (see the declaration). Scaled into every density the integration multiplies,
+ // so the air's haze, height fog, mist and halo fade out together as the water fades in, and
+ // a diver does not get an air-fog integral laid over the column src/Effects/Underwater.h is
+ // already shading. The edge fog goes with them: it is a distance-fog vignette in air, and
+ // underwater the distance term belongs to the water.
+ const float airShare=std::clamp(1.f-f.underwaterRamp,0.f,1.f);
+ settings.densityScale*=airShare;
+ settings.localFogDensity*=airShare;
+ settings.scatterStrength*=airShare;
+ settings.edgeFogPower*=airShare;
  // Direct scatter uses the stabilized light (see CelestialStability.h);
  // the disc-draw signal remains only where a screen position is truly
  // needed (the halo centre / disc protection below). Frames built
@@ -699,6 +710,11 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  const float directIntensity=f.directLightValid?f.directLightIntensity:f.celestialIntensity;
  const bool directIsMoon=f.directLightValid?f.directLightIsMoon:f.celestialIsMoon;
  const Vec3& directView=f.directLightValid?f.directLightDirectionView:f.sunDirectionView;
+ // Fully submerged there is nothing left to integrate, and running the march to composite
+ // zeros would cost a low-resolution march and a full-resolution composite for a frame that
+ // is not in this medium at all. The compositor treats this exactly as it treats the fog
+ // being switched off, which is a state it already supports.
+ if(airShare<=0.f)return false;
  if(!settings.enabled||!d||!target||!f.cameraValid||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
  // Resource recreation resets shaders too; compile only after that reset.
  // A failed setup is retried after a cooldown instead of rebuilding shaders every frame.
