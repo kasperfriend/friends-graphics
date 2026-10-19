@@ -28,6 +28,7 @@
 #include "src/Diagnostics/RendererDiagnostics.h"
 #include "src/Diagnostics/FileSink.h"
 #include "src/D3D9/DepthCapture.h"
+#include "src/D3D9/ScopedPassState.h"
 #include "src/D3D9/CameraCapture.h"
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
@@ -521,6 +522,10 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
 // keep holding the old device's dead resources).
 void ResetEffectStateForDeviceChange(IDirect3DDevice9* d) noexcept
 {
+    // Release cached D3DSBT_ALL snapshots first: they retain the game's bound
+    // textures, which can include D3DPOOL_DEFAULT resources that otherwise
+    // make Reset fail indefinitely during resolution/fullscreen changes.
+    renderer::detail::ResetPassStateBlocks();
     try {
     tuningoverlay::font.Reset();
     tuningoverlay::windDebugFont.Reset();

@@ -84,6 +84,19 @@ namespace renderer
             return shared;
         }
 
+        // State blocks capture textures and other bound resources as well as
+        // scalar state. A cached block can therefore keep D3DPOOL_DEFAULT
+        // resources alive across IDirect3DDevice9::Reset, which makes a game
+        // display-mode switch fail repeatedly. Explicitly drop every cached
+        // block and the device pin before the original Reset is called.
+        inline void ResetPassStateBlocks() noexcept
+        {
+            auto& shared = SharedPassStateBlock();
+            for (auto& block : shared.block) block.Reset();
+            shared.deviceRef.Reset();
+            shared.depth = 0;
+        }
+
         // Acquires the block at the current nesting level, captures the
         // current state, and returns true when the caller now holds it -
         // the matching release is EndPassState() (Apply + level release).

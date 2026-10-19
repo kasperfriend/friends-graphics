@@ -401,8 +401,9 @@ void Configure(const std::wstring& base) {
 
 // Frame-scoped DEFAULT resources: persistent textures STAY ALIVE across frames!
 void Finish(IDirect3DDevice9* d) {
-    if (owner && owner != d) return;
-    renderer::DepthCapture::Instance().OnFrameEnd(d);
+    // A recreated device has a different pointer. Drop frame-owned references
+    // regardless; DepthCapture::Reset handles whether restoration is safe.
+    renderer::DepthCapture::Instance().Reset(d);
     surface.Reset(); depth.Reset(); originalDepth.Reset(); target.Reset();
     owner = nullptr; ready = false; composed = false;
     watereffect::mainTargetSurface = nullptr;

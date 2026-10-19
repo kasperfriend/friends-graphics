@@ -733,7 +733,9 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
 
 void VolumetricClouds::Reset(IDirect3DDevice9* device)
 {
- if(m_owner&&m_owner!=device)return;
+ // A device recreation must release resources owned by the discarded device;
+ // comparing the owner to the new device and returning would retain dead COM
+ // references and make every subsequent cloud allocation fail.
  m_cloudSurface.Reset();m_cloudTexture.Reset();
  m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
@@ -744,10 +746,10 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
  // an alt-tab does not pay for regenerating them. Only a different device
  // invalidates them.
- if(device==nullptr)
+ if(device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device))
  {
   m_shapeTexture.Reset();m_detailTexture.Reset();m_weatherTexture.Reset();
-  m_fieldsReady=false;m_fieldsFailed=false;
+  m_fieldsDevice=nullptr;m_fieldsReady=false;m_fieldsFailed=false;
  }
 }
 
@@ -815,6 +817,7 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
   m_fieldsFailed=true;
   return false;
  }
+ m_fieldsDevice=d;
  m_fieldsReady=true;
  return true;
 }
@@ -824,7 +827,13 @@ bool VolumetricClouds::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h
  const uint32_t lw=std::max(1u,uint32_t(float(w)*m_settings.resolutionScale));
  const uint32_t lh=std::max(1u,uint32_t(float(h)*m_settings.resolutionScale));
  if(m_owner==d&&m_fullWidth==w&&m_fullHeight==h&&m_lowWidth==lw&&m_lowHeight==lh&&m_cloudTexture)return true;
- Reset(d);m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;
+ // A backbuffer resize only invalidates size-dependent targets. Keep the
+ // expensive raymarch shaders and managed noise fields: resetting/recompiling
+ // all three cloud shaders on every resolution switch caused a long first-frame
+ // hitch and could make clouds appear to lose their shader transiently.
+ m_cloudSurface.Reset();m_cloudTexture.Reset();
+ m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;m_shadowSize=0;
+ m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;
  auto tex=[&](D3DFORMAT format){
   m_cloudTexture.Reset();m_cloudSurface.Reset();
   return SUCCEEDED(d->CreateTexture(lw,lh,1,D3DUSAGE_RENDERTARGET,format,D3DPOOL_DEFAULT,m_cloudTexture.GetAddressOf(),nullptr))&&

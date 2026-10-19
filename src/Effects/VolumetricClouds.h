@@ -153,6 +153,7 @@ namespace renderer
         bool m_shadersFailed = false;
         bool m_fieldsReady = false;
         bool m_fieldsFailed = false;
+        IDirect3DDevice9* m_fieldsDevice = nullptr;
         // Set by the load-time field-generation worker (see Configure) until
         // it publishes the cache. The render thread only ever reads it
         // (EnsureFields), so an atomic with no other synchronization is

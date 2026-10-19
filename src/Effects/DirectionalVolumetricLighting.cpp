@@ -621,9 +621,10 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_historyValid=false;
 }
 
-void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
+void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* /*device*/)
 {
- if(m_owner&&m_owner!=device)return;
+ // Reset is called for the active device after Reset or device replacement.
+ // Never retain resources merely because the replacement has a new pointer.
  m_integratedSurface.Reset();m_integratedTexture.Reset();m_upsampledSurface.Reset();m_upsampledTexture.Reset();
  m_boundarySurface.Reset();m_boundaryTexture.Reset();
  m_localFogFieldSurface.Reset();m_localFogFieldTexture.Reset();m_localFogFieldShader.Reset();
@@ -644,7 +645,13 @@ bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t
 {
  uint32_t lw=std::max(1u,uint32_t(w*m_settings.resolutionScale)),lh=std::max(1u,uint32_t(h*m_settings.resolutionScale));
  if(m_owner==d&&m_fullWidth==w&&m_fullHeight==h&&m_lowWidth==lw&&m_lowHeight==lh&&m_targetFormat==format&&m_upsampledTexture)return true;
- Reset(d);m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;m_targetFormat=format;
+ // Backbuffer changes invalidate targets and temporal history, not shaders.
+ // Avoid recompiling the multi-pass volume shader set on every resize.
+ m_integratedSurface.Reset();m_integratedTexture.Reset();m_upsampledSurface.Reset();m_upsampledTexture.Reset();
+ m_boundarySurface.Reset();m_boundaryTexture.Reset();m_localFogFieldSurface.Reset();m_localFogFieldTexture.Reset();
+ for(int i=0;i<2;++i){m_historySurface[i].Reset();m_historyTexture[i].Reset();m_depthSurface[i].Reset();m_depthTexture[i].Reset();m_groundHeightSurface[i].Reset();m_groundHeightTexture[i].Reset();m_groundHeightIssued[i]=false;}
+ m_owner=d;m_fullWidth=w;m_fullHeight=h;m_lowWidth=lw;m_lowHeight=lh;m_targetFormat=format;
+ m_historyValid=false;m_previousViewValid=false;m_setupRetry=RetryGate{};
  D3DFORMAT hdr=D3DFMT_A16B16G16R16F;
  auto tex=[&](UINT tw,UINT th,D3DFORMAT f,ComPtr<IDirect3DTexture9>& t,ComPtr<IDirect3DSurface9>& s){return SUCCEEDED(d->CreateTexture(tw,th,1,D3DUSAGE_RENDERTARGET,f,D3DPOOL_DEFAULT,t.GetAddressOf(),nullptr))&&SUCCEEDED(t->GetSurfaceLevel(0,s.GetAddressOf()));};
  if(!tex(lw,lh,hdr,m_integratedTexture,m_integratedSurface)){hdr=D3DFMT_A8R8G8B8;if(!tex(lw,lh,hdr,m_integratedTexture,m_integratedSurface))return false;}

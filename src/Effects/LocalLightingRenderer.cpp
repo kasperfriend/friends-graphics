@@ -355,9 +355,10 @@ void LocalLightingRenderer::Log(const std::string& message) const
     std::ofstream(std::filesystem::path(m_logPath), std::ios::app) << message << '\n';
 }
 
-void LocalLightingRenderer::Reset(IDirect3DDevice9* device)
+void LocalLightingRenderer::Reset(IDirect3DDevice9* /*device*/)
 {
-    if (m_owner && device && m_owner != device) return;
+    // Reset runs for the active D3D device, which may be a replacement with a
+    // different COM pointer. Always drop this renderer's own references.
     m_lightSurface.Reset(); m_lightTexture.Reset();
     m_litSurface.Reset(); m_litTexture.Reset();
     m_surfaceShader.Reset(); m_compositeShader.Reset();
