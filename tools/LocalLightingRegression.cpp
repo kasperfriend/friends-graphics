@@ -1360,6 +1360,7 @@ int main()
         const std::string water = ReadFile("WaterEffect.h");
         const std::string settings = ReadFile("GraphicsEffects.ini");
         const std::string overlay = ReadFile("src/Environment/OverlayItems.h");
+        const std::string volumeEffects = ReadFile("VolumeEffects.h");
         Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
               surface.find("sourceDebug+=contribution;") != std::string::npos &&
               surface.find("float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;") != std::string::npos &&
@@ -1388,6 +1389,14 @@ int main()
               overlay.find("NormalSpreadPercent") == std::string::npos &&
               manager.find("NormalSpreadPercent") == std::string::npos,
               "the extra normal-spread control is removed from settings, F7 and runtime");
+        Check(settings.find("LocalLightPercent") == std::string::npos &&
+              settings.find("LocalLightThresholdPercent") == std::string::npos &&
+              settings.find("LocalLightRadiusPixels") == std::string::npos &&
+              settings.find("LocalLightDebugMask") == std::string::npos &&
+              volume.find("CompositeLateLocalLights") == std::string::npos &&
+              volume.find("localA.GetAddressOf()") == std::string::npos &&
+              volumeEffects.find("localLightPixelSource") == std::string::npos,
+              "dead legacy bright-pixel lights, controls and render targets are removed in favor of the live verified light pool");
         Check(settings.find("Quality=2") != std::string::npos &&
               overlay.find("L\"Quality\",\"LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)\",0,2,1,2") != std::string::npos &&
               manager.find("L\"Quality\", 2,") != std::string::npos,

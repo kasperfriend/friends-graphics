@@ -32,6 +32,9 @@ int main() try
             "cloud target resize preserves compiled shaders instead of forcing a full pass reset");
     Require(text.find("// A device recreation must release resources owned by the discarded device;") != std::string::npos,
             "device replacement releases stale cloud COM resources rather than retaining the old device");
+    Require(text.find("if(!m_shaderRetry.Open(now))return false;") != std::string::npos &&
+            text.find("m_shaderRetry.Fail(now,kOptionalPassRetryMs);") != std::string::npos,
+            "transient cloud shader creation failures retry after a cooldown instead of disabling clouds until device reset");
     Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
 

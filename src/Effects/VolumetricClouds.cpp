@@ -740,7 +740,7 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
  // A new device (or a resize, which is rare) is worth one more attempt.
- m_shadersFailed=false;
+ m_shaderRetry.Succeed();
  m_clock.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_shadowSize=0;
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
@@ -756,21 +756,25 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
 bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
 {
  if(m_marchShader&&m_compositeShader&&m_shadowShader)return true;
- // Compiling a 460-slot ps_3_0 shader costs tens of milliseconds. Without
- // remembering the failure, a driver that rejects the march would be asked
- // to reject it again on every single frame - turning "this machine has no
- // clouds" into "this machine has no frames". The fields cache their own
- // failure for the same reason.
- if(m_shadersFailed)return false;
+ // Compiling a 460-slot ps_3_0 shader costs tens of milliseconds. A failed
+ // attempt is throttled, not permanently cached: transient device/driver
+ // failures get another chance after the retry cooldown without taxing every
+ // frame or leaving clouds disabled until the next device reset.
+ const uint64_t now=GetTickCount64();
+ if(!m_shaderRetry.Open(now))return false;
  if(Compile(d,kCloudMarchSource,m_shaderCacheDir,m_marchShader.GetAddressOf())&&
     Compile(d,kCloudCompositeSource,m_shaderCacheDir,m_compositeShader.GetAddressOf())&&
-    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))return true;
+    Compile(d,kCloudShadowSource,m_shaderCacheDir,m_shadowShader.GetAddressOf()))
+ {
+  m_shaderRetry.Succeed();
+  return true;
+ }
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
- m_shadersFailed=true;
- if(!m_logPath.empty())
+ const bool firstFailure=m_shaderRetry.Fail(now,kOptionalPassRetryMs);
+ if(firstFailure&&!m_logPath.empty())
  {
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
-  out<<"clouds: pixel shader compilation failed on this device; the deck is off\n";
+  out<<"clouds: pixel shader creation failed; retrying after cooldown\n";
  }
  return false;
 }

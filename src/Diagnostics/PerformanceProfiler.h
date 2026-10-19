@@ -15,7 +15,6 @@ namespace renderer
     {
         ShadowMapBuild = 0,
         LegacyComposite,
-        ContactShadows,
         HeightFog,
         DirectionalVolumetricRaymarch,
         VolumetricTemporal,

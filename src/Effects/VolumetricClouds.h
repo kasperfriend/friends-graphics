@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include "../Core/FrameClock.h"
+#include "../Core/DeviceHealth.h"
 #include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
 
@@ -150,7 +151,7 @@ namespace renderer
         std::wstring m_logPath;
         std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
-        bool m_shadersFailed = false;
+        RetryGate m_shaderRetry;
         bool m_fieldsReady = false;
         bool m_fieldsFailed = false;
         IDirect3DDevice9* m_fieldsDevice = nullptr;
