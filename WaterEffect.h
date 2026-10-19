@@ -2854,8 +2854,8 @@ struct Scope {
                 if(frameIndex!=fogCurveFrame) {
                     fogCurveFrame=frameIndex;
                     if(fogCurveRead&&renderer::water::HasFogCurve(oldVertexFog)) {
-                        const float exponent=max(oldVertexFog[2],.001f);
-                        const float solved=(std::pow(.95f,1.f/exponent)-oldVertexFog[1])/oldVertexFog[0];
+                        const float exponent=std::max(oldVertexFog[2],.001f);
+                        const float solved=(std::pow(0.95f,1.f/exponent)-oldVertexFog[1])/oldVertexFog[0];
                         if(std::isfinite(solved)&&solved>1.f) fogCurveYards=solved;
                     }
                 }
