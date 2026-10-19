@@ -1063,7 +1063,10 @@ int main(int argc, char** argv)
                     // the shipped look, so it takes the ini default rather than a command-line
                     // override; a body whose override raises or lowers it is a picture this cannot
                     // certify, same as any other per-area tuning.
-                    alpha = std::max(alpha, .85f);
+                    // ...and, like the shader, complete wherever the capture has no
+                    // geometry behind the sheet: a partial alpha over open water can only
+                    // reveal the clear colour, which reads as glass over emptiness.
+                    alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));
                     const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
                     // The shader fogs toward the flat scene fog colour and lets the device blend
                     // it over the copy with the water's own alpha; both happen here in that order.

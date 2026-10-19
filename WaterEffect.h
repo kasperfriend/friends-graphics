@@ -1873,7 +1873,19 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // fade below, so a far sheet still dissolves at the silhouette instead of being
     // held opaque by the floor: the floor says how much sea a pixel is, the fade says
     // that this fragment is not one.
-    surfaceAlpha=max(surfaceAlpha,opacityControl.x);
+    //
+    // A floor is the wrong answer where there is nothing BEHIND the sheet. The capture
+    // writes no geometry over open water - the depth is the cleared far value, which is
+    // already `openOcean` above - so the only thing a partial alpha can reveal there is
+    // the clear colour the copy was never asked to replace. At 85% that is 15% of empty
+    // sky blended into every open-sea pixel: a sheet of glass over the void off
+    // Stormwind's southern barrier and Booty Bay's mouth, reported as "still transparent
+    // where the seabed has run out". Coverage is complete there, because the sea is the
+    // only thing in the column and there is no refraction it owes anyone. Under the
+    // surface the rule is the opposite - `behindZ` is the sky through Snell's window, and
+    // forcing coverage there would paint the window shut - so the term is above-water only.
+    float openOceanCoverage=openOcean*(1-underwater);
+    surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
     // silhouette itself turning away, not a second sheet behind the first.

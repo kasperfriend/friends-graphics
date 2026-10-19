@@ -2587,6 +2587,58 @@ so the caustic net cannot slide across the bed by the teleport distance either.
 stamp. `tools/UnderwaterRegression.cpp`'s "one field, built at composite" pin now also
 requires the fresh-anchor gate.
 
+## Round 7: open water is not a window (2026-10-19)
+
+### What was being seen
+
+WATER OPACITY at its shipped 85% fixed the shallow bed reading straight up through the
+sea, but two views still showed the surface as a sheet of glass: the open water past
+Stormwind Harbor's southern barrier and the mouth of Booty Bay. Neither has any terrain
+under it - the depth capture there holds nothing at all - and the sheet still let the
+empty sky behind it through.
+
+### Why the floor could not cover it
+
+Every optical term in the stage is built from the captured column. Over open water there
+is no captured column: `behindZ` is the cleared far value, `captureValid` is 0 because no
+draw carried a bed, so `depthAlpha=captureValid*(1-transmittance)` is 0 and coverage came
+out as `baseAlpha` - the client's painted liquid alpha, which is a small number. The
+authored floor then raised that to exactly `opacityControl.x`, and a floor of 85% leaves
+15% of whatever is behind the surface showing. Behind an open-ocean pixel there is only
+the clear colour the scene copy was never asked to replace, so 15% of emptiness blended
+into every one of those pixels. A floor is the wrong instrument where there is nothing to
+be translucent *to*.
+
+### The fix
+
+The stage already computes `openOcean` (`step(99999,behindZ)`, the capture's own statement
+that no geometry lies behind this pixel). Coverage is now complete there:
+
+```hlsl
+float openOceanCoverage=openOcean*(1-underwater);
+surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
+```
+
+- Above water the sea is the only thing in the column, so there is no refraction it owes:
+  it covers fully and the body's own deep colour, in-scatter and sky reflection are what
+  the pixel shows. The horizon still fades into the medium through the fog lerp that
+  follows, so the plane meets the sky at the same colour instead of at a hard edge.
+- Under the surface the same `behindZ` is the sky through Snell's window, and forcing
+  coverage there would paint the window shut, so the term is multiplied by `(1-underwater)`.
+  That branch already owns its own coverage rule (`totalInternal`/`transmittance`).
+- The rule is above the wrong-side fade, like the floor, so a far sheet still dissolves at
+  its silhouette rather than being pinned opaque at the edge of a wave.
+- `tools/WaterPreview.cpp` mirrors it (`Mix(.85f,1.f,openOcean)`), because the preview has
+  no underwater camera and its branch is documented as exactly zero.
+
+The knob keeps its meaning: WATER OPACITY still says how much cover the surface may leave
+out where there IS a bed to see, and raising it to 100 hides even that.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the term, its `(1-underwater)` gate, its position between
+the optical terms and the wrong-side fade, and the preview's mirror of the same rule.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

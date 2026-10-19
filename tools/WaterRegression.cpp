@@ -1184,13 +1184,31 @@ int main() try
         // read from its own ini key so it is not a second spelling of WATER CLARITY, and
         // uploaded on a lane inside the block the draw already writes.
         {
-            const auto floorRule=pixel.find("surfaceAlpha=max(surfaceAlpha,opacityControl.x);");
+            const auto floorRule=pixel.find(
+                "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
             const auto optics=pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));");
             const auto fade=pixel.find("surfaceAlpha*=1-smoothstep(0.0,.25,wrongSide);");
             Require(pixel.find("float4 opacityControl:register(c199);")!=std::string::npos&&
                     floorRule!=std::string::npos&&optics!=std::string::npos&&fade!=std::string::npos&&
                     optics<floorRule&&floorRule<fade,
                     "opacity is a floor on coverage: after the optical terms, before the wrong-side fade");
+            // A floor cannot cover what is not there. Over open water the capture holds no
+            // geometry behind the sheet - only the clear colour it was never asked to
+            // replace - so a partial alpha reveals emptiness itself, which is the second
+            // half of the report ("still transparent where the seabed has run out"). The
+            // sea is then the whole column and coverage is complete; under the surface the
+            // same `behindZ` is the sky through Snell's window, so the term is above-water only.
+            {
+                const auto openTerm=pixel.find("float openOceanCoverage=openOcean*(1-underwater);");
+                const auto openRule=pixel.find(
+                    "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
+                Require(openTerm!=std::string::npos&&openRule!=std::string::npos&&
+                        optics<openTerm&&openTerm<openRule&&openRule<fade,
+                        "open ocean is fully covered, above water only, and still before the wrong-side fade");
+                const std::string mirror=ReadAlongside("WaterPreview.cpp");
+                Require(mirror.find("alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));")!=std::string::npos,
+                        "the CPU preview carries the same open-ocean coverage rule");
+            }
             Require(pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")
                         !=std::string::npos&&
                     pixel.find("depthAlpha=absorption*opacityControl")==std::string::npos&&
