@@ -920,6 +920,26 @@ int main() try
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(header.size()>4096,"the wave field header both stages mirror is readable");
         Require(vertex.size()>1024&&pixel.size()>8192,"both water stages are readable as text");
+        // (0) The sea's re-anchoring pivot must be THIS place's camera. WaveMotion::Advance
+        // compensates every heading and WAVE SIZE edit about the pivot it is handed, which
+        // keeps the field still at the player and nowhere else: a point d away from the pivot
+        // shifts by dot(d, the lattice change). A teleport leaves the previous zone's draw
+        // anchor behind (a loading screen draws nothing, and the new zone's first frames
+        // capture no camera), so compensating about that anchor sweeps every crest across the
+        // surface by the distance between the two zones - the reported "water races after a
+        // teleport, then slows back to normal", because the heading eases over ~12 s. The
+        // anchor is therefore only allowed to stand in for the frame camera while it is FRESH,
+        // and a stale one freezes the lattice for those frames instead of re-anchoring it.
+        Require(code.find("constexpr double kAnchorFreshSeconds=.25;")!=std::string::npos&&
+                code.find("inline bool LastWaveAnchorFresh() noexcept {")!=std::string::npos&&
+                code.find("const bool pivotValid=frame.cameraValid||anchorFresh;")!=std::string::npos&&
+                code.find("waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);")
+                    !=std::string::npos,
+                "the sea re-anchors only about a fresh, local pivot, never about the previous zone's anchor");
+        Require(code.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();")!=std::string::npos&&
+                code.find("lastWaveAnchorSeconds=renderer::PerformanceSeconds();")!=std::string::npos&&
+                code.find("lastWaveAnchorSeconds=-1.0;")!=std::string::npos,
+                "the full-screen medium's field and the Reset path obey the same freshness rule");
         // (1) The waves followed the camera. Two causes, both a matrix read the wrong way
         // round: the lattice was built from the view axes expressed in world coordinates, so
         // a camera-relative position was rotated by the camera twice and the field turned

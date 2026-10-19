@@ -203,8 +203,24 @@ renderer::water::SeaWeather seaWeather;
 renderer::water::SeaStateFilter seaFilter;
 renderer::water::WaveMotion waveMotion;
 renderer::water::DrawAnchor lastWaveAnchor;
+// When that anchor was read, on the same clock the sea integrates on. It may only
+// stand in for a camera the frame did not capture while it is still the place the
+// player is standing: a teleport leaves the last anchor of the OLD zone behind, and
+// a loading screen leaves it behind with no draw to replace it.
+double lastWaveAnchorSeconds=-1.0;
+// How long a draw's own camera may stand in for the frame camera. The field's
+// phases are continuous at the frame pivot (WaveMotion::Advance compensates every
+// heading and size edit there), so a pivot from anywhere but here turns such an
+// edit into a phase shift proportional to the distance - which is the water that
+// "races" for a few seconds after a teleport and then settles.
+constexpr double kAnchorFreshSeconds=.25;
 renderer::FrameClock seaFrameClock;
 void AdvanceSea(float dt);
+inline bool LastWaveAnchorFresh() noexcept {
+    if(!lastWaveAnchor.valid||!(lastWaveAnchorSeconds>=0.0))return false;
+    const double age=renderer::PerformanceSeconds()-lastWaveAnchorSeconds;
+    return age>=0.0&&age<=kAnchorFreshSeconds;
+}
 
 // One frame of the underwater ramp, and the frame the full-screen medium reads. Called
 // from Present, after the water draws have had their say and before the counters reset, so
@@ -454,10 +470,13 @@ void AdvanceUnderwater(float dt) {
 // casts still move as one.
 inline renderer::underwater::Field UnderwaterFieldAt(float cameraX,float cameraY,
     bool cameraValid) noexcept {
+    // The same freshness rule as the pivot below: a stale anchor's phases belong to a
+    // place the player has left (a teleport), and building the net from them slides it
+    // across the bed by the distance between the two places until the next draw.
+    const bool anchorValid=cameraValid||LastWaveAnchorFresh();
     const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];
     const float anchorY=cameraValid?cameraY:lastWaveAnchor.camera[1];
-    const auto wave=waveMotion.Build(anchorX,anchorY,
-        cameraValid||lastWaveAnchor.valid,wavesEnabled);
+    const auto wave=waveMotion.Build(anchorX,anchorY,anchorValid,wavesEnabled);
     renderer::underwater::Field field;
     for(int i=0;i<4;++i)field.lattice[i]=wave.lattice[i];
     field.chopPhase[0]=wave.ripplePhase[0];
@@ -2060,13 +2079,27 @@ void AdvanceSea(float dt) {
         windStrengthPercent*.01f,frame.wind.DrivesWaves(),frame.wind.strength};
     const auto sea=seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds);
     seaAgitation=sea.agitation;seaMotion=sea.motion;seaShear=sea.shear;seaWind=sea.wind;
-    // Prefer the main camera; waves-only/no-depth frames can use the most
-    // recent accepted draw anchor. It chooses only the turn pivot, never
-    // the per-draw phase (reflection draws retain their own camera below).
+    // Prefer the main camera; waves-only/no-depth frames can use a draw anchor from
+    // THIS place. It chooses only the turn pivot, never the per-draw phase (reflection
+    // draws retain their own camera below).
+    //
+    // The anchor must be fresh, not merely valid. A zone change or a teleport leaves the
+    // previous zone's anchor behind - a loading screen draws nothing, and the first
+    // frames of the new zone capture no camera - so "the most recent accepted draw
+    // anchor" is a point thousands of yards away, in another zone, from before the
+    // teleport. Every heading or WAVE SIZE edit since then is compensated about the
+    // pivot, and compensating about a point in another zone shifts the field's phase by
+    // the distance between the two places: the crests cross the surface at many times
+    // the sea's own speed and then slow down as the heading finishes easing. With no
+    // fresh pivot the lattice simply holds where it was for those frames, which is the
+    // correct behaviour - an unknown camera cannot re-anchor a sea, and the travel
+    // integration below (which moves the field at the sea's own speed) is unaffected.
+    const bool anchorFresh=LastWaveAnchorFresh();
+    const bool pivotValid=frame.cameraValid||anchorFresh;
     const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];
     const float pivotY=frame.cameraValid?frame.cameraPosition.y:lastWaveAnchor.camera[1];
     waveMotion.Advance(dt,flowSpeed*seaMotion,std::clamp(flowRotation*(1.f+seaShear),0.f,1.f),
-        waveScalePercent,frame.wind,pivotX,pivotY,frame.cameraValid||lastWaveAnchor.valid,wavesEnabled);
+        waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);
 }
 void Present() {
     if(!enabled)return;
@@ -2126,6 +2159,7 @@ inline void Reset(IDirect3DDevice9* d) {
     // Wind, sea state and accumulated phases survive GPU loss. They are CPU
     // state, not device resources; forgetting them would pop every crest.
     lastWaveAnchor.valid=false;
+    lastWaveAnchorSeconds=-1.0;
     localLightConstantCache.valid=false;
     // The hook is invoked for the active device, including replacement
     // devices whose pointer differs from the cached shader owner. These
@@ -2827,7 +2861,10 @@ struct Scope {
                 anchor.up[1]=viewValid?waveFrame.viewRaw.m[2][1]:0.f;
                 anchor.up[2]=viewValid?waveFrame.viewRaw.m[2][2]:1.f;
             }
-            if(anchor.valid)lastWaveAnchor=anchor;
+            if(anchor.valid){
+                lastWaveAnchor=anchor;
+                lastWaveAnchorSeconds=renderer::PerformanceSeconds();
+            }
             // Direction, speed, shear and their phases were integrated once at
             // Present. Both shader stages and every draw share that field.
             const auto wave=waveMotion.Build(anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled);

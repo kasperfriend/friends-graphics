@@ -2543,6 +2543,48 @@ absorption is untouched (so clarity keeps its meaning and the two knobs cannot d
 other), the c199 upload ahead of the cached-light splice, the ini default, and the exact F7
 line and bounds.
 
+## Round 6: the sea stops racing after a teleport (2026-10-19)
+
+### What was being seen
+
+Sometimes, right after a teleport, the water moved at several times its normal speed for a
+few seconds and then settled. Nothing about the wind or the sea state had changed more than
+a teleport changes it.
+
+### The cause: a pivot from the wrong place
+
+`WaveMotion::Advance` integrates every phase and compensates each *heading* and *wave size*
+edit about a pivot, so that a sea whose direction is easing does not sweep the crests past a
+player who is standing still: a point `d` away from the pivot shifts by `dot(d, Δlattice)`.
+That is exact at the pivot and nowhere else, which is the point - the pivot is supposed to
+be the camera the player is looking through.
+
+The pivot was `frame.cameraValid ? frame.cameraPosition : lastWaveAnchor.camera`. The
+fallback exists for waves-only and no-depth frames, but it is not "the last camera": it is
+the last *draw* anchor, and a teleport is exactly the event that leaves one behind. A loading
+screen draws nothing, and the first frames of the new zone capture no camera yet, so the
+anchor still described the previous zone - hundreds or thousands of yards away. Every
+heading/size edit in those frames was therefore compensated about a point in another zone,
+and the whole field shifted by the distance between them. The heading eases over ~12 s, so
+the result was a fast sweep that decayed as the ease finished: the reported "extreme speeds,
+then back to normal".
+
+### The fix
+
+The anchor may stand in for the camera only while it is **fresh** (`LastWaveAnchorFresh`,
+250 ms, on the same clock the sea integrates on). With no fresh pivot the lattice simply
+holds where it was for those frames: an unknown camera cannot re-anchor a sea. The travel
+integration is untouched, so crests keep moving at the sea's own speed throughout. The same
+rule now gates the anchor the full-screen medium builds its field from (`UnderwaterFieldAt`),
+so the caustic net cannot slide across the bed by the teleport distance either.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the freshness constant, the `pivotValid` expression that
+`Advance` is called with, the medium's use of the same rule, and the `Reset` that clears the
+stamp. `tools/UnderwaterRegression.cpp`'s "one field, built at composite" pin now also
+requires the fresh-anchor gate.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

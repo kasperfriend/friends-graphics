@@ -2221,15 +2221,17 @@ void TestMirror()
     // all slid by a frame's worth of swimming, visibly, whenever the camera moved or turned.
     // There must be exactly one field construction, at composite, and the anchor inside it
     // must be the camera it was handed.
-    Require(water.find("const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];")
+    Require(water.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();") != std::string::npos
+                && water.find("const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];")
                 != std::string::npos
-                && water.find("cameraValid||lastWaveAnchor.valid,wavesEnabled);") != std::string::npos
+                && water.find("waveMotion.Build(anchorX,anchorY,anchorValid,wavesEnabled);") != std::string::npos
                 && water.find("field.finePhase[0]=wave.ripplePhase[0]*2.f;") != std::string::npos
                 && water.find("field.finePhase[1]=wave.ripplePhase[1]*2.f;") != std::string::npos
                 && water.find("underwaterFrame.field") == std::string::npos
                 && water.find("const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];")
-                    != std::string::npos,
-            "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed");
+                    != std::string::npos
+                && water.find("const bool pivotValid=frame.cameraValid||anchorFresh;") != std::string::npos,
+            "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed (or a fresh local draw anchor)");
     // World +Z in view space is ROW 2 of a row-vector matrix. That is what AnchorFromModelView
     // documents ("world axis i arrives in view space as row i") and what the renderer's
     // world-space helpers use; PlaneOverCamera leans on the same convention one step
