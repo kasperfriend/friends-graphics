@@ -118,6 +118,19 @@ namespace renderer
         // DirectionalVolumetricLighting.cpp's boundary-depth pass.
         IDirect3DTexture9* waterMaskTexture = nullptr;
         IDirect3DTexture9* waterDepthTexture = nullptr;
+        // How far the camera is under the liquid, 0 in air and 1 a yard and a half under it:
+        // renderer::underwater::Tracker's ramp, settled once per frame from the liquid draws'
+        // own matrices (see WaterEffect.h, controls[75], and src/Water/UnderwaterMedium.h) and
+        // published by the compositor before any pass reads it. Every whole-frame term that
+        // integrates AIR fades out on this - the atmosphere's haze, height fog, mist and halo,
+        // the cloud deck landing on a surface seen from underneath - and the term that
+        // integrates WATER fades in on it, so crossing the surface moves one medium into the
+        // other instead of swapping them. Zero on every frame that drew no liquid, which makes
+        // it the identity for a machine that never goes swimming.
+        float underwaterRamp = 0.f;
+        // The signed yards of water over the camera the ramp was built from, positive under
+        // the surface. Diagnostics and logs read this; passes read the ramp.
+        float underwaterYards = -1.f;
 
         bool depthAvailable = false;
         bool cameraValid = false;

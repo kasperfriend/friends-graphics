@@ -86,6 +86,75 @@ int main() try
                     "shore foam depth is the same world vertical distance under every camera orientation");
         }
     }
+    {
+        // The bed slope is measured over a yard-scale baseline, not over one pixel: the
+        // captured depth this pass reads back is not exact (an INTZ fetch can hand back a
+        // floating-point depth with a short mantissa), and a one-pixel stencil divides
+        // that storage step by a bed footprint inches across, so the slope - and the
+        // shoal/beach foam thresholds riding on it - jittered a derivative quad at a
+        // time. Model the round trip on a plane of known slope at a real resolution's
+        // footprint and pin the property the shader's taps exist for: the storage-step
+        // jitter is suppressed by an order of magnitude while the reading stays true.
+        const int gw=512, gh=320;
+        const float pitch=0.384f;                      // 22 degrees down
+        const std::array<float,3> up{0.f,std::cos(pitch),-std::sin(pitch)};
+        const float trueSlope=0.28f, tilt=std::atan(trueSlope);
+        const float ct=std::cos(-tilt), st=std::sin(-tilt);
+        std::array<float,3> bedN{0.f,ct*up[1]-st*up[2],st*up[1]+ct*up[2]};
+        const float nl=std::sqrt(bedN[0]*bedN[0]+bedN[1]*bedN[1]+bedN[2]*bedN[2]);
+        bedN={bedN[0]/nl,bedN[1]/nl,bedN[2]/nl};
+        const double planeD=bedN[0]*2.0+bedN[1]*-6.0+bedN[2]*55.0;
+        const double p11=2.1445, p00=p11/(double(gw)/double(gh)), nearZ=0.5, farZ=2000.0;
+        std::vector<std::array<float,3>> bed(size_t(gw)*size_t(gh));
+        std::vector<std::array<float,3>> exact(size_t(gw)*size_t(gh));
+        for(int j=0;j<gh;++j) for(int i=0;i<gw;++i) {
+            const double dx=(2.0*(i+0.5)/gw-1.0)/p00, dy=(1.0-2.0*(j+0.5)/gh)/p11;
+            const double t=planeD/(bedN[0]*dx+bedN[1]*dy+bedN[2]);
+            exact[size_t(j)*gw+i]={float(dx*t),float(dy*t),float(t)};
+            // Nonlinear depth stored the way a short-mantissa float format stores it.
+            double raw=farZ/(farZ-nearZ)*(t-nearZ)/t;
+            const double step=std::ldexp(1.0,int(std::floor(std::log2(raw)))-16);
+            raw=std::floor(raw/step+0.5)*step;
+            const float tq=float(farZ*nearZ/(farZ-raw*(farZ-nearZ)));
+            bed[size_t(j)*gw+i]={float(dx)*tq,float(dy)*tq,tq};
+        }
+        const auto sub=[](const std::array<float,3>& a,const std::array<float,3>& b){
+            return std::array<float,3>{a[0]-b[0],a[1]-b[1],a[2]-b[2]}; };
+        const auto slopeOf=[&](const std::array<float,3>& tx,const std::array<float,3>& ty){
+            const std::array<float,3> n{tx[1]*ty[2]-tx[2]*ty[1],tx[2]*ty[0]-tx[0]*ty[2],tx[0]*ty[1]-tx[1]*ty[0]};
+            return WorldPlaneSlope(n,up); };
+        const auto at=[&](const std::vector<std::array<float,3>>& f,int i,int j)->const std::array<float,3>&{
+            return f[size_t(j)*gw+i]; };
+        // The tap distance the shader derives from the same footprint at the centre.
+        const auto cxStep=sub(at(exact,gw/2+1,gh/2),at(exact,gw/2,gh/2));
+        const auto cyStep=sub(at(exact,gw/2,gh/2+1),at(exact,gw/2,gh/2));
+        const float yardsPerPixel=std::max(std::sqrt(cxStep[0]*cxStep[0]+cxStep[1]*cxStep[1]+cxStep[2]*cxStep[2]),
+                                           std::sqrt(cyStep[0]*cyStep[0]+cyStep[1]*cyStep[1]+cyStep[2]*cyStep[2]));
+        const int tap=std::clamp(int(std::lround(1.5f/yardsPerPixel)),1,16);
+        std::vector<float> oldSlope(size_t(gw)*gh,-1.f), newSlope(size_t(gw)*gh,-1.f);
+        for(int j=0;j+1<gh;++j) for(int i=0;i+1<gw;++i)
+            oldSlope[size_t(j)*gw+i]=slopeOf(sub(at(bed,i+1,j),at(bed,i,j)),sub(at(bed,i,j+1),at(bed,i,j)));
+        for(int j=tap;j+tap<gh;++j) for(int i=tap;i+tap<gw;++i)
+            newSlope[size_t(j)*gw+i]=slopeOf(sub(at(bed,i+tap,j),at(bed,i-tap,j)),sub(at(bed,i,j+tap),at(bed,i,j-tap)));
+        const auto jitter=[&](const std::vector<float>& f){
+            double sum=0; size_t n=0;
+            for(int j=0;j<gh;++j) for(int i=0;i<gw;++i) {
+                const float v=f[size_t(j)*gw+i]; if(v<0) continue;
+                if(i+1<gw&&f[size_t(j)*gw+i+1]>=0){ sum+=std::fabs(f[size_t(j)*gw+i+1]-v); ++n; }
+                if(j+1<gh&&f[size_t(j+1)*gw+i]>=0){ sum+=std::fabs(f[size_t(j+1)*gw+i]-v); ++n; }
+            }
+            return sum/double(n); };
+        std::vector<float> newErr;
+        for(const float v: newSlope) if(v>=0) newErr.push_back(std::fabs(v-trueSlope));
+        std::sort(newErr.begin(),newErr.end());
+        const double oldJit=jitter(oldSlope), newJit=jitter(newSlope);
+        Require(oldJit>0.004,
+                "one-pixel bed-slope derivatives jitter on short-mantissa captured depth (the foam tick mechanism)");
+        Require(newJit*6.0<oldJit,
+                "the yard-scale bed-slope baseline suppresses captured-depth storage jitter by an order of magnitude");
+        Require(newErr[newErr.size()/2]<0.015f,
+                "the yard-scale bed-slope baseline still reads the bed's true slope");
+    }
     Require(IsMaterialLayout(8,64,512,512), "canonical liquid material accepted");
     Require(!IsMaterialLayout(8,64,64,64), "weather ripple LUT alone is not water");
     Require(!IsMaterialLayout(512,512,8,64), "swapped slots are not the supported shader ABI");
@@ -192,6 +261,19 @@ int main() try
             Require(std::fabs((warped.plane.x-cellX)-(warpedReference.plane.x-worldCellX))<2e-2f&&
                     std::fabs((warped.plane.y-cellY)-(warpedReference.plane.y-worldCellY))<2e-2f,
                     "the same world point receives the same smooth random crest displacement");
+            // The foam lace's fleck, anchored like the warp above. It used to read the fine
+            // chop octave, whose counter-phased coordinate moves with the camera at a fixed
+            // world point (measured mean value change .22 across these same cameras), so the
+            // flecks crawled over shoal foam as hash. The integer-matrix sample must hold
+            // still to phase precision, and its footprint fade must be full where a fleck cell
+            // spans five pixels and gone where it spans two.
+            Require(std::fabs(FoamLaceFineValue(field,cellX,cellY,.37f)-
+                              FoamLaceFineValue(reference,worldCellX,worldCellY,.37f))<.06f,
+                    "the foam lace fleck stays on the same world point from any camera");
+            Require(FoamLaceFilter(0.f,0.f)==1.f&&FoamLaceFilter(.08f,.03f)==1.f&&
+                    FoamLaceFilter(.12f,.05f)>.5f&&FoamLaceFilter(.12f,.05f)<1.f&&
+                    FoamLaceFilter(.21f,.1f)==0.f,
+                    "the lace fleck fades out between five and two pixels per fleck cell");
             Require(std::fabs(field.ripplePhase[0])<=kLatticeWrap&&
                     std::fabs(field.ripplePhase[1])<=kLatticeWrap&&
                     std::fabs(field.warpPhase[0])<=kLatticeWrap&&
@@ -930,18 +1012,25 @@ int main() try
         // mid octave remains for its wave slope; sample broad warp exactly per pixel as the second
         // foam scale, so neither a projected octave nor triangle interpolation prints a grid.
         // Also pin the old clipped thresholds out of both implementations.
-        Require(pixel.find("float fine=lerp(.5,rippleFine.x,filter*filter);")!=std::string::npos&&
+        Require(pixel.find("float2 laceAbsolute=plane+wavePhase.xy;")!=std::string::npos&&
+                pixel.find("float2 laceCell=float2(laceAbsolute.x*2+laceAbsolute.y,")!=std::string::npos&&
+                pixel.find("-laceAbsolute.x+laceAbsolute.y*2)+swell*float2(.9,.47);")!=std::string::npos&&
+                pixel.find("float laceFade=1-smoothstep(.18,.45,2.2360679*max(footprint.x,footprint.y));")!=std::string::npos&&
+                pixel.find("float fine=lerp(.5,noiseGradient(laceCell).x,laceFade);")!=std::string::npos&&
                 pixel.find("float2 foamWarpCoord=float2(plane.x*.8253356+plane.y*.5646425,")!=std::string::npos&&
                 pixel.find("float3 foamWarp=noiseGradient(foamWarpCoord);")!=std::string::npos&&
                 pixel.find("float broad=lerp(.5,foamWarp.x,filter);")!=std::string::npos&&
                 pixel.find("float broad=lerp(.5,waveWarp.x,filter);")==std::string::npos&&
                 pixel.find("lace=lerp(1,1-.70*(1-fine)*(1-broad),saturate(filter*2-.2));")!=std::string::npos&&
+                pixel.find("rippleFine.x",pixel.find("float lace=1;"))==std::string::npos&&
                 pixel.find("rippleMid.x",pixel.find("float lace=1;"))==std::string::npos&&
                 pixel.find("*1.7-.35)")==std::string::npos&&
                 pixel.find("*1.6-.30)")==std::string::npos&&
+                mirror.find("FoamLaceFineValue(field, plane.x, plane.y, swell)")!=std::string::npos&&
+                mirror.find("Mix(.5f, wave.laceFineValue, wave.laceFilter)")!=std::string::npos&&
                 mirror.find("1.f - .70f * (1.f - laceFine) * (1.f - laceBroad)")!=std::string::npos&&
                 mirror.find("laceMid")==std::string::npos,
-                "the quality-7 mid octave no longer feeds foam coverage; the lace uses fine and broad fields only");
+                "the lace fleck is the anchored integer-matrix sample, not the counter-phased chop or mid octave");
         // The black shape inside the waves at surface height. `controls.z` is normalStrength times the
         // sea's agitation and reaches 2.5, so the body multiplier goes NEGATIVE on a face turning away
         // from the light, and nothing saturates rgb between there and the output - the render target
@@ -957,27 +1046,178 @@ int main() try
         Require(mirror.find("Mix(.22f, .78f, Saturate(-Dot(toCamera, light) * 1.7f - .45f))")!=std::string::npos&&
                 mirror.find("rgb = Mul(rgb, std::max(1.f + normalResponse")!=std::string::npos,
                 "the CPU mirror floors its body shading identically");
-        Require(pixel.find("float underwater=1-step(-1e-4,cameraSide);")!=std::string::npos&&
+        // Coverage is the column's own extinction in both halves. A mirror that kept the old
+        // fraction would publish preview frames translucency the renderer no longer has, which
+        // is exactly the kind of drift this pair of pins exists to catch: the double wave was
+        // half a classification bug in the shader and half a coverage ceiling in both.
+        Require(pixel.find("float depthAlpha=absorption;")!=std::string::npos&&
+                mirror.find("const float depthAlpha = absorption;")!=std::string::npos&&
+                mirror.find(".78f - .20f * fresnel")==std::string::npos,
+                "the CPU mirror covers a face by what its own column extinguishes, as the shader does");
+        // The preview renders from above the plane, where the shader's underwater branch of the
+        // optical column is exactly zero, so the mirror carries the branch as a comment and the
+        // captured-depth side of it as code. Pinned so the omission stays a stated identity
+        // rather than becoming a silent drift.
+        Require(mirror.find("column=min(lerp(effectiveDepth*reflectionControl.w,interfaceYards,underwater),400.0)")!=std::string::npos&&
+                mirror.find("const float column = std::min(effectiveDepth * depthFogFactor, 400.f);")!=std::string::npos,
+                "the CPU mirror states which side of the underwater column branch a preview camera takes");
+        // Which side of the interface the CAMERA is on. This used to be asked of the triangle
+        // (`1-step(-1e-4,dot(n,v))`), and a triangle cannot answer it: a facing test is true of
+        // every face near edge-on, and at a low camera above water the whole sea out toward the
+        // horizon is within a degree or two of edge-on. Half the sea therefore took the
+        // underwater optical path while the camera stood in the air - the water-to-air mirror,
+        // the camera-column absorption over the full distance to that face, and the coverage
+        // floor with them - which is the dark sheet a player reads as seeing the front faces of
+        // waves through the backs of them. The answer now comes from the draw's own matrices on
+        // the CPU, in units of the wave's own lift, and is one number for the whole tile.
+        // Pinned on both sides of the fix: the classification that replaced the facing test, the
+        // absence of the facing test, and the three optical terms that are only correct because
+        // of it (the critical-angle floor, the camera-to-surface column and the coverage that
+        // matches what that column extinguishes).
+        const auto classification=pixel.find("float underwater=smoothstep(-1.0,1.0,waveSwell2.w);");
+        Require(classification!=std::string::npos&&
+                pixel.find("1-step(-1e-4,cameraSide)")==std::string::npos&&
+                pixel.find("float cameraSide=dot(n,v);")!=std::string::npos&&
+                pixel.find("float flip=cameraSide<0?-1:1;")!=std::string::npos&&
                 pixel.find("float totalInternal=1-smoothstep(.63,.69,NoV);")!=std::string::npos&&
                 pixel.find("fresnel=max(fresnel,underwater*totalInternal*foreverStyle.z);")!=std::string::npos&&
-                pixel.find("float cameraColumn=min(length(viewPos),250.0);")!=std::string::npos&&
-                pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos&&
                 pixel.find("surfaceAlpha=max(surfaceAlpha,reflectionAmount);")!=std::string::npos,
-                "the underside uses a water-to-air critical-angle reflection, camera-side absorption and coverage that does not double-blend the scene");
+                "the camera's side of the interface comes from the draw's own matrices, not from which way a triangle faces");
+        // Under the surface, what is "behind" a fragment is AIR - the sky, a shore, a hull - so
+        // the column measured from the surface down to the captured depth behind it is a length
+        // of air mistaken for a length of water: a hundred yards of murk with the camera three
+        // yards under, which collapsed every upward view onto the deep colour. The water this ray
+        // really crosses is the camera-to-surface segment, which is the same length the
+        // camera-column absorption has always used, so the two are now the same number and the
+        // lerp between them is gated on the classification above.
+        const auto cameraColumn=pixel.find("float cameraColumn=min(length(viewPos),250.0);");
+        const auto column=pixel.find("float column=min(lerp(effectiveDepth*reflectionControl.w,interfaceYards,underwater),400.0);");
+        Require(cameraColumn!=std::string::npos&&column!=std::string::npos&&cameraColumn<column&&
+                pixel.find("float column=min(effectiveDepth,400.0);")==std::string::npos&&
+                pixel.find("float totalInternal=1-smoothstep(.63,.69,NoV);")!=std::string::npos&&
+                pixel.find("float interfaceYards=lerp(250.0,cameraColumn*(1.0+clamp(lightColor.w,0.0,15.0)),1.0-totalInternal);")
+                    !=std::string::npos&&
+                pixel.find("float4 lightColor:register(c202);")!=std::string::npos&&
+                code.find("controls[11]=renderer::underwater::ExitWash(effectiveTurbidity,submersion,true)-1.f;")
+                    !=std::string::npos&&
+                pixel.find("float3 cameraTransmittance=exp(-bodyStyle.x*waterStyle.y*cameraColumn*absorbTint.rgb);")
+                    !=std::string::npos&&
+                pixel.find("rgb=lerp(rgb,underwaterBody,underwater);")!=std::string::npos&&
+                pixel.rfind("float cameraColumn=min(length(viewPos),250.0);")==cameraColumn,
+                "underwater the optical column is the camera-to-surface segment with the exit wash on it, and the far column outside Snell's window");
+        // The underside is the medium's own colour, everywhere, not the sky's. Three
+        // terms used to hand it the air's palette: the reflection MISS fell back to
+        // the sky/fog colour (rayUp saturates at zero from below, so the horizon
+        // term was the whole of it), an SSR HIT arrived in the client's dry in-air
+        // shading because the full-screen pass leaves liquid pixels alone, and the
+        // sheet fogged into fogColor at range - over a coverage that still leaked
+        // most of the live scene through a shallow sheet outside Snell's window,
+        // where nothing may be transmitted at all. A blue lake's underside on a
+        // warm evening was orange by the first and third of those. Now the miss
+        // reflects the body's asymptote, the hit is marched over the leg it
+        // travelled, the camera segment is charged once to the finished pixel
+        // (after foam, not before reflection), coverage is opaque at total
+        // internal reflection, and the fog target is the medium.
+        const auto foamGlow=pixel.find("*saturate(sunElev*2.+.2)*.55*deepTint.a;");
+        const auto cameraCharge=pixel.find("rgb=lerp(rgb,underwaterBody,underwater);",foamGlow);
+        Require(pixel.find("float3 underEnvironment=(deepTint.rgb+inScatter)*waterTint.rgb;")!=std::string::npos&&
+                pixel.find("float3 environment=lerp(sky,underEnvironment,underwater);")!=std::string::npos&&
+                pixel.find("if(hit<=0)hitDistance=traceDistance;")!=std::string::npos&&
+                pixel.find("float3 reflectionTransmittance=exp(-bodyStyle.x*waterStyle.y*hitDistance*absorbTint.rgb);")
+                    !=std::string::npos&&
+                foamGlow!=std::string::npos&&cameraCharge!=std::string::npos&&foamGlow<cameraCharge&&
+                pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));")
+                    !=std::string::npos&&
+                pixel.find("float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);")!=std::string::npos&&
+                pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
+                "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
+        // DEPTH FOG: the view DOWN into the water charges the sunlight's trip to the bed as
+        // well as the trip back, so submerged terrain dissolves into the body with depth
+        // instead of standing dark under clear-looking water. One register lane that was
+        // uploaded unread, one multiply on the captured-depth side only (the submerged
+        // branch is the medium's own column and is not scaled), exactly 1 with the toggle
+        // off, and plumbed as a toggle plus a slider through the same [Water] tuning,
+        // overlay and CPU mirror as every other water number.
+        Require(code.find("controls[19]=depthFogEnabled?depthFogStrength:1.f;")!=std::string::npos&&
+                code.find("depthFogEnabled=ReadTuning(L\"DepthFogEnabled\",1)!=0;")!=std::string::npos&&
+                code.find("depthFogStrength=std::clamp(ReadTuning(L\"DepthFogPercent\",200),100,400)*.01f;")!=std::string::npos&&
+                mirror.find("const float depthFogFactor = c.depthFogOn ? std::clamp(c.depthFog, 100.f, 400.f) * .01f : 1.f;")!=std::string::npos,
+                "depth fog charges both legs of the bed's path, is exactly the old column when off, and reaches the mirror");
+        // Coverage. Water writes no depth and blends, so whatever is behind a face shows through
+        // by exactly (1-alpha) - and behind the face of a wave is very often another face of the
+        // same wave. The old `absorption*(.78-.20*fresnel)` leaked 22% of the sea behind into
+        // the sea in front at every depth past the first e-fold, and 42% at the grazing angles
+        // where wave faces overlap most: the second half of the double wave. 1-T is the fraction
+        // of what is behind that this column really extinguishes, and it is the same number the
+        // colour converged to the deep tint by.
+        Require(pixel.find("float depthAlpha=absorption;")!=std::string::npos&&
+                pixel.find("absorption*(.78-.20*fresnel)")==std::string::npos&&
+                pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")!=std::string::npos,
+                "a water face covers by what its own column extinguishes, so the sea behind it cannot show through the sea in front");
+        // The CPU half: the plane over the camera, read from the draw's own modelView and one
+        // of its own vertices - and nothing else. It used to be read against the live VIEW
+        // transform and refused outright when the view's basis determinant was negative (the
+        // client's reflection pass); on a real client that read nothing at all and the medium
+        // never engaged, because a shader-driven client leaves its fixed-function VIEW state
+        // holding whatever a fixed-function draw last put there, and the determinant's sign is
+        // a handedness convention this tree never established. Reflection draws are now kept
+        // out by their render target, a scaled tile still reports the same plane (a scale's
+        // fourth row is (0,0,0,1), so it cancels out of row 3), the reading is held across
+        // draws that cannot answer, and it is divided by the wave's own lift so a swimmer
+        // crossing a rough surface fades instead of snapping.
+        Require(code.find("renderer::underwater::PlaneOverCamera(modelView,")!=std::string::npos&&
+                code.find("const bool haveVertices=mainTarget&&ReadLiquidVertices(d,vertexSamples);")!=std::string::npos&&
+                code.find("mainTarget=mainTargetSurface&&currentTarget.Get()==mainTargetSurface;")!=std::string::npos&&
+                code.find("submersionTracker.Observe(planeReading);uwPlaneValid++;")!=std::string::npos&&
+                code.find("const float planeBand=std::max(renderer::underwater::kShaderBandYards,")!=std::string::npos&&
+                code.find("geometry.amplitude*renderer::water::kGroupMax);")!=std::string::npos&&
+                code.find("controls[75]=std::clamp(submersion/planeBand,-2.f,2.f);")!=std::string::npos&&
+                code.find("const float submersion=renderer::underwater::ClassifiedYards(")
+                    !=std::string::npos&&
+                code.find("(haveVertices&&vertexSamples.haveCoverage)?&liquidCoverage:nullptr")
+                    !=std::string::npos&&
+                code.find("const float submersion=(planeReading.valid&&planeReading.local)")
+                    ==std::string::npos,
+                "the camera's side of the plane is read from the draw itself, refused when the draw is off-screen, and held when it cannot answer");
+        // The read's own sweep (round 18): the coverage extremes are measured
+        // once as the draw is copied in and handed to the reading, so a far
+        // sheet is refused from its bounding box instead of a per-frame
+        // triangle scan; the element count is computed in 64-bit under a
+        // ceiling, so an absurd primitive count cannot wrap small and have
+        // the first few emitted vertices swear they were the whole draw;
+        // and the vertex declaration's position is parsed once per
+        // declaration instead of on every liquid draw.
+        Require(code.find("MeasureLiquidCoverageBounds(liquidCoverageScratch,consumedElements,")!=std::string::npos&&
+                code.find("vertexSamples.haveCoverageBounds};")!=std::string::npos&&
+                code.find("out.haveCoverageBounds=entry.haveCoverageBounds;")!=std::string::npos&&
+                code.find("elements<=(UINT64(1)<<24)?static_cast<UINT>(elements):0;")!=std::string::npos&&
+                code.find("liquidDeclarationCache.Get()==declaration.Get()")!=std::string::npos&&
+                code.find("liquidDeclarationCache.Reset();")!=std::string::npos,
+                "the liquid read measures its coverage bounds once, counts elements without wrapping, and parses each declaration once");
         // Foam placement must not be evaluated in view-depth units: that makes a fixed seabed
         // look shallower/steeper as the camera pitches. Reconstruct the bed point on its screen
-        // ray, use vertical world separation for shore bands, and derive slope from a normal.
+        // ray, use vertical world separation for shore bands, and derive slope from a normal
+        // measured over reconstructed points a fixed world span apart: a one-pixel derivative
+        // stencil hands the slope to the captured depth's storage step, which printed through
+        // shoal/beach foam as quad-scale ticks on shallow beds (modeled numerically above).
+        // Every depth-gated foam source carries foamDepthValid, backwash included: a pixel
+        // with sky behind it clamps its foam depth to zero and would read as ankle-deep swash.
         Require(pixel.find("float3 bottomView=float3((2*screenUV.x-1)*behindZ/max(reflectionProjection.z,1e-6),")!=std::string::npos&&
                 pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")!=std::string::npos&&
-                pixel.find("float3 bedNormal=cross(ddx(bottomView),ddy(bottomView));")!=std::string::npos&&
+                pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
+                pixel.find("float bedTap=clamp(kBedSlopeSpanYards/max(bedPixelYards,1e-4),1.0,16.0);")!=std::string::npos&&
+                pixel.find("float3 bedNormal=cross(bedE-bedW,bedS-bedN);")!=std::string::npos&&
+                pixel.find("cross(ddx(bottomView),ddy(bottomView))")==std::string::npos&&
                 pixel.find("float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);")!=std::string::npos&&
                 pixel.find("float swashDepth=max(foamDepth-sin01.x*runUp,0);")!=std::string::npos&&
                 pixel.find("float shore=foamDepthValid*shallowEdge;")!=std::string::npos&&
                 pixel.find("float shoal=foamDepthValid*saturate(bedSlope*bodyStyle.w*2.0-.3)*saturate(1-foamDepth*.05);")!=std::string::npos&&
+                pixel.find("backwash=foamDepthValid*saturate(.55+.45*sin(swashDepth*2.4-sin01.x*2.1))")!=std::string::npos&&
                 pixel.find("ddx(effectiveDepth)")==std::string::npos&&
                 pixel.find("float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));")!=std::string::npos&&
-                mirror.find("const float e = 1.5f;")!=std::string::npos,
-                "shore, shoal and backwash foam use camera-invariant world depth and bed slope while optical depth remains unchanged");
+                mirror.find("const float e = 1.5f;")!=std::string::npos&&
+                mirror.find("validDepth * Saturate(.55f")!=std::string::npos,
+                "shore, shoal and backwash foam use camera-invariant world depth and a yard-scale bed slope while optical depth remains unchanged");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&
@@ -1405,6 +1645,11 @@ int main() try
             Require(overlay.find("L\"Water\",L\"Quality\"")!=std::string::npos&&
                     overlay.find("WATER QUALITY (0 FLAT 6 HIGH 10 MAX)\",0,10,1,7}")!=std::string::npos,
                     "water quality is an eleven-position slider in F7, bounded and defaulted by the ladder");
+            Require(ini.find("DepthFogEnabled=1")!=std::string::npos&&
+                    ini.find("DepthFogPercent=200")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"DepthFogEnabled\",\"DEPTH FOG\",0,1,1,1}")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"DepthFogPercent\",\"DEPTH FOG AMOUNT\",100,400,5,200}")!=std::string::npos,
+                    "depth fog ships on at both-legs strength in the ini and as a toggle plus slider in F7");
         }
         // And the CPU mirror resolves the SAME ladder rather than inventing its own gates, so a
         // published frame at a level is a picture of what the renderer draws at that level.

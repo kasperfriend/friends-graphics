@@ -1,5 +1,1129 @@
 # Water rendering audit
 
+## Full rework round 19: the ticks on the shallow bed (2026-10-19)
+
+The report: dark ticks in rows on the submerged sand in the shallows, gone the moment
+foam is switched off. The second half of that sentence is the diagnostic - the foam
+switch zeroes both foam strengths together - so the hunt stays inside the foam terms,
+and of those only one is built from a screen-space derivative: the bed slope behind the
+shoal term and the beach/wall split. The ticks in the screenshot measure two pixels
+wide in every depth band, near shore and far, which is the size of a derivative quad
+and of nothing else in the foam chain: the lace, the broad warp and the chop are all
+world-anchored and yards across, and round 16's anchored fleck fades out well above
+that scale.
+
+**What the slope was reading.** `bedSlope` came from `cross(ddx(bottomView),
+ddy(bottomView))` - the reconstructed bed point differenced against its immediate
+neighbours. For a plane in exact arithmetic that ratio is the plane's true slope at any
+resolution, which is how it survived review; but the depth it reconstructs from is
+*stored*, and stored depth has a step. Modeled end to end (a 0.28-slope bed under a
+pitched camera, the client's projection, point-sampled capture, 2x2-quad derivatives,
+the shader's own thresholds): against a true 24-bit fixed depth buffer the reading is
+clean to three decimals, and against a short-mantissa floating-point depth - what an
+INTZ fetch hands back on AMD hardware, where INTZ is DF24 - the storage step at a few
+tens of yards is a sizeable fraction of the bed's rise between neighbouring pixels, and
+the slope comes back as quad-scale jitter, an order of magnitude above the bed's own
+variation. Every shallow bed whose true slope sits near the shoal threshold
+(`bedSlope*2-.3` - ordinary beach aprons and sand bars live exactly there) then
+switches its shoal foam a quad at a time along its depth contours, with the beach/wall
+split and the swash width jittering behind it. On fixed-24 hardware there was never
+anything to see, which is why it presented as a machine-specific artifact and why the
+CPU preview - whose `FieldSlope` has always measured the authored bed over +-1.5 yards
+- could not reproduce it: the mirror and the shader were reading different numbers.
+("Shore understanding" below had even named this failure and its cure, a span named
+`kBedSlopeSpanYards`, for an ancestor of the slope code; the constant was never in the
+shader. It is now.)
+
+**The fix.** The bed normal is built from bed points reconstructed at taps a fixed
+world distance out: `kBedSlopeSpanYards` (1.5 yards, `FieldSlope`'s own baseline)
+either side of the pixel along its screen axes, marched along the derivatives of
+`screenUV` (this pixel's own texel steps, smooth whatever the depth does), the texel
+distance derived from the pixel's footprint in yards grown by the bed's extra distance
+along the ray and capped at sixteen texels - past which one texel is already most of
+the span wide. A tap that lands on sky falls back to the centre point, turning that
+axis into a one-sided reading instead of a cliff invented out of the far sentinel. The
+model above has the jitter collapse by more than an order of magnitude at every storage
+precision while the reading stays on the true slope, and that round trip is a regression
+fixture now, not a paragraph. Four extra depth taps in the surface stage are the whole
+cost.
+
+**One gate that was simply missing.** The backwash term never carried
+`foamDepthValid`. Where the captured depth behind a water pixel is sky - open sea
+running to the horizon, no bed in the capture at all - the foam depth clamps to zero,
+the swash mask reads ankle-deep, and at quality 7 and above the backwash painted
+streaks across deep water whenever the sheet was draining. Shore and shoal always had
+the gate; backwash has it now, in the shader and in the mirror. The preview's coast
+frame moves in 29 of its 139,200 pixels (the waterline fringe where the clamped depth
+was lying) and the sea frame not at all, which is the size of the look change over any
+bed that is really there: none.
+
+Verification: WaterRegression 5636 (three new - the captured-depth round trip above,
+asserting the one-pixel stencil's jitter, the span's suppression of it, and the span's
+accuracy - plus the source pins); the underwater and shader-source suites unchanged and
+green.
+
+## Full rework round 18: the optimization and bug sweep (2026-10-19)
+
+A sweep rather than a report: profile what round 17 left on the hot path, hunt for the
+bugs a careful read and a sanitizer can find, and fix what is real. No pixel changes -
+the round's visual claim is the opposite, proved rather than asserted.
+
+**The coverage scan was the new hot path.** Round 17 put a per-triangle barycentric scan
+in `PlaneOverCamera`, which runs on *every* liquid draw of *every* frame. Benchmarked
+portably (identity basis, the shapes production feeds it), a chunk's 128 triangles cost
+3.4 µs with the camera over it, 5.0 µs two yards ashore, 5.2 µs from 300 yards away -
+and a cap-sized 1296-triangle sheet 30-50 µs. Flying over a lake draws dozens of chunks
+the camera is not in, so the frame was spending a visible slice of itself refining
+distances for sheets that could only ever answer "not yours". Three cuts, each beneath
+the decisions rather than through them: the reader now measures the coverage vertices'
+exact local extremes once as it copies a draw in (it already validates every position
+finite there) and hands them over as `LiquidCoverage::boundsKnown`, so the reading
+skips its own validation pass; a sheet whose whole bounding box is past the locality
+reach the tail of the function judges by (with a hair of guard for the float the answer
+is reported in) is refused from the box alone - not local, not containing, the distance
+reported being the box's lower bound and the height the measured ends' mean, two
+numbers only the log spends on a sheet that observes and classifies nothing; and inside
+the scan a triangle whose own box is no nearer than the best already found is retired
+in six compares before any division. After: 1.1 µs over the chunk, 1.3 µs ashore, 0.08
+µs from afar; the big sheet 7.1 / 12.2 / 0.08 µs. A differential fuzz against the
+pre-sweep header - 400,000 randomized sheets (grids with dry holes, soups, strips,
+fans) under identity, yawed, scaled and mirrored bases, bounded and not - found **zero**
+divergent decisions, identical numbers wherever a reading is local or containing, and
+the far distance a true lower bound everywhere else.
+
+**A smaller per-draw cost went with it.** The liquid read re-parsed the bound vertex
+declaration's element array on every draw to rediscover where POSITION lives; liquid
+draws share one declaration, so the parse is now remembered against the declaration
+itself (held like the cached buffers beside it, dropped in the same reset). Where the
+position lives is a fact about the declaration, not about the draw, and it was the only
+part of the parse any consumer kept.
+
+**Bugs found and fixed.** `LiquidElementCount` multiplied in UINT: past ~1.4e9
+primitives `3*count` wraps, and a count wrapped small would have had the coverage read
+swear the first few emitted vertices were the whole draw, footprint and all. It now
+counts in 64-bit under a ceiling no liquid draw approaches, past which the read samples
+the first vertex only - the same fail-safe as an unknown primitive type. The tracker's
+idea of "have a camera" checked only the height's finiteness while the jump test and
+the remembered plane's anchor spend x and y: a NaN in either would have sailed through
+every comparison and anchored the plane somewhere it could never expire from; all three
+axes must now be finite. Both suites also ran clean under ASan/UBSan with
+`-fno-sanitize-recover=all` before and after - no UB was hiding in the portable core.
+The two visual candidates a sweep would want next remain exactly as blocked as the
+TODO records: world-anchoring the sediment patches needs shader slots the 508/512
+stage does not have, and fading the client's own underwater fog needs a client to
+answer which fog that is. Neither is guessable from here, and neither was guessed.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is **189 assertions**: bounded coverage answers
+bit-for-bit as unbounded (contained, dry-corner distance, yards, span), a sheet past
+locality reach is refused from its box with the box's distance (300 yards short on
+each axis reads 424.264, bounded or not), and a NaN-horizontal camera anchors no plane.
+`tools/WaterRegression.cpp` is **5633**, pinning the bounds hand-off, the 64-bit ceiling
+and the declaration cache in the Windows-only reader by source. The differential fuzz
+and benchmarks above were run against a verbatim copy of the pre-sweep header. No HLSL
+changed; the fxc counts stand at rounds 16-17's (underwater 508/512, surface 1042).
+
+## Full rework round 17: memory may not start what the gate refused (2026-10-19)
+
+One report from the round-15/16 build: the underwater shader was on while standing on ground
+near water in Sholazar basin basin. Round 14 was supposed to have closed exactly this - only being
+under the sheet may start a submersion - and its direct gate does hold. What it left behind was
+the memory underneath the gate, and the sequence is short enough to state as a walk: stand
+**above** a nearby lake and its reading quite properly observes "air" (testimony of air was
+never gated) - and was *remembered*, as every accepted local plane was. Walk downhill
+**beside** that lake, into the basin below its level. Every direct reading is now positive and
+is footprint-refused, frame after frame - but those frames are therefore *unobserved*, and an
+unobserved frame re-measures the camera against the remembered height, which says three yards
+of water overhead. The medium starts from memory; the old loose sustain ("nearness may sustain
+an established swim") then accepts the beside-the-lake readings at face value and keeps it
+forever. Reproduced against the core in thirty lines: air above the bank, then the refused
+reading below it, and the tracker settles at `ramp 1, submerged` on dry ground. The direct
+reading was never the problem again; the problem was that three other paths spent weaker
+evidence than the gate demanded. All three are closed, everywhere the answer is spent:
+
+**Memory has provenance, and memory may not start.** Only a sheet actually over the camera
+(`MayStartSubmersion` on a positive reading) may create or renew the remembered plane; air
+testimony and beside-the-water heights create none. A remembered plane may finish an overhead
+entry for one second (the smoothing crosses its threshold over frames in which the sheet can
+leave the frustum) and may sustain a swimmer already in, but a dry camera is answered "air"
+from memory however far below some remembered lake's level it has walked, and a dry tracker's
+stale plane is dropped outright. Sustaining changed sides with it: a positive reading that is
+not overhead no longer observes at all - the remembered plane does that job - and a known
+footprint that keeps saying "outside" while the camera travels away from where a sheet last
+covered it retires the memory, which is the exit for climbing out onto ground below a
+neighbouring sheet's level (outside evidence alone retires nobody: a visible neighbour not
+containing a diver proves nothing about his own culled chunk overhead). The jump reset
+still lands first, and a teleport *into* water remembers its landing frame's own overhead
+plane, pinned as its own case.
+
+**A rectangle is not a sheet.** The footprint itself was the next weakest evidence: first and
+last consumed vertices bound a chunk's rectangle, but a liquid chunk enables its tiles one by
+one, so that rectangle routinely covers dry shore cells and the inside of a bend. The caller
+now reads the draw's emitted vertices in order - one range lock per buffer inside the existing
+one-new-chunk-per-frame budget, cached with the draw, capped at 4096 elements and a megabyte
+of vertex span - and `PlaneOverCamera` measures containment and distance against the actual
+triangles (0.75 yards of seam slack, not a shoreline's three), taking the height from the
+nearest triangle at the camera's own point instead of the mean of a river's two ends. The
+rectangle remains the fallback when a draw could not be read whole, and the no-footprint entry
+fallback shrinks from 24 yards to the 4 yards that mean "measured water at the camera" rather
+than "water near a player on the ground".
+
+**The surface lane spends the same rule.** The tracker was only one consumer: the water stage
+classified its own draw with any local positive yards, so a sheet beside a dry camera shaded
+itself as seen from under water even while the full-screen gate stayed shut. Both now spend
+`ClassifiedYards`/`MayStartSubmersion` - one entry rule, in the core, for the medium, the
+memory and the lane. The status line gains the outside count and `cover=`/`contains=` so the
+next report from any shore says which evidence it ran on.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is **186 assertions**: the walk-downhill-beside-the-lake
+sequence stays dry end to end, an L-shaped emitted sheet refuses the dry corner inside its own
+rectangle while a strip spelling of the same triangles contains, a tilted sheet answers by its
+triangle's height at the camera, a neighbouring sheet no longer observes and its outside
+evidence retires the memory, the one-point fallback stops at a shoreline's scale, a teleport
+into water remembers its landing plane, and the three halves of the gate are pinned against
+each other in source. `tools/WaterRegression.cpp` stays **5632** with its classification pin
+moved to the shared helper. No HLSL changed - the lane's *value* is chosen on the CPU - so the
+fxc counts stand where round 16 left them.
+
+## Full rework round 15: the login screen, the plane itself, and the orange underside (2026-10-19)
+
+Three reports from the round-14 build: starting the game could leave a white login window with
+only the audio running - sometimes cured by a restart; looking up from under water still showed
+far terrain through the plane in water that should be too dirty for it; and a lake in Mulgore that
+is blue on its surface was orange on its underside.
+
+**No optional effect may prepare itself inside the first frame of a launch.** The underwater
+pass's `Prewarm` ran from the compositor's `BeforeClear` hook - the first clear of the first
+frame - and `EnsureShader` was synchronous end to end: on a cold bytecode cache (which is every
+new build's first launch, because the key is the shader source) that first frame paid a full fxc
+run plus the driver's own JIT before the client had drawn anything at all, and a restart found
+the cache the abandoned launch had written and sailed through. Whether that is the whole of the
+white screen only a stuck launch's log can prove; that nothing may stand there is not in
+question, so the cost is simply gone from the frame path. The bytecode half is now
+`shaderbytecode::GetBytecode` (load-or-compile, no device), run on a worker from `Configure`
+and published under one mutex with its error and its elapsed time; `EnsureShader` consumes the
+blob and owes only `CreatePixelShader`, and even that waits in `Prewarm` until 180 frames have
+been presented - a few seconds of login screen the player can see - while a player who dives
+sooner gets it from `Render` out of bytecode the worker had the whole login to finish. A diver
+who beats the worker outright keeps the client's own fog for those frames instead of paying fxc
+mid-dive; a blob the driver refuses is recompiled once, on the worker again; and the pass logs
+`bytecode ready in N ms (worker thread…)`, so the next cold launch says what preparation cost
+and that no frame waited for it.
+
+**The plane and the gaps in the plane answer the same question now.** Round 13 closed Snell's
+window and added the turbidity wash - in the full-screen pass, which deliberately returns the
+liquid's own pixels untouched. The water stage marched its own pixels over the plain
+camera-to-surface segment at every angle, raised the Fresnel at total internal reflection, and
+then let the sheet's native alpha leak most of the live scene through anyway, because alpha -
+not Fresnel - is what a blended sheet transmits by. So the far shore stood crisp *through the
+plane* while the same shore was correctly impossible everywhere around it. The surface's
+underwater column is now `renderer::underwater::InterfaceYards`: inside the surface's own Snell
+band it is the camera segment with `ExitWash` on it, outside it is the far column; coverage
+floors at total internal reflection and otherwise at what that column extinguishes. The wash
+itself also grew the piece round 13 was missing: an exiting *image* crosses a near-surface
+layer of silt and rough interface that scrambles direction faster than it removes light, charged
+as **4 equivalent yards per unit of turbidity** (`kInterfaceScatterYards`) folded into the wash
+multiplier on the CPU. At turbidity 0 the wash is exactly 1 and the crystal pane - and the
+bottom path's exact-agreement pin - are untouched; in a swept swamp (turbidity 2.1-2.4 against
+a short clarity e-fold) the overhead shore dissolves into the glow from a couple of yards down,
+on liquid and non-liquid pixels alike. The surface receives the wash through the light colour's
+unread `w` lane, folded per draw from the submersion that draw measured, the player's turbidity
+dial as published by the compositor's reload, and the zone multiplier behind the same
+`ZoneWaves` gate as clarity - one dirt, spent by both stages.
+
+**An underside reflects the water it is in, not the sky it is under.** Mulgore needed no new
+colours: three terms were handing its underside the air's palette on every zone alike. The
+reflection miss fell back to the sky term, which from below (`rayUp` saturated at zero) is the
+bare fog colour - orange on a warm evening. An SSR hit arrived in the client's dry, in-air
+shading out of the pre-water copy, because these pixels are exactly the ones the medium pass
+leaves alone: the bed in its own orange dirt, mirrored over blue water. And the sheet fogged
+into `fogColor` at range while the camera-segment attenuation was spent on the body before the
+reflection and foam were even added. The miss now reflects the body's own asymptote
+(`(deep + inScatter) * tint`), a hit is marched over the reflected leg it travelled, the camera
+segment is charged once to the finished pixel, and the fog target under water is that same
+asymptote. None of it is per-zone: blue water is blue from both sides, a brown swamp is brown
+from both sides, and Mulgore keeps the clear blue round 14 authored for it.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is **177 assertions** - the wash as numbers (exact at 0,
+per-yard-overhead at the interface, far column outside the window, a shallow dirty sky already
+washed at two yards) and the startup contract as source pins (worker preparation, no
+synchronous compile path left in the pass, frame-gated device creation) - and
+`tools/WaterRegression.cpp` is **5182**, pinning the interface column, the medium-coloured
+underside, the reflected leg, the moved camera charge, the coverage floor and the fog target
+as one statement. CloudClimate 92, ShaderSource 36, AO 11, LocalLighting 13, the zone audit
+and the CPU preview are green as before. The fullscreen stage's only change is which constant
+lane its wash reads, and the Windows fxc leg holds it at **508/512 slots**; the surface stage's
+new underside work lands at **1011 slots** (vertex 188), with Win32 Release, Portable
+regressions and the changelog check all green.
+
+## Full rework round 14: under the sheet, in the water's own colour (2026-10-19)
+
+Three asks from the shore of the round-13 build: standing outside the water, with water nearby,
+and looking up started the underwater shader; give every water-bearing zone underwater defaults
+of its own, according to the place; and make the medium the colour the water advertises - red
+water, red underwater.
+
+**Nearness may sustain a swim; only being under the sheet may start one.** Round 12's locality
+was one-dimensional: distance to the segment between the draw's first and last consumed vertices,
+against that segment's span plus a shore's slack (or a 450-yard fallback with one vertex). That
+answers *which lake is this height about?* - it is not evidence the camera is in the lake. Below a
+raised sheet, on the shore under a canal wall or a dam, looking up puts exactly such a local,
+positive reading in frame forever. `PlaneOverCamera` now also puts the camera in the draw's own
+in-plane coordinates - one projection per axis, which the already-refused-otherwise orthogonal
+basis makes exact - and reports how far outside the sampled chunk's rectangle it lies
+(`footprintYards`, `containsCamera`, with three yards of chunk-seam tolerance; a footprint is only
+claimed when both sampled extents are real). The tracker spends that stronger fact in one place:
+a positive reading may *start* a submersion only when the sheet is over the camera, or, with no
+footprint to ask, when measured water is within 24 yards. Sustaining a swim keeps the loose
+locality (the chunk containing a diver looking at the bed is routinely the culled one), testimony
+of air is never gated, and the status line prints `foot=` beside `yards=`/`horiz=` so the next
+report says which fact it ran on. One boundary is named rather than papered over: a dry pocket
+*under* a sheet that genuinely covers the camera - a grotto roof, a hull - is indistinguishable
+from being in the water by anything a liquid draw reports, and still reads as in it.
+
+**The medium inherits the water's colour, not just its depths.** `MediumFor` used to carry
+DeepColour through untouched and let WaterColour (the tint) weigh in at a few percent, while the
+sky overhead was lifted by a fixed blue - so a place could be red on the surface and merely dark
+below it. WaterColour is a multiplier, so its hue is the *proportion* between its channels: the
+medium now normalises the tint by its own luminance and folds that mean-one hue into the deep
+colour (DeepColour still authors how dark the column ends; WaterColour now authors what colour it
+ends as), and `SkyGlowColour` lifts by `tint * .18` instead of the fixed blue. A neutral tint is
+an exact identity - the shipped global water and the bottom path's exact-agreement pins are
+untouched - and a one-channel tint saturates at a clamp instead of becoming a laser. The third
+leg is `AbsorptionColour`: it is a per-channel death rate, so the hue that *survives* a deep
+column is the one it kills slowest; the sweep below authors it accordingly (blue dies in a swamp,
+green and blue die in blood-red water) where the older values killed red first everywhere.
+
+**A sweep of the world's water.** The environment table gains five zone dials -
+`WaterClarityMultiplier` (0.1-4) and `UnderwaterTurbidity/Caustic/Shaft/GlowMultiplier`
+(0-4 / 0-2 / 0-2 / 0-2), all defaulting to 1, resolved Map -> Zone -> Area and blended across
+borders like every other environment float, and gated by the same `ZoneWaves` switch as the zone
+sea state. Clarity is spent once, on the surface's `bodyStyle.x` and the medium together (one
+water, one clarity); the other four reach the pass per frame from the settled environment and
+scale a copy of the player's [Underwater] dials inside the core's own bounds, so a player's 0
+stays 0. Against that schema, **199 of the 414 root zones** (plus Booty Bay's area override) now
+author a complete colour set and underwater tuple, classified by the water they actually hold:
+snowmelt and frozen seas run clear with low silt; Stranglethorn, Booty Bay and the tropical isles
+run clearest with the strongest net and beams; Swamp of Sorrows, Dustwallow and Zangarmarsh are
+soup (clarity 0.3-0.5, turbidity 2.1-2.7, the net nearly gone); the Plaguelands, Felwood and
+Shadowmoon are murk in their own sickly hues; Bloodmyst is red and turbid; Moonglade and Hyjal
+glow; canals, sewers and the Undercity slime run darkest; cave water gets almost no net, beam or
+glow because there is no sky over it; and Loch Modan is authored as what it is - a clear, dammed
+reservoir. Zones that already had hand-authored colours keep their Water/Deep pair; lava-only and
+dry roots author nothing and stay on the global water. `docs/water-zone-profile-audit.md` (and its
+generator, which now refuses partial colour sets, partial tuples and out-of-range dials) carries
+the full table; as ever, addressable in the client table is not proof a root is playable.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is 174 assertions - rectangle-vs-diagonal footprint fixtures,
+the dry-shore/overhead/sustain/air tracker cases, red and fel hue folds, exposure invariance and
+the tint-lifted sky - and `tools/CloudClimateRegression.cpp` is 92, pinning the sweep's breadth
+(199 complete sets, never colours without dials), spot values a reader can check against the
+world, Booty Bay's area override, border blending and transactional range refusals.
+`WaterRegression.cpp` stays at 5181, ShaderSource 36, AO 11, LocalLighting 13, overlay and zone
+audit green. The only HLSL touched is the sky lift (`waterTint.rgb*.18` for the fixed blue), a
+variable multiply where a constant stood; fxc on the Windows leg lands the underwater shader at
+**508/512 slots** (its allocator is not monotone - replacing the constant freed three), with
+Win32 Release, Portable regressions and the changelog check all green.
+
+## Full rework round 13: the lattice vertex under your feet, and the sky's picture (2026-10-18)
+
+Two live reports from the round-12 build, both visible looking down at the bed: "one big 2x2
+grid-like pattern, crossing in the middle" - also suspected looking up at the sky - and a request:
+in dirty water the sky should NOT be clearly visible through the surface.
+
+**The grid was two artifacts of the same family.** Reproduced without a GPU by rendering the
+core's fields to images: the dirt patch field over an 80-yard window is literally *four flat
+wedges meeting at a point*. `shadedWorld` is camera-relative, so the patch lattice (one cell per
+100 yards) keeps a vertex at the point directly under the camera forever, and the four cells
+meeting there print as a giant pinned cross that follows the swimmer - looking at the bed, looking
+at the sky, anywhere. The fix is one constant: the patch sample is offset by a non-integer number
+of patch cells (`kDirtSampleOffset = {37.31, 57.17}`), which parks the nearest vertex ~50 yards
+away and leaves a slow gradient underfoot. The patch field is still camera-relative (round 12's
+known debt), but it no longer carries a surveying diagram around.
+
+Beneath that, the same images showed the caustic net cut by hard diagonal seams on both lattice
+axes, in every fine-octave spelling. The shared value noise wraps the cell INDEX into [0,64)
+before hashing but hashes cell 63's far corner under the id 64 while the cell that wrapped to 0
+hashes the same corner as 0 - so the field is discontinuous at every wrap, every 160 yards (80 for
+the doubled octave). On the surface, where the noise bends normals, that line has never been
+readable; under a sharpened net at five times gain it rules straight lines across the bed. The
+net now reads a corner-wrapped variant (`NoiseValue64` / `causticNoise`) that is exactly
+64-periodic in both axes - which is what the camera phase's own wrap assumed all along. The cost
+in ps_3_0 slots is paid by restructuring the shaft march: the light's entry point is affine along
+the march, so its cell is a lerp of the two ends' cells instead of a third entry solve per tap.
+Warp and dirt keep the plain noise (their seams sit 1280 cells and 6400 yards apart,
+respectively); the divisor was remeasured over the periodic lattice (.195948, 5.1034).
+
+**The sky's picture vs the sky's light.** Inside Snell's window the pass showed the client's sky
+and shore through the column over the diver as though through a glass pane, because that is how
+round 8 modelled it. In real water the *image* dies faster than the *energy*: scattering scrambles
+the incoming sky light's direction as well as dimming it, so past a turbid column what survives is
+the downwelling glow, not readable clouds. Exiting rays now pay an extra wash of the water
+overhead - the column times `(1 + turbidity)` - while the in-scatter and surface-glow terms still
+pay out the full light, which is the physical trade: the dirtier the water, the sooner the window
+turns from a view into a lamp. At TURBIDITY 0 the wash is exactly 1 and nothing changes (the
+bottom path's exact-agreement pin holds on purpose); rays that end under water are untouched.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is 159 assertions: noise continuity proven by straddling the
+wrap (largest step there bounded against the field's own interior slope), the dirt offset pinned
+mid-cell with the murk around the camera's own point bounded to a slow gradient, the wash measured
+at turbidity 3 vs 0 and pinned OFF at 0, and re-measured net normalization. The fields themselves
+were rendered to images before and after: wedge-cross and diamond seams in, seamless net and a
+directionless murk gradient out. `WaterRegression.cpp` stays at 5181.
+
+## Full rework round 12: whose water is it, and which camera is it for (2026-10-18)
+
+Three live reports, between them they touch every layer of the underwater path: a teleport to
+Mulgore put the underwater medium on dry land and it survived a restart; under water, the caustic
+net moved with the camera - turning or swimming dragged it across the bed; and in Loch Modan the
+medium never engaged at all.
+
+**A height is not a place.** The plane reading answered one question - how far is this draw's water
+above the camera - and the tracker kept the nearest such plane as the camera's interface. But a
+plateau lake drawn anywhere in view reads the same yards as the lake the camera is actually
+floating in, so a player who teleported onto dry land under raised water kept *observing* the lake
+every frame, and the teleport reset that should have forgotten the old state only ran on frames
+that observed nothing: it never fired. Four guards replace the one coincidence:
+
+* The reading now measures **sideways as well as up.** The caller reads the draw's first AND last
+  consumed vertices (the hint carries the primitive so the last one can be located), and
+  `PlaneOverCamera` reports the camera's horizontal distance to the segment between them and that
+  segment's span. A reading only counts (`local`) when the camera is within about the span of the
+  water that measured it - the gate scales with the water body itself instead of with a guessed
+  yardage. Tilted sheets answer by the mean of their ends. Non-local readings observe nothing and
+  classify nothing, and the status line counts them apart (`uwPlane` gains a seventh field, plus
+  `horiz=`): on the offending client the log should show the plateau lake being refused by name.
+* The camera-jump reset now runs **every frame**, not only on unobserved ones, and the remembered
+  plane is **forgotten after 450 horizontal yards** from where it was observed - its height stops
+  answering for the world once the camera has walked away from the water that gave it. A deliberate
+  clear also latches (`cleared`), because otherwise the frame after a forget quietly re-holds the
+  last smoothed yards forever, which is the exact false-positive all this exists to prevent.
+* The vertex read no longer refuses dynamic default-pool buffers outright. That refusal was
+  first-dive insurance, but wherever a client's liquid chunks are (flagged) dynamic it made every
+  reading answer from the draw origin's plane forever - one way a whole zone's water never engages
+  (the Loch Modan report). The one-locking-chunk-per-frame budget is the safety; the pool never
+  was.
+
+**The field belongs to the camera that consumes it.** The wave field's phases carry an anchor
+camera's own place in the lattice, and the full-screen pass reconstructs bed positions relative to
+the frame context's camera, so relative-plus-phase is the absolute cell ONLY when the two are the
+same camera. They never quite were: the field was published by the last water draw (anchored to
+the draw), or rebuilt at a frame's `Present` for the frame that was ENDING and then consumed by
+the next frame's composite - which runs *before* that `Present`. Either way the net, the shafts
+and the silt were shaded against a camera a frame's worth of swimming away, and crawled by exactly
+the difference. There is now exactly one field construction, at composite time
+(`watereffect::UnderwaterFieldAt`), from the same integrated motion clock every draw used, handed
+the frame context it will be consumed against.
+
+That left the net's fine octave, which crawled for a subtler reason: its sample was
+`2.17*cell + 1.31*counterPhase`, inherited from the surface's fine ripple, and under that spelling
+the octave moves at one rate with the cell and another with the phase, so it shears across the
+base octave as the camera moves. A surface grain may shear under a drifting sea and nobody sees it;
+a caustic net is nailed to the bed or it is a decal. The fine octave now applies ONE map -
+crossed-and-doubled - to `cell + phase` together, so it reads the chop's own second harmonic of
+the absolute cell. The map's entries are integers on purpose: the phase wraps at the lattice's
+64-cell period, and only an integer map takes that lattice to itself, so the net does not pop at
+each wrap the swimmer crosses. Measured again: the net's mean moves from .197391 to .195857, and
+the divisor with it (5.0661 -> 5.1058), which is the whole of the visible difference - the pattern
+stops moving with the camera and starts lying still on the bed.
+
+The sediment patches had the family fault in its simplest form: their noise sampled the
+camera-relative position at a fortieth scale with no camera phase at all, so the patches travelled
+with the swimmer. "Both are properties of the place, not of the camera," the comment said. The
+anchored form - the broad warp read at the bed point - was built, then unbuilt under protest: fxc
+measures the full-anchored shader at 522 of its 512 ps_3_0 slots (the warp coordinate costs five,
+and a rotated fine octave five more: the net's fine octave is an un-rotated exact doubling for the
+same reason), and a phase of the patch field's own would need a constant lane the stage does not
+have (`warpConstants.w` is the only free lane, and a phase takes two). fxc's budget arithmetic is
+also non-monotonic here - three spellings of the same shader measured identical totals - so the
+round took the slot it could prove: dirt stays the one camera-relative sample in the pass, the
+patches breathe slowly with the swimmer, and TODO.md carries the item against a budget or ABI
+opening. Anchoring is no longer a comment for the rest: `TestWorldAnchoring` puts two cameras
+fifty-seven yards apart through the real field builder and Requires the net and the warp at a fixed
+bed point to be the same numbers from both - and a stale field to be different, which is the bug,
+quantified.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` grew to 153 assertions: the reading's locality geometry (a lake 700
+yards away at swimming height measures truly and is not local; a swimmer mid-lake is distance
+zero; the lone-vertex fallback radius both ways), a teleport that lands under somebody else's
+lake and never re-observes it, the remembered plane's expiry under walking, the anchoring
+identities above, and pins that the composite builds the field for its own frame context while
+no draw and no `Present` publishes one. `WaterRegression.cpp` stays at 5181. Live confirmation
+remains the client's job - Mulgore after a teleport, a Loch Modan dive, and a slow turn over a
+sunlit bed - with the new `horiz=`/seventh-field counters on the water status line to read.
+
+## Full rework round 11: the second leg of the bed's path (2026-10-18)
+
+With the horizon opaque, the same player pointed at what was left in that direction: a submerged
+hillside standing dark and crisp *through* the mid-distance water, clearly terrain behind glass
+rather than terrain under a body of water. Asked for "some underwater fog visible from above,"
+with a slider and a toggle.
+
+The view down into the water had a one-legged integral. The seabed in the captured scene was lit
+by the client **as though in air** - the client's terrain shading knows nothing about the water
+over it - and this stage then charged the light's trip back *up* from the bed to the camera (the
+Beer-Lambert column of round 6). The sunlight's trip *down* to the bed was never charged by
+anyone, so a bed ten yards down was being shaded and then extinguished as though the sun had
+reached it for free: roughly twice as present as the water over it allows, and dark rather than
+dissolved, because one leg's extinction on an already-dark bed mostly subtracts while the body's
+own colour (what the second leg's worth of absorption hands the pixel to) is what makes it read
+as *depth*.
+
+`DEPTH FOG` closes it. The captured-depth side of the optical column is multiplied by an authored
+factor carried in `reflectionControl.w` (a lane uploaded unread since the depth range moved into
+c203 on the CPU): 100% is the one-way column this stage always marched, 200% (shipped) charges
+both legs, and up to 400% is simply murk a player may ask a lake for. It multiplies *yards*, not
+colour, so ankle-deep water at a shoreline stays clear at any setting and only depth earns the
+fog; the submerged branch of the column (the camera-to-surface segment, which the medium marches
+in full already) is untouched; foam, shore masks and the soft contact read their own depths and
+do not move. The toggle off uploads exactly `1.0f`, which makes the column bit-identical to the
+pre-round-11 shader. Plumbing is the standard water path end to end: `[Water] DepthFogEnabled` /
+`DepthFogPercent` (per-area like the rest), `DEPTH FOG` and `DEPTH FOG AMOUNT` in F7 next to
+`WATER DEPTH`, and the CPU preview charges the same factor on its own bed (which it also shades
+in open air, for the same reason), so a published preview frame is still a picture of the game.
+
+### Verification
+
+`tools/WaterRegression.cpp` is at 5181 assertions (the column line, the unlock-lane upload, the
+settings reads at matching bounds, the ini/overlay defaults, the mirror's factor);
+`tools/UnderwaterRegression.cpp` unchanged at 140. The Win32 build and the look are CI's and the
+client's; the expected change is that mid-depth terrain like the Stranglethorn Vale screenshot's
+dissolves into the body of the water within a few fathoms instead of standing under it, with
+shallows and shores unchanged, and `DEPTH FOG AMOUNT 100` (or the toggle off) restoring the
+previous picture exactly.
+
+## Full rework round 10: a sheet is only a sheet while a pixel resolves it (2026-10-18)
+
+The first live report on the working medium: underwater is good. Two defects rode in with the
+rounds that made it work, and both are fixed here.
+
+**The glass horizon.** From above the surface, distant water was transparent - the sky and the
+land behind the sea showed through the far water, with the horizon line visible *through* it.
+Round 8's far-sheet discard is the cause, and the mechanism is sampling: the discard is a
+per-fragment geometric fact (this triangle is the far side of its wave), sound while a pixel
+resolves a wave into many fragments. At distance and grazing angles a pixel spans whole triangles
+of the ~4-yard liquid grid and whole wave faces; which sheet covers the pixel centre is then
+luck, and a pixel whose only fragment is a far slope is discarded into a hole showing whatever
+was behind the sea. Near the horizon that is most of the far water. The discard now fades out
+with the pixel footprint (`1 - smoothstep(1.2, 3.6, max(footprint))` lattice cells, the wave
+being 16 and 11.5 cells long) - the same ground on which this stage already fades every
+unresolved octave. Where it fades, the two sheets shade within a fog colour of each other and
+the column's coverage is opaque anyway, so keeping both sheets costs nothing visible; where
+waves are resolved the factor is exactly one and the near sea is bit-identical.
+
+**The first dive that stopped the render.** Going under for the first time in the session froze
+rendering (the game kept running); a restart - warm caches - never saw it again. Two first-time
+costs were waiting on that exact frame: the underwater pass compiled its shader lazily at first
+submersion (a full compiler run plus the driver's JIT, on the render thread), and every newly
+seen liquid chunk paid a read-only buffer lock for its vertex height, a call that can wait on
+the GPU being finished with the buffer. Neither is allowed to wait for the dive any more: the
+compositor pre-warms the pass's shader on the ordinary frames it prepares (`Underwater::Prewarm`,
+through the same retry gate failure handling already used), and the vertex read spends at most
+one lock per frame (further chunks answer from their origin plane until their turn, so the cache
+is fully warm within a second of looking at any water) and, as a further belt, never locks a
+dynamic default-pool buffer at all. The underwater shader itself has no dynamic loops (a fixed
+three-tap unroll), so there is nothing left on that path that can spin. (Round 12 later removed
+the pool refusal: wherever a client's chunks are flagged dynamic it made every reading answer
+from the origin plane forever, and the budget alone is the safety it was always really resting on.)
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is at 140 assertions (the footprint gate and its ordering, the
+pre-warm and lock-budget pins); `tools/WaterRegression.cpp` unchanged at 5179. The Win32 build
+and `fxc` slots are CI's; the live proof is a horizon with opaque water up to its far edge, and a
+cold first dive with no hitch.
+
+## Full rework round 9: ask the draw, and only the draw (2026-10-18)
+
+The same player, on the round 8 build, this time with `Underwater.log` attached: dozens of tuning
+lines reached the effect, and then one transition for the whole session - `underwater pass idle
+(2): ramp 0.000000, medium valid 1`. The ramp never moved, so nothing downstream of it ever ran,
+and the toggle and the debug modes - which live inside the pass the ramp gates - could not have
+changed anything on that client. The question was no longer what the medium looks like. It was why
+the tracker never once believed the camera was wet.
+
+Round 7 had blamed the scale refusal and fixed it, and the fix was real - but it kept the reading's
+two other outside dependencies, and both turned out to be choices rather than facts:
+
+1. **The live view.** The reading dotted the draw's origin with the live `D3DTS_VIEW`'s up row and
+   demanded the draw's basis agree with it direction-for-direction. A fully shader-driven client
+   uploads its view as shader constants and touches the fixed-function state only on the draws
+   that still need it, so "the live view" at a liquid draw is whatever the last fixed-function
+   draw left there - plausibly stale, plausibly identity. Every honest draw then reads as
+   rotated against it and is refused, and the refusal leaves no other trace.
+2. **The determinant's sign.** Reflections were refused by `det(basis) < 0`. Nothing in this tree
+   had ever established which sign an ordinary draw carries - a right-handed z-up world through a
+   left-handed view can carry the negative one in the *normal* case - so the test could as easily
+   refuse every real draw and admit the mirrored one. It was a coin the code had flipped without
+   looking.
+3. **The origin's plane.** The reading measured the draw origin's plane, which is the liquid's
+   plane only if the water level lives in the matrix. Where the level lives in the vertices, the
+   answer is one water level off in whichever direction the tile chose - wrong even when every
+   gate above passed.
+
+The reading now asks the draw, and only the draw. In row-vector convention the rows of
+`modelView` are the view-space images of the liquid grid's own axes: two in the plane, one up out
+of it. The plane's normal is the cross of the first two rows, oriented to the third; a vertex at
+local height `h` lies on the plane at `row3 + h*row2`; the camera is the view-space origin; so
+`dot(row3 + h*row2, n)/|n|` is the plane's signed height over the camera - exact for translation,
+rotation and per-axis scale, needing no second matrix, no world up, and no opinion about
+handedness. Shear is still refused (rows not mutually orthogonal), because there the cross is not
+the third axis's direction and "up out of the plane" stops being one direction, and the 4000-yard
+bound stands. The determinant is still computed - for the log line, where its sign settles the
+convention question empirically instead of by assumption - and never acted on.
+
+The two facts the draw's matrix cannot carry are plumbed to it instead of derived:
+
+* **Which pass this is** is read off the render target. The composite publishes the surface the
+  player's own view is drawn into (`watereffect::mainTargetSurface`); a liquid draw aimed
+  anywhere else - the client's reflection texture above all - does not reach the tracker and does
+  not publish a medium. The backbuffer always counts as the player's view, so a client running
+  without the volume path classifies the same way, and a failed target query answers "main"
+  rather than silencing everything.
+* **Where the plane sits along the draw's own up axis** is read from a vertex the draw actually
+  consumes - its first one - using LocalLightManager's torch pattern verbatim (declaration, stream
+  and index queries, bounds against the buffers' own descriptors, read-only single-vertex locks,
+  the draw parameters handed over as a hint by the four detours, which are the only place those
+  parameters exist). A chunk's height is read once and cached against its buffers; the cache
+  holds the buffers so a freed-and-reallocated pointer cannot alias, and it is dropped at device
+  reset, where an extra reference to a client default-pool buffer would fail the client's own
+  reset. A draw whose height cannot be read still reports, from its origin's plane, and the
+  status line counts those separately (`noVertex`).
+
+The status line grew the rest of the answer: `uwPlane=valid/degenerate/shear/range/offscreen/
+noVertex[/far] yards=<last reading> [horiz=<its horizontal distance>] vertexZ=<last height>
+detNeg=<negative-determinant readings>` - the seventh field and `horiz=` arrived with round 12's
+locality gate, counting the heights that belonged to water somewhere else. If the medium ever goes
+missing again (or ever turns up where it should not), one `WaterEffect.log` line says which door is
+shut, and the last reading says what the water thought the truth was while it was shut.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is at 139 assertions: the reading re-derived against every
+camera rotation, a vertex-carried level, a mirrored basis *measured and reported rather than
+refused*, yaw-in-plane, both scales, shear and garbage refused with their reason codes, and
+wiring pins for the target publication, the four detour hints and the cache's death at reset.
+`tools/WaterRegression.cpp` re-pins the new reading on its side (5179, passing). The Win32 build
+is CI's; the live proof is a swim where `Underwater.log` says `underwater pass drawing` and the
+status line's `yards=` goes positive.
+
+## Full rework round 8: the far side of a wave is not drawn (2026-10-18)
+
+The same player, on the round 7 build, still saw the front face of a wave through the back of it,
+and said the thing that turns out to name the mechanism: it can be related to how the water
+treats its underwater part, "so I don't see *through* the wave, because it's underwater."
+Round 6 fixed the two halves it could see from the shader text - the camera-side classification
+and the coverage ceiling - and both were real. But coverage has a limit round 6 stated as a
+virtue and never followed to its end: alpha says how strongly a face paints, it cannot say
+that a face should not have painted. A displaced crest is a hump of water; a ray from a low
+camera produces two fragments for it, the face it enters by and the far face it would leave by.
+The far fragment is shaded like a legitimate surface (its normal is flipped, so it carries the
+same foam and glint as the front), it writes no depth, and it blends over or under the front
+face in whatever order the liquid mesh happened to be indexed in. At `depthAlpha=1` the far
+sheet drawn second simply wins. No alpha fixes that; the sheet has to not be drawn.
+
+Which side is far is a fact about the mesh, so it is read off the mesh. The derivatives of the
+interpolated displaced position give the triangle's own plane - a `cross(ddx,ddy)`; the bed
+slope further down the same stage is the same move over a yard-scale span - oriented to the
+surface's top by world up,
+which neither winding nor a mirrored reflection view can subvert (a cross product flips under a
+mirror and re-orienting by up flips it back). Two other normals were candidates and both are
+lies for this question: the interpolated vertex normal is the flat tile's up vector and knows
+nothing of the displacement, and the shading normal's slope is scaled by NORMAL STRENGTH, not
+by the lift in the geometry. `wrongSide` is positive for the underside seen from the air and
+for the top seen from inside the medium - the part of the wave that is underwater *from the
+camera's side of it*, which is the player's sentence as an equation. It fades over about
+fifteen degrees past the silhouette and discards outright beyond the fade: the discard also
+keeps the far sheet out of the mask and surface-depth outputs, and it refunds the eight
+trains, three noise octaves and two ray marches on near half the fragments of a low-camera
+sea. At the middle of the camera-side band it is exactly zero, because an eye in the surface
+has both sides legitimately in front of it. Above the band it does not depend on the tracker
+at all: with no plane reading the lane reads "above", and undersides are discarded, which is
+the correct above-water answer with a dead tracker as well as a live one.
+
+### The underwater fog, audited
+
+Asked directly whether far horizon and land are hidden under water, and whether there is an
+underwater fog: yes, and it is the medium rather than a fog. Submerged terrain is marched
+through per-channel Beer-Lambert over its true distance with the deep colour as the asymptote
+(at the shipped clarity, green is at 11% by sixty yards and 3% by a hundred, before the silt
+of round 7 deepens it), and a level ray that never meets the plane runs to the far cap, so
+there is no distance at which a submerged shore can be read clearly. One gap did exist, on
+exactly the pixels the screenshot showed: land and sky *beyond* the plane, on rays the column
+clamp cuts back to the surface, were transmitted by the short camera-to-surface column alone -
+as through glass, at angles glass does not transmit at. A ray leaving water for air only
+leaves inside the critical cone (cos .6613); outside it the plane is a mirror from below. The
+water stage already states that on its own pixels (`totalInternal`); the medium now states it
+on the pixels no tile covered: such a ray is marched as though it never leaves, to the far cap,
+and the in-scatter and asymptote fill it. Horizon land from under water is therefore not a
+matter of clarity or dirt any more: outside Snell's window it cannot arrive, and inside the
+window it arrives through exactly the water over the diver's head. The regression states it as
+an equality - a bright shore and a black shore at the horizon shade identically from two yards
+down, and differ by half the frame nearly overhead.
+
+All of it still has the one precondition round 7 built the diagnostics for: the medium only
+exists while the pass draws. `Underwater.log` says `underwater pass drawing` or names the
+guard keeping it idle, and the water status line counts the plane reading's answers. If those
+say the pass is not drawing, the fog in frame is the client's flat one, and that is a log
+question, not a tuning one.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is at 134 assertions (the sail re-derived through the window's
+edge, the horizon equality, the overhead contrast, and mirror pins for both new terms);
+`tools/WaterRegression.cpp` unchanged in count and passing (5179); the full portable replica is
+green. `fxc` slots and the live look are CI's and the client's, as ever.
+
+## Full rework round 7: silt, and a reading that can say why it said no (2026-10-18)
+
+A player report with a screenshot: submerged in Stranglethorn Vale, dome hills clear as day across
+the valley, no caustic net, no murk, and the UNDERWATER toggle and UNDERWATER DEBUG changing nothing
+at all. Everything in the frame - the deep-tinted waterline, the distance softness - was client
+shading. Round 6's medium had never engaged on that client, and the worst part of the failure is
+that nothing anywhere said so.
+
+### The ice-out: a scale cancels, and the reading refused it anyway
+
+Round 6's plane reading refused any draw whose basis differed from the live view by more than .02
+or whose rows were not unit length - including a draw whose WORLD matrix carries a *scale*. Row 3
+of S*T*V does not depend on the scale S: a scale's fourth row is (0,0,0,1), so a scaled tile
+reports exactly the same plane as an unscaled one. The refusal was therefore always wrong, and it
+fails in the worst way: silently, for every draw, on a client that scales its liquid draws, so the
+camera-side classification, the medium, the caustics and the debug overlays are all dead at once
+and every round-6 fix with them (`c218.w` reads the held default, the facing test's replacement
+never lands). The reading now compares directions: each row of the draw's basis must point where
+the live view's row points (cosine >= .9998), which admits any per-axis scale and still refuses a
+rotation or a shear. The regression pins the same plane reported through a doubled-x and a
+non-uniform scale, and the shear refused.
+
+The deeper correction is that a reading which refuses must now say *how*: rigid(1), mirrored(2),
+rotated(3), out of range(4). The water status line counts valid planes and each refusal per
+interval, plus the `c218.w` lane the last draw uploaded and whether a frame published the medium;
+the underwater pass logs which of its guards is keeping it idle, on transition. The next report of
+this kind is answerable from two lines of log instead of another audit.
+
+### Dirt: water is not uniformly clear
+
+Round 6's medium was one flat extinction, which is the one thing that makes a medium read as a
+fog: distant terrain through crystal water reads as terrain, because it *is* seen through crystal
+water. Real dirt is a property of the place, not of the camera. The medium now carries:
+
+* a **silt gradient**: suspended sediment hands in the column, so extinction grows with the water
+  over the shaded point - `1 + .9*saturate(under/18)`, 1.0 at the surface, 1.9x eighteen yards
+  down - which is also a depth cue in still water too flat to carry a net;
+* a **patch field**: the wave field's broad warp read at an offset cell - about fifty yards across,
+  anchored to the world by the warp's own camera phase, a +/-35% multiplier on the extinction.
+  (As first shipped this sampled the camera-relative position at a fortieth scale with no phase at
+  all, so the patches travelled with the swimmer; round 12 put it on the warp.) Swimming through a
+  patch changes what the water looks like the way swimming into a shadow changes the light;
+* `TurbidityPercent` scales the *deviation*: 0 is the zone's own medium with no silt in it (and
+  the pass then agrees with the surface's bottom path exactly, as before - that pin survives),
+  100 is the shipped silt, 300 triples it. There is still one clarity and the zone still owns it.
+
+At the shipped clarity the deep water a diver actually moves through now extinguishes at up to
+2.57x the zone rate (1.9 silt x 1.35 patch): green visibility at fourteen yards of depth is about
+ten yards instead of twenty-seven, and distant land goes through it the way distant land goes
+through a lake in August.
+
+### Caustics
+
+Unchanged in construction - the world-anchored net of round 6 - and now reachable in the first
+place. The regression re-pins its measured mean, plateau count and the twin `[branch]` gates.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` is 130 assertions; `tools/WaterRegression.cpp` re-pins the tap
+under the counter change. All portable steps pass locally; the Win32 build and fxc slot counts are
+CI's. The live proof is the same swim with the two logs beside the screenshot.
+
+## Full rework round 6: the camera's side of the water (2026-10-18)
+
+Round 5 left one thing a player can point at: standing on a shore, the front faces of waves show
+through the backs of them. A crest that should hide the sea behind it is translucent, and the sheet
+behind it is drawn again on top of itself, so the water reads as two overlapping films rather than as
+one body with a surface. This round is that bug, and the second half of the same question - what the
+world looks like from under the surface - because both halves turn out to be one missing fact: which
+side of the interface the camera is on.
+
+### What the double wave actually was
+
+Water writes no depth and blends, and the surface is drawn two-sided, so every fragment the sea puts
+up has to decide for itself how much of what is behind it to let through. Two independent things were
+getting that decision wrong, and they compounded:
+
+* **A per-fragment facing test was standing in for a per-camera fact.** Round 2's underwater optical
+  path - the water-to-air critical angle, the camera-column Beer-Lambert, the coverage floor that goes
+  with them - was gated on `underwater = 1 - step(-1e-4, dot(n, v))`, the sign of the *triangle's*
+  facing. A facing test is true of every face near edge-on, and at a low camera above water the whole
+  sea out toward the horizon is within a degree or two of edge-on, so a large fraction of an
+  above-water frame took the underwater path: total internal reflection where there is no interface to
+  reflect off, absorption over the full camera-to-fragment distance in a column that is air, and the
+  coverage floor. Those patches read as dark mirror sheets with a bright crest composited over them -
+  which is exactly "the front of one wave seen through the back of the next", drawn twice, once for
+  each face.
+* **Coverage was a hand-tuned fraction of the column instead of the column.** `depthAlpha =
+  absorption * (.78 - .20 * fresnel)` let at least 22% of whatever was behind a face through, and 42%
+  at the grazing angles where wave faces overlap most. Whatever was behind was very often another face
+  of the same wave, and a fifth of it is a visible second sea.
+
+Neither is a tuning mistake, which is why no look-setting could reach it: the first asks a triangle a
+question only a camera can answer, and the second caps a number that the physics already gives.
+
+### The camera's side, read from the draws
+
+The renderer cannot ask the client where the water is, but every liquid draw it replaces carries two
+matrices that say it. In row-vector convention (`p_view = p_local * M`), row 3 of `modelView` is the
+plane's own origin in view space and rows 0..2 are the view-space images of the world axes, so with
+`up` in view space:
+
+```
+dot(up, row3(modelView)) = plane.z - camera.z          // yards of liquid over the camera
+```
+
+when WORLD is a pure translation - and a liquid tile's WORLD *is* a pure translation, which is the
+same fact `AnchorFromModelView` already relies on. It holds for any camera rotation because the rows
+are orthonormal, and it is exact: no depth buffer, no per-pixel test, no ray against a mesh.
+`renderer::underwater::PlaneOverCamera` in `src/Water/UnderwaterMedium.h` computes it, and refuses -
+returning `valid=false` rather than guessing - a mirrored view (`det(basis) < 0`, the client's own
+reflection pass, which would report twice the depth with the wrong sign), a rotated or sheared liquid
+(a *scaled* one was initially refused too; round 7 shows why that was wrong and what it cost)
+object (not a plane this camera can stand in), a non-finite register, and a reading further than
+`kMaxPlaneYards = 4000`.
+
+`watereffect::Scope` reads it on every matched liquid draw and hands it to a `Tracker`, which keeps
+the plane **nearest** the camera - a draw that reports a lake the player is standing beside must not
+outvote the tile under their feet - and settles the frame's answer in time:
+
+* smoothing at `kSmoothingRate = 9` per second, so a new reading is 95% arrived in about a third of a
+  second: fast enough that surfacing feels immediate, slow enough that a bobbing swimmer cannot
+  strobe;
+* hysteresis, submerged at `kEnterYards = .22` and not surfaced again until `kExitYards = .06`, so the
+  answer cannot oscillate on a camera sitting exactly at the plane;
+* a ramp, `Smoothstep(.22, 1.5, yards)`, which is the one number every pass reads;
+* **the remembered plane, not the remembered distance.** A frame usually draws no liquid at all -
+  looking at the seabed, the surface is behind the camera and frustum-culled - and simply holding the
+  last answer would keep the medium on a diver (right) and also on a player who walked up a beach with
+  the lake behind them (wrong). So the tracker stores the plane's own height in the world
+  (`camera.z + yards` on any reading that produced one) and, on a frame that drew nothing, re-measures
+  the current camera against that height. A diver looking down stays in; a swimmer who rises leaves; a
+  player who climbs out onto the sand leaves too, all with no draw to say so. With no camera at all
+  there is nothing to measure against and the answer is held exactly.
+* a camera-jump reset at `kCameraJumpYards = 50` in one frame - a teleport, a hearth, a zone change -
+  which drops the remembered plane *and* the settled answer, for the same reason the atmosphere drops
+  its temporal history at the same distance: the state being left behind is not a measurement of
+  anything the player is now inside. It is checked on every frame, and the remembered plane also
+  expires after `kPlaneForgetYards = 450` horizontal yards from where it was observed, with both
+  clears latching until the new place itself observes water. (Round 12: the reset originally ran
+  only on unobserved frames and the memory never expired, which between them is how a teleport put
+  the medium on dry land in Mulgore and kept it there - the reading that feeds this tracker also has
+  to be *local* water at all, which is `PlaneOverCamera` measuring sideways as well as up.)
+
+The same fact - a frame usually draws no liquid at all - reaches everything else the medium reads, and
+not only the plane. A diver looking at the seabed has the surface behind the camera and frustum-culled,
+so no `Scope` runs and nothing publishes: that is the most common underwater view there is. The up axis
+and the light therefore have per-frame sources of their own, backfilled by `AdvanceUnderwater` on a
+frame that drew nothing. The wave field goes one step further and is not published or backfilled at all:
+the composite builds it every frame, through `UnderwaterFieldAt`, for the very frame context it
+reconstructs against - the motion is integrated once at `Present`, so the field can be built without a
+draw, and it MUST be built against the consuming camera rather than merely this frame's, because the
+phases carry an anchor camera's place and a field from the previous frame's `Present` is the previous
+frame's camera. (Round 12: a per-draw publication, and a `Present` rebuild before it, both failed that
+test by one frame's worth of swimming, and the net crawled.) World +Z in view space is row 2 of this frame's captured view, and the
+source the surface is lit by is `CelestialTracker`'s confirmed disc, which is a singleton rather than a
+per-draw constant. Only the light's *colour* is a per-draw constant (c35), so only that one is held; it
+moves on the scale of a weather front, not of a frame.
+
+Holding the rest instead was two visible bugs: the caustic net froze on the bed while the wobble clock
+kept running, so the frame moved and the net did not, and the up axis stayed pointed where the camera
+was looking when it last saw water, which puts the beams, the sky glow and the bed's facing test on the
+wrong axis for every turn of the diver's head after that. The same row-versus-column convention was
+wrong in one other place, and it predates this round: the anchor fallback a draw takes when it has no
+rigid basis of its own read the up axis *across* the rows of the captured view, which yields the view
+axes expressed in world coordinates and applies the camera's rotation twice over - exactly the mistake
+`AnchorFromModelView`'s own comment names, and exactly what `PlaneOverCamera`'s identity cannot
+survive, since `dot(row2, row3)` is the plane's height over the camera only because the rows are
+orthonormal. It now reads row 2 like everything else in the tree, and the tests that read the plane
+under every camera rotation are what prove that convention.
+
+There is deliberately no switch on any of this. Which side of the interface the camera is on is a fact,
+and the water stage's use of it is the bug fix; a tuning key that could turn the classification off
+would be a key that could turn the bug back on. `[Underwater] Enabled` switches the *medium* (the
+full-screen pass and the ramp the air passes fade out on), not the reading.
+
+### What changed in the water pixel stage
+
+Three lines, and no register, no interpolant and no texture:
+
+* `float underwater = smoothstep(-1.0, 1.0, waveSwell2.w);` — c218.w, previously unused, now carries
+  `clamp(submersion / band, -2, 2)` where `band = max(kShaderBandYards, geometry.amplitude *
+  kGroupMax)`. Dividing by the band is what makes the classification cross over the distance the sea
+  is actually rough enough to need instead of snapping at the mean plane: a third of a yard on a flat
+  lake, the full group envelope on a swell that lifts three. Above that band - above the waves, not
+  merely above their mean - every fragment of every tile now gets exactly 0, which is the identity
+  round 2 claimed and could not keep. Inside the band the answer is deliberately partial, because at
+  the scale of the waves the interface is not a plane but a thickness and a camera inside it has water
+  both over and under it. What that costs an above-water frame is very little: the camera-to-surface
+  segment there is a third of a yard or less, so the blend moves the column a few percent toward it,
+  and the deep tint never lands on a frame the camera is not inside - which is exactly what the old
+  facing test did to every near-edge-on face in the sea.
+* `float column = min(lerp(effectiveDepth, cameraColumn, underwater), 400.0);` — under the surface,
+  what is "behind" a fragment is *air* (the sky, a shore, a hull), and the captured-depth column
+  measured from the surface down to it was a length of air being mistaken for a length of water: a
+  hundred yards of murk for a camera three yards down, which is why every upward view collapsed onto
+  the deep colour. The water a submerged ray really crosses is the camera-to-surface segment, so that
+  is the column: looking up from just under the surface shows the sky and the shore almost undimmed,
+  and the murk grows as the swimmer goes down.
+* `float depthAlpha = absorption;` — coverage is what this column extinguishes, `1 - T`, the same
+  number the colour already converged to the deep tint by. Deep water is now the deep colour rather
+  than the deep colour over a fifth of whatever was standing behind it; shallow water is untouched,
+  because there `T` is near one and the bottom still shows through, which is the only translucency this
+  pass owes.
+
+### The medium: what the world looks like from inside it
+
+The client's own answer to being underwater is a flat fog - one colour, lerped in by distance, the
+same for a pebble at the diver's feet and a wreck at forty yards, with no red in it and no light in
+it. It is applied per object at draw time, so nothing downstream can fix it up, and the water stage
+cannot either: the water pixel stage only runs on the liquid's own pixels, and a diver looking at the
+seabed is looking at pixels that are not water at all. The medium therefore has to be applied to the
+frame after the frame is drawn, which is where every other whole-frame term in this renderer lives.
+
+`src/Effects/Underwater.h` is that pass: one ps_3_0 draw, one full-screen quad, no history, no
+intermediate target. It reads the compositor's scene copy, the depth it already reconstructs for
+ambient occlusion, and the water mask that marks the liquid's own pixels, and writes the mixed frame
+back into the target with blending off. Per pixel, in the order and with the literals of
+`renderer::underwater::ShadePixel`:
+
+The column all of it is integrated over is the distance to the point the ray ends at, capped at the
+same `kFarColumnYards = 250` the water stage caps its own camera ray at - and then cut back to the
+liquid plane on any ray that reaches the plane first. Looking up at sky through an opening, at a sail,
+at a pier's upper works, at a cliff face the water was never tiled over, the segment past the surface
+is *air*, and counting it as water would extinguish the diver's brightest view by a column that is not
+there: a straight-up opening from eight yards down is eight yards of water, not two hundred and fifty.
+That case is not hypothetical either - a diver looking up at a pier gets exactly those pixels, because
+the liquid tile fails the depth test behind the pier and so no mask covers them. Both halves of the
+renderer now say the same thing about where the water stops, though they read the plane from different
+places: the water stage bands the *raw* per-draw reading, falling back to the tracker's held yards when
+a frame draws no liquid, and this pass uses the tracker's *settled* yards, which is the height the
+ramp, the beam march and the net's depth fade are already built on. The two differ by at most the
+smoothing lag - about a third of a second of the camera's own motion - and both sit inside the band the
+classification crosses over. Downward and
+level rays never meet the plane and keep the full distance to the bed they are looking at; a grazing
+upward ray meets it so far away that the minimum picks the real distance. `ShadePixel` publishes the
+yards it used as `PixelOutput::columnYards`, and the net and the beam march both read the end of the
+*water* column rather than the end of the ray, so a beam is never marched from a point in the air
+above the surface and a net is never focused onto geometry that is not under water.
+
+1. **Beer-Lambert per channel** over the column with the *same* per-yard extinction the surface uses -
+   `bodyStyle.x * waterStyle.y * absorbTint.rgb` - so a seabed fades out with the coefficient the sea
+   above it fades out with and the two meet without a seam. `MediumFor` authors nothing: it re-spells
+   the registers the water draw was handed, in the same units, per zone like the rest of the water.
+2. **Caustics**, applied to the world *before* the medium eats it, because a net thirty yards away is a
+   net the water has already taken the red out of. The net is the two octaves the surface's own chop is
+   made of (`noiseGradient`, on the same wrapped lattice), crossed as ridges and sharpened
+   (`pow(net, 2.2)`), normalized by `kCausticNormalization = 5.0661` - the reciprocal of the net's
+   measured mean - so caustics move light around on the bed instead of creating it: the modulation
+   averages exactly one. They need water over them to focus through, an upward-facing bed to land on,
+   and a source above the horizon, and they are gone by `kCausticReachYards = 28`, which is the physics
+   of a shallow-water phenomenon and not a slider.
+3. **Henyey-Greenstein in-scatter** on the water stage's own normalized lobe, `g = .3 + .34 *
+   saturate(sunElevation)`, with the light arriving through the surface carrying the broad warp's own
+   structure: each ray is walked back up to the plane and `kShaftSamples = 3` points of that surface
+   are sampled where it entered, averaged and scaled by `kShaftGain = 2.2`. The beams a swimmer sees
+   *are* the patches of surface the light came through.
+4. **The sky's downwelling glow** on up-looking rays, which is what keeps a pixel the client left as
+   sky - no liquid tile drawn there - reading as water overhead rather than as a flat deep colour. With
+   the column cut back to the plane, that pixel is sky seen through exactly the water over the diver's
+   head: bright and still blue from just under the surface, and from down deep almost entirely the
+   water's own scattered light, which is the honest answer and the one this term exists to give.
+5. **The column's asymptote**: the authored deep colour and nothing else.
+
+Plus one term that is not a light term: the whole frame wobbles, by at most `kMaxDistortionTexels =
+1.6` texels at `WobblePercent = 100`, because a camera inside the medium is looking through a moving
+interface it cannot focus past. It is applied to the sampling uv uniformly - the liquid's own pixels
+wobble with everything else, so the waterline is not a seam where the frame moves on one side and holds
+still on the other - from four rates whose shared period (`kWobblePeriodSeconds = 20pi`) the CPU wraps
+the clock into, so the argument never grows past the point where a float32 stops having fraction bits.
+
+The pass does not touch the liquid's own pixels: the water stage has already marched that column with
+the same coefficient, and applying the medium twice would be applying it twice.
+
+### One ramp, and the air passes
+
+`FrameContext::underwaterRamp` is published by the compositor from the water stage's settled tracker
+before any pass reads it, and gated on the medium's own switch so `UNDERWATER=0` restores the air
+passes exactly as they were. Three passes read it:
+
+* the atmosphere scales every density it integrates by `1 - ramp` - haze, height fog, local fog,
+  scatter and the distance-fog vignette all fade out together, and the pass does not run at all once
+  the ramp reaches 1, because a diver is not in that medium and marching it would cost a
+  low-resolution march and a full-resolution composite for zeros;
+* the cloud deck stops landing on a surface seen from underneath (`submergedWater` in the composite:
+  emission to zero, transmittance to one, which is the identity for that pixel), because a cloud
+  painted over water the water stage has already shaded is a full-brightness cloud ten yards under it.
+  Above water this is an exact identity and the sea keeps the deck it has always had;
+* the underwater pass fades its own medium in on it.
+
+Ordering is what makes this one number rather than three opinions: the ramp is published before the
+air passes read it, the medium is applied after them and before the grade, and the scene copy the grade
+and the anti-aliasing read is republished after the medium is applied.
+
+The ramp is folded into the medium's *strength* - `saturate(deepColour.w) * ramp` in the stage,
+`Saturate(settings.strength) * Saturate(in.ramp)` in `ShadePixel`, the same product - rather than being
+applied as a second blend over the finished frame. That is what makes the crossing one medium becoming
+another instead of two pictures of the world dissolving: at half a yard under, the transmittance sits
+exactly halfway between 1 and the full column (scaling the *effect* of the exponent, not the
+coefficient, so the crossing is linear in what a swimmer sees), the extinction and the caustic net are
+exactly half, and the in-scatter is a quarter, because both the absorption it rides and the strength it
+is gated by are halved - the murk thins out faster than the extinction does, which is the right shape
+for a surface you are rising toward. `PixelInput::ramp` defaults to 1, the settled state a diver is in,
+so at ramp 0 the core is an exact identity and at ramp 1 it is the full medium, with the same numbers
+the stage uses. The crossing is monotone by construction and pinned that way, so a camera bobbing in a
+swell cannot flicker between two looks.
+
+### What the pass refuses to draw
+
+The pass holds the finished frame, so every way it could be handed something it cannot interpret ends
+in a refusal that leaves that frame exactly as it was, rather than in a draw that guesses:
+
+* no ramp (`ramp <= 0`), or a medium that extinguishes nothing - `MediumFor` reports that as
+  `valid = false`, because a pass that would draw an identity is a full-screen quad spent on nothing;
+* no camera this frame: `viewRawValid`, and `cameraValid`, the flag the camera capture publishes the
+  inverse view, the projection unpack, the far Z and the camera position under;
+* a projection that cannot be inverted - `projUnpack` non-finite or degenerate, `depthMaxZ <= 0`;
+* any of the three inverse-view rows non-finite or collapsed. Those rows turn a view-space ray into
+  world yards, and every world-space term reads the result: the net's lattice coordinate, the beam
+  march's entry point, the bed's facing test, and now the ray's meeting with the plane. One NaN in one
+  row is a NaN in every pixel, and a collapsed row puts the whole world at the origin, so they are
+  validated on the CPU where a refusal is free rather than per pixel where it would cost the frame;
+* a non-finite up axis or light direction, and a non-finite `underwaterYards` - guarded with
+  `std::isfinite` rather than clamped, because `std::max(NaN, 0.f)` is not specified to be `0.f`, and a
+  NaN would otherwise sail through the clamp into every beam and every net in the frame;
+* MSAA, which is not a choice this pass makes: `src/D3D9/DepthCapture.cpp` refuses INTZ depth capture
+  under multisampling ("Set in-game Multisampling to 1x"), so `depthTexture` is null and every
+  depth-based pass in the compositor stands aside, ambient occlusion included. The water mask's own
+  MRT is refused under MSAA as well, so the pass would have nothing to reject the liquid's pixels with
+  even if it ran;
+* and last, the stage's own output: `dot(colour, colour) < 1e30` before the frame is written, so a NaN
+  or an infinity that got past everything above returns the frame the pass was handed instead of
+  poisoning every pixel of it with one bad value. A NaN compares false against everything, which is
+  what makes that spelling a guard rather than a comparison. The CPU validates the same numbers before
+  it uploads them, so this is belt and braces - and "should be unreachable" is not a property of a
+  driver.
+
+Two more refusals are about cost rather than safety, and both are exact. The net's work is gated twice:
+once on `causticScale`, the product of the authored amount, the source's elevation and the frame's
+strength, which is a *constant* for the whole draw, so a tile skips the fade, the net and its two noise
+evaluations together whenever caustics are off, the sun is under the horizon or `STRENGTH` is 0 - the
+same shape as the water stage's quality gates, which are comparisons against a constant register for
+exactly this reason; and once on the net's own amount, which is per-pixel, so every wall, every point
+past `kCausticReachYards` and every pixel of sky skips the two noise evaluations as well. The
+per-pixel gate is a mathematical no-op rather than an approximation - `lerp(1, net * N, 0)` is `1` for a
+bounded net - and `ShadePixel` carries both gates in the same order, so the mirror stays one mirror. And the wobble clock is
+wrapped where it is *kept*, in `WaterEffect::AdvanceUnderwater`, by subtracting whole
+`kWobblePeriodSeconds` instead of resetting to zero: the four rates are all even multiples of pi over
+`20pi`, so they stay continuous across the wrap, and a published clock inside one period keeps the
+fraction bits the wrap depends on at any session length. `Wobble` wraps its own argument too, but a
+wrap is only as precise as the number it wraps.
+
+### Authoring
+
+`[Underwater]` in `GraphicsEffects.ini`, reachable from F7 in the WATER tab (they are the same water,
+and the tab count is pinned at eleven): `Enabled`, `StrengthPercent`, `CausticPercent`,
+`ShaftPercent`, `SurfaceGlowPercent`, `WobblePercent`, `DebugMode` (0 off, 1 the gates, 2 the
+in-scatter, 3 the extinction as a grey, 4 the caustic modulation). There is no clarity key and no
+colour key: the medium's clarity *is* `WATER CLARITY` and its colours *are* `DeepColour` /
+`AbsorptionColour` / the zone's authored water, resolved through the same three-way precedence the
+draw resolves them through (`ResolveWaterColourSet`), so a diver and the surface above the diver
+cannot disagree.
+
+### The client's own underwater fog, and one thing this round deliberately leaves alone
+
+The client fogs the world itself while the camera is under water: a flat colour lerped in by distance,
+applied per object at draw time. This round does not touch it, so a diver gets that fog *and* the
+medium - two extinctions over the same column, which means the far distance is murkier than `WATER
+CLARITY` on its own implies. That is a real interaction and it is named here rather than discovered in
+a forum thread.
+
+Fading the client's curve out on the ramp is the obvious follow-up and it is not free: it would mean
+overriding a fog constant on every world draw, keyed by a table of known shader families
+(`distancefog::Scope`), inside a scope that already stands aside when the atmosphere owns distance fog,
+and the client's underwater fog may not even ride those constants. Three unknowns that need a GPU and a
+3.3.5 client to answer, for a change whose failure mode is world geometry losing its fog at the wrong
+moments. `TODO.md` carries it as an open item.
+
+In the meantime `StrengthPercent` is the lever: it interpolates the medium's whole effect - extinction,
+caustics, in-scatter and asymptote together - so a diver who finds the combination too murky dials it
+down instead of off, and `0` leaves the client's fog standing alone exactly as before this round.
+
+### Known limitation
+
+A camera underneath a liquid plane it cannot see through - a cave with a lake over it - reads as
+submerged, because there is no per-pixel or per-frame signal that distinguishes the two. `UNDERWATER`
+off turns the medium off and the camera-jump reset drops the state on a teleport.
+
+### Verification
+
+* `tools/UnderwaterRegression.cpp` (new, portable, runs in CI without a GPU) began at 121 assertions over
+  the whole contract: the plane reading under every camera rotation and position and its five
+  refusals; the tracker's hysteresis, its hold, the remembered plane, the surfacing and beach-walking
+  cases that have no draw in frame, the jump reset and ordinary swimming; the medium's numbers
+  (extinction, first e-fold near thirty yards, red first, the far cap, `DEPTH` off, zone clarity,
+  garbage tuning cannot produce a NaN); `ShadePixel` against the water stage's own bottom path term for
+  term; the caustic normalization re-measured from four million samples to four in a thousand, the
+  plateau count that once printed a lattice onto the foam, peak over mean about five, the modulation's
+  mean exactly one, and the net shown to be the two octaves of the surface's own chop via
+  `renderer::water::NoiseGradient`; the beam statistics (a peak above .9, a duty cycle under 35%,
+  sub-horizon safety) and the wobble's peak, wrap continuity and NaN clock; the surface crossing modelled
+  rather than asserted - ramp 0 an exact identity term by term, ramp 1/2 exactly half the extinction
+  and half the net and a quarter of the in-scatter, a ramp outside 0..1 clamped, and the whole crossing
+  walked in twenty steps to prove it is monotone; the column's meeting with the plane, from eight yards
+  and from sixty and on a level ray and on a downward one and on a sail above the waterline; the frame
+  that drew no liquid still publishing a moving net, this frame's up axis and this frame's light; and the literal pins
+  that hold the ps_3_0 stage, the water pixel stage, the compositor, the atmosphere, the cloud
+  deck, `FrameContext`, the ini and the F7 layout against each other, ordering included.
+* `tools/WaterRegression.cpp` gained the pins for the new classification lane and for the CPU mirror's
+  coverage and column (5179 assertions, unchanged elsewhere).
+* `tools/WaterPreview.cpp`, the CPU mirror, follows the coverage change (`depthAlpha = absorption`) and
+  states which side of the column's underwater branch a preview camera takes: the preview renders from
+  above the plane, where `underwater` is exactly zero, so the captured-depth side of the lerp is the
+  whole column - a stated identity rather than a silent omission.
+* `tools/ValidateShaders.ps1` compiles `kUnderwaterSource` with `fxc` on Windows and budgets it at the
+  ps_3_0 device floor, 512 slots, the same ceiling `kAmbientOcclusionSource` (501) sits under. Measured
+  on the runner: **481** - 456 before the column met the liquid plane, so the clamp and the two caustic
+  gates cost 25 slots and leave 31 under the floor. Round 7's silt and patch field take it to **505**,
+  7 under the floor, and round 8's Snell window to **509**, 3 under - bought by centring the beam samples
+  once over their mean instead of per sample: the next term this stage gains has to earn its slots, not
+  just want them. The estimate while it was being written was
+  250-350, the usual direction of error in this tree, where vectorised work costs more than it reads.
+  The runner's `Shader instruction counts` annotation carries the figure for whatever commit is being
+  read; a slot count is a property of a commit and not of a document.
+* The water pixel stage pays for the classification fix, and the cost is stated rather than left to be
+  found: **958** slots against main's **954**, four slots for a `smoothstep` and a `lerp` in a budget of
+  2048. Both figures are the runner's own annotation for the respective commits, so the delta is
+  measured and not estimated.
+* No `[branch]` in the new stage wraps a body that samples with an implicit LOD, because fxc rejects
+  that outright on ps_3_0 (`X3528`, "can't force branch with gradients on non-inputs") rather than
+  merely compiling it slowly. The first CI run said so; the two `[branch]`es that remain sit on shader
+  constants around pure arithmetic, and every test that reaches a `tex2D` is a plain `if`.
+  `tools/UnderwaterRegression.cpp` pins the rule, and `VolumeEffects.h` carries the same one for its
+  anti-aliasing taps.
+* The Windows runner builds the DLL, runs the water GPU regressions and the F7 overlay device
+  regressions against these changes; the live look - a coast at a low camera, a diver looking straight
+  down, surfacing, walking up a beach - remains an in-client check, and the sandbox this round was
+  written in has neither `fxc` nor `d3d9`.
+
 ## Full rework round 5: the quality ladder, mid waves, shore and back flow (2026-10-17)
 
 Round 4 left a sea that reads as a body of water, and a problem no look-setting could answer: the
@@ -71,26 +1195,28 @@ not a step on the way to something shorter.
 
 ### Shore understanding
 
-The shoal foam was a per-pixel depth difference, and a difference measured per pixel is not a slope:
-it halves when the resolution doubles and halves again when the camera steps back, which is why the
-foam over a bar existed only within a few yards of the water's edge and vanished from the beach above
-it. The lattice footprint the pixel stage already takes for the chop fade is that pixel's own size in
-world yards, so dividing by it turns the screen-space difference into the dimensionless bed slope it
-was always meant to be - the same number at any resolution and any distance, and the same number
-`tools/WaterPreview.cpp` measures in world space with `FieldSlope`, which is the reading the
-published frames were tuned against. It carries the view angle's `1/cos`, because the separation this
-pass can read is along the view axis rather than vertical.
+The shoal foam needs the bed's slope, and the only geometry this pass can read is the captured
+depth, so the slope is recovered from reconstructed bed points: this pixel's own point on its ray
+and four more on neighbouring rays, a fixed world distance out along the pixel's screen axes. The
+cross product of the two tangents those points define is the bed's plane normal, and its
+inclination to world-up is the dimensionless slope - the same number at any resolution, distance
+or camera pitch, and the same number `tools/WaterPreview.cpp` measures in world space with
+`FieldSlope`, which is the reading the published frames were tuned against.
 
-That divisor has a floor, `kBedSlopeSpanYards`, and the floor is the part that was missing at first.
-`ddx(depth)` is a difference across **one pixel**, so at the water's edge - where one pixel is a few
-inches - dividing by that pixel's own footprint measures the depth buffer's quantization and dither
-rather than the bed, and reports it as an enormous slope. That number drives the shoal foam, the
-beach/wall split and the swash band width, so up close it read as a checkerboard of foam on the
-seabed that crawled with the camera. The floor is 1.5 yards because that is the span `FieldSlope`
-samples (`+-1.5`), so the shader and the mirror the look was tuned against read the same baseline;
-it is a floor, so any coarser pixel keeps its own footprint and distant water is untouched. Up close
-the shader now reports a calmer slope than a per-pixel difference would, which is the trade: less
-shoal foam in the last yard than a number that was mostly noise was producing.
+The span is in yards, not pixels - `kBedSlopeSpanYards`, +-1.5 either side, `FieldSlope`'s own
+baseline - and the span is the part that matters. A one-pixel stencil is exact for a plane in
+exact arithmetic, but the captured depth is stored with a step, and where the INTZ fetch is a
+short-mantissa floating-point depth that step is a sizeable fraction of the bed's rise between
+neighbouring pixels: divided by a footprint inches across it comes back as slope, jittering a
+2x2 quad at a time, and because that number drives the shoal foam, the beach/wall split and the
+swash band width, a shallow bed near the threshold printed it as tick rows along its depth
+contours (round 19, above). Over a three-yard baseline the same step is a rounding error at any
+precision the capture can produce. The taps' texel distance comes from the lattice footprint the
+pixel stage already takes for the chop fade, read back through the lattice's own cell size as
+yards and grown by the bed's extra distance along the ray, so any coarser pixel keeps its own
+span and distant water is untouched. Up close the shader now reports a calmer slope than a
+per-pixel difference would, which is the trade: less shoal foam in the last yard than a number
+that was mostly noise was producing.
 
 One number then separates the two shores that look the same to a depth buffer: about twelve degrees
 of bed is a beach, about forty is a wall. A beach gets a wide swash zone and sheets running up it; a
@@ -121,14 +1247,16 @@ switch without a second authoring path, and it is zero on water that was authore
 The foam that goes back out with it is a band in depth moving with the swell, torn into flecks by
 the chop value so it can never read as rings painted on the water, kept inside the swash zone by
 `shallowEdge`, and gated on `draining` - the streaks are only there while the sheet is leaving,
-which is what makes them a backwash rather than a second run-up.
+which is what makes them a backwash rather than a second run-up. It also carries
+`foamDepthValid`, as the shore and shoal terms always did: without it a pixel with sky in the
+captured depth behind it reads its clamped foam depth as swash and streaks deep water (round 19).
 
 ### Foam
 
 Coverage was one scalar, and one scalar can only ever be a grey sheet - which is what "the foam is
 nice but flat" meant. Real foam is a lace: bright filaments with dark, water-filled gaps between
-them, at multiple scales. The fine chop is the fleck; an exact per-pixel sample of the broad warp
-is the tongue both are torn out of. That extra noise evaluation is intentional: using its
+them, at multiple scales. An anchored fine sample is the fleck; an exact per-pixel sample of the broad warp
+is the tongue both are torn out of. Those extra noise evaluations are intentional: using a
 vertex-interpolated value in high-contrast foam exposed triangle seams that shifted with the camera.
 The level-7 mid octave stays out of coverage, so its projected lattice cannot return as a grid. The
 lace multiplies crest terms whole, because a whitecap *is* a broken streak, and only `.45` of the
@@ -157,6 +1285,30 @@ Regression pins require the mid-value input to stay out of the lace and the clip
 to stay gone. This is the first change aimed at the quality-7 input itself; the game capture remains
 the acceptance check for the reported camera-moving grid.
 
+Round 16 found the remaining camera-dependent input still inside that lace. The fleck read the
+**fine chop octave's value**, and that octave is sampled counter-phased on purpose: `plane*2.17`
+against the ripple phase with its lanes swapped and scaled by `1.31`. At a fixed world point the
+relative plane and the camera-carrying phase cancel for the base octave, but not for that spelling,
+so the fine coordinate moves when the camera moves even at a frozen instant. As a wave slope the
+drift is invisible - it is the sea's own grain - but the lace is a bright mask multiplier laid over
+a stable bed, so its flecks crawled across shoal foam and showed on the terrain under it as a
+hash-like shimmer (the report's screenshot: short dark ticks on an otherwise smooth shallow bed,
+exactly where the thin green side of the foam colour ramp multiplies through). Measured through
+`BuildWaveField` over the regression's camera set, the old fleck's value at one world point changes
+by **0.22 on average** (worst 0.58) between cameras at the same instant; every other foam input -
+broad warp, base detail, swell, pinch, bed depth - is anchored, so the fleck was the one term that
+could move against the bed. The fleck is now its own sample (`FoamLaceFineValue` in
+`src/Water/WaterNoise.h`, mirrored in the shader): the absolute cell `plane + wavePhase.xy` under
+the integer matrix `[[2,1],[-1,2]]`, a scaled rotation `sqrt(5)` times finer than the base lattice
+and exact under the 64-cell wrap, riding the swell by the fine octave's own offset, so the flecks
+keep their scale and their travel with the sea but not their crawl with the camera (same measurement:
+worst change **0.037**, phase precision). It also gets a fade of its own (`FoamLaceFilter`): the
+fleck returns to neutral between 0.18 and 0.45 fleck cells per pixel - five pixels per cell down to
+two - because below that a point-sampled fleck is aliasing that breaks into ticks as its phase
+drifts, while the broad tongue keeps the slower `filter` fade and outlives it. The fine chop octave
+itself is untouched: its slopes still counter-drift as surface grain. Only the mask stopped reading
+it.
+
 At the same level the colour becomes a ramp on the coverage the masks already produced instead of
 one flat white: a thick cap scatters everything back and reads as the bright chalk of a breaking
 crest, a thin veil lets the water's own tint through and reads as the grey-green lace underneath it.
@@ -175,6 +1327,12 @@ reflection mix. It also attenuates the camera-to-surface ray by the authored per
 Beer-Lambert coefficients and converges it toward the body's deep tint. This uses ray length, not
 view-Z, so an oblique underwater view does not artificially shorten the water column. Above water,
 the camera-side blend is exactly identity and the new reflection term is gated off.
+
+> **Corrected in round 6.** The blend above was gated on the *triangle's* facing, which is a per-fragment
+> test standing in for a per-camera fact, and the identity it claims held only for faces the camera was
+> squarely above. See "Full rework round 6: the camera's side of the water": the gate is now the
+> camera's own distance from this draw's liquid plane, read on the CPU from the draw's matrices, and
+> above water it is exactly zero for every pixel of every tile.
 
 The output alpha is at least the reflection weight already mixed into the water colour. Without that
 floor the fixed-function blend applies the original scene a second time over the computed reflection,

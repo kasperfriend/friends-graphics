@@ -107,6 +107,9 @@ struct Config
     float wind = 100.f, clarity = 100.f, sparkle = 100.f;
     float waveScale = 100.f, softening = 100.f, flowSpeed = 100.f, flowRotation = 32.f;
     float refraction = 14.f, absorption = 38.f, shoreFoam = 28.f, shoreFoamWidth = 120.f;
+    // DEPTH FOG: the factor on the column looking down into the water, the [Water] keys'
+    // own units (100 = the one-way column, 200 = both legs of the bed's path, shipped).
+    float depthFog = 200.f;
     float swell = 55.f, glint = 160.f, fresnel = 100.f, crestFoam = 20.f;
     float ripple = 18.f, normalResponse = 28.f, specular = 115.f;
     float roughness = 100.f, sheen = 50.f, shoalFoam = 100.f, foamBrightness = 100.f;
@@ -119,7 +122,7 @@ struct Config
     float reflectionStrength = 80.f, environmentStrength = 45.f, reflectionDistance = 120.f;
     float reflectionThickness = 350.f;
     unsigned waterColour = 0x808080u, deepColour = 0x0e2a28u, absorptionColour = 0xff8c6bu;
-    bool stats = false, reflections = true, refractionOn = true, depthOn = true, foamOn = true;
+    bool stats = false, reflections = true, refractionOn = true, depthOn = true, depthFogOn = true, foamOn = true;
     int matrix = 0;                  // 2x2 zone-by-weather grid instead of the four bodies
     // Zone and weather, exactly the inputs WaterEffect.h feeds to TargetSeaState: the multiplier
     // a zone authors, and what the sky is doing. Applied to the numbers below rather than to the
@@ -297,6 +300,10 @@ struct WaveState
     // quality level does not sample them, which is exactly what the shader's seeded samples
     // are worth, so a low level here and there mean the same surface.
     float fineValue = .5f, midValue = .5f;
+    // The lace's own fleck sample and its footprint fade, from WaterNoise.h: anchored where
+    // the fine chop octave beside it is deliberately counter-phased, so the preview's foam
+    // flecks stay on the water when its camera moves exactly as the shader's now do.
+    float laceFineValue = .5f, laceFilter = 1.f;
     // The longest swell train this point stands in, and its rate of change: the sine is the
     // height the shore back-flow runs a beach up by, and the cosine says whether the sheet is
     // arriving (positive, run-up) or leaving (negative, backwash). The DLL reads both out of
@@ -387,6 +394,8 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     w.swell01 = swell * kSwellToUnit + .5f;
     w.rippleEnergy = std::hypot(ripple.dx, ripple.dy) * filter;
     w.filter = filter;
+    w.laceFineValue = plan.midWaves ? FoamLaceFineValue(field, plane.x, plane.y, swell) : .5f;
+    w.laceFilter = FoamLaceFilter(footprint.x, footprint.y);
     w.pinch = geometry.sigma * gain * trains.pinch;
     w.jacobian = std::max(1.f - w.pinch, .3f);
     const V3 axisX{ field.lattice[0], field.lattice[1], 0.f }, axisY{ field.lattice[2], field.lattice[3], 0.f };
@@ -494,6 +503,8 @@ int main(int argc, char** argv)
         else if (a == "--no-reflect") base.reflections = false;
         else if (a == "--no-refract") base.refractionOn = false;
         else if (a == "--no-depth") base.depthOn = false;
+        else if (a == "--no-depth-fog") base.depthFogOn = false;
+        else if (a == "--depth-fog") base.depthFog = ArgFloat(next());
         else if (a == "--no-foam") base.foamOn = false;
         else if (a == "--debug") base.debugMode = ArgFloat(next());
         else if (a == "--agitation") base.zoneAgitation = ArgFloat(next());
@@ -692,6 +703,7 @@ int main(int argc, char** argv)
         const V3 absorbRate{ byte(c.absorptionColour,16,128.f), byte(c.absorptionColour,8,128.f), byte(c.absorptionColour,0,128.f) };
         const float refractionStrength = c.refractionOn ? c.refraction * .01f : 0.f;
         const float absorptionStrength = c.depthOn ? c.absorption * .01f : 0.f;
+        const float depthFogFactor = c.depthFogOn ? std::clamp(c.depthFog, 100.f, 400.f) * .01f : 1.f;
         const float shoreFoamStrength = c.foamOn ? c.shoreFoam * .01f : 0.f;
         const float crestFoamStrength = c.foamOn ? c.crestFoam * .01f : 0.f;
         const float shoreFoamWidth = c.shoreFoamWidth * .01f;
@@ -779,7 +791,20 @@ int main(int argc, char** argv)
                     const float validDepth = (behindZ < 99999.f ? 1.f : 0.f) * Step(viewZ, behindZ);
                     const float openOcean = behindZ >= 99999.f ? 1.f : 0.f;
                     const float effectiveDepth = Mix(waterDepth, 9999.f, openOcean);
-                    const float column = std::min(effectiveDepth, 400.f);
+                    // The shader's column carries an underwater branch:
+                    //     column=min(lerp(effectiveDepth*reflectionControl.w,interfaceYards,underwater),400.0)
+                    // because under the surface what is "behind" a fragment is air, and the
+                    // segment from the surface down to the captured depth is not water at all.
+                    // `underwater` there is a per-draw constant the CPU reads out of the draw's
+                    // own matrices (c218.w, renderer::underwater::PlaneOverCamera) and this
+                    // preview's camera is above the plane it renders, so the branch is exactly
+                    // zero and the captured-depth side of the lerp is the whole column - which
+                    // is what this line has always computed. Mirroring the branch would mean
+                    // mirroring a second camera, and the value it selects here is this one.
+                    // The captured-depth side carries the DEPTH FOG factor (reflectionControl.w):
+                    // this preview shades its bed in open air for the same reason the client
+                    // does, so it owes the same second leg.
+                    const float column = std::min(effectiveDepth * depthFogFactor, 400.f);
                     // The shader's soft contact line at the top level: the last inches of a
                     // waterline are a meniscus, not a step, so the refracted offset fades in
                     // over the first yard instead of pulling the bottom by the full wave slope
@@ -874,7 +899,7 @@ int main(int argc, char** argv)
                     // threshold was fixed. Keep the continuous fine fleck, but use the broad warp
                     // already interpolated from vertices as the other lace scale: unlike per-pixel
                     // mid value noise it cannot print a cell grid onto foam or split at mesh tiles.
-                    const float laceFine = Mix(.5f, wave.fineValue, wave.filter * wave.filter);
+                    const float laceFine = Mix(.5f, wave.laceFineValue, wave.laceFilter);
                     const float laceBroad = Mix(.5f, wave.broadValue, wave.filter);
                     const float lace = plan.midWaves
                         ? Mix(1.f, 1.f - .70f * (1.f - laceFine) * (1.f - laceBroad),
@@ -889,8 +914,11 @@ int main(int argc, char** argv)
                     // inside the swash zone they belong to, and `draining` is what makes them a
                     // backwash rather than a run-up: the streaks are only there while the sheet is
                     // leaving.
+                    // validDepth gates this like it gates the shore and shoal terms (the
+                    // shader's foamDepthValid): a pixel with no bed behind it reads its
+                    // clamped depth as ankle-deep swash and would streak deep water.
                     const float backwash = plan.midWaves
-                        ? Saturate(.55f + .45f * std::sin(swashDepth * 2.4f - wave.swashSine * 2.1f))
+                        ? validDepth * Saturate(.55f + .45f * std::sin(swashDepth * 2.4f - wave.swashSine * 2.1f))
                             * (.30f + .70f * wave.foamPattern) * Saturate(shallowEdge * 2.2f) * draining
                         : 0.f;
                     const float foamAmount = Saturate((shore * shoreFoamStrength * (.35f + .65f * foamWind)
@@ -1021,7 +1049,14 @@ int main(int argc, char** argv)
                     }
                     const float columnBottom = std::max(-BottomOf(c, surface.x, surface.y), 0.f);   // the client's own alpha stand-in
                     const float baseAlpha = Saturate(.30f + columnBottom * .30f);
-                    const float depthAlpha = absorption * (.78f - .20f * fresnel);
+                    // Coverage is the column's own extinction, in the shader and here: water
+                    // writes no depth and blends, so whatever is behind a face shows through by
+                    // exactly (1-alpha), and behind the face of a wave is very often another
+                    // face of the same wave. The fraction this used to be - .78, taken to .58 at
+                    // grazing angles - leaked the sea behind into the sea in front at every
+                    // depth past the first e-fold, which is the other half of seeing the front
+                    // of one wave through the back of the next.
+                    const float depthAlpha = absorption;
                     const float alpha = Saturate(baseAlpha + (1.f - baseAlpha) * depthAlpha);
                     const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
                     // The shader fogs toward the flat scene fog colour and lets the device blend

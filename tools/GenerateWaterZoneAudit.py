@@ -100,8 +100,34 @@ def render() -> str:
         multiplier = float(values["WaterAgitationMultiplier"])
         if not 0.0 <= multiplier <= 4.0:
             raise ValueError(f"Zone.{zone_id} has an out-of-range multiplier")
+        colour_keys = ("WaterColour", "DeepColour", "AbsorptionColour")
+        colours = [values.get(key) for key in colour_keys]
+        if any(colours) and not all(colours):
+            raise ValueError(f"Zone.{zone_id} authors only part of its water colour set")
+        underwater_keys = (
+            "WaterClarityMultiplier",
+            "UnderwaterTurbidityMultiplier",
+            "UnderwaterCausticMultiplier",
+            "UnderwaterShaftMultiplier",
+            "UnderwaterGlowMultiplier",
+        )
+        underwater = [values.get(key) for key in underwater_keys]
+        if any(underwater) and not all(underwater):
+            raise ValueError(f"Zone.{zone_id} authors only part of its underwater tuple")
+        if all(underwater):
+            parsed = [float(value) for value in underwater]
+            limits = ((0.1, 4.0), (0.0, 4.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0))
+            if any(not low <= value <= high for value, (low, high) in zip(parsed, limits)):
+                raise ValueError(f"Zone.{zone_id} has an out-of-range underwater multiplier")
+            underwater_text = "/".join(format(value, "g") for value in parsed)
+        else:
+            underwater_text = "player defaults"
         by_map[int(area["map_id"])].append({
-            **area, "display_name": values.get("Name", str(area["name"])), "multiplier": multiplier,
+            **area,
+            "display_name": values.get("Name", str(area["name"])),
+            "multiplier": multiplier,
+            "colours": "/".join(colours) if all(colours) else "global",
+            "underwater": underwater_text,
         })
     if sum(map(len, by_map.values())) != len(roots):
         raise ValueError("the generated listing omitted one or more root zones")
@@ -120,8 +146,10 @@ def render() -> str:
         "",
         "Regenerate or validate this list with `python3 tools/GenerateWaterZoneAudit.py` or `python3 tools/GenerateWaterZoneAudit.py --check`.",
         "",
-        "| Map ID | Map | Zone ID | Root zone | Multiplier | Behavior |",
-        "| ---: | --- | ---: | --- | ---: | --- |",
+        "Colours are `WaterColour/DeepColour/AbsorptionColour`; `global` keeps the `GraphicsEffects.ini` set. Underwater is the swept zone tuple `clarity/turbidity/caustics/shafts/glow`, each a multiplier on the player dial; `player defaults` means the zone authors no underwater treatment of its own. Booty Bay (`[Area.35]`) overrides its Stranglethorn zone with azure harbour water.",
+        "",
+        "| Map ID | Map | Zone ID | Root zone | Multiplier | Behavior | Colours (water/deep/absorption) | Underwater clarity/turbidity/caustics/shafts/glow |",
+        "| ---: | --- | ---: | --- | ---: | --- | --- | --- |",
     ]
     for map_id in sorted(by_map):
         map_name = maps.get(map_id)
@@ -131,7 +159,8 @@ def render() -> str:
             multiplier = float(area["multiplier"])
             lines.append(
                 f"| {map_id} | {markdown_cell(map_name)} | {area['id']} | "
-                f"{markdown_cell(str(area['display_name']))} | {multiplier:.2f} | {water_behavior(multiplier)} |"
+                f"{markdown_cell(str(area['display_name']))} | {multiplier:.2f} | {water_behavior(multiplier)} | "
+                f"{area['colours']} | {area['underwater']} |"
             )
     return "\n".join(lines) + "\n"
 

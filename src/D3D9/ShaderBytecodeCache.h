@@ -194,6 +194,32 @@ namespace renderer
             if (ec) std::filesystem::remove(tmp, ec);
         }
 
+        // Compile-or-load, WITHOUT a device: the half of GetShader that is pure CPU
+        // work (a disk read, or a full fxc run) and can therefore be done on a worker
+        // thread while the game is still presenting its first frames. CreatePixelShader
+        // itself stays with the caller, on the render thread, where a device call
+        // belongs. `forceCompile` skips the disk entry - the answer to a blob the
+        // driver has just refused - and the fresh output is saved over it as far as
+        // Save's own valid-entry check allows.
+        inline bool GetBytecode(const std::wstring& dir, const char* source, const char* entry, const char* profile,
+                                ComPtr<ID3DBlob>& bytecode, bool forceCompile = false, std::string* error = nullptr)
+        {
+            if (!forceCompile && !dir.empty() && Load(dir, source, entry, profile, bytecode)) return true;
+            bytecode.Reset();
+            ComPtr<ID3DBlob> errors;
+            const HRESULT hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, entry, profile,
+                                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, bytecode.GetAddressOf(), errors.GetAddressOf());
+            if (FAILED(hr) || !bytecode)
+            {
+                if (error) *error = errors && errors->GetBufferPointer()
+                    ? static_cast<const char*>(errors->GetBufferPointer())
+                    : "D3DCompile failed";
+                return false;
+            }
+            Save(dir, source, entry, profile, bytecode.Get());
+            return true;
+        }
+
         // Compile-or-load, ending in a driver-accepted shader.
         //   1. cached blob -> Create; driver accepts: done, zero fxc;
         //   2. miss -> D3DCompile -> Save -> Create;
@@ -213,20 +239,7 @@ namespace renderer
                 return false;
             }
             bool fromCache = !dir.empty() && Load(dir, source, entry, profile, bytecode);
-            if (!fromCache)
-            {
-                ComPtr<ID3DBlob> errors;
-                const HRESULT hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, entry, profile,
-                                              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, bytecode.GetAddressOf(), errors.GetAddressOf());
-                if (FAILED(hr) || !bytecode)
-                {
-                    if (error) *error = errors && errors->GetBufferPointer()
-                        ? static_cast<const char*>(errors->GetBufferPointer())
-                        : "D3DCompile failed";
-                    return false;
-                }
-                Save(dir, source, entry, profile, bytecode.Get());
-            }
+            if (!fromCache && !GetBytecode(dir, source, entry, profile, bytecode, true, error)) return false;
             if (create(bytecode.Get())) return true;
             if (!fromCache)
             {
@@ -236,18 +249,7 @@ namespace renderer
             // A cached blob the driver refuses means the entry is stale or
             // corrupt for this machine: the fallback is exactly the old
             // behavior (compile), and the fresh bytecode replaces the entry.
-            bytecode.Reset();
-            ComPtr<ID3DBlob> errors;
-            const HRESULT hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, entry, profile,
-                                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, bytecode.GetAddressOf(), errors.GetAddressOf());
-            if (FAILED(hr) || !bytecode)
-            {
-                if (error) *error = errors && errors->GetBufferPointer()
-                    ? static_cast<const char*>(errors->GetBufferPointer())
-                    : "D3DCompile failed";
-                return false;
-            }
-            Save(dir, source, entry, profile, bytecode.Get());
+            if (!GetBytecode(dir, source, entry, profile, bytecode, true, error)) return false;
             if (create(bytecode.Get())) return true;
             if (error) *error = "CreatePixelShader failed";
             return false;
