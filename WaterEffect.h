@@ -1751,12 +1751,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // the sheet lets past; the body's own colour is built from `refracted`, the captured
         // seabed attenuated by the column, so at a clear shallow shelf the surface painted
         // the bed back into the frame at full coverage - the slider moved the alpha and the
-        // picture did not change, which is exactly the report "opacity does nothing". With
-        // this term the body converges on the colour an infinitely thick column converges on
-        // (deep tint + in-scatter), so 100 is water you cannot see the bed through and 0 is
-        // the pre-slider physics. The weight is gated by the water actually under the pixel,
-        // so a shoreline's first yard still shows its sand: a sheet ankle-deep cannot hide
-        // anything it is not standing over.
+        // picture did not change, which is exactly the report "opacity does nothing".
         // The captured bottom, unchanged - this is the optics the sheet is for.
         float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;
         // REFRACTION is how much of that bottom replaces the client's own liquid colour.
