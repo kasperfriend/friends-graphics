@@ -1,21 +1,22 @@
 # F7 overlay verification
 
-The overlay has eleven left-side category tabs: Atmosphere & God Rays, Local
+The overlay has ten left-side category tabs: Atmosphere & God Rays, Local
 Volumetric Fog, Weather Visuals, Wind, Volumetric Clouds, Water & Reflections,
-Local Lighting, Dynamic Shadows, Ambient Occlusion, AI Materials & Relief, and
-Image & Color. Each `KIND_HEADER` in `OverlayItems.h` makes one, so a new group
-of controls joins an existing tab unless it is really a new subject: the seven
-underwater controls are in Water & Reflections, because the medium they author is
-the same water that tab already authors.
+Local Lighting, Dynamic Shadows, Ambient Occlusion, and Image & Color. Each
+`KIND_HEADER` in `OverlayItems.h` makes one, so a new group of controls joins an
+existing tab unless it is really a new subject: the seven underwater controls
+are in Water & Reflections, because the medium they author is the same water
+that tab already authors.
 `OverlayItems.h` holds every control with its key, default, range and save
 semantics - the original 69 plus the wind, cloud-resolution, water,
 ambient-occlusion and underwater controls added since, less the eleven
-vegetation-sway rows and the eleven global-illumination rows that were removed
-with those features. The count is not written down here because it is pinned
-where it can be checked: `tools/OverlayLayoutRegression.cpp` walks the table and
-reports the number of settings it reached (117 as of the underwater dirt control), so
-a row that cannot be reached - a duplicate key, a control past the last header -
-fails the portable test rather than this paragraph.
+vegetation-sway rows, the eleven global-illumination rows and the four unfinished
+AI Materials rows that were removed with those features. The count is not written
+down here because it is pinned where it can be checked:
+`tools/OverlayLayoutRegression.cpp` walks the table and reports the number of
+settings it reached (114 as of the AI Materials removal), so a row that cannot be
+reached - a duplicate key, a control past the last header - fails the portable
+test rather than this paragraph.
 `OverlayLayout.h` is platform-independent and supplies the rectangles used by
 both Direct3D drawing and Win32 hit testing, including the scrollbar and resize
 handle. Window geometry and tab scroll positions last for

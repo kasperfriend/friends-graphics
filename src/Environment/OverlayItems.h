@@ -191,13 +191,6 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"AmbientOcclusion",L"DistanceFadeUnits","AO DISTANCE FADE (UNITS)",20,600,10,250},
  {KIND_TOGGLE,L"AmbientOcclusion",L"DebugMask","AO DEBUG VIEW",0,1,1,0},
 
- // === AI MATERIALS & RELIEF ===
- {KIND_HEADER,nullptr,nullptr,"--- AI MATERIALS & RELIEF ---",0,0,0,0},
- {KIND_TOGGLE,L"AIMaterials",L"Enabled","EXPERIMENTAL MATERIALS",0,1,1,0},
- {KIND_SLIDER,L"AIMaterials",L"NormalStrengthPercent","NORMAL BUMP",0,200,5,90},
- {KIND_SLIDER,L"AIMaterials",L"ParallaxDepthPercent","PARALLAX DEPTH",0,100,2,35},
- {KIND_SLIDER,L"AIMaterials",L"SelfShadowStrength","SELF SHADOWS",0,150,5,90},
-
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR (GLOBAL) ---",0,0,0,0},
  {KIND_TOGGLE,L"PostProcess",L"Enabled","POST PROCESS",0,1,1,0},

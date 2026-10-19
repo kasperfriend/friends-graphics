@@ -39,7 +39,6 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClCompile Include="src\Effects\AmbientOcclusion.cpp" />
     <ClCompile Include="src\Diagnostics\CelestialMemoryProbe.cpp" />
     <ClCompile Include="src\D3D9\CelestialTracker.cpp" />
-    <ClCompile Include="src\Materials\MaterialCacheManager.cpp" />
     <ClCompile Include="src\Lighting\LocalLightManager.cpp" />
     <ClCompile Include="src\Effects\LocalLightingRenderer.cpp" />
     <ClInclude Include="src\Game\WoWClientContext.h" />
@@ -61,9 +60,8 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Core\FrameContext.h" />
     <ClInclude Include="src\Core\DeviceHealth.h" />
     <ClInclude Include="src\Core\ShaderCache.h" />
-    <ClInclude Include="src\Materials\MaterialCacheManager.h" />
-    <ClInclude Include="src\Materials\TextureHashLookup.h" />
-    <ClInclude Include="src\Materials\WicTextureLoader.h" />
+    <ClInclude Include="src\D3D9\TextureHashLookup.h" />
+    <ClInclude Include="src\D3D9\WicTextureLoader.h" />
     <ClInclude Include="src\Scene\MaterialType.h" />
     <ClInclude Include="src\Scene\DrawCallContext.h" />
     <ClInclude Include="src\Scene\DrawCallClassifier.h" />

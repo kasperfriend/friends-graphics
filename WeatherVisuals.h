@@ -20,8 +20,8 @@
 
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
-#include "src/Materials/WicTextureLoader.h"
-#include "src/Materials/TextureHashLookup.h"
+#include "src/D3D9/WicTextureLoader.h"
+#include "src/D3D9/TextureHashLookup.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/ScopedPassState.h"
 #include "src/D3D9/TrackedRenderState.h"

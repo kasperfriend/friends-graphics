@@ -41,7 +41,7 @@ inline std::wstring Scope(unsigned level) {
 // section the value cache holds, down to the same rule that `Key=` counts as
 // absent - and keeping both is what a crossing paid for. The key cache had a 96
 // entry ceiling, and a real session's place still flaps across more scopes than
-// that inside a single apply: every level of every section the nine tuning reloads
+// that inside a single apply: every level of every section the eight tuning reloads
 // and the F7 menu's hundred-odd rows ask about. So the ceiling was reached, the
 // whole memo was dropped in the middle of the apply, and every read that followed
 // fell back to a GetPrivateProfileSectionW - a whole-file parse, one per scope per
@@ -550,7 +550,7 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
     // that is active, and this client's place flaps across a boundary while the
     // player walks it - `Area=0` and `Area=223` alternating in a real session,
     // each alternation dropping the memo and re-reading every section of the file
-    // for the F7 menu and the nine tuning reloads behind it, one
+    // for the F7 menu and the eight tuning reloads behind it, one
     // GetPrivateProfileSectionW per scope per section. That is the second the
     // player felt on every crossing. What does invalidate it: a different scoped
     // file, the same file changed underneath the memo (a hand edit, another
@@ -565,7 +565,7 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
 // place whose tuning is already in force needs no re-read at all: the values can
 // only differ if one of the two files changed in between, and both are checked
 // here by their own identity - the same stat a read would make. This is the
-// difference between a crossing that re-reads nine subsystems and one that does
+// difference between a crossing that re-reads eight subsystems and one that does
 // nothing, and it is what the log line of the next report is read for.
 // A place does not have to be the SAME place to need no re-read: two areas answer
 // a scoped read identically when neither of them overrides anything, which is the
@@ -573,8 +573,8 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
 // border. What decides it is therefore the VALUES a place resolves to, not its
 // ids: both files' own identity plus every scoped section that belongs to the
 // place's three levels, keys and values. Two places with the same fingerprint
-// answer all nine subsystems the same way, so the reload is skipped and the log
-// says 0 us instead of a stalled second - and the nine subsystems read this place
+// answer all eight subsystems the same way, so the reload is skipped and the log
+// says 0 us instead of a stalled second - and the eight subsystems read this place
 // through nothing else: every one of them goes through ReadInt/ReadString/
 // HasScopedValue, which resolve against these levels and these files alone.
 //
@@ -659,7 +659,7 @@ inline std::wstring SectionSuffixOf(const std::wstring& name) {
 // place whose tuning is already in force needs no re-read at all: the values can
 // only differ if one of the two files changed in between, and both are checked
 // here by their own identity - the same stat a read would make. This is the
-// difference between a crossing that re-reads nine subsystems and one that does
+// difference between a crossing that re-reads eight subsystems and one that does
 // nothing, and it is what the log line of the next report is read for.
 // A place does not have to be the SAME place to need no re-read: two areas answer
 // a scoped read identically when neither of them overrides anything, which is the
@@ -667,8 +667,8 @@ inline std::wstring SectionSuffixOf(const std::wstring& name) {
 // border. What decides it is therefore the VALUES a place resolves to, not its
 // ids: both files' own identity plus every scoped section that belongs to the
 // place's three levels, keys and values. Two places with the same fingerprint
-// answer all nine subsystems the same way, so the reload is skipped and the log
-// says 0 us instead of a stalled second - and the nine subsystems read this place
+// answer all eight subsystems the same way, so the reload is skipped and the log
+// says 0 us instead of a stalled second - and the eight subsystems read this place
 // through nothing else: every one of them goes through ReadInt/ReadString/
 // HasScopedValue, which resolve against these levels and these files alone.
 //
@@ -842,7 +842,7 @@ inline uint64_t ScopedFingerprint(const LocationContext& location) {
     active=previous;
     return hash;
 }
-// The fingerprint the nine subsystems were last configured with, and whether that
+// The fingerprint the eight subsystems were last configured with, and whether that
 // configuration is still the one this place would produce.
 inline uint64_t appliedFingerprint=0;
 inline bool appliedEditable=false;
