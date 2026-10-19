@@ -708,25 +708,32 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
   // Not exists alone: a settings change can re-enter this block while the
   // first worker is still generating, and two workers writing the same
   // cache is wasted CPU on the crossing's frame.
-  if(!std::filesystem::exists(m_cachePath,ec)&&!m_fieldsGenerating) {
-   m_fieldsGenerating=true;
-   std::thread([this]{
-    try {
-    auto shape=cloudnoise::GenerateShape(int(kShapeSize));
-    auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
-    auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
-    if(shape.size>0&&detail.size>0&&weather.width>0)
-     SaveFields(m_cachePath,shape,detail,weather);
-    else
-     m_fieldsFailed=true;
-    } catch (...) {
-    // An exception escaping a std::thread calls std::terminate and kills
-    // the game. A failed generation must only cost this launch's clouds -
-    // the file cache from a healthy launch covers the next one.
-    m_fieldsFailed=true;
-    }
-    m_fieldsGenerating=false;
-   }).detach();
+  auto worker=m_fieldWorker;
+  bool expected=false;
+  if(!std::filesystem::exists(m_cachePath,ec)&&
+     worker->generating.compare_exchange_strong(expected,true,std::memory_order_acq_rel)) {
+   const std::wstring cachePath=m_cachePath;
+   try {
+    std::thread([worker,cachePath]{
+     try {
+      auto shape=cloudnoise::GenerateShape(int(kShapeSize));
+      auto detail=cloudnoise::GenerateDetail(int(kDetailSize));
+      auto weather=cloudnoise::GenerateWeather(int(kWeatherSize));
+      if(shape.size>0&&detail.size>0&&weather.width>0)
+       SaveFields(cachePath,shape,detail,weather);
+      else
+       worker->failed.store(true,std::memory_order_release);
+     } catch (...) {
+      // A failed generation costs this launch's clouds only; it must never
+      // escape a worker thread and terminate the game process.
+      worker->failed.store(true,std::memory_order_release);
+     }
+     worker->generating.store(false,std::memory_order_release);
+    }).detach();
+   } catch (...) {
+    worker->failed.store(true,std::memory_order_release);
+    worker->generating.store(false,std::memory_order_release);
+   }
   }
  }
 }
@@ -749,7 +756,8 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  if(device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device))
  {
   m_shapeTexture.Reset();m_detailTexture.Reset();m_weatherTexture.Reset();
-  m_fieldsDevice=nullptr;m_fieldsReady=false;m_fieldsFailed=false;
+  m_fieldsDevice=nullptr;m_fieldsReady=false;m_fieldsWaitStart=0;
+  m_fieldWorker->failed.store(false,std::memory_order_release);
  }
 }
 
@@ -782,12 +790,12 @@ bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
 bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
 {
  if(m_fieldsReady)return true;
- if(m_fieldsFailed)return false;
+ if(m_fieldWorker->failed.load(std::memory_order_acquire))return false;
  D3DCAPS9 caps{};
  if(FAILED(d->GetDeviceCaps(&caps))||!(caps.TextureCaps&D3DPTEXTURECAPS_VOLUMEMAP)||
     caps.MaxVolumeExtent<kShapeSize)
  {
-  m_fieldsFailed=true;
+  m_fieldWorker->failed.store(true,std::memory_order_release);
   return false;
  }
  cloudnoise::Volume3D shape,detail;
@@ -799,18 +807,22 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
  // next - the worker started seconds ago and the render thread must not
  // block on it. Past a five-second bound the worker is pathologically slow
  // or dead, and the legacy inline generation runs (its atomic save and
- // deterministic content keep a late worker write harmless).
+ // deterministic content keep a late worker write harmless). Do not reopen
+ // and scan the multi-megabyte cache on every frame while that worker runs.
+ const bool generating=m_fieldWorker->generating.load(std::memory_order_acquire);
+ const uint64_t now=GetTickCount64();
+ if(generating) {
+  if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
+  if(now-m_fieldsWaitStart<5000)return false;
+ } else {
+  m_fieldsWaitStart=0;
+ }
  if(!LoadFields(m_cachePath,shape,detail,weather))
  {
-  if(m_fieldsGenerating.load(std::memory_order_acquire)) {
-   const auto now=GetTickCount64();
-   if(!m_fieldsWaitStart)m_fieldsWaitStart=now;
-   if(now-m_fieldsWaitStart<5000)return false;
-  }
   shape=cloudnoise::GenerateShape(int(kShapeSize));
   detail=cloudnoise::GenerateDetail(int(kDetailSize));
   weather=cloudnoise::GenerateWeather(int(kWeatherSize));
-  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldsFailed=true;return false;}
+  if(shape.size<=0||detail.size<=0||weather.width<=0){m_fieldWorker->failed.store(true,std::memory_order_release);return false;}
   SaveFields(m_cachePath,shape,detail,weather);
  }
  if(!UploadVolume(d,shape,m_shapeTexture.ReleaseAndGetAddressOf())||
@@ -818,7 +830,7 @@ bool VolumetricClouds::EnsureFields(IDirect3DDevice9* d)
     !UploadImage(d,weather,m_weatherTexture.ReleaseAndGetAddressOf()))
  {
   m_shapeTexture.Reset();m_detailTexture.Reset();m_weatherTexture.Reset();
-  m_fieldsFailed=true;
+  m_fieldWorker->failed.store(true,std::memory_order_release);
   return false;
  }
  m_fieldsDevice=d;

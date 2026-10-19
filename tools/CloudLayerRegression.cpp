@@ -35,6 +35,11 @@ int main() try
     Require(text.find("if(!m_shaderRetry.Open(now))return false;") != std::string::npos &&
             text.find("m_shaderRetry.Fail(now,kOptionalPassRetryMs);") != std::string::npos,
             "transient cloud shader creation failures retry after a cooldown instead of disabling clouds until device reset");
+    const auto workerWait = text.find("const bool generating=m_fieldWorker->generating.load");
+    const auto cacheRead = text.find("if(!LoadFields(m_cachePath,shape,detail,weather))");
+    Require(text.find("std::thread([worker,cachePath]") != std::string::npos &&
+            workerWait != std::string::npos && cacheRead != std::string::npos && workerWait < cacheRead,
+            "cold-start cloud generation owns its async state and avoids per-frame cache I/O while the worker runs");
     Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
 
