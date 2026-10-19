@@ -1740,6 +1740,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float3 sheenColor=lightPos;
     // 1. Water body: refracted bottom, absorbed and scattered through the column.
     float3 waterBody=rgb;
+    // The colour an infinitely thick column converges on. It is named once here
+    // because it is also what the water FOGS into: a far sheet that converges on
+    // `deepTint` alone and a near one that converges on `deepTint + inScatter` are
+    // two different seas meeting at one line on screen, and that line is the flat
+    // "chunk over the horizon" that survived every colour change - the sea at the
+    // fog's limit was not the same water as the sea in front of it.
+    float3 seaBody=deepTint.rgb+inScatter;
     // Gated on the capture, exactly as before: without a depth/colour copy there is
     // no column to absorb through, and inventing one would break the promise that an
     // unmatched or uncaptured water pixel keeps the client's own colour.
@@ -1764,7 +1771,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // was exactly true: it moved a sixth of the picture. Now the surface converges on
         // the colour an infinitely thick column converges on, in proportion to the water
         // really over the pixel (so a shoreline's first yard still shows its sand).
-        float3 seaBody=deepTint.rgb+inScatter;
         // ...and it may never be switched off by a depth reading that is missing,
         // implausible, or the sheet's own surface. `depthValid` is false both when
         // the copy has no depth and when the depth it has is not behind this
@@ -1786,7 +1792,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // already forced to 1 for this case (there is nothing behind to blend), so the only
         // honest thing for it to show is the body itself: the colour an infinitely thick
         // column converges on, which is what the covered path below is heading for anyway.
-        waterBody=deepTint.rgb+inScatter;
+        waterBody=seaBody;
     }
     // Per-body colour authoring multiplies rather than replaces, so the zone's own
     // painted water survives tinted instead of being overwritten: 0x808080 neutral.
@@ -1953,9 +1959,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // share therefore rises with view distance: near water keeps the air's colour (the
     // horizon still meets the sky), and past a few hundred yards the sheet converges on
     // the body instead, so distance deepens it rather than deleting it.
-    float farSea=smoothstep(40.0,320.0,length(viewPos))*(1-underwater);
-    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.9);
-    float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);
+    float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);
+    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);
+    // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
+    // body the near sheet converges on, so the fog distance stops being a visible
+    // edge in the middle of one continuous plane. The remaining air share keeps the
+    // horizon from becoming a hard line against the sky.
+    float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);
     result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;

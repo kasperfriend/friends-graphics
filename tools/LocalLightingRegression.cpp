@@ -1353,6 +1353,8 @@ int main()
         // These are the lines that carry the fix; a change to either side has
         // to move them together.
         const std::string surface = ReadFile("src/Effects/LocalLightingRenderer.cpp");
+        const std::string frameContext = ReadFile("src/Core/FrameContext.h");
+        const std::string volumetric = ReadFile("src/Effects/DirectionalVolumetricLighting.cpp");
         const std::string volume = ReadFile("VolumeIntegration.h");
         const std::string atmosphere = ReadFile("src/Effects/DirectionalVolumetricLighting.cpp");
         const std::string manager = ReadFile("src/Lighting/LocalLightManager.cpp");
@@ -1366,10 +1368,19 @@ int main()
         // has cameraValid false while the retained pose is a frame or two old, and
         // refusing the pass outright blinked every lamp as the camera turned. The hold is
         // the same one the lamps and the underwater medium use.
-        Check(surface.find("const bool poseRetained = !f.cameraValid && f.viewRawValid &&") != std::string::npos &&
-              surface.find("f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;") != std::string::npos &&
-              surface.find("(!f.cameraValid && !poseRetained) || !f.depthAvailable") != std::string::npos,
+        Check(surface.find("const bool poseRetained = !f.cameraValid && f.PoseUsable();") != std::string::npos &&
+              surface.find("(!f.cameraValid && !poseRetained) || !f.depthAvailable") != std::string::npos &&
+              frameContext.find("bool PoseUsable() const") != std::string::npos &&
+              frameContext.find("return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);")
+                  != std::string::npos,
               "a retained pose keeps the lamps drawn instead of blinking them by camera angle");
+        // One definition of "a pose this frame may use", and every pass that draws a
+        // lamp's light obeys it. The volumetric march used to refuse a frame the
+        // surface lighting accepted, so the shaft and halo around a lamp blinked off
+        // while the ground it lit stayed lit - a lamp that visibly broke.
+        Check(volumetric.find("!f.PoseUsable()") != std::string::npos &&
+              volumetric.find("!target||!f.cameraValid||") == std::string::npos,
+              "the volumetric light march uses the same pose rule as the surface lighting");
         // A lamp's importance is where it is, not where the player is looking. The score
         // used to swing six-fold with the light's angle to the camera, and a light one
         // radius behind was culled outright, so turning the head re-ordered the four/eight

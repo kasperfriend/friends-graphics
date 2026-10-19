@@ -1083,9 +1083,12 @@ int main(int argc, char** argv)
                     // hole in the world. Same term here.
                     // Distance deepens the sea rather than deleting it: past a few hundred
                     // yards the fog target is mostly the body's own colour.
-                    const float farSea = Smoothstep(40.f, 320.f, viewZ);
-                    const V3 fogTarget = Lerp(c.fog, deep,
-                        std::max(Saturate(absorption) * .55f, farSea * .9f));
+                    // The far sea fogs into the SAME body the near sea converges on,
+                    // so the distance at which the air takes over is not an edge in
+                    // the middle of one plane.
+                    const float farSea = Smoothstep(40.f, 600.f, viewZ);
+                    const V3 fogTarget = Lerp(c.fog, Add(deep, inScatter),
+                        std::max(Saturate(absorption) * .55f, farSea * .85f));
                     // The shader fogs toward that target and lets the device blend it over the
                     // copy with the water's own alpha; both happen here in that order.
                     out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fog), alpha);

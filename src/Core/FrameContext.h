@@ -174,6 +174,19 @@ namespace renderer
         bool cameraValid = false;
         bool composed = false;
 
+        // Is there a pose a screen-space pass may use THIS frame?
+        //
+        // A frame whose draws carried no fresh eye - the camera is pointed at the
+        // sky, at a wall, or the draw stream stumbled - still has the retained
+        // inverse view and eye in here, good for `kCameraEyeHoldMs`. Every pass
+        // must make that decision the same way, or one of them blinks while the
+        // others hold: the surface lighting keeps a held pose while the volumetric
+        // march around it refused, which reads to a player as a lamp that broke.
+        bool PoseUsable() const
+        {
+            return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);
+        }
+
         // Sampled once per frame at the top of Present: is WoW the
         // foreground window? Every hotkey (F7-F12) reads this instead of
         // calling GetForegroundWindow/GetWindowThreadProcessId itself -

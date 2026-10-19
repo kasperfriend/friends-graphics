@@ -1148,7 +1148,7 @@ int main() try
                 foamGlow!=std::string::npos&&cameraCharge!=std::string::npos&&foamGlow<cameraCharge&&
                 pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));")
                     !=std::string::npos&&
-                pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);")
+                pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);")
                     !=std::string::npos&&
                 pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
                 "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
@@ -1157,18 +1157,26 @@ int main() try
         // takes the body's deep colour in proportion to the column's own saturation, above
         // water only, so a shallow shore still fades exactly as before.
         {
-            const auto farSea=pixel.find("float farSea=smoothstep(40.0,320.0,length(viewPos))*(1-underwater);");
+            const auto farSea=pixel.find("float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);");
             const auto share=pixel.find(
-                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.9);");
+                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);");
+            const auto body=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
             const auto target=pixel.find(
-                "float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);");
+                "float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);");
+            // The far sheet must fog into the SAME body the near sheet converges on.
+            // Fading to `deepTint` alone left two different seas meeting at the fog's
+            // limit, which is the flat band across the horizon ("that chunk").
+            Require(body!=std::string::npos&&body<target&&
+                    pixel.find("lerp(fogColor.rgb,deepTint.rgb,seaShare)")==std::string::npos,
+                    "the water fogs into its own body, so the fog distance is not an edge");
             const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
             Require(farSea!=std::string::npos&&share!=std::string::npos&&target!=std::string::npos&&
                     target==fade&&farSea<share&&share<target,
                     "the distant sheet fades into the sea's own colour above water, and into the medium below it");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float farSea = Smoothstep(40.f, 320.f, viewZ);")!=std::string::npos&&
-                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .9f)")!=std::string::npos,
+            Require(mirror.find("const float farSea = Smoothstep(40.f, 600.f, viewZ);")!=std::string::npos&&
+                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f)")!=std::string::npos &&
+                    mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
                     "the CPU preview fogs toward the same tinted target, deepening with distance");
         }
         // WATER OPACITY, second half. The alpha floor only decides how much of the scene the
@@ -1178,9 +1186,11 @@ int main() try
         // "opacity does nothing visually". The body now converges on the asymptote an
         // infinitely thick column converges on, gated by the water actually over the pixel.
         {
-            const auto bed=pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;");
+            // `seaBody` is named once, above the capture branch, because the fog
+            // target needs the same value - so it comes BEFORE the body math.
+            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
+            const auto bed=pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;",sea);
             const auto bodyLine=pixel.find("float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));",bed);
-            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;",bodyLine);
             const auto gate=pixel.find(
                 "float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);",sea);
             const auto trust=pixel.find(
@@ -1189,7 +1199,7 @@ int main() try
                 "body=lerp(body,seaBody,opacityControl.x*bedFade);",trust);
             Require(bed!=std::string::npos&&bodyLine!=std::string::npos&&sea!=std::string::npos&&
                     gate!=std::string::npos&&trust!=std::string::npos&&fade!=std::string::npos&&
-                    bed<bodyLine&&bodyLine<sea&&sea<gate&&gate<trust&&trust<fade,
+                    sea<bed&&bed<bodyLine&&bodyLine<gate&&gate<trust&&trust<fade,
                     "water opacity fades the WHOLE body toward the sea, after the refraction mix");
             // An unknown or implausible bed reading must not switch the slider off.
             // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
@@ -1216,8 +1226,8 @@ int main() try
             // the colour of the sky - the "completely transparent water" of the report.
             // (Comments are stripped from `pixel`, so only code can be pinned here.)
             Require(pixel.find("} else {")!=std::string::npos&&
-                    pixel.find("waterBody=deepTint.rgb+inScatter;")!=std::string::npos&&
-                    pixel.find("waterBody=deepTint.rgb+inScatter;")>pixel.find("} else {"),
+                    pixel.find("waterBody=seaBody;")!=std::string::npos&&
+                    pixel.find("waterBody=seaBody;")>pixel.find("} else {"),
                     "an uncaptured surface shows the sea's own colour, never the client's pale liquid");
         }
         // DEPTH FOG: the view DOWN into the water charges the sunlight's trip to the bed as

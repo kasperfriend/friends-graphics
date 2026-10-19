@@ -239,6 +239,13 @@ the reported asymmetry exactly: yaw sweeps emitters across the frustum edge far
 more often than pitch does, and no change to scoring could reach a lamp that had
 already left the pool.
 
+**And every pass that draws a lamp has to agree about the pose.** The surface
+lighting was given the `kCameraEyeHoldMs` hold in this round; the volumetric
+march that draws each lamp's shaft and halo was still gated on a bare
+`f.cameraValid`, so on a frame whose draw stream carried no fresh eye the ground
+stayed lit while the glow around it vanished - a lamp that visibly broke. There
+is now one definition, `FrameContext::PoseUsable()`, and both passes ask it.
+
 A confirmed source (`stableFrames >= 6`) is now held across
 `kNativeConfirmedHoldMs = 15000` of silence, while an unconfirmed one keeps the
 old five-part test. The window is finite on purpose: a brazier that is put out

@@ -444,8 +444,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     // turned, which is the reported "dynamic lights flicker at some angles": the lights are
     // world-anchored, but the gate that decided whether to draw them was not. Hold the
     // retained pose for the same window the lamps themselves use, and refuse it past that.
-    const bool poseRetained = !f.cameraValid && f.viewRawValid &&
-        f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+    const bool poseRetained = !f.cameraValid && f.PoseUsable();
     if (!manager.Enabled() || (lights.empty() && !debugView) || !device ||
         (!f.cameraValid && !poseRetained) || !f.depthAvailable || !f.sceneColor) return false;
     // Only a pose this frame could not corroborate AND an eye no draw has

@@ -2804,6 +2804,29 @@ captured bed at full strength and the only visible effect left was the alpha.
   A genuinely measured shallow shelf still keeps its sand, which was the point
   of the gate. The CPU preview mirrors it.
 
+## Round 11: the far sea was a different sea (2026-10-19)
+
+The water fogs into `fogTarget`, and `fogTarget` used to be the **deep tint**,
+while the water's own body is the deep tint **plus in-scatter**. Two different
+colours, then, for the same sea at two distances - and the fog is a curve that
+saturates, so the change between them happened over a short span of screen and
+read as a flat grey slab lying on the horizon with the live water in front of
+it. That is the reported "chunk over the horizon": not a missing draw and not a
+zone, but the distance at which the air takes over being a different colour from
+the water it is taking over from. Raising WATER OPACITY could only darken it,
+because the slab was already the water's asymptote - just the wrong one.
+
+- `seaBody = deepTint.rgb + inScatter` is now named once, above the capture
+  branch, and `fogTarget` lerps toward **it** (`lerp(fogColor, seaBody, seaShare)`)
+  above water. A fully fogged sheet is exactly the body a near sheet converges
+  on, so the fog distance cannot be an edge in the middle of one plane.
+- The distance share rises over `smoothstep(40, 600, |viewPos|)` to `.85`, not
+  `.9` at 320: the ramp is long enough not to be a visible band, and the last
+  15% of air keeps the horizon from becoming a hard line against the sky.
+- The uncaptured branch uses the same `seaBody`, and the CPU preview mirrors all
+  three. `WaterRegression` pins that the fog target is the body and that the old
+  `lerp(fogColor.rgb, deepTint.rgb, seaShare)` spelling is gone.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

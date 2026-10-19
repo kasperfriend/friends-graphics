@@ -757,7 +757,12 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  // is not in this medium at all. The compositor treats this exactly as it treats the fog
  // being switched off, which is a state it already supports.
  if(airShare<=0.f)return false;
- if(!settings.enabled||!d||!target||!f.cameraValid||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
+ // A held pose is as usable here as it is for the surface lighting: this pass draws
+ // the shaft and halo AROUND each lamp, so refusing a frame the surface pass accepts
+ // made the glow blink while the ground stayed lit - a lamp that visibly broke every
+ // time the draw stream missed a frame, which is what the player reports. Same rule,
+ // one definition (`FrameContext::PoseUsable`).
+ if(!settings.enabled||!d||!target||!f.PoseUsable()||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
  // Resource recreation resets shaders too; compile only after that reset.
  // A failed setup is retried after a cooldown instead of rebuilding shaders every frame.
  const ULONGLONG setupNow=GetTickCount64();
