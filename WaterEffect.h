@@ -1884,7 +1884,14 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // only thing in the column and there is no refraction it owes anyone. Under the
     // surface the rule is the opposite - `behindZ` is the sky through Snell's window, and
     // forcing coverage there would paint the window shut - so the term is above-water only.
-    float openOceanCoverage=openOcean*(1-underwater);
+    // A frame whose scene copy never landed has no picture behind the surface at all:
+    // `captureValid` is 0, the "behind" a partial alpha would blend is whatever the
+    // client left in the target, and over water that is the clear colour. Nothing
+    // captured is not something to see through, so the sheet covers in full - the same
+    // reasoning as open water, taken to its limit. This is the safety net behind the
+    // report "the whole sea is still a sheet of glass out there": without it, a missing
+    // copy silently turned every water pixel into baseAlpha over an empty background.
+    float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);
     surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
@@ -1896,7 +1903,16 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // fallback used to supply). Under water the sheet converges on the body's
     // own asymptote instead, which is also what the non-liquid pixels around it
     // converge on, so the plane and its gaps meet at one colour at range.
-    float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);
+    // A sea's horizon is not the sky. The light reaching the eye from a distant water
+    // pixel has crossed the body, and the body's own colour is what makes the far sea read
+    // as a surface instead of a hole in the world: the air fog alone painted the open sea
+    // the exact colour of the sky it fades into, which is the "nothingness in the distance"
+    // report. The tint is weighted by the column's own saturation, so a shallow shore
+    // (where absorption is small) still fades exactly as it did, and only water that the
+    // body has really swallowed takes the deep colour. Under the surface the medium is the
+    // body, so that branch keeps the medium's own asymptote unchanged.
+    float seaShare=saturate(absorption)*(1-underwater)*.55;
+    float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);
     result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;

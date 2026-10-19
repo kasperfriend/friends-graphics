@@ -2634,10 +2634,30 @@ surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
 The knob keeps its meaning: WATER OPACITY still says how much cover the surface may leave
 out where there IS a bed to see, and raising it to 100 hides even that.
 
+Two more things made the same view read as emptiness rather than as sea.
+
+**The horizon took the sky's colour.** The sheet fades into `fogTarget`, and above water
+that was the air's fog colour exactly - so the distant sea converged on the very colour of
+the sky it met, which is the "nothingness in the distance". Light reaching the eye from a
+distant water pixel has crossed the body, and the body's colour is what makes a sea read as
+a surface. The target now takes the deep colour in proportion to the column's own
+saturation (`seaShare = saturate(absorption) * .55` above water), so water that the body has
+really swallowed keeps a sea colour at range, while a shallow shore - where absorption is
+small - still fades exactly as it did. Under the surface the medium's own asymptote is
+unchanged.
+
+A second case has no picture behind the sheet at all: a frame whose scene copy never
+landed (`captureValid` 0). There `depthAlpha` is zero by construction and the "behind" a
+partial alpha would blend is whatever the client left in the target - over water, the
+clear colour. Nothing captured is not something to see through, so that case joins the
+open-ocean branch (`max(openOcean*(1-underwater), 1-captureValid)`). It is a safety net,
+not the normal path: with a capture present nothing about it changes.
+
 ### Verification
 
 `tools/WaterRegression.cpp` pins the term, its `(1-underwater)` gate, its position between
-the optical terms and the wrong-side fade, and the preview's mirror of the same rule.
+the optical terms and the wrong-side fade, the captureless safety net, the tinted fog target
+(and its preview mirror).
 
 ## In-game verification / troubleshooting
 

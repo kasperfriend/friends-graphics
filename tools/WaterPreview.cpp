@@ -1068,9 +1068,14 @@ int main(int argc, char** argv)
                     // reveal the clear colour, which reads as glass over emptiness.
                     alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));
                     const float fog = 1.f - std::exp(-viewZ * c.fogDensity);
-                    // The shader fogs toward the flat scene fog colour and lets the device blend
-                    // it over the copy with the water's own alpha; both happen here in that order.
-                    out = Lerp(copy.colour[at], Lerp(rgb, c.fog, fog), alpha);
+                    // A sea's horizon is not the sky: the shader mixes the air fog toward the
+                    // body's deep colour in proportion to the column's own saturation
+                    // (`seaShare`), so the far water still reads as a surface instead of as a
+                    // hole in the world. Same term here.
+                    const V3 fogTarget = Lerp(c.fog, deep, Saturate(absorption) * .55f);
+                    // The shader fogs toward that target and lets the device blend it over the
+                    // copy with the water's own alpha; both happen here in that order.
+                    out = Lerp(copy.colour[at], Lerp(rgb, fogTarget, fog), alpha);
                     if (c.probeX == x && c.probeY == y)
                     {
                         const auto bad=[](float f){ return !(f >= 0.f && f <= 1e9f); };   // true for NaN too

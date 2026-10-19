@@ -1148,9 +1148,26 @@ int main() try
                 foamGlow!=std::string::npos&&cameraCharge!=std::string::npos&&foamGlow<cameraCharge&&
                 pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));")
                     !=std::string::npos&&
-                pixel.find("float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);")!=std::string::npos&&
+                pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);")
+                    !=std::string::npos&&
                 pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
                 "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
+        // A sea's horizon is not the sky. The air fog alone painted distant water the exact
+        // colour of the sky it faded into, which reads as a hole in the world; the target
+        // takes the body's deep colour in proportion to the column's own saturation, above
+        // water only, so a shallow shore still fades exactly as before.
+        {
+            const auto share=pixel.find("float seaShare=saturate(absorption)*(1-underwater)*.55;");
+            const auto target=pixel.find(
+                "float3 fogTarget=lerp(lerp(fogColor.rgb,deepTint.rgb,seaShare),underEnvironment,underwater);");
+            const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
+            Require(share!=std::string::npos&&target!=std::string::npos&&target==fade&&share<target,
+                    "the distant sheet fades into the sea's own colour above water, and into the medium below it");
+            const std::string mirror=ReadAlongside("WaterPreview.cpp");
+            Require(mirror.find("const V3 fogTarget = Lerp(c.fog, deep, Saturate(absorption) * .55f);")
+                        !=std::string::npos,
+                    "the CPU preview fogs toward the same tinted target");
+        }
         // DEPTH FOG: the view DOWN into the water charges the sunlight's trip to the bed as
         // well as the trip back, so submerged terrain dissolves into the body with depth
         // instead of standing dark under clear-looking water. One register lane that was
@@ -1199,12 +1216,19 @@ int main() try
             // sea is then the whole column and coverage is complete; under the surface the
             // same `behindZ` is the sky through Snell's window, so the term is above-water only.
             {
-                const auto openTerm=pixel.find("float openOceanCoverage=openOcean*(1-underwater);");
+                const auto openTerm=pixel.find(
+                    "float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);");
                 const auto openRule=pixel.find(
                     "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
                 Require(openTerm!=std::string::npos&&openRule!=std::string::npos&&
                         optics<openTerm&&openTerm<openRule&&openRule<fade,
                         "open ocean is fully covered, above water only, and still before the wrong-side fade");
+                // A frame with no scene copy has nothing behind the surface either: the
+                // "behind" a partial alpha would blend is whatever the client left in the
+                // target, which over water is the clear colour. Nothing captured is not
+                // something to see through.
+                Require(pixel.find("1-captureValid)")!=std::string::npos,
+                        "a missing scene capture covers the sheet instead of blending the clear colour through it");
                 const std::string mirror=ReadAlongside("WaterPreview.cpp");
                 Require(mirror.find("alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));")!=std::string::npos,
                         "the CPU preview carries the same open-ocean coverage rule");
