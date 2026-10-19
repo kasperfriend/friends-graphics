@@ -1757,10 +1757,11 @@ void TestMirror()
     const std::string atmosphere = ReadAlongside("../src/Effects/DirectionalVolumetricLighting.cpp");
     const std::string clouds = ReadAlongside("../src/Effects/VolumetricClouds.cpp");
     const std::string frameContext = ReadAlongside("../src/Core/FrameContext.h");
+    const std::string weather = ReadAlongside("../WeatherVisuals.h");
     const std::string ini = ReadAlongside("../GraphicsEffects.ini");
     const std::string overlay = ReadAlongside("../src/Environment/OverlayItems.h");
     Require(core.size() > 8192 && pass.size() > 8192 && water.size() > 4096 && composite.size() > 4096
-                && rendererCpp.size() > 4096
+                && rendererCpp.size() > 4096 && weather.size() > 4096
                 && atmosphere.size() > 4096 && clouds.size() > 4096 && frameContext.size() > 1024
                 && ini.size() > 1024 && overlay.size() > 1024,
             "every file the underwater path spans is readable as text");
@@ -2038,6 +2039,17 @@ void TestMirror()
                 && composite.find("const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();")
                     != std::string::npos,
             "the compositor publishes the water stage's settled answer, gated on the medium's own switch");
+    // The precipitation stage composites during the client's draw stream, before the composite
+    // that settles this frame's medium, so the same answer is published for it one frame ahead:
+    // rain (and snow/sand) fades out below the surface instead of drawing over a diver.
+    Require(frameContext.find("float compositedUnderwaterRamp = 0.f;") != std::string::npos
+                && composite.find("frameCtx.compositedUnderwaterRamp = (!shaftDebug && enabled && active &&")
+                    != std::string::npos
+                && weather.find("const float aboveWater = 1.f - std::clamp(frame.compositedUnderwaterRamp, 0.f, 1.f);")
+                    != std::string::npos
+                && weather.find("intensity * frame.environment[renderer::Weather] * aboveWater") != std::string::npos
+                && weather.find("lensStrength * aboveWater") != std::string::npos,
+            "the draw-stream precipitation pass fades on the same ramp, published one frame ahead of it");
     {
         const auto publish = composite.find("frameCtx.underwaterRamp =");
         const auto atmosphereCall = composite.find("atmosphereRendered = renderer::DirectionalVolumetricLighting");

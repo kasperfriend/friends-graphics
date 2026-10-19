@@ -227,3 +227,60 @@ feed a short, frame-rate-independent eased target; positions and streak angles
 continue updating between identical captures. Invalid captures, teleports and
 device resets rebase without replaying pending camera displacement. The wind
 and gravity phases are not reset.
+
+# Rain underwater, and rain climbing under a diving camera (2026-10-19)
+
+## Cause 1: the pass does not know where the camera is
+
+The analytic rain field, the snow/sand continuity layer and the lens droplets are all composited
+into the backbuffer during the client's draw stream, at the first UI draw, as a screen-sized quad.
+Nothing in that pass knew the camera was under water, and the underwater medium composited later
+then tinted the streaks along with the rest of the frame - rain drew at full strength over a
+diver's view. The pass cannot read `FrameContext::underwaterRamp` for this: `ResetForNewFrame`
+clears it at the top of every frame, and the value is only settled by the composite that runs
+*after* the draw stream.
+
+## Cause 2: the camera parallax had no floor
+
+The camera translation added to each layer's phase is world-anchoring, not decoration: a drop four
+yards away moves a long way up the screen when the camera drops, and the formula is right about
+that. What it lacked was the other half of the picture. The drops are also falling, and the camera
+term was unbounded, so a descent (swimming down, a mount losing height, an ordinary fall) added an
+upward screen displacement several times larger than gravity's. The whole field climbed, and
+`Motion::Direction` normalises the same sum, so the near streaks pointed up as well - the reported
+"when I move the camera downward, rain drops go up".
+
+## Fix
+
+`FrameContext::compositedUnderwaterRamp` is the medium's ramp as the last composite settled it.
+`VolumeIntegration::BeforeClear` publishes it, with the same gating as the composite's own publish
+(`!shaftDebug && enabled && active && Underwater::IsActive()`), so with the underwater pass off it
+is always 0 and nothing changes above or below the surface. It is one frame behind, which the
+ramp's own third-of-a-second smoothing makes invisible. `BeforeDraw` turns it into
+`aboveWater = 1 - ramp` and fades the rain field, the snow/sand continuity layer and the lens
+droplets by it; the status line appends `(UNDERWATER)` for the same reason it appends `(COVER)`.
+
+In `rainfield::Motion`, `Advance` now remembers the fall speed and projected wind it integrated, and
+`TrackCamera` floors the *vertical* camera contribution per layer at
+`-kMinimumCameraFallShare * layerSpeed * gravity * dt`. A descending camera can therefore slow the
+pattern to 35% of its fall or stop adding to it, but it can never push the pattern - or the streak
+axis, which is the same sum normalised - upward. Ascending and horizontal camera motion are
+untouched, and the eased phase keeps working exactly as before.
+
+## Verification
+
+`tools/WindRegression.cpp` drives a descending camera for 120 frames at 30 yards a second and
+requires every layer's phase to move down and every streak axis to point down, on top of all the
+existing camera-parallax, teleport, rotation and long-session assertions (which the clamp leaves
+unchanged, because they all move the camera up or sideways). Source checks pin the
+`aboveWater` factor in all three composites, the ramp publication in `BeforeClear`, and the field in
+`FrameContext`; `tools/UnderwaterRegression.cpp` pins the same wiring from the medium's side. A
+scratch sweep (not shipped) covered fall speeds 0.1-4, projected wind of ±840, descent rates up to
+144 yards a second and 30/60 Hz plus a 0.1 s clamped step, with no upward phase step in any layer.
+
+## In-game check
+
+Swim down, ride a mount down and jump off a ledge, in rain: the drops must keep falling downward
+(they may slow), and once the camera is under the surface the rain, the snow/sand layer and the
+lens droplets must fade out, with F10 reading `RAIN ON (UNDERWATER)`. Surfacing restores them; a
+lake viewed from above still rains normally.

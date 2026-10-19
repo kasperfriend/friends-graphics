@@ -131,6 +131,16 @@ namespace renderer
         // The signed yards of water over the camera the ramp was built from, positive under
         // the surface. Diagnostics and logs read this; passes read the ramp.
         float underwaterYards = -1.f;
+        // The SAME ramp, as settled by the last frame that composed. Precipitation composites
+        // itself during the client's draw stream - before this frame's water draws report their
+        // planes and before the composite settles the medium - so it cannot read `underwaterRamp`
+        // (ResetForNewFrame clears that at the top of the frame) or a value that is only computed
+        // at Present. VolumeIntegration publishes this copy in BeforeClear, one frame behind,
+        // which the ramp's own third-of-a-second smoothing makes invisible; the precipitation
+        // stage fades its whole field out on it so a diver does not have rain drawing over the
+        // water. Zero on every frame that settles above the surface, and above the surface it is
+        // the identity every consumer has always had.
+        float compositedUnderwaterRamp = 0.f;
 
         bool depthAvailable = false;
         bool cameraValid = false;

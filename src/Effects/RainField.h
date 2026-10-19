@@ -14,6 +14,14 @@ inline constexpr float cellHeight[3] = {88.f, 58.f, 38.f};
 inline constexpr float layerSpeed[3] = {1.10f, .86f, .64f};
 inline constexpr float layerDepth[3] = {4.f, 11.f, 25.f};
 inline constexpr float latticePeriod = 4096.f;
+// How much of a layer's own screen-space fall a camera translation may take
+// away before the parallax stops. A camera that descends (swimming down, a
+// mount losing height, a fall) moves world-anchored drops UP the screen, and at
+// the nearest layer's 4 yards it does so several times faster than the drops
+// fall: the whole field climbed, and the near streaks, whose bright head sits
+// on their direction axis, pointed up. The camera may slow the rain down -
+// that is the depth cue - but it may never reverse it.
+inline constexpr float kMinimumCameraFallShare = .35f;
 
 struct Projection { float x = 0.f, y = 0.f; }; // screen-right, screen-down, in reference pixels/sec
 inline Projection Project(const WindState& wind, WindVector right, WindVector up,
@@ -54,6 +62,10 @@ public:
         const double step = WindDelta(dt);
         m_x += step * WindFinite(wind.x, 0.f);
         m_y += step * VerticalSpeed(fallSpeed, wind);
+        // Remembered for TrackCamera's clamp: a camera translation has to be
+        // measured against the rate these drops are already falling at.
+        m_fallSpeed = std::clamp(WindFinite(fallSpeed, 1.f), .1f, 4.f);
+        m_wind = {WindFinite(wind.x, 0.f), WindFinite(wind.y, 0.f)};
     }
     void TrackCamera(const Camera& camera, float amount = .7f, float dt = 1.f/60.f) noexcept
     {
@@ -91,13 +103,24 @@ public:
         const double seconds = double(WindDelta(dt));
         const double positionBlend = -std::expm1(-seconds / .045);
         const double directionBlend = -std::expm1(-seconds / .07);
+        // Pixels per second this frame's rain falls by its own gravity, before
+        // the camera is allowed to spend any of it on parallax.
+        const double fallRate = double(VerticalSpeed(m_fallSpeed, m_wind));
         for (unsigned i = 0; i < 3; ++i)
         {
             // Clamp each newly observed displacement, then ease its target
             // into the rendered phase on EVERY frame. An irregular camera
             // capture no longer moves the whole pattern in discrete jumps.
+            // The vertical share is additionally floored: a descending camera
+            // contributes y < 0 (screen up), and without the floor the near
+            // layer climbed faster than the rain fell - the reported "rain
+            // goes up when the camera moves down". The floor is each layer's
+            // own fall scaled by kMinimumCameraFallShare, so the same rule
+            // holds for all three depths; a camera moving up is never limited.
+            const double verticalFall = fallRate * layerSpeed[i];
+            const double floorY = std::max(-verticalFall * kMinimumCameraFallShare * seconds, -32.0);
             m_targetX[i] += std::clamp(x / layerDepth[i], -32.0, 32.0);
-            m_targetY[i] += std::clamp(y / layerDepth[i], -32.0, 32.0);
+            m_targetY[i] += std::clamp(y / layerDepth[i], floorY, 32.0);
             const double stepX = (m_targetX[i] - m_cameraX[i]) * positionBlend;
             const double stepY = (m_targetY[i] - m_cameraY[i]) * positionBlend;
             m_cameraX[i] += stepX;
@@ -134,6 +157,10 @@ public:
     double Y() const noexcept { return m_y; }
 private:
     double m_x = 0, m_y = 0;
+    // The fall speed and projected wind last integrated, so the camera clamp
+    // measures a translation against the drops' actual screen fall.
+    float m_fallSpeed = 1.f;
+    Projection m_wind{};
     void CancelPendingCameraMotion() noexcept
     {
         for (unsigned i = 0; i < 3; ++i)

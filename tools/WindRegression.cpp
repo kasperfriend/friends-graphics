@@ -461,6 +461,35 @@ static void TestPrecipitationMotion()
     cameraRain.Layer(0,afterCamera);
     for(int i=0;i<4;++i)Check(afterCamera[i]==beforeCamera[i],
         "missing camera sample rebases without a catch-up streak");
+    // A camera that descends moves world-anchored drops UP the screen, and at
+    // four yards it does so several times faster than they fall, so the whole
+    // field used to climb and the near streaks pointed up: "the rain goes up
+    // when I move the camera down". The camera may slow the fall - that is the
+    // depth cue - but never reverse it, in the pattern or in the streak angle.
+    rainfield::Camera sink{};
+    sink.valid=true;sink.right[0]=1;sink.up[1]=1;
+    sink.projectionX=1;sink.projectionY=1;sink.aspect=1;
+    rainfield::Motion diving;
+    diving.TrackCamera(sink,.7f,1.f/60.f); // rebase on the starting pose
+    auto rainY=[](const rainfield::Motion& motion,unsigned layer){
+        float phase[4]{}; motion.Layer(layer,phase);
+        return std::remainder(double(phase[2])+double(phase[3]),double(rainfield::latticePeriod));
+    };
+    bool descendingFalls=true;
+    for(int step=0;step<120;++step){
+        double before[3]{};
+        for(unsigned i=0;i<3;++i)before[i]=rainY(diving,i);
+        diving.Advance(1.f/60.f,1.f,{});
+        sink.position[1]-=.5; // thirty yards a second: a dive or a fall
+        diving.TrackCamera(sink,.7f,1.f/60.f);
+        for(unsigned i=0;i<3;++i)
+        {
+            const double delta=std::remainder(rainY(diving,i)-before[i],
+                                              double(rainfield::latticePeriod));
+            descendingFalls=descendingFalls&&delta>0&&diving.Direction(i,{},1.f).y>0;
+        }
+    }
+    Check(descendingFalls, "a descending camera slows the rain but never makes it climb");
     for (int mode : {2,3}) {
         const auto m = ComputeWrappedPhases(motion.Fall(),motion.WindX(),motion.WindY(),mode);
         Check(m.c9[0] >= 0 && m.c9[0] < 6.29f && m.c10[0] >= 0 && m.c10[0] < 1,
@@ -672,6 +701,17 @@ static void TestConfigurationAndWiring()
           Read("ModernWoWRenderer.cpp").find("weathervisuals::NeedsPresentFallback()") != std::string::npos &&
           Read("ModernWoWRenderer.cpp").find("weathervisuals::BeforeDraw(d, true);") != std::string::npos,
           "small rain batches and missing UI draws cannot silently disable the rain pass");
+    // Precipitation composites during the client's draw stream, before the composite that
+    // settles the frame's medium, so it fades on the ramp published one frame ahead of it.
+    Check(weatherSource.find("const float aboveWater = 1.f - std::clamp(frame.compositedUnderwaterRamp, 0.f, 1.f);")
+              != weatherSource.npos &&
+          weatherSource.find("intensity * frame.environment[renderer::Weather] * aboveWater") != weatherSource.npos &&
+          weatherSource.find("* .45f * aboveWater") != weatherSource.npos &&
+          weatherSource.find("lensStrength * aboveWater") != weatherSource.npos &&
+          Read("VolumeIntegration.h").find("frameCtx.compositedUnderwaterRamp = (!shaftDebug && enabled && active &&")
+              != std::string::npos &&
+          Read("src/Core/FrameContext.h").find("float compositedUnderwaterRamp = 0.f;") != std::string::npos,
+          "precipitation fades on the published medium ramp instead of drawing over a diver");
     const auto weatherResetStart = weatherSource.find("inline void Reset(IDirect3DDevice9* device)");
     Check(weatherResetStart != weatherSource.npos &&
           weatherSource.substr(weatherResetStart, weatherSource.find("inline bool IsTerrainShader", weatherResetStart) - weatherResetStart)

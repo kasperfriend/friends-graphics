@@ -496,6 +496,17 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     if (renderer::DepthCapture::Instance().HasDepth()) {
         auto& frameCtx = renderer::FrameContext::Current();
         frameCtx.ResetForNewFrame(frameCtx.frameIndex + 1, d);
+        // Precipitation composites itself over the scene during the client's draw stream, which
+        // starts now and ends before this frame's water draws settle the medium at Present. So it
+        // cannot read underwaterRamp (cleared just above) or wait for the composite: publish the
+        // ramp the last composite settled, so the precipitation stage can fade out below the
+        // surface instead of drawing rain over the water. One frame late, which the ramp's own
+        // third-of-a-second smoothing makes invisible. Gated exactly like the composite's own
+        // publish (including the shaft debug mask), so with the underwater pass off this is
+        // always 0 and precipitation above and below the surface is untouched.
+        frameCtx.compositedUnderwaterRamp = (!shaftDebug && enabled && active &&
+            renderer::Underwater::Instance().IsActive())
+            ? std::clamp(watereffect::submersionTracker.ramp, 0.f, 1.f) : 0.f;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
         renderer::CameraCapture::Instance().BeginFrame();

@@ -896,6 +896,13 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     rainCamera.projectionY = frame.projUnpack[3];
     rainCamera.aspect = frame.height ? float(frame.width)/float(frame.height) : 1.f;
     rainMotion.TrackCamera(rainCamera, rainParallax, dt);
+    // Rain belongs to the air above the surface. This stage is a screen-sized quad over the whole
+    // client frame, so nothing inside it knows where the camera is standing, and below the surface
+    // it used to draw full streaks over the diver's view (and then the underwater pass tinted them
+    // as if they were part of the medium). `compositedUnderwaterRamp` is the medium's own ramp as
+    // the last composite settled it - it cannot be this frame's, which is resolved after this pass
+    // runs - and above water it is exactly 0, which makes `aboveWater` the identity there.
+    const float aboveWater = 1.f - std::clamp(frame.compositedUnderwaterRamp, 0.f, 1.f);
     precipitationMotion.Advance(dt, speed, frame.wind,
         {frame.viewRaw.m[0][0], frame.viewRaw.m[1][0]},
         {frame.viewRaw.m[0][1], frame.viewRaw.m[1][1]},
@@ -983,7 +990,8 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     // c1: Weather params
     // Snow/sand continuity supplements native particles. The fourth lane also
     // gates the distance-dependent mist when a real depth texture is available.
-    float weatherConst[4] = { motion.fall, intensity * frame.environment[renderer::Weather] * .45f, float(renderMode),
+    float weatherConst[4] = { motion.fall,
+        intensity * frame.environment[renderer::Weather] * .45f * aboveWater, float(renderMode),
         hasCapturedDepth ? 1.0f : 0.0f };
     // c2: Integrated screen-space displacement, not current wind * session age.
     float windConst[4] = { motion.windX, motion.windY, atmosphereHaze, smoothedIndoor };
@@ -1033,7 +1041,7 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
         }
         const float rainTravel[4] = {rainAxes[0][0],rainAxes[0][1],rainWind.x,rainWind.y};
         const float rainShape[4] = {rainDensity,rainLength,rainWidth,rainOpacity};
-        const float rainControl[4] = {intensity * frame.environment[renderer::Weather],
+        const float rainControl[4] = {intensity * frame.environment[renderer::Weather] * aboveWater,
             smoothedIndoor,depthOcclusion ? 1.f : 0.f,float(rainDebugView)};
         device->SetPixelShaderConstantF(0, projConstants, 1);
         device->SetPixelShaderConstantF(1, screenConst, 1);
@@ -1076,7 +1084,10 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
     drewPrecipitation = SUCCEEDED(device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex)));
 
     // Render camera lens droplets pass (if rain and enabled)
-    if (drewPrecipitation && lensDroplets && rainDebugView == 0 && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
+    // Droplets belong on a lens that rain can reach. Underwater they would be a second, brighter
+    // screen of rain over the medium, so they fade out with the ramp exactly like the streaks.
+    if (drewPrecipitation && lensDroplets && rainDebugView == 0 && renderMode == 1 && lensDropletsPS &&
+        sceneCopyTex && lensStrength * aboveWater > 0.01f)
     {
         // A render-target texture cannot be a StretchRect destination while
         // it is still bound for sampling by the precipitation pass.
@@ -1094,7 +1105,7 @@ inline void BeforeDraw(IDirect3DDevice9* device, bool presentFallback = false)
         }
         else
         {
-            float lensConst[4] = { elapsedTime, lensStrength, smoothedIndoor, 0.0f };
+            float lensConst[4] = { elapsedTime, lensStrength * aboveWater, smoothedIndoor, 0.0f };
             device->SetPixelShader(lensDropletsPS.Get());
             device->SetPixelShaderConstantF(0, lensConst, 1);
             device->SetPixelShaderConstantF(1, screenConst, 1);
@@ -1208,6 +1219,13 @@ inline const char* GetStatusText()
     if (smoothedIndoor > 0.5f)
     {
         std::snprintf(status, sizeof status, "%s (COVER)", mode);
+        return status;
+    }
+    // Same reason as (COVER): the precipitation fading out below the surface is the medium
+    // suppressing it, not the weather pass failing.
+    if (renderer::FrameContext::Current().compositedUnderwaterRamp > .5f)
+    {
+        std::snprintf(status, sizeof status, "%s (UNDERWATER)", mode);
         return status;
     }
     return mode;
