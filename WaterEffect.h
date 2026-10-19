@@ -1746,11 +1746,33 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     if(captureValid>.5) {
         // Refraction strength scales the BLEND, never the colour: with refraction off
         // this has to fall back to the client's own pixels, not to a black bottom.
-        float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;
+        // WATER OPACITY hides the bed from the COLOUR as well as from the blend, and that
+        // is the half that was missing. The alpha floor only decides how much of the scene
+        // the sheet lets past; the body's own colour is built from `refracted`, the captured
+        // seabed attenuated by the column, so at a clear shallow shelf the surface painted
+        // the bed back into the frame at full coverage - the slider moved the alpha and the
+        // picture did not change, which is exactly the report "opacity does nothing". With
+        // this term the body converges on the colour an infinitely thick column converges on
+        // (deep tint + in-scatter), so 100 is water you cannot see the bed through and 0 is
+        // the pre-slider physics. The weight is gated by the water actually under the pixel,
+        // so a shoreline's first yard still shows its sand: a sheet ankle-deep cannot hide
+        // anything it is not standing over.
+        float hideBed=opacityControl.x*saturate(effectiveDepth*.5);
+        float3 seaBody=deepTint.rgb+inScatter;
+        float3 bottom=lerp(refracted*transmittance+inScatter+deepTint.rgb*absorption,seaBody,hideBed);
         float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
         waterBody=lerp(body,deepTint.rgb+inScatter,saturate(absorption*(.85-.22*fresnel)));
+    } else {
+        // No scene copy at all: there is no bed to refract and no column to absorb through,
+        // and the old fallthrough kept the CLIENT's own liquid colour. Over open ocean that
+        // surface is a pale, nearly transparent sheet - the colour of the sky it sits under,
+        // which is the "still completely transparent water" the screenshots show. Coverage is
+        // already forced to 1 for this case (there is nothing behind to blend), so the only
+        // honest thing for it to show is the body itself: the colour an infinitely thick
+        // column converges on, which is what the covered path below is heading for anyway.
+        waterBody=deepTint.rgb+inScatter;
     }
     // Per-body colour authoring multiplies rather than replaces, so the zone's own
     // painted water survives tinted instead of being overwritten: 0x808080 neutral.

@@ -1168,6 +1168,36 @@ int main() try
                         !=std::string::npos,
                     "the CPU preview fogs toward the same tinted target");
         }
+        // WATER OPACITY, second half. The alpha floor only decides how much of the scene the
+        // sheet lets past; the body's COLOUR is built from the refracted seabed, so on a
+        // clear shallow shelf the surface painted the bed back into the frame at full
+        // coverage and the slider moved the alpha without moving the picture - the report
+        // "opacity does nothing visually". The body now converges on the asymptote an
+        // infinitely thick column converges on, gated by the water actually over the pixel.
+        {
+            const auto hide=pixel.find("float hideBed=opacityControl.x*saturate(effectiveDepth*.5);");
+            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
+            const auto bottom=pixel.find(
+                "float3 bottom=lerp(refracted*transmittance+inScatter+deepTint.rgb*absorption,seaBody,hideBed);");
+            const auto uses=pixel.find("waterBody=lerp(body,deepTint.rgb+inScatter,",bottom);
+            Require(hide!=std::string::npos&&sea!=std::string::npos&&bottom!=std::string::npos&&
+                    hide<sea&&sea<bottom&&bottom<uses,
+                    "water opacity hides the bed from the body's colour too, not only from the blend");
+            Require(pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;")
+                        ==std::string::npos,
+                    "the unmixed bed colour is gone, so a full slider can hide it");
+            const std::string mirror=ReadAlongside("WaterPreview.cpp");
+            Require(mirror.find("const float hideBed = .85f * Saturate(effectiveDepth * .5f);")!=std::string::npos,
+                    "the CPU preview hides the bed at the shipped opacity too");
+            // And the case with no scene copy at all keeps the BODY, not the client's own
+            // liquid: over open ocean that fallthrough was a pale, nearly transparent sheet
+            // the colour of the sky - the "completely transparent water" of the report.
+            // (Comments are stripped from `pixel`, so only code can be pinned here.)
+            Require(pixel.find("} else {")!=std::string::npos&&
+                    pixel.find("waterBody=deepTint.rgb+inScatter;")!=std::string::npos&&
+                    pixel.find("waterBody=deepTint.rgb+inScatter;")>pixel.find("} else {"),
+                    "an uncaptured surface shows the sea's own colour, never the client's pale liquid");
+        }
         // DEPTH FOG: the view DOWN into the water charges the sunlight's trip to the bed as
         // well as the trip back, so submerged terrain dissolves into the body with depth
         // instead of standing dark under clear-looking water. One register lane that was

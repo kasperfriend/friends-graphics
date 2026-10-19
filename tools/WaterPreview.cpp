@@ -999,6 +999,13 @@ int main(int argc, char** argv)
                     if (true)               // a capture exists whenever this preview has a copy
                     {
                         V3 bottom = Add(Add(Mul(refracted, transmittance), inScatter), Mul(deep, absorption));
+                        // WATER OPACITY hides the bed from the COLOUR too, not only from the
+                        // blend: the body converges on what an infinitely thick column
+                        // converges on, gated by the water actually over the pixel so a
+                        // shoreline's first yard keeps its sand. Same rule as the shader's
+                        // `hideBed`, at the shipped 85%.
+                        const float hideBed = .85f * Saturate(effectiveDepth * .5f);
+                        bottom = Lerp(bottom, Add(deep, inScatter), hideBed);
                     probeBottom = bottom;
                         V3 body = Lerp(rgb, bottom, validDepth * Saturate(refractionStrength));
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));

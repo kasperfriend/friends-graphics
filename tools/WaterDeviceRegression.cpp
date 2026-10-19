@@ -506,6 +506,12 @@ int main() try {
     const float savedRefractionStrength=watereffect::refractionStrength;
     watereffect::wavesEnabled=watereffect::foamEnabled=watereffect::depthEnabled=watereffect::sunGlintEnabled=false;
     watereffect::reflectionsEnabled=false;watereffect::refractionEnabled=true;watereffect::refractionStrength=1;
+    // This block isolates the refraction/gamma round trip. WATER OPACITY is a coverage
+    // control on top of it (100 hides the bed entirely), so it is taken out of the way
+    // here - otherwise "a copied 128 gray stays 128" would be asserting that the slider
+    // does nothing, which is the bug this round exists to remove.
+    const float savedOpacity=watereffect::opacityPercent;
+    watereffect::opacityPercent=0;
     auto encodedScene=texture(128,128,0xff808080),sampledDepth=texture(128,128,0xffe5e5e5);
     watereffect::reflectionScene=encodedScene.Get();watereffect::reflectionDepth=sampledDepth.Get();
     watereffect::reflectionData[0]=1.001f;watereffect::reflectionData[1]=-.1f;
@@ -525,6 +531,7 @@ int main() try {
         Require(outputSrgb==srgb,"sweep: water leaves native output gamma state unchanged");
     }
     Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE));
+    watereffect::opacityPercent=savedOpacity;
     watereffect::reflectionScene=watereffect::reflectionDepth=nullptr;
     watereffect::wavesEnabled=savedWaves;watereffect::foamEnabled=savedFoam;
     watereffect::depthEnabled=savedDepth;watereffect::sunGlintEnabled=savedGlint;
