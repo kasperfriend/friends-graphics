@@ -198,8 +198,8 @@ If F7 is locked, unresponsive, or fails to save, open F7 and reproduce the probl
 
 1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
 2. Extract its contents into the Ascension client directory, next to the game executable.
-3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, and `EnvironmentProfiles.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
-4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` by hand.
+3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, `EnvironmentProfiles.ini`, and `LocationGraphics.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
+4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` or `LocationGraphics.ini` by hand.
 
 Example layout:
 
@@ -208,6 +208,10 @@ Ascension/
 ├── d3d9.dll
 ├── ModernWoWRenderer.ini
 ├── GraphicsEffects.ini
+├── EnvironmentProfiles.ini
+├── LocationGraphics.ini
+├── data/
+│   └── areas.txt
 ├── MaterialCache/
 │   ├── local_light_manifest.json
 │   └── LocalLightReview.json
@@ -238,6 +242,10 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[AIMaterials]` | Unfinished experimental placeholder; keep disabled. |
 
 The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.
+
+`LocationGraphics.ini` holds the per-location overrides, and ships empty: every example in it is commented out, so it changes nothing until you fill a value in. A setting is read from the most specific scope that holds it - the subarea, the zone, the map, then the whole-game `[Global.<Section>]` scope, and finally the `GraphicsEffects.ini` baseline. The whole-game scope does not silently override a zone you have tuned: a location takes a whole-game value only where it opts in, through its own `[Map.<map>.Zone.<zone>.InheritGlobal]` section. The file documents the scope names, the sections you may use and how to find the current Map/Zone/Area IDs. F7 saves the overlay's own changes into this same file, and it rewrites the section it writes, so keep notes above the first section header.
+
+`EnvironmentProfiles.ini` holds the authored environment table: `[Default]`, the named climates in `[Environment.<Name>]`, and the per-place multipliers in `[Map.<id>]`, `[Zone.<id>]` and `[Area.<id>]`, resolved as `Default` then `Map` then `Zone` then `Area`. It also carries the `[LocationProvider]` block that tells the renderer which client build it may read location ids from, and without a verified client and `data/areas.txt` the renderer cannot tell which zone you are in - so none of the zone settings apply.
 
 Water uses the live `[Water] Enabled` setting above, including location overrides.
 An old water `Enabled` entry in `ModernWoWRenderer.ini` is ignored; it no longer
@@ -271,6 +279,7 @@ Each successful Release build uploads an install-ready artifact containing:
 - `ModernWoWRenderer.ini`
 - `GraphicsEffects.ini`
 - `EnvironmentProfiles.ini` (location verification and environment configuration)
+- `LocationGraphics.ini` (the per-location override file, shipped empty so it can be filled in by hand)
 - required `MaterialCache` manifests
 - packaged weather textures
 

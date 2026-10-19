@@ -257,6 +257,7 @@ jobs:
             "$dir\ModernWoWRenderer.ini",
             "$dir\GraphicsEffects.ini",
             "$dir\EnvironmentProfiles.ini",
+            "$dir\LocationGraphics.ini",
             "$dir\data\areas.txt"
           )
 
@@ -279,6 +280,7 @@ jobs:
           Copy-Item "$source\ModernWoWRenderer.ini" $package
           Copy-Item "$source\GraphicsEffects.ini" $package
           Copy-Item "$source\EnvironmentProfiles.ini" $package
+          Copy-Item "$source\LocationGraphics.ini" $package
           Copy-Item "$source\data" $package -Recurse
 
           $materialCache = Join-Path $package "MaterialCache"

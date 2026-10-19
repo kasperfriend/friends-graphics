@@ -13,6 +13,7 @@
   <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><AdditionalDependencies>d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies><ModuleDefinitionFile>$(ProjectDir)d3d9.def</ModuleDefinitionFile></Link><PostBuildEvent><Command>copy /Y "$(ProjectDir)ModernWoWRenderer.ini" "$(OutDir)ModernWoWRenderer.ini"
 copy /Y "$(ProjectDir)GraphicsEffects.ini" "$(OutDir)GraphicsEffects.ini"
 copy /Y "$(ProjectDir)EnvironmentProfiles.ini" "$(OutDir)EnvironmentProfiles.ini"
+copy /Y "$(ProjectDir)LocationGraphics.ini" "$(OutDir)LocationGraphics.ini"
 if exist "$(ProjectDir)data\areas.txt" xcopy /E /I /Y "$(ProjectDir)data" "$(OutDir)data"
 if not exist "$(OutDir)MaterialCache" mkdir "$(OutDir)MaterialCache"
 copy /Y "$(ProjectDir)MaterialCache\local_light_manifest.json" "$(OutDir)MaterialCache\local_light_manifest.json"
