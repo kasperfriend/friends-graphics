@@ -208,3 +208,23 @@ by source type, active normal-spread percentage and each selected source's type,
 ID, position, radius, intensity and score. This makes it possible to tell
 whether nearby flame captures are competing as separate lights instead of
 inferring from the total attached-emitter count alone.
+
+## Pool membership: hysteresis and cross-fade (2026-10-19)
+
+Four (quality 0) or eight (quality 1-2) emitters fit in the constant table, so
+membership is a decision taken every frame. It used to be the raw score
+ordering, which meant two lamps of similar strength traded places as the player
+walked between them - one switching off and the other on in the same frame,
+reported as flicker near a group of lights.
+
+`renderer::local_light_detail::StablePool` (src/Lighting/LocalLightSelection.h)
+now keeps incumbents: a challenger must beat the weakest incumbent by
+`kDisplacementMargin` (30%) to take its slot, and at most one slot changes
+hands per frame. `FadeToward` cross-fades every slot - in over `kFadeInMs`
+(140 ms), out over `kFadeOutMs` (220 ms) - and a light that falls out of the
+candidate set keeps its slot while it dissolves. `SelectionSignature` includes
+the quantized effective intensity so the water pass's per-frame constant cache
+notices a fade in progress, not only a changed id set.
+
+`tools/CameraAnchoringRegression.cpp` pins the one-swap-per-frame rule, the
+margin, the tie behaviour and the fade curve.

@@ -66,3 +66,29 @@ Walking/running appearance, shoreline composition and live overlay interaction
 still need in-client visual acceptance; the automated fixtures establish the
 technical behavior, not final artistic quality. No client DLL was installed and
 no commit was pushed by this change.
+
+## The floor the layer sits on (2026-10-19)
+
+The banks are integrated against a floor that must be a property of the world,
+not of where the camera is pointed. Two rules now enforce that
+(`src/Effects/GroundReference.h`, mirrored by `kGroundHeightSource` and the
+integration shader):
+
+- A depth tap is only a candidate floor if it actually hit a surface and that
+  surface is **not above the eye** (`kAboveEyeTolerance`, 0.75 yd). Pitching up
+  in a city used to sweep the three fixed probe rows straight onto a wall, a
+  balcony or a roof, and the layer rode up with the view.
+- The base is the **lowest** usable tap, held when a frame offers none, and
+  never above the eye. A crate, a stair or a kerb beside the player cannot lift
+  it either. Travel is bounded (3 yd/s up, 8 yd/s down), so a probe flicking
+  between two surfaces cannot drag the layer.
+
+Where no terrain was captured - most of Orgrimmar from street level - that
+floor is the only anchor the fog has, which is why the old screen-row median
+looked camera-attached only in cities. `LocalFog` in the integration shader
+also clamps its own base to `cameraPos.z`, so even a terrain-height atlas entry
+above the viewer cannot put the bank overhead.
+
+`tools/CameraAnchoringRegression.cpp` pins the rule (roof rejected, crate
+ignored, hold on no evidence, never above the eye, bounded travel) and checks
+the shipped shader still applies it.

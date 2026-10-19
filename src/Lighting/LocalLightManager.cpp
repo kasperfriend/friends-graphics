@@ -382,23 +382,79 @@ namespace renderer
             if (a.score != b.score) return a.score > b.score;
             return a.stableId < b.stableId;
         };
-        if (candidates.size() > limit)
+        // Only the best four/eight feed either the surface shader or the
+        // volume march, and the boundary between "in" and "out" used to be
+        // decided on the raw score every frame. Two lamps of similar strength
+        // then swapped places as the player walked between them - one going
+        // dark and another lighting up in the same frame, which is the
+        // reported flicker near a group of lights. Incumbents now hold their
+        // slot until a challenger beats them by kDisplacementMargin, and at
+        // most one slot changes hands per frame.
+        const size_t count = local_light_detail::StablePool(candidates, m_selected, limit, byPriority);
+
+        // Every slot cross-fades. A swap is a real change in what the pool can
+        // show, and it must dissolve rather than pop: a light entering ramps up
+        // over kFadeInMs, one that left keeps its slot while it ramps down over
+        // kFadeOutMs. Bounded by the same 100 ms ceiling as every other frame
+        // delta here, so an Alt+Tab does not manufacture a fade.
+        const ULONGLONG selectionNow = GetTickCount64();
+        const float elapsedMs = m_lastSelectionTick != 0
+            ? float(std::min<ULONGLONG>(selectionNow - m_lastSelectionTick, 100ull))
+            : 16.f;
+        m_lastSelectionTick = selectionNow;
+
+        // Persistent, like m_candidates: the pool is rebuilt every frame on
+        // the render thread and must not allocate one.
+        std::vector<LocalLightSource>& next = m_nextSelected;
+        next.clear();
+        next.reserve(limit);
+        for (size_t index = 0; index < count; ++index)
         {
-            // Only the best four/eight feed either the surface shader or the
-            // volume march. Sorting every nearby manifest source each frame
-            // was unnecessary work; partial_sort retains the same ordered top
-            // set with O(n log limit) comparisons.
-            std::partial_sort(candidates.begin(), candidates.begin() + limit, candidates.end(), byPriority);
-            candidates.resize(limit);
+            LocalLightSource light = candidates[index];
+            const auto weight = m_fade.find(light.stableId);
+            const float fade = local_light_detail::FadeToward(
+                weight != m_fade.end() ? weight->second : 0.f, true, elapsedMs);
+            m_fade[light.stableId] = fade;
+            light.intensity *= fade;
+            next.push_back(light);
         }
-        else
+        // A source that fell out of the candidate set (out of range, its draw
+        // batch ended) is exactly the one a walking player sees blink. Hold it
+        // for the length of its fade, with its last published position.
+        for (auto it = m_fade.begin(); it != m_fade.end();)
         {
-            std::sort(candidates.begin(), candidates.end(), byPriority);
+            bool stillCandidate = false;
+            for (size_t index = 0; index < count; ++index)
+                if (candidates[index].stableId == it->first) { stillCandidate = true; break; }
+            if (stillCandidate) { ++it; continue; }
+            const float previousFade = it->second;
+            const float fade = local_light_detail::FadeToward(previousFade, false, elapsedMs);
+            // Fully dissolved: forget the weight rather than accumulate a zero
+            // entry per light the player has ever walked past. A forgotten
+            // light that comes back later starts its fade-in from zero, which
+            // is the same curve it would have had.
+            if (fade <= 0.001f) { it = m_fade.erase(it); continue; }
+            it->second = fade;
+            if (next.size() >= limit) { ++it; continue; }
+            for (const auto& previous : m_selected)
+            {
+                if (previous.stableId != it->first) continue;
+                LocalLightSource light = previous;
+                // The published copy already carries the fade it had last
+                // frame, so scale it by how much the fade moved, not again by
+                // its whole value.
+                if (previousFade > 1e-3f)
+                    light.intensity *= std::min(1.f, fade / previousFade);
+                next.push_back(light);
+                break;
+            }
+            ++it;
         }
-        m_selected.swap(candidates);
+        m_selected.swap(next);
 
         // Water's per-frame constant cache needs to notice a changed emitter
-        // set even if another water surface draws in the same frame.
+        // set - and a fade in progress - even if another water surface draws
+        // in the same frame.
         m_selectionSignature = local_light_detail::SelectionSignature(m_selected);
 
         if ((m_selectionFrame % 300) == 0)

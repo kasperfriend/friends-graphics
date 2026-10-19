@@ -389,3 +389,28 @@ so `DrawCallClassifier` cannot inherit a failed attempt's shader as "terrain".
 
 `tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
 the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.
+
+### The celestial disc, verified against geometry (2026-10-19)
+
+The client draws the moon as a small camera-facing billboard at a fixed 4-16
+yards along the light, nearer than almost all world geometry. The cloud pass has
+to treat those pixels as clear sky or the deck is cut by a dark disc, and it
+identified them by "geometry whose depth matches the sprite's". That test is
+ambiguous: a floor, wall or roof inside the same screen circle at the same
+distance matches too - seen from below in a city, the moon's disc then appears
+punched through the ground and the deck marches through it.
+
+`src/Effects/CelestialDiscGate.h` supplies the discriminator, mirrored by the
+ps_3_0 helpers in `VolumetricClouds`: a camera-facing billboard has ONE view
+depth across its face, so its raw depth is constant from centre to rim, while
+an angled surface is not. The centre and a rim tap on each axis must agree
+within the sprite's own depth tolerance before any pass treats geometry as the
+moon (`moonSprite`, c26 in the march and c12 in the composite).
+
+Two related gates, both from the camera-freshness work above:
+
+- `FrameContext::moonDiscValid` is false while `cameraPoseStale` - the tracked
+  disc position was measured against a camera this frame is not using.
+- The atmosphere's halo and its disc protection are disabled for such a frame
+  (`sourceScreen.w`), so a stale screen position cannot paint a sun onto
+  whatever now occupies that pixel.

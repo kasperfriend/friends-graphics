@@ -1,5 +1,6 @@
 #include "../Environment/LocationTuning.h"
 #include "VolumetricClouds.h"
+#include "CelestialDiscGate.h"
 #include "CloudNoise.h"
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -66,6 +67,21 @@ float4 haze:register(c22);          // rgb=aerial perspective colour, w=1/fade d
 float4 evolution:register(c23);     // x=shape Z phase, y=detail Z phase, z=weather variation, w=type scale
 float4 moonDisc:register(c24); // xy=tracked screen centre, z=disc view depth
 float4 moonControl:register(c25);   // x=vertical UV radius, y=depth tolerance, z=valid, w=horizontal scale
+// xy=the sprite's own normalized raw depth and how far it may drift across the
+// disc, z=rim tap radius, w=usable. A camera-facing billboard is ONE depth
+// across its whole face; an angled floor, wall or roof at the same distance is
+// not. See src/Effects/CelestialDiscGate.h - change both in the same commit.
+float4 moonSprite:register(c26);
+float SpriteVerified(float2 centre) {
+ if(moonSprite.w<.5) return 0;
+ float2 h=float2(moonSprite.z/max(moonControl.w,1e-3),0),v=float2(0,moonSprite.z);
+ // Raw viewport depth, compared the same way as renderer::discgate::IsFlatSprite:
+ // one flat, camera-facing value across the sprite's face.
+ float c=tex2D(depthMap,centre).r;
+ float2 rim=float2(tex2D(depthMap,centre+h).r,tex2D(depthMap,centre+v).r);
+ float tol=max(moonSprite.y,1e-5);
+ return step(abs(c-moonSprite.x),tol)*step(max(abs(rim.x-c),abs(rim.y-c)),tol);
+}
 
 // Analytic vertical profile per cloud type: this is what separates a flat
 // overcast lid from towering cumulus with flat bottoms and round tops.
@@ -121,12 +137,12 @@ float HG(float c,float g) { return (1-g*g)*pow(max(1+g*g-2*g*c,1e-4),-1.5); }
 // nearer than the world-space cloud deck, so treating that depth as terrain
 // clipped the clouds away in a dark circular hole. Match only the tracked
 // disc's view-space cone AND depth; all other geometry remains an occluder.
-float MoonDiscPixel(float2 uv,float rawDepth,float viewDepth) {
+float MoonDiscPixel(float2 uv,float rawDepth,float viewDepth,float sprite) {
  float2 delta=(uv-moonDisc.xy)*float2(moonControl.w,1);
  float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
  float depthMatch=1-step(moonControl.y,abs(viewDepth-moonDisc.z));
  float geometry=1-step((depthRange.z+1)*.5,rawDepth);
- return disc*depthMatch*geometry*moonControl.z;
+ return disc*depthMatch*geometry*moonControl.z*sprite;
 }
 
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
@@ -153,7 +169,15 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // back turns into a NaN the moment it meets another one.
  float hasGeometry=1-step((depthRange.z+1)*.5,rawDepth);
  float sceneViewDepth=projection.y/min(raw-projection.x,-1e-6);
- float moonPixel=MoonDiscPixel(uv,rawDepth,sceneViewDepth);
+ // Only where the tracked sprite really is: at the disc's own centre and rim
+ // the buffer must hold one flat camera-facing depth. A floor or ceiling that
+ // happens to sit at the billboard's 4-16 yards inside the same circle is an
+ // angled surface and fails, so it cannot punch the moon's disc through the
+ // ground and let the deck march through it.
+ float2 discDelta=float2((uv.x-moonDisc.x)*moonControl.w,uv.y-moonDisc.y);
+ float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
+ float moonPixel=MoonDiscPixel(uv,rawDepth,sceneViewDepth,
+                               withinDisc>.5?SpriteVerified(moonDisc.xy):0);
  float sceneLimit=hasGeometry>.5&&moonPixel<.5?sceneViewDepth*viewLength:layer.w;
 
  // Intersect fixed world-height planes, never a camera-centred dome.
@@ -396,13 +420,27 @@ float4 area:register(c7);        // xy=shadow world origin, z=1/extent, w=shadow
 float4 lightProjection:register(c8); // xy=light XY/Z, z=cloud base, w=thickness
 float4 moonDisc:register(c9); // xy=tracked screen centre, z=disc view depth
 float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z=valid, w=horizontal scale
+// Same contract as the march's c26 (see CelestialDiscGate.h).
+float4 moonSprite:register(c12);
 float4 mediumControl:register(c11); // x=how far the camera is under water (0 air, 1 submerged)
-float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth) {
+float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth,float sprite) {
  float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
  float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
  float depthMatch=1-step(moonControl.y,abs(viewDepth-moonDisc.z));
  float geometry=1-step((depthRange.z+1)*.5,rawDepth);
- return disc*depthMatch*geometry*moonControl.z;
+ return disc*depthMatch*geometry*moonControl.z*sprite;
+}
+// A resolved sprite is one flat, camera-facing depth across its face. Verified
+// once per pixel (and only inside a circle slightly larger than the disc), not
+// once per upsample tap.
+float SpriteVerified(float2 centre) {
+ if(moonSprite.w<.5) return 0;
+ float2 h=float2(moonSprite.z/max(moonControl.w,1e-3),0),v=float2(0,moonSprite.z);
+ // Raw viewport depth, same units as the host's CelestialDiscGate values.
+ float c=tex2D(depthMap,centre).r;
+ float2 rim=float2(tex2D(depthMap,centre+h).r,tex2D(depthMap,centre+v).r);
+ float tol=max(moonSprite.y,1e-5);
+ return step(abs(c-moonSprite.x),tol)*step(max(abs(rim.x-c),abs(rim.y-c)),tol);
 }
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
@@ -432,9 +470,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float centreZ=projection.y/min(normalizedRaw-projection.x,-1e-6);
  float4 tapZ=projection.y/min(normalizedTaps-projection.x,-1e-6);
  float clearZ=projection.y/min(1-projection.x,-1e-6);
- float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ);
- float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x),MoonDiscPixel(tapUv1,taps.y,tapZ.y),
-                        MoonDiscPixel(tapUv2,taps.z,tapZ.z),MoonDiscPixel(tapUv3,taps.w,tapZ.w));
+ // Verify the sprite only where it can matter: cheap circle test first, so
+ // the extra depth taps are paid on a handful of pixels.
+ float2 discDelta=float2((uv.x-moonDisc.x)*moonControl.w,uv.y-moonDisc.y);
+ float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
+ float sprite=withinDisc>.5?SpriteVerified(moonDisc.xy):0;
+ float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);
+ float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x,sprite),MoonDiscPixel(tapUv1,taps.y,tapZ.y,sprite),
+                        MoonDiscPixel(tapUv2,taps.z,tapZ.z,sprite),MoonDiscPixel(tapUv3,taps.w,tapZ.w,sprite));
  // The moon's near billboard depth is a sprite, not a foreground surface.
  // Treat only those matched pixels as clear sky while choosing the four
  // depth-aware taps, so it cannot pull a dark ring through the low-res cloud.
@@ -1033,6 +1076,17 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                               std::max(.75f,f.moonDiscViewDepth*.04f),
                               f.moonDiscValid?1.f:0.f,
                               f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f)};
+ // Where the sprite's own plane sits in the depth buffer, and how much a
+ // camera-facing billboard may vary across its face. The shaders additionally
+ // require the centre and the rim to agree, so a floor or wall at the
+ // billboard's distance is not mistaken for the moon (CelestialDiscGate.h).
+ // Raw viewport depth, deliberately un-normalised: the shaders read the depth
+ // buffer's own value at the centre and the rim, exactly like IsFlatSprite.
+ const float moonSprite[4]={renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],f.moonDiscViewDepth),
+                            renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
+                                f.moonDiscViewDepth,moonControl[1]),
+                            moonControl[0]*.72f,
+                            (f.moonDiscValid&&f.moonDiscViewDepth>.05f&&!f.cameraPoseStale)?1.f:0.f};
  const float c14[4]={kBaseExtinction*settings.density*settings.opacity,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
@@ -1112,6 +1166,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
   d->SetPixelShaderConstantF(24,moonDisc,1);d->SetPixelShaderConstantF(25,moonControl,1);
+  d->SetPixelShaderConstantF(26,moonSprite,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);
@@ -1155,6 +1210,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
   d->SetPixelShaderConstantF(8,c8c,1);
   d->SetPixelShaderConstantF(9,moonDisc,1);d->SetPixelShaderConstantF(10,moonControl,1);
+  d->SetPixelShaderConstantF(12,moonSprite,1);
   const float c11[4]={std::clamp(f.underwaterRamp,0.f,1.f),0,0,0};
   d->SetPixelShaderConstantF(11,c11,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);

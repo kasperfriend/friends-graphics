@@ -83,9 +83,37 @@ float3 World(float2 uv) {
  float3 v=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*z;
  return cameraPos.xyz+v.x*invView0.xyz+v.y*invView1.xyz+v.z*invView2.xyz;
 }
+// One probe that can be the FLOOR, or 1e6 when it cannot. A tap is only the
+// floor if it actually hit a surface and that surface is not above the eye:
+// pitching up in a city sweeps a fixed screen row straight onto a wall, a
+// balcony or a roof, and treating that as the floor is what lifted the whole
+// fog layer over the player's head. Mirrors renderer::groundref
+// (src/Effects/GroundReference.h) - change both in the same commit.
+float FloorProbe(float2 uv) {
+ float raw=tex2Dlod(boundaryDepth,float4(uv,0,0)).r;
+ float z=projection.y/(raw-projection.x);
+ float3 p=World(uv);
+ float hit=step(1e-4,z)*step(z,250)*step(raw,.9999);
+ float usable=hit*step(p.z,cameraPos.z+.75);
+ return usable>.5?p.z:1e6;
+}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
- float a=World(float2(.25,.90)).z,b=World(float2(.50,.90)).z,c=World(float2(.75,.90)).z;
- float ground=a+b+c-min(a,min(b,c))-max(a,max(b,c));
+ // A spread, not one row: a row is a line in the world, so the farther taps
+ // land on whatever is above or below it. The lowest usable tap is the floor
+ // - a crate or a stair beside the player is higher, and cannot lift it.
+ float ground=1e6;
+ ground=min(ground,FloorProbe(float2(.18,.96)));
+ ground=min(ground,FloorProbe(float2(.50,.94)));
+ ground=min(ground,FloorProbe(float2(.82,.96)));
+ ground=min(ground,FloorProbe(float2(.30,.82)));
+ ground=min(ground,FloorProbe(float2(.70,.82)));
+ ground=min(ground,FloorProbe(float2(.50,.985)));
+ float found=step(ground,1e5);
+ float4 old=tex2Dlod(previousState,float4(.25,.5,0,0));
+ float4 velocity=tex2Dlod(previousState,float4(.75,.5,0,0));
+ // No usable probe this frame (the view is all sky or all roof): HOLD the
+ // last base instead of inventing one from the camera height.
+ ground=found>.5?min(ground,cameraPos.z):old.z;
  // Third-person silhouette probe, rather than the camera's world position.
  float3 actor=World(float2(.5,.60));
  float best=1e6;bool detected=false;
@@ -93,8 +121,6 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
   float height=candidate.z-ground,dist=length(candidate-cameraPos.xyz);
   if(height>.6&&height<5.5&&dist<best){actor=candidate;best=dist;detected=true;}}
 
- float4 old=tex2Dlod(previousState,float4(.25,.5,0,0));
- float4 velocity=tex2Dlod(previousState,float4(.75,.5,0,0));
  if(timing.y<.5) return uv.x<.5?float4(actor.xy,ground,0):float4(0,0,0,0);
  float dt=max(timing.x,.001);
  float2 delta=detected?actor.xy-old.xy:float2(0,0);
@@ -102,7 +128,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float blend=1-exp(-dt*6);
  float2 position=old.xy+delta*blend;
  float2 motion=lerp(velocity.xy,delta*blend/dt,1-exp(-dt*3))*valid;
- ground=old.z+clamp(ground-old.z,-dt*2,dt*2)*timing.z;
+ // Bounded travel, slower up than down: a probe flicking between the street
+ // and a ledge cannot drag the layer. The base never rises above the eye.
+ ground=old.z+clamp(ground-old.z,-dt*8,dt*3)*timing.z;
+ ground=min(ground,cameraPos.z);
  float wake=lerp(old.w,saturate((length(motion)-.3)/3),1-exp(-dt*2));
  return uv.x<.5?float4(position,ground,wake):float4(motion,0,0);
 })HLSL";
@@ -291,10 +320,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    heightOptical+=(hd+md)*segmentLength*coverage;
 
    float localRange=1-smoothstep(localShape.y*.65,localShape.y,length(p.xy-cameraPos.xy));
-   float height=max(0,p.z-floor.x-localFog.z)*localFog.w;
+   // The local bank hangs from the floor under the player - never from a
+   // surface the view swept across above them. A city street's fog therefore
+   // stays at street level whichever way the camera is pointed, which is the
+   // guard against "the local fog is a lot above me" (the atlas and the depth
+   // fallback can both report a roof when the view is tilted up).
+   float localBase=min(floor.x,cameraPos.z);
+   float height=max(0,p.z-localBase-localFog.z)*localFog.w;
    float4 layers=tex2Dlod(localField,float4((p.xy-fieldOrigin.xy)*fieldOrigin.z,0,0));
    float localBank=dot(layers,saturate(1-abs(height-float4(0,.5,1,1.5))*2))*2.2;
-   float ld=localFog.x*localFog.y*localBank*localRange*nearFade*smoothstep(-.4,.05,p.z-floor.x-localFog.z);
+   float ld=localFog.x*localFog.y*localBank*localRange*nearFade*smoothstep(-.4,.05,p.z-localBase-localFog.z);
    localOptical+=ld*segmentLength*coverage;
 
    heightSum+=hd;mistSum+=md;noiseSum+=bank;
@@ -321,7 +356,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
      // Thin ambient aerosol also exists above the ground banks. Its small
      // optical depth is only visible near a real emitter, not as screen wash.
      float medium=layerEnable.x*ambientAerial.w+localFog.x*localFog.y*.06;
-     medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-floor.x-localFog.z)*localFog.w);
+     medium+=localFog.x*localFog.y*.25*exp(-max(0,p.z-min(floor.x,cameraPos.z)-localFog.z)*localFog.w);
      float edge=1-perpendicular2/radius2;
      float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
      float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
@@ -833,7 +868,11 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float c2[4]={LinearizeAtmosphereColor(ambR),LinearizeAtmosphereColor(ambG),LinearizeAtmosphereColor(ambB),settings.aerialDensity*settings.densityScale};float c3[4]={LinearizeAtmosphereColor(std::clamp(ambR*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambG*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambB*1.5f,.12f,1.f)),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   // The integration shader uses the persistent GPU ground reference.
-  float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
+  float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};// A stale pose cannot say where the disc is on screen: the halo would sit
+ // at last frame's position, on whatever happens to be under it. Keep the
+ // fog, drop the celestial terms for that frame.
+ float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),
+                (f.celestialIntensity>0.f&&!f.cameraPoseStale)?1.f:0.f};
   float c15[4]={settings.localFogEnabled?1.f:0.f,settings.localFogDensity,settings.localFogBaseOffset,settings.localFogHeightFalloff};
   float c16[4]={f.depthMaxZ,0,0,0};
   float c17[4]={0,65.f,0,0};
@@ -896,7 +935,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetTexture(4,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(3,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,FALSE);d->SetSamplerState(4,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,FALSE);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);float depthInfo[4]={f.depthMaxZ,0,0,0};d->SetPixelShaderConstantF(7,depthInfo,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);d->SetTexture(4,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetTexture(4,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(3,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,FALSE);d->SetSamplerState(4,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,FALSE);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),(f.celestialIntensity>0.f&&!f.cameraPoseStale)?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);float depthInfo[4]={f.depthMaxZ,0,0,0};d->SetPixelShaderConstantF(7,depthInfo,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);d->SetTexture(4,nullptr);
  }
  m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;
  return true;

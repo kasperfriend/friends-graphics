@@ -996,7 +996,13 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
-        frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f;
+        // A stale pose means the disc position/depth were measured against a
+        // camera this frame is not using: the atmosphere, the cloud deck and the
+        // water treat that signal as "the moon is here", so a stale one would
+        // pin the moon's protection circle to the wrong part of the ground. No
+        // pose, no disc.
+        frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f &&
+            !frameCtx.cameraPoseStale;
         if (frameCtx.moonDiscValid) {
             frameCtx.moonDiscScreenX = moon.screenX;
             frameCtx.moonDiscScreenY = moon.screenY;
@@ -1012,7 +1018,14 @@ bool Composite(IDirect3DDevice9* d) {
         const bool nightDominant = frameCtx.moonlightFactor > frameCtx.daylightFactor;
         bool useMoon = moon.visible && (nightDominant || !sun.visible);
         bool useSun = sun.visible && !useMoon;
-        const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
+        // The tracked screen position belongs to the camera that was captured
+        // when the sprite was drawn. With a stale pose it points somewhere the
+        // current view does not, and every consumer of it - the glare, the
+        // halo, the disc protection - would place a bright disc on whatever
+        // now occupies that pixel. One frame without a celestial source is
+        // invisible; a sun painted onto a wall is not.
+        const renderer::CelestialBody* body = frameCtx.cameraPoseStale
+            ? nullptr : (useSun ? &sun : (useMoon ? &moon : nullptr));
         if (body) {
             constants[2][0] = body->screenX;
             constants[2][1] = body->screenY;
