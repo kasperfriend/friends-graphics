@@ -1370,7 +1370,8 @@ already travelling:
 | `c218.z` (PS) | the shore back-flow run-up in yards, 0 with the feature off (`controls[74]`) |
 
 `controls` is 75 floats of the 156 the saved `c180..c218` span holds, so the save/restore window,
-the single `SetPixelShaderConstantF(180, …, 39)` upload and the untouched `c197..c199` gap are all
+the single `SetPixelShaderConstantF(180, …, 39)` upload, the untouched `c197/c198` gap and the
+WATER OPACITY floor on `c199` are all
 unchanged; `c204.w` and `c218.w` are still spare.
 
 The slot count is the one estimate in this round that was wrong, and it is worth recording exactly
@@ -1449,7 +1450,8 @@ was already available or exactly zero:
   normalization and the exponent-64 specular lobe. Fractional edge visibility,
   partial SSR hits and every in-radius light follow the previous arithmetic.
 - `watereffect::Scope` now saves native pixel constants `c180..c218`, preserves
-  the untouched `c197..c199` gap, splices in local lights/water controls, uploads
+  the untouched `c197/c198` gap, splices in local lights/water controls plus the
+opacity floor on `c199`, uploads
   once and restores once. Native vertex inputs `c5..c35` are likewise read in one
   enclosing block. This reduces constant-state driver crossings from twelve to
   seven per matched tile while retaining complete restoration. The selected local
