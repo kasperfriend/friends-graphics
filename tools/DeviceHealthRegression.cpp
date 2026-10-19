@@ -334,6 +334,50 @@ int main() try
                 "the terrain shader is published only after the capture that produced it succeeded");
         }
 
+        {
+            // THE FIRST FRAME OF A SESSION. The Clear hook is what starts a depth
+            // capture, the depth capture is what used to gate the camera attempt, and
+            // the camera is what every camera-dependent pass needs. Installing the
+            // Clear hook behind "some effect is enabled right now" closed that loop on
+            // itself: a device hooked while nothing was enabled never captured depth,
+            // therefore never captured a camera, therefore never ran anything - and the
+            // next device reset (a loading screen or a teleport) was the only way back.
+            const auto renderer = Read("ModernWoWRenderer.cpp");
+            const auto composite = Read("VolumeIntegration.h");
+            const auto water = Read("WaterEffect.h");
+            const auto count = [](const std::string& text, const char* needle) {
+                size_t total = 0;
+                for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++total;
+                return total;
+            };
+            Require(!Contains(renderer, "if(volume::enabled||watereffect::enabled||watereffect::compiling){"),
+                "the capture hooks are installed on every device, not only when an effect happened to be on at hook time");
+            Require(count(renderer, "InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));") == 2 &&
+                    count(renderer, "renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);") == 1,
+                "both the first hook pass and the post-Reset pass install the Clear hook, and the originals are read once per device");
+            Require(Contains(composite, "if (!ready && !isUi) {") &&
+                    !Contains(composite, "!ready && surface != nullptr && !isUi"),
+                "a captured depth surface is no longer a precondition for capturing the camera");
+            Require(Contains(renderer, "try { volume::Finish(d); } catch (...) {}") &&
+                    Contains(renderer, "try { waterreflection::Finish(); } catch (...) {}"),
+                "the frame teardown runs even when the effect pass threw, so a dead frame cannot latch the capture for the session");
+            // A refusal to create the replacement shaders is retried on a cooldown,
+            // exactly like the cloud deck's, instead of keeping native water until the
+            // device is re-created.
+            Require(Contains(water, "if(GetTickCount64() < shaderFailureRetryAt) return;") &&
+                    Contains(water, "shaderFailureRetryAt=GetTickCount64()+renderer::kOptionalPassRetryMs;") &&
+                    Contains(water, "if(shaderCreationFailed&&GetTickCount64()<shaderFailureRetryAt)return;") &&
+                    !Contains(water, "keeping native water until device reset"),
+                "a failed water shader creation retries after the optional-pass cooldown, and every draw-side gate honours that cooldown");
+            // A frame with no depth capture is still this device's frame: the camera
+            // attempt runs, and the frame is handed to the image pass rather than to a
+            // composite that has no scene copy to paint on.
+            Require(Contains(composite, "(owner != nullptr && owner != d)") &&
+                    Contains(composite, "if (!target || !depth) { composed = PostProcessWithoutCamera(d); return; }") &&
+                    Contains(composite, "if (!target || !depth) return false;"),
+                "a null capture owner no longer blocks the camera attempt, and a pose without a scene copy cannot reach the composite");
+        }
+
         // MULTISAMPLING, AND THE ANTI-ALIASING THAT REPLACES IT. A multisampled depth buffer cannot be
         // sampled by a pixel shader in D3D9 at all, so above 1x every effect here that reads depth
         // loses it - water refraction, absorption and shore foam, ambient occlusion, local lighting,

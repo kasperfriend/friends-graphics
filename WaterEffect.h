@@ -22,6 +22,7 @@
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
+#include "src/Core/DeviceHealth.h"
 #include "src/Water/WaterMaterial.h"
 #include "src/Water/WaveField.h"
 #include "src/Water/WaterSeaState.h"
@@ -580,6 +581,13 @@ inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
 inline bool shaderCreationFailed = false;
+// When a failed CreatePixelShader/CreateVertexShader may be tried again. A device
+// can refuse a perfectly good blob once - a cold driver JIT, a device that is
+// mid-Reset, a probe sharing the same frame - and the old code latched that
+// refusal until a device reset, which is exactly the report "it works after a
+// reload but not before one". A cooldown retries instead, and still keeps a
+// permanent refusal from recompiling on every draw.
+inline std::uint64_t shaderFailureRetryAt = 0;
 inline bool NeedsScene() {
     // WATER QUALITY can remove the reason to take the copy at all: below level 2 there is no
     // screen-space reflection march and below level 3 no celestial occlusion march, so at
@@ -2168,6 +2176,7 @@ inline void Reset(IDirect3DDevice9* d) {
     cachedReplacementVS.Reset();
     cachedShaderDevice = nullptr;
     shaderCreationFailed=false;
+    shaderFailureRetryAt=0;
 }
 void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0) noexcept {
     if(!external&&(!enabled||!showStatus))return;
@@ -2628,9 +2637,12 @@ struct Scope {
     explicit Scope(IDirect3DDevice9* d,bool skip=false,
                    const renderer::water::Observation* observed=nullptr) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
-        // A shader-creation failure is permanent until device reset; skip
-        // the Observe + constant reads + all CPU math for every draw.
-        if(shaderCreationFailed)return;
+        // A shader-creation failure skips the Observe + constant reads + all CPU
+        // math for every draw until its cooldown elapses - not for the rest of the
+        // session. A device that refused a blob once (a cold JIT, a Reset in flight)
+        // is asked again instead of leaving native water until something re-creates
+        // the device, which a player experiences as "it only works after a reload".
+        if(shaderCreationFailed&&GetTickCount64()<shaderFailureRetryAt)return;
         try {
             const auto observation=observed?*observed:renderer::water::Observe(d);
             if(!observation.liquid) {
@@ -3027,7 +3039,13 @@ struct Scope {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
             }
-            if(shaderCreationFailed)return;
+            if(shaderCreationFailed) {
+                if(GetTickCount64() < shaderFailureRetryAt) return;
+                // The cooldown has elapsed: the blob and the device may both be fine
+                // now, so make one more attempt rather than keeping native water for
+                // the rest of the session.
+                shaderCreationFailed=false;
+            }
             if(!cachedReplacementPS || !cachedReplacementVS) {
                 // The bytecode is published by the startup compile thread;
                 // take the same lock the publish uses. Empty means still
@@ -3066,11 +3084,13 @@ struct Scope {
                 }
                 if(FAILED(hr)) {
                     shaderCreationFailed=true;
+                    shaderFailureRetryAt=GetTickCount64()+renderer::kOptionalPassRetryMs;
                     D3DCAPS9 caps{};d->GetDeviceCaps(&caps);
                     std::ofstream(std::filesystem::path(logPath),std::ios::app)
                         <<"water shader creation failed hr="<<std::hex<<hr<<std::dec
                         <<" PS30 slots="<<caps.MaxPixelShader30InstructionSlots
-                        <<"; keeping native water until device reset\n";
+                        <<"; keeping native water and retrying in "
+                        <<renderer::kOptionalPassRetryMs<<" ms\n";
                     return;
                 }
             }

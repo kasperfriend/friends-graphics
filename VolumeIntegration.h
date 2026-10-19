@@ -931,6 +931,10 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
+    // Every branch below samples or writes the scene copy the clear hook publishes.
+    // A camera captured without a depth capture (which is now possible, and is the
+    // point) must not reach them: there is nothing to composite onto.
+    if (!target || !depth) return false;
     const auto& localLightManager = renderer::LocalLightManager::Instance();
     const bool dynamicLightDebugView = localLightManager.Enabled() &&
         renderer::locallighting::IsDebugView(localLightManager.DebugMode());
@@ -1623,7 +1627,13 @@ bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
 }
 
 void BeforeDraw(IDirect3DDevice9* d) {
-    if (internal || owner != d || composed || (!(enabled && active) && !watereffect::NeedsScene())) return;
+    // `owner` is the device whose depth capture this frame started. A frame that
+    // captured no depth at all has no owner, and refusing it here was the second half
+    // of the same one-way door the Clear hook had: with no depth, no camera attempt;
+    // with no camera, nothing at all. The capture attempt below needs no depth, so a
+    // null owner means "this device's frame, with no capture yet" - not a foreign one.
+    if (internal || composed || (owner != nullptr && owner != d) ||
+        (!(enabled && active) && !watereffect::NeedsScene())) return;
 
     bool isUi = (renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                  renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull);
@@ -1631,27 +1641,34 @@ void BeforeDraw(IDirect3DDevice9* d) {
     if (ready && !isUi) return;
 
     // Try camera capture on every draw where:
-    //   - depth capture is active this frame (surface != nullptr)
     //   - a vertex shader is bound (not fixed-function / UI pass)
-    //   - current depth buffer matches our INTZ surface
+    //   - the draw itself survives Capture()'s gates (full viewport, rigid basis,
+    //     perspective projection) - note that a captured depth surface is NOT one
+    //     of them, see below
     // No attempt-count limit: WoW's early draws (skybox, shadow, pre-pass) don't carry
     // the 27 perspective constants; world terrain arrives at draw ~20-50+ and must be reached.
-    if (!ready && surface != nullptr && !isUi) {
+    if (!ready && !isUi) {
         if (renderer::g_trackedState.currentVS != nullptr) {
-            ComPtr<IDirect3DSurface9> ds;
-            if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
-                ready = CaptureCamera(d);
-                if (ready) {
-                    // Publish the shader only for a draw that ACTUALLY yielded
-                    // the camera. The hash used to be written before the
-                    // attempt, so a failed one - a sky, moon or portrait draw,
-                    // exactly the ones that fail the full-frame/rigid gates -
-                    // was remembered as "the terrain shader" and every later
-                    // WMO draw with it was classified as terrain for the rest
-                    // of the frame.
-                    cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
-                    ++cameraFrames;
-                }
+            // The camera is not a depth resource: its 27 shader constants, the
+            // viewport and the projection all come from the draw. This attempt used
+            // to require a captured INTZ surface first - which made the frame's whole
+            // camera, and with it every cloud, shaft, local light and ambient
+            // occlusion in the frame, depend on a depth format the device can refuse
+            // (multisampling, an unusual backbuffer depth). The depth surface is what
+            // the effect passes consume, not what the camera needs, so the capture
+            // gate is the draw's own: Capture() already refuses anything that is not
+            // a full-viewport draw with a rigid basis and a perspective projection.
+            ready = CaptureCamera(d);
+            if (ready) {
+                // Publish the shader only for a draw that ACTUALLY yielded
+                // the camera. The hash used to be written before the
+                // attempt, so a failed one - a sky, moon or portrait draw,
+                // exactly the ones that fail the full-frame/rigid gates -
+                // was remembered as "the terrain shader" and every later
+                // WMO draw with it was classified as terrain for the rest
+                // of the frame.
+                cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
+                ++cameraFrames;
             }
         }
         if (!ready) {
@@ -1662,6 +1679,14 @@ void BeforeDraw(IDirect3DDevice9* d) {
     // Water can borrow depth/camera capture with the atmosphere switched off.
     // Do not accidentally enable atmosphere/postprocessing in that mode.
     if (!enabled || !active) return;
+    // The camera and the scene copy are different requirements. A pose captured on a
+    // frame whose depth capture was refused (multisampling, an exotic backbuffer depth)
+    // has already served every pose-only pass in BeforeDraw; what it cannot do is make
+    // this frame's full-screen composite, which paints onto the copy the clear hook
+    // publishes. Hand the frame to the image pass instead of compositing onto nothing -
+    // that pass is grade and anti-aliasing, and it is exactly what a player running
+    // multisampling is relying on.
+    if (!target || !depth) { composed = PostProcessWithoutCamera(d); return; }
     if (!ready && isUi && surface != nullptr) {
         ready = CaptureSkyFallback();
         if (ready) {
@@ -1690,8 +1715,11 @@ void Present(IDirect3DDevice9* d) {
             ++cameraFrames;
         }
     }
-    if(enabled && active && !composed && !ready)composed=PostProcessWithoutCamera(d);
-    if (enabled && active && !composed && ready) {
+    // Same split as BeforeDraw: a pose without a scene copy still cannot composite, so
+    // the image pass takes the frame (and a frame with neither gets no pass at all,
+    // which is what this branch already did).
+    if(enabled && active && !composed && (!ready || !target || !depth))composed=PostProcessWithoutCamera(d);
+    if (enabled && active && !composed && ready && target && depth) {
         composed = true;
         if (Composite(d)) {
             ++applied;
