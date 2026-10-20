@@ -54,6 +54,16 @@ namespace renderer
         cloudLightProjection = {};
         cloudRayStrength = 0.f;
 
+        // A pose published by the previous frame says nothing about this one:
+        // the capture (or the corroborated sky fallback) re-publishes all of
+        // these as it publishes the pose itself. Until then a consumer must
+        // treat the pose as stale, which the boolean's own default does.
+        cameraPoseStale = true;
+        // No draw has carried an eye into THIS frame yet: a consumer that asks
+        // how old the eye is must not read "just now".
+        cameraEyeAgeMs = 1.0e6f;
+        cameraPoseSource = PoseNone;
+
         depthAvailable = false;
         cameraValid = false;
         composed = false;

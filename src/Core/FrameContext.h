@@ -131,10 +131,61 @@ namespace renderer
         // The signed yards of water over the camera the ramp was built from, positive under
         // the surface. Diagnostics and logs read this; passes read the ramp.
         float underwaterYards = -1.f;
+        // The SAME ramp, as settled by the last frame that composed. Precipitation composites
+        // itself during the client's draw stream - before this frame's water draws report their
+        // planes and before the composite settles the medium - so it cannot read `underwaterRamp`
+        // (ResetForNewFrame clears that at the top of the frame) or a value that is only computed
+        // at Present. VolumeIntegration publishes this copy in BeforeClear, one frame behind,
+        // which the ramp's own third-of-a-second smoothing makes invisible; the precipitation
+        // stage fades its whole field out on it so a diver does not have rain drawing over the
+        // water. Zero on every frame that settles above the surface, and above the surface it is
+        // the identity every consumer has always had.
+        float compositedUnderwaterRamp = 0.f;
+
+        // WHICH CAMERA THIS FRAME'S WORLD-ANCHORED PASSES MAY USE. `cameraValid`
+        // only says a pose was published; it does not say the pose is this
+        // frame's. In a place where the terrain capture never latches - a city
+        // with everything overhead culled, which is most of Orgrimmar from
+        // street level - the frame falls back to the sky transform, and when
+        // even that cannot be corroborated the previous frame's pose is held.
+        // Drawing the deck or a torch from that pose is what "the clouds and the
+        // dynamic lights go with the camera" looks like: they are anchored to a
+        // camera the player already left. A pass that places something in WORLD
+        // space must check this, and skip instead of drawing it in the wrong
+        // place; screen-space passes that merely want a direction do not.
+        bool cameraPoseStale = false;
+        // Milliseconds since a draw actually carried the camera's EYE (a real
+        // capture, not a rotation-only sky transform). Anything placed within a
+        // few yards of the camera - torch emitters above all - needs a fresh
+        // eye, where far-away anchoring only needs a fresh orientation.
+        // About sixty frames at 60 Hz. Long enough to survive the gaps in the
+        // draw stream that cities and interiors produce (capture is not the
+        // only way to get an eye, but it is the only way to REFRESH one), and
+        // short enough that a lamp is never put where the player stood a
+        // second ago: at running speed that is a dozen yards.
+        static constexpr float kCameraEyeHoldMs = 1000.f;
+        float cameraEyeAgeMs = 0.f;
+        // How the pose was obtained, for diagnostics and the regression
+        // tools. 0 none, 1 captured, 2 sky fallback, 3 held previous frame.
+        uint8_t cameraPoseSource = 0;
+        enum CameraPoseSource : uint8_t { PoseNone = 0, PoseCaptured = 1, PoseSky = 2, PoseHeld = 3 };
 
         bool depthAvailable = false;
         bool cameraValid = false;
         bool composed = false;
+
+        // Is there a pose a screen-space pass may use THIS frame?
+        //
+        // A frame whose draws carried no fresh eye - the camera is pointed at the
+        // sky, at a wall, or the draw stream stumbled - still has the retained
+        // inverse view and eye in here, good for `kCameraEyeHoldMs`. Every pass
+        // must make that decision the same way, or one of them blinks while the
+        // others hold: the surface lighting keeps a held pose while the volumetric
+        // march around it refused, which reads to a player as a lamp that broke.
+        bool PoseUsable() const
+        {
+            return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);
+        }
 
         // Sampled once per frame at the top of Present: is WoW the
         // foreground window? Every hotkey (F7-F12) reads this instead of

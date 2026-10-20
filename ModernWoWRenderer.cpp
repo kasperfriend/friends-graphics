@@ -194,6 +194,10 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 
 // When the place last changed, when its tuning was last applied, and whether the
 // renderer has configured itself for a place at all yet. See HookedPresent.
+// The last place, in the only granularity weather cares about: a map/zone change is
+// a different sky, an area change (a district, a cave, a tower) is not. Zero until a
+// valid sample arrives, so the first zone-in is treated as a move from nowhere.
+uint32_t g_weatherMapId = 0, g_weatherZoneId = 0;
 uint64_t g_placeChangedAt = 0;
 // What the client has drawn, as of the last Present: the frame that takes a gap
 // is the difference between this and the session total when the gap is measured
@@ -351,6 +355,21 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             renderer::ShouldHoldLocation(worldFrame, environment.Location().valid));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
+    {
+        // A confirmed zone change is also a weather discontinuity. The detected
+        // precipitation (and the deck coverage it forces) described the place the
+        // player left; the 30 s hold that keeps it alive across particle gaps must not
+        // carry it across a teleport, or a clear zone inherits the old one's overcast
+        // for the hold plus the slow clearing ramp. Only a change between two VALID
+        // samples counts: a loading screen's invalid sample is travel, not a new sky.
+        const auto& place=renderer::EnvironmentProfileManager::Instance().Location();
+        if(place.valid&&(place.mapId!=g_weatherMapId||place.zoneId!=g_weatherZoneId)) {
+            if(g_weatherMapId||g_weatherZoneId) Log("Weather re-armed: the zone changed, so the old zone's precipitation no longer applies");
+            g_weatherMapId=place.mapId;g_weatherZoneId=place.zoneId;
+            weathervisuals::ForgetLocation();
+            volume::ForgetWeather();
+        }
+    }
     waterreflection::Present();
     volume::Present(d);
     // The normal weather pass precedes the first UI draw. Some client frames
@@ -509,6 +528,15 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         // state that a reload was halfway through re-arms on the next zone
         // change or F12, and the device handshake is untouched.
         Log("Present: effect pass threw; the frame still presents.");
+        // The frame's teardown is an invariant, not part of the pass. `volume::Present`
+        // normally ends by releasing the frame's depth capture and its target surface;
+        // if something above threw before it got there, that owner stays latched, the
+        // next clear is refused, and every later frame loses its per-frame camera and
+        // mask setup - which looks exactly like "nothing works until the device is
+        // re-created", i.e. until a loading screen or a teleport. Run it here too; each
+        // half is already noexcept in practice and is guarded again on its own.
+        try { waterreflection::Finish(); } catch (...) {}
+        try { volume::Finish(d); } catch (...) {}
     }
     const HRESULT presentResult = originalPresent(d,a,b,w,r);
     // One write per frame for every line the frame produced: see Log.
@@ -980,15 +1008,21 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    // Water's backend is ready or still compiling (its startup shader compile
-    // runs on a worker thread): install the capture hooks either way, since a
-    // failed compile just leaves the hooks dormant (their per-frame gates all
-    // check readiness live) and a late success must not need a device reset.
-    if(volume::enabled||watereffect::enabled||watereffect::compiling){
-        InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
-        InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
-        InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
-    }
+    // Install the depth/capture hooks unconditionally. They used to be gated on
+    // volume::enabled||watereffect::enabled||watereffect::compiling, which turned a
+    // cold start into a one-way door: everything that needs a camera (clouds,
+    // shafts, local lights, ambient occlusion) and everything that needs depth
+    // (reflections, refraction, the underwater pass) reads INTZ, and the only path
+    // that captured INTZ ran behind this Clear hook. If the flags happened to be
+    // "off" at hook time, no clear was ever observed, so no depth surface ever
+    // existed, so CameraCapture's own attempt - which requires that surface - never
+    // ran either, and the scene stayed effectless until the next device reset (a
+    // loading screen or teleport) re-ran this function. Each hook checks its own
+    // live gates per call, so an install with every effect switched off costs one
+    // branch on a clear and does nothing else.
+    InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
+    InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
+    InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
     DWORD ignored=0;
     VirtualProtect(&table[16],95*sizeof(void*),oldProtect,&ignored);
     g_hookedTable=table;
@@ -1056,17 +1090,17 @@ void HookDevice(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
         InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
     }
-    // Same gate as the first hook pass: water's compile may still be in
-    // flight (worker thread), and a late success must not need a reset.
-    if(volume::enabled||watereffect::enabled||watereffect::compiling){
-        volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
-        volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
-        renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);
-        originalClear=reinterpret_cast<ClearFn>(table[43]);
-        InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
-        InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
-        InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
-    }
+    // Unconditional, same reason as the first pass: a device hooked while every
+    // optional pass was still starting up must still have a capture path. A NULL
+    // entry here would be a device whose vtable did not carry the method at all,
+    // which no D3D9 device does; the originals are captured once per device object.
+    volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
+    volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
+    renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);
+    originalClear=reinterpret_cast<ClearFn>(table[43]);
+    InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
+    InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
+    InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
     DWORD ignored = 0;
     VirtualProtect(&table[16], 95*sizeof(void*), oldProtect, &ignored);
     g_hookedTable = table;

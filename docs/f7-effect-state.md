@@ -46,3 +46,54 @@ In-game confirmation: stand by an equipped torch and a world lamp, keep F7 open
 for at least ten seconds, switch tabs without editing values, then close/reopen.
 Lighting, weather and atmosphere should remain stable. An actual effect toggle
 must still take effect while the menu stays open.
+
+## Why an enabled effect could still draw nothing until a reload (2026-10-19)
+
+### The report
+
+Every effect is on in F7, and the world draws with none of them. A teleport (or any loading
+screen) makes them all appear, and they stay on afterwards.
+
+### The loop
+
+The capture path was a cycle that could close on itself:
+
+1. `table[39/40/43]` (`SetDepthStencilSurface`, `GetDepthStencilSurface`, `Clear`) were hooked
+   **only** when `volume::enabled || watereffect::enabled || watereffect::compiling` at the
+   moment the device was hooked or reset.
+2. Only `HookedClear` could start a depth capture, so without those hooks no INTZ surface ever
+   existed.
+3. `volume::BeforeDraw` attempted `CaptureCamera` only when that surface existed **and**
+   `owner == device`, where `owner` is published by the same capture. No capture meant no
+   camera attempt at all.
+4. `FrameContext::cameraValid` is published only by `CameraCapture`, so clouds, shafts, local
+   lights, ambient occlusion, reflections and the underwater pass all had no camera.
+5. The only event that re-ran step 1 with different flags was a device reset - a loading
+   screen or a teleport. That is the "reload" the player found.
+
+A second latch sat on the same path: if anything in the effect frame threw before
+`volume::Present` reached its `Finish`, the capture owner stayed set for the rest of the
+session and every later clear was refused. A third: a failed `CreatePixelShader` for the water
+replacement kept native water "until device reset".
+
+### The fixes
+
+- The depth hooks are installed unconditionally, on every device and after every Reset. Each
+  hook keeps its own live gates, so an install with all effects off costs one branch per clear.
+- `CaptureCamera` no longer requires a captured depth surface. The camera's 27 constants, the
+  viewport and the projection come from the draw; only the *passes* need depth. A camera
+  captured on a refused-depth frame (multisampling, an exotic backbuffer format) is used by the
+  pose-only passes immediately, and the composite is skipped in favour of the image pass
+  (`PostProcessWithoutCamera`), because there is no scene copy to composite onto.
+- The `owner != device` early-out in `BeforeDraw` now only refuses a *foreign* owner, not a
+  frame with no capture yet.
+- The effect frame's teardown (`waterreflection::Finish`, `volume::Finish`) also runs in the
+  `Present` catch, so a thrown frame cannot latch the capture.
+- Water's shader-creation failure retries after `kOptionalPassRetryMs`, like the cloud deck's,
+  instead of keeping native water until a device reset.
+
+### Verification
+
+`tools/DeviceHealthRegression.cpp` pins all five: no flag-gated hook install, both hook passes
+installing the Clear hook, the camera attempt without a depth surface, the teardown in the
+catch, and the shader-creation cooldown.

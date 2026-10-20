@@ -79,6 +79,11 @@ namespace renderer
         std::wstring m_logPath;
         std::unordered_map<DWORD, NativeSlot> m_nativeLights;
         std::unordered_map<uint64_t, LocalLightSource> m_smoothed;
+        // This slot's cross-fade weight, 0..1. A light entering the pool ramps
+        // in and one that left ramps out over kFadeOutMs instead of popping;
+        // the pool boundary is decided with hysteresis so it does not churn.
+        std::unordered_map<uint64_t, float> m_fade;
+        ULONGLONG m_lastSelectionTick = 0;
         std::vector<LocalLightSource> m_manifestLights;
         struct AttachedEmitter { LocalLightSource light; ULONGLONG seen; };
         std::vector<AttachedEmitter> m_attached;
@@ -88,6 +93,7 @@ namespace renderer
         // allocation happens once, not once per frame on the render thread.
         std::vector<LocalLightSource> m_candidates;
         std::vector<LocalLightSource> m_selected;
+        std::vector<LocalLightSource> m_nextSelected;
         bool m_enabled = true;
         float m_intensityScale = 1.0f;
         float m_rayScale = 0.75f;

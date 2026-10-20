@@ -148,6 +148,16 @@ public:
         return result;
     }
 
+    // A confirmed zone change is a weather discontinuity, not a weather trend: the
+    // precipitation the client was emitting came from a place the player has left, and
+    // the wet vector it fed forced the deck's coverage to 1. Carrying it across the
+    // hold (30 s of "no new evidence" grace) and then the slow clearing ramp left a
+    // full overcast hanging over a clear zone after a fast teleport - the reported
+    // "stuck covering the whole sky, no transition between locations". The new zone's
+    // own particles set it again within a frame or two, and the climate filter below
+    // still eases the field itself, so the sky changes but does not pop.
+    void ForgetWeather() noexcept { m_wet = {0.f, 0.f, 0.f}; }
+
     const CloudMotion& Motion() const { return m_motion; }
     float WeatherAmount() const { return m_wet[0] + m_wet[1] + m_wet[2]; }
 

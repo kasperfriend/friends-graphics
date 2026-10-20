@@ -298,6 +298,59 @@ Four frames from `tools/CloudPreview.cpp` at the shipped defaults: scattered cum
 broken deck at 50, an overcast lid at 92, and the same sky seen from 3600 units up. All four are the same field and
 the same lighting - only the slider and the camera move.
 
+## Zone changes and the weather deck (2026-10-19)
+
+### What was being seen
+
+After a burst of teleports the deck sat at full coverage in every location and never
+changed - no transition, no clear sky, just an overcast lid wherever the player went.
+
+### Where the coverage came from
+
+Two things feed coverage. The first is the climate: the authored `CoveragePercent`
+slider times `CloudCoverageMultiplier` from the resolved environment profile, eased by
+`CloudDynamics` toward the new target over `TransitionSeconds` - a normal transition.
+The second is precipitation: `result.coverage += (1-result.coverage)*wet`, where `wet`
+is the decaying weight of the client's detected rain/snow/sand. At `wet=1` the deck is
+***full*** overcast regardless of the zone's climate.
+
+That second state is deliberately slow: when the native particles stop, the detection
+holds for `nativeWeatherHoldMs` (30 s, so a doorway or a particle gap cannot blink the
+pass) and the wet weight then eases out over its own 35 s response. Neither of those was
+ever cleared on travel, because nothing told the weather state that the player had left
+the place the rain belonged to. A teleport therefore carried the old zone's rain
+evidence across, and a clear destination inherited a full deck for the hold plus the
+clearing ramp - and a second teleport re-armed nothing, so it stayed that way.
+
+### The fix
+
+A confirmed **zone or map** change is a discontinuity, not a trend:
+
+- `weathervisuals::ForgetLocation()` drops the detected weather (`nativeWeatherMode`,
+  the per-frame observation, the hold tick and `weatherSuspended`) and the cover
+  estimate. The particle evidence that made it true belonged to the old zone; the new
+  zone's own draws set it again within a frame or two.
+- `volume::ForgetWeather()` clears the frame's published weather and, through
+  `VolumetricClouds::ForgetWeather()`, the `CloudDynamics` wet vector
+  (`m_wet = {0,0,0}`) that had pinned coverage to 1.
+- The climate filter is untouched: `m_current` still eases toward the new zone's
+  `CloudCoverageMultiplier`, which is the transition the report expected to see.
+- Only changes between two **valid** samples count. A loading screen's invalid sample
+  is travel, not a new sky, so it neither fires the reset nor masks the real change on
+  landing. Sub-zone (area) changes are ignored on purpose: walking between two districts
+  of one city is the same sky.
+
+The call site is in `Present`, immediately after
+`EnvironmentProfileManager::Update` has confirmed the location, and it logs
+`Weather re-armed: the zone changed...` once per move.
+
+### Verification
+
+`tools/CloudClimateRegression.cpp` drives a deck to `wet=1`/coverage 1, calls
+`ForgetWeather()`, and requires the next frame to be at the zone's own coverage (`0.5`
+with neutral multipliers) and to rebuild when rain continues; source pins hold the two
+reset entry points and the zone-only trigger in `ModernWoWRenderer.cpp`.
+
 ## Tests
 
 `tools/AtmosphereRegression.cpp` (run with `tools/Test-Atmosphere.cmd`, needs a real D3D9 device) covers the deck on
@@ -351,3 +404,66 @@ rain/snow/sand onset/clearing; check a zero-wind sky several minutes apart; fly
 below/inside/above; pan off the sun; toggle F7/F10, reload F12 and Alt+Tab. Confirm
 no field restart, boundary pop or cloud/shadow disagreement. Native weather
 recognition still requires a supported client draw signature.
+
+### Camera pose freshness: cities, interiors, and looking up
+
+The deck is anchored at absolute world heights, so "the clouds are dragged along with the camera" can only
+mean the *frame's camera* was wrong while the client's depth buffer was the real one. That happens where no
+draw ever carries a full-frame rigid camera - most of Orgrimmar seen from street level, with the terrain over
+the player's head frustum-culled - and it clears up on higher ground because a real capture latches there.
+
+`CameraCapture` now treats every sky/draw transform it sees as a *candidate* for the frame, not as the camera:
+
+- The transform must be a rigid basis: unit-length, mutually orthogonal rows. A scaled billboard's rows are
+  not the camera's axes.
+- Its view translation must either be zero (the sun's skybox trick, where the rows ARE the camera's rotation)
+  or imply an eye within `kSkyEyeLeashYards` (40 yd) of the last accepted camera. The moon's billboard sits at
+  a fixed 4-16 yd render distance along the light and its rotation is not the camera's, so it is dropped rather
+  than merely ignored; that is what used to make the deck swing with the mouse.
+- Candidates are collected for the whole frame (`SkyPoseSelector`) and resolved once at the UI draw, when the
+  frame's own sun/moon disc has been painted. A candidate that reproduces the painted disc (within 0.18 of
+  normalized screen units) wins, using `ProjectWorldDirection`, which projects through the view matrix's
+  COLUMNS - the same convention as `CelestialTracker` and `MathTypes`' row-vector transform.
+- Without a disc, continuity with the accepted camera decides (`BasisAgreement >= .75`). A discontinuous
+  transform is held for two frames and only adopted if the frame repeats it; one that changes every frame is
+  never adopted.
+- The eye is always `CameraContinuityGate::Position()` - the last position a real draw carried. A sky
+  transform's translation never moves it.
+
+Frames that still cannot be corroborated publish `FrameContext::cameraPoseStale` and keep the previous
+orientation for screen-space passes. Every pass that places something in *world* space must refuse
+(or hold) that frame:
+`VolumetricClouds::Render` refuses a stale pose outright; `LocalLightingRenderer::Render` and
+`LocalLightManager::ObserveTorchDraw` refuse it while `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a
+pose held for a frame keeps the lamps steady (a frame-late lamp is invisible, a lamp placed through a
+second-old eye is in the wrong street) while a genuinely orphaned pose is never drawn from. `capturedViewValid` and
+`cameraCaptureShaderHash` are now cleared every frame and published only by a capture that actually succeeded,
+so `DrawCallClassifier` cannot inherit a failed attempt's shader as "terrain".
+
+`tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
+the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.
+
+### The celestial disc, verified against geometry (2026-10-19)
+
+The client draws the moon as a small camera-facing billboard at a fixed 4-16
+yards along the light, nearer than almost all world geometry. The cloud pass has
+to treat those pixels as clear sky or the deck is cut by a dark disc, and it
+identified them by "geometry whose depth matches the sprite's". That test is
+ambiguous: a floor, wall or roof inside the same screen circle at the same
+distance matches too - seen from below in a city, the moon's disc then appears
+punched through the ground and the deck marches through it.
+
+`src/Effects/CelestialDiscGate.h` supplies the discriminator, mirrored by the
+ps_3_0 helpers in `VolumetricClouds`: a camera-facing billboard has ONE view
+depth across its face, so its raw depth is constant from centre to rim, while
+an angled surface is not. The centre and a rim tap on each axis must agree
+within the sprite's own depth tolerance before any pass treats geometry as the
+moon (`moonSprite`, c26 in the march and c12 in the composite).
+
+Two related gates, both from the camera-freshness work above:
+
+- `FrameContext::moonDiscValid` is false while `cameraPoseStale` - the tracked
+  disc position was measured against a camera this frame is not using.
+- The atmosphere's halo and its disc protection are disabled for such a frame
+  (`sourceScreen.w`), so a stale screen position cannot paint a sun onto
+  whatever now occupies that pixel.

@@ -1353,6 +1353,8 @@ int main()
         // These are the lines that carry the fix; a change to either side has
         // to move them together.
         const std::string surface = ReadFile("src/Effects/LocalLightingRenderer.cpp");
+        const std::string frameContext = ReadFile("src/Core/FrameContext.h");
+        const std::string volumetric = ReadFile("src/Effects/DirectionalVolumetricLighting.cpp");
         const std::string volume = ReadFile("VolumeIntegration.h");
         const std::string atmosphere = ReadFile("src/Effects/DirectionalVolumetricLighting.cpp");
         const std::string manager = ReadFile("src/Lighting/LocalLightManager.cpp");
@@ -1361,6 +1363,34 @@ int main()
         const std::string settings = ReadFile("GraphicsEffects.ini");
         const std::string overlay = ReadFile("src/Environment/OverlayItems.h");
         const std::string volumeEffects = ReadFile("VolumeEffects.h");
+        // The lamps are world-anchored; the gate that decides whether to draw them was
+        // not. A frame whose draws carried no fresh eye (looking at the sky or a wall)
+        // has cameraValid false while the retained pose is a frame or two old, and
+        // refusing the pass outright blinked every lamp as the camera turned. The hold is
+        // the same one the lamps and the underwater medium use.
+        Check(surface.find("const bool poseRetained = !f.cameraValid && f.PoseUsable();") != std::string::npos &&
+              surface.find("(!f.cameraValid && !poseRetained) || !f.depthAvailable") != std::string::npos &&
+              frameContext.find("bool PoseUsable() const") != std::string::npos &&
+              frameContext.find("return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);")
+                  != std::string::npos,
+              "a retained pose keeps the lamps drawn instead of blinking them by camera angle");
+        // One definition of "a pose this frame may use", and every pass that draws a
+        // lamp's light obeys it. The volumetric march used to refuse a frame the
+        // surface lighting accepted, so the shaft and halo around a lamp blinked off
+        // while the ground it lit stayed lit - a lamp that visibly broke.
+        Check(volumetric.find("!f.PoseUsable()") != std::string::npos &&
+              volumetric.find("!target||!f.cameraValid||") == std::string::npos,
+              "the volumetric light march uses the same pose rule as the surface lighting");
+        // A lamp's importance is where it is, not where the player is looking. The score
+        // used to swing six-fold with the light's angle to the camera, and a light one
+        // radius behind was culled outright, so turning the head re-ordered the four/eight
+        // slots and dropped lamps in and out - the "lights break when observed at
+        // different angles" report.
+        Check(manager.find("light.score = light.intensity * light.radius * light.radius / std::max(4.0f, distanceSquared);")
+                  != std::string::npos &&
+              manager.find("forwardDistance") == std::string::npos &&
+              manager.find("const float facing") == std::string::npos,
+              "light selection is a fact about the lamp, not the camera's heading");
         Check(surface.find("if(distanceSquared>=radius*radius) continue;") != std::string::npos &&
               surface.find("sourceDebug+=contribution;") != std::string::npos &&
               surface.find("float3 contribution=lightColorPower[i].rgb*lightColorPower[i].w*(diffuse+spec)*attenuation;") != std::string::npos &&
@@ -1380,11 +1410,23 @@ int main()
               "volumetric diagnostics expose mode 13 and cull zero-power or missed lamp rays");
         Check(manager.find("light.stableId = StableManifestId(block);") != std::string::npos &&
               manager.find("std::isfinite(position.x)") != std::string::npos &&
-              manager.find("(!slot.enabled &&") != std::string::npos &&
-              manager.find("!recentlyEnabled || !recentlySeen || slot.stableFrames < 6") != std::string::npos &&
               manager.find("kNativeEnableGraceMs = 700") != std::string::npos &&
               manager.find("kNativeObservationGraceMs = 1400") != std::string::npos,
               "manifest records receive distinct content-based IDs and malformed numeric records are rejected");
+        // A lamp's existence may not depend on the camera's heading either. The pool
+        // used to require re-observation inside the batch cadence (1.4 s), and the
+        // client only submits an emitter's draws while it is in the frustum - so
+        // turning away retired the lamp and turning back needed six frames before it
+        // lit again. Both halves are pinned: the ordinary live test still needs the
+        // confirmation, and a confirmed source is held across a much longer silence.
+        Check(manager.find("const bool liveNow = slot.enabled || (recentlyEnabled && recentlySeen && confirmed);")
+                  != std::string::npos &&
+              manager.find("kNativeConfirmedHoldMs = 15000") != std::string::npos &&
+              manager.find("const bool held = confirmed && slot.lastSeenTick != 0 &&") != std::string::npos &&
+              manager.find("if (!liveNow && !held) continue;") != std::string::npos &&
+              manager.find("(!slot.enabled &&\n                (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))")
+                  == std::string::npos,
+              "a confirmed lamp survives a head turn instead of leaving the pool");
         Check(settings.find("NormalSpreadPercent") == std::string::npos &&
               overlay.find("NormalSpreadPercent") == std::string::npos &&
               manager.find("NormalSpreadPercent") == std::string::npos,

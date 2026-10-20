@@ -432,7 +432,26 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const auto& lights = manager.Selected();
     const int debugMode = manager.DebugMode();
     const bool debugView = locallighting::IsDebugView(debugMode);
-    if (!manager.Enabled() || (lights.empty() && !debugView) || !device || !f.cameraValid || !f.depthAvailable || !f.sceneColor) return false;
+    // Both the light pool's selection and each pixel's world position are
+    // reconstructed from this pose, so a pose the capture could not corroborate
+    // would place every lamp somewhere the player is not - the reported
+    // "dynamic lights are broken" next to the dragged clouds. Hold the pass for
+    // that frame instead of drawing it from a camera the player has left.
+    // A frame whose draws carried no fresh eye - there is no terrain in view, the player
+    // is looking at the sky, at a wall, or the draw stream stumbled - has cameraValid
+    // false while the retained inverse view and camera position are a frame or two old.
+    // Refusing the pass on those outright made every lamp in the city blink as the camera
+    // turned, which is the reported "dynamic lights flicker at some angles": the lights are
+    // world-anchored, but the gate that decided whether to draw them was not. Hold the
+    // retained pose for the same window the lamps themselves use, and refuse it past that.
+    const bool poseRetained = !f.cameraValid && f.PoseUsable();
+    if (!manager.Enabled() || (lights.empty() && !debugView) || !device ||
+        (!f.cameraValid && !poseRetained) || !f.depthAvailable || !f.sceneColor) return false;
+    // Only a pose this frame could not corroborate AND an eye no draw has
+    // carried for kCameraEyeHoldMs is refused. A pose held for a frame still
+    // reconstructs the scene correctly enough to light it; refusing that would
+    // flicker every lamp in the city the moment the draw stream stumbles.
+    if (f.cameraPoseStale && !(f.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs)) return false;
     if (!m_retry.Open(GetTickCount64())) return false;
     D3DSURFACE_DESC desc{};
     if (!f.sceneSurface || FAILED(f.sceneSurface->GetDesc(&desc)) || !EnsureShaders(device) ||

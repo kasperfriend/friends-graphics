@@ -626,8 +626,18 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
             if (!frameContext.viewRawValid) { NoteIdle(6, "no raw view matrix captured this frame"); return false; }
             // `cameraValid` is the flag the camera capture publishes the inverse view under,
             // along with projUnpack, depthMaxZ and the camera position this pass reconstructs
-            // from, so it is the flag that says those three rows are this frame's.
-            if (!frameContext.cameraValid) { NoteIdle(7, "cameraValid is false - the inverse view and the camera position are not this frame's"); return false; }
+            // from, so it is the flag that says those three rows are this frame's. A frame
+            // whose draws carried no fresh eye - looking up at the surface from under it, a
+            // wall or a menu with no terrain in view - leaves it false while the retained rows
+            // are a frame or two old, and refusing the pass on those frames is what made the
+            // medium vanish at camera ANGLES rather than at the surface: a diver who turned to
+            // look up lost the fog, the caustics, the beams and the grade until some terrain
+            // draw re-published the pose. Hold the retained pose for the same short window the
+            // lamps use, and refuse it past that: a stale camera is a wrong world position,
+            // a second-old one is the swimmer's own movement.
+            const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&
+                frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+            if (!frameContext.cameraValid && !poseRetained) { NoteIdle(7, "cameraValid is false and the retained pose is past its hold - the inverse view and the camera position are not this frame's"); return false; }
             // The rows of the inverse view turn a view-space ray into world yards, and every
             // world-space term reads the result: the caustic net's lattice coordinate, the
             // beam march's entry point, the bed's facing test. A NaN in one row is a NaN in

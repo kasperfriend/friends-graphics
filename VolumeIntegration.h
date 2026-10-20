@@ -369,6 +369,16 @@ void Configure(const std::wstring& base) {
     ReloadTuning();
 }
 
+// A confirmed zone change: the precipitation the client was drawing belongs to the
+// place the player left, so neither the detected weather nor the deck coverage it
+// forced may be carried across (see weathervisuals::ForgetLocation and
+// CloudDynamics::ForgetWeather). The cloud field's own climate still eases.
+inline void ForgetWeather() noexcept {
+    cloudWeather=renderer::CloudWeather::Clear;
+    cloudWeatherStrength=0.f;
+    renderer::VolumetricClouds::Instance().ForgetWeather();
+}
+
 // Frame-scoped DEFAULT resources: persistent textures STAY ALIVE across frames!
 void Finish(IDirect3DDevice9* d) {
     // A recreated device has a different pointer. Drop frame-owned references
@@ -496,9 +506,25 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     if (renderer::DepthCapture::Instance().HasDepth()) {
         auto& frameCtx = renderer::FrameContext::Current();
         frameCtx.ResetForNewFrame(frameCtx.frameIndex + 1, d);
+        // Precipitation composites itself over the scene during the client's draw stream, which
+        // starts now and ends before this frame's water draws settle the medium at Present. So it
+        // cannot read underwaterRamp (cleared just above) or wait for the composite: publish the
+        // ramp the last composite settled, so the precipitation stage can fade out below the
+        // surface instead of drawing rain over the water. One frame late, which the ramp's own
+        // third-of-a-second smoothing makes invisible. Gated exactly like the composite's own
+        // publish (including the shaft debug mask), so with the underwater pass off this is
+        // always 0 and precipitation above and below the surface is untouched.
+        frameCtx.compositedUnderwaterRamp = (!shaftDebug && enabled && active &&
+            renderer::Underwater::Instance().IsActive())
+            ? std::clamp(watereffect::submersionTracker.ramp, 0.f, 1.f) : 0.f;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
         renderer::CameraCapture::Instance().BeginFrame();
+        // Both describe this frame's capture attempt. A frame that never
+        // latches a camera must not hand DrawCallClassifier the previous
+        // frame's "terrain shader" or view translation.
+        capturedViewValid = false;
+        cameraCaptureShaderHash = 0;
 
         // Per-frame water mask: watereffect::Scope binds this as a second
         // render target during every actual water draw (see WaterEffect.h)
@@ -630,7 +656,8 @@ bool CaptureCamera(IDirect3DDevice9* d) {
 
     renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
     bool ok = renderer::CameraCapture::Instance().Capture(
-        d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
+        d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid,
+        renderer::g_trackedState.vsHash);
     if (ok) {
         renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         celestialDaylight = frameCtx.daylightFactor;
@@ -914,6 +941,10 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
+    // Every branch below samples or writes the scene copy the clear hook publishes.
+    // A camera captured without a depth capture (which is now possible, and is the
+    // point) must not reach them: there is nothing to composite onto.
+    if (!target || !depth) return false;
     const auto& localLightManager = renderer::LocalLightManager::Instance();
     const bool dynamicLightDebugView = localLightManager.Enabled() &&
         renderer::locallighting::IsDebugView(localLightManager.DebugMode());
@@ -979,7 +1010,13 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
-        frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f;
+        // A stale pose means the disc position/depth were measured against a
+        // camera this frame is not using: the atmosphere, the cloud deck and the
+        // water treat that signal as "the moon is here", so a stale one would
+        // pin the moon's protection circle to the wrong part of the ground. No
+        // pose, no disc.
+        frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f &&
+            !frameCtx.cameraPoseStale;
         if (frameCtx.moonDiscValid) {
             frameCtx.moonDiscScreenX = moon.screenX;
             frameCtx.moonDiscScreenY = moon.screenY;
@@ -995,7 +1032,14 @@ bool Composite(IDirect3DDevice9* d) {
         const bool nightDominant = frameCtx.moonlightFactor > frameCtx.daylightFactor;
         bool useMoon = moon.visible && (nightDominant || !sun.visible);
         bool useSun = sun.visible && !useMoon;
-        const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
+        // The tracked screen position belongs to the camera that was captured
+        // when the sprite was drawn. With a stale pose it points somewhere the
+        // current view does not, and every consumer of it - the glare, the
+        // halo, the disc protection - would place a bright disc on whatever
+        // now occupies that pixel. One frame without a celestial source is
+        // invisible; a sun painted onto a wall is not.
+        const renderer::CelestialBody* body = frameCtx.cameraPoseStale
+            ? nullptr : (useSun ? &sun : (useMoon ? &moon : nullptr));
         if (body) {
             constants[2][0] = body->screenX;
             constants[2][1] = body->screenY;
@@ -1593,7 +1637,13 @@ bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
 }
 
 void BeforeDraw(IDirect3DDevice9* d) {
-    if (internal || owner != d || composed || (!(enabled && active) && !watereffect::NeedsScene())) return;
+    // `owner` is the device whose depth capture this frame started. A frame that
+    // captured no depth at all has no owner, and refusing it here was the second half
+    // of the same one-way door the Clear hook had: with no depth, no camera attempt;
+    // with no camera, nothing at all. The capture attempt below needs no depth, so a
+    // null owner means "this device's frame, with no capture yet" - not a foreign one.
+    if (internal || composed || (owner != nullptr && owner != d) ||
+        (!(enabled && active) && !watereffect::NeedsScene())) return;
 
     bool isUi = (renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
                  renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull);
@@ -1601,20 +1651,34 @@ void BeforeDraw(IDirect3DDevice9* d) {
     if (ready && !isUi) return;
 
     // Try camera capture on every draw where:
-    //   - depth capture is active this frame (surface != nullptr)
     //   - a vertex shader is bound (not fixed-function / UI pass)
-    //   - current depth buffer matches our INTZ surface
+    //   - the draw itself survives Capture()'s gates (full viewport, rigid basis,
+    //     perspective projection) - note that a captured depth surface is NOT one
+    //     of them, see below
     // No attempt-count limit: WoW's early draws (skybox, shadow, pre-pass) don't carry
     // the 27 perspective constants; world terrain arrives at draw ~20-50+ and must be reached.
-    if (!ready && surface != nullptr && !isUi) {
+    if (!ready && !isUi) {
         if (renderer::g_trackedState.currentVS != nullptr) {
-            ComPtr<IDirect3DSurface9> ds;
-            if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
+            // The camera is not a depth resource: its 27 shader constants, the
+            // viewport and the projection all come from the draw. This attempt used
+            // to require a captured INTZ surface first - which made the frame's whole
+            // camera, and with it every cloud, shaft, local light and ambient
+            // occlusion in the frame, depend on a depth format the device can refuse
+            // (multisampling, an unusual backbuffer depth). The depth surface is what
+            // the effect passes consume, not what the camera needs, so the capture
+            // gate is the draw's own: Capture() already refuses anything that is not
+            // a full-viewport draw with a rigid basis and a perspective projection.
+            ready = CaptureCamera(d);
+            if (ready) {
+                // Publish the shader only for a draw that ACTUALLY yielded
+                // the camera. The hash used to be written before the
+                // attempt, so a failed one - a sky, moon or portrait draw,
+                // exactly the ones that fail the full-frame/rigid gates -
+                // was remembered as "the terrain shader" and every later
+                // WMO draw with it was classified as terrain for the rest
+                // of the frame.
                 cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
-                ready = CaptureCamera(d);
-                if (ready) {
-                    ++cameraFrames;
-                }
+                ++cameraFrames;
             }
         }
         if (!ready) {
@@ -1625,6 +1689,14 @@ void BeforeDraw(IDirect3DDevice9* d) {
     // Water can borrow depth/camera capture with the atmosphere switched off.
     // Do not accidentally enable atmosphere/postprocessing in that mode.
     if (!enabled || !active) return;
+    // The camera and the scene copy are different requirements. A pose captured on a
+    // frame whose depth capture was refused (multisampling, an exotic backbuffer depth)
+    // has already served every pose-only pass in BeforeDraw; what it cannot do is make
+    // this frame's full-screen composite, which paints onto the copy the clear hook
+    // publishes. Hand the frame to the image pass instead of compositing onto nothing -
+    // that pass is grade and anti-aliasing, and it is exactly what a player running
+    // multisampling is relying on.
+    if (!target || !depth) { composed = PostProcessWithoutCamera(d); return; }
     if (!ready && isUi && surface != nullptr) {
         ready = CaptureSkyFallback();
         if (ready) {
@@ -1653,8 +1725,11 @@ void Present(IDirect3DDevice9* d) {
             ++cameraFrames;
         }
     }
-    if(enabled && active && !composed && !ready)composed=PostProcessWithoutCamera(d);
-    if (enabled && active && !composed && ready) {
+    // Same split as BeforeDraw: a pose without a scene copy still cannot composite, so
+    // the image pass takes the frame (and a frame with neither gets no pass at all,
+    // which is what this branch already did).
+    if(enabled && active && !composed && (!ready || !target || !depth))composed=PostProcessWithoutCamera(d);
+    if (enabled && active && !composed && ready && target && depth) {
         composed = true;
         if (Composite(d)) {
             ++applied;

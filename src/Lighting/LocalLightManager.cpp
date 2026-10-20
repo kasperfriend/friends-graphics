@@ -187,7 +187,16 @@ namespace renderer
         // Only verified flame material + verified rigid M2 skinning. Neither
         // arbitrary bright pixels nor character/weapon textures become lights.
         const auto& f=FrameContext::Current();
+        // A torch is recovered from the draw's own view-space vertices, so its
+        // world position is only as good as the pose converting it. With a
+        // stale pose the emitter lands somewhere the player is not - and, since
+        // this runs every frame, the light follows the error around. Wait for a
+        // pose a draw actually carried the eye for.
         if(!m_enabled||!d||!f.cameraValid||!f.viewRawValid||!g_trackedState.zEnable||!g_trackedState.alphaBlend)return;
+        // A one-frame-old pose places the torch a frame late, which is
+        // invisible; a pose whose eye is a second old places it in the wrong
+        // street. Only the latter is refused.
+        if(f.cameraPoseStale&&!(f.cameraEyeAgeMs<=FrameContext::kCameraEyeHoldMs))return;
         bool rigid=std::find(std::begin(kRigidM2Shaders),std::end(kRigidM2Shaders),g_trackedState.vsHash)!=std::end(kRigidM2Shaders);
         bool unskinned=std::find(std::begin(kUnskinnedM2Shaders),std::end(kUnskinnedM2Shaders),g_trackedState.vsHash)!=std::end(kUnskinnedM2Shaders);
         if(!rigid&&!unskinned)return;
@@ -293,8 +302,38 @@ namespace renderer
             constexpr ULONGLONG kNativeObservationGraceMs = 1400;
             const bool recentlyEnabled = slot.lastEnabledTick != 0 && now - slot.lastEnabledTick <= kNativeEnableGraceMs;
             const bool recentlySeen = slot.lastSeenTick != 0 && now - slot.lastSeenTick <= kNativeObservationGraceMs;
-            if (!slot.valid || (!slot.enabled &&
-                (!recentlyEnabled || !recentlySeen || slot.stableFrames < 6))) continue;
+            // A CONFIRMED source is not dropped for having gone quiet, and that is the
+            // last place the camera's heading decided whether a lamp existed. The client
+            // enables a light for the draws that consume it and disables the slot again
+            // afterwards, and it only submits those draws for emitters inside the
+            // frustum - so "not observed this second" is a fact about where the camera
+            // is pointed, not about whether the lamp is still in the world. Requiring
+            // re-observation made the pool itself view-dependent: turning away retired a
+            // lamp after 1.4 s, which is a lamp's ground lighting going dark while that
+            // ground is still on screen, and turning back needed six fresh frames before
+            // it lit again - the reported "lights break, more on left-right rotation".
+            // No scoring change could reach it because the lamp had already left the pool.
+            // Silence is only evidence for a slot that has never been confirmed; a
+            // confirmed one leaves through slot reuse (a new generation and signature),
+            // an explicit disable without a matching light, or the distance cull below,
+            // none of which a head turn can do.
+            // A confirmed source therefore gets a silence window measured against how
+            // long a player can plausibly look away (`kNativeConfirmedHoldMs`), not
+            // against the batch cadence. It is still finite: a light that is genuinely
+            // gone - a door closing, a brazier put out - must not glow forever.
+            constexpr ULONGLONG kNativeConfirmedHoldMs = 15000;
+            if (!slot.valid) continue;
+            const bool confirmed = slot.stableFrames >= 6;
+            // Live the way the original test saw it: enabled, or enabled and observed
+            // inside the batch-cadence window - and only for a source that has been
+            // confirmed as persistent, which is the filter the spell/particle flashes
+            // need.
+            const bool liveNow = slot.enabled || (recentlyEnabled && recentlySeen && confirmed);
+            // Or held: confirmed once, and seen inside the long window a player can
+            // spend looking the other way. This is the branch that used to be missing.
+            const bool held = confirmed && slot.lastSeenTick != 0 &&
+                now - slot.lastSeenTick <= kNativeConfirmedHoldMs;
+            if (!liveNow && !held) continue;
             const D3DLIGHT9& d = slot.light;
             if (!std::isfinite(d.Position.x) || !std::isfinite(d.Position.y) || !std::isfinite(d.Position.z) ||
                 !std::isfinite(d.Diffuse.r) || !std::isfinite(d.Diffuse.g) || !std::isfinite(d.Diffuse.b) ||
@@ -326,11 +365,22 @@ namespace renderer
             const float distanceSquared = Dot(delta, delta);
             const float maxDistance = light.radius * 2.0f + 80.0f;
             if (!std::isfinite(distanceSquared) || distanceSquared > maxDistance * maxDistance) continue;
-            const float forwardDistance = Dot(delta, cameraForward);
-            if (forwardDistance < -light.radius) continue;
+            // NOTHING about the camera's HEADING may decide whether a lamp is drawn.
+            // It used to: a light one radius behind was culled outright, and the score
+            // carried a factor of six between "in front" and "behind", so a yaw moved
+            // lamps in and out of the four/eight slots and re-ordered the rest - which
+            // `StablePool`'s hysteresis turned into swaps and cross-fades rather than a
+            // clean picture. The report is exactly that: "lights break more often on
+            // left-right rotation than up-down". Distance and intensity are facts about
+            // where the lamp is; the direction the player happens to face is not, and a
+            // lamp behind the player is still lighting ground the player can turn onto.
+            // It is also the wrong test for "off screen": the frustum culls what is not
+            // drawn, and haloes reach past a screen edge from lights just outside it.
+            // `cameraForward` stays in the signature because the volume march and the
+            // water stage take the same pose, but this selection no longer reads it.
+            (void)cameraForward;
             const float distance = std::sqrt(std::max(distanceSquared, 0.0f));
-            const float facing = std::clamp(forwardDistance / std::max(distance, 0.01f) * 0.35f + 0.65f, 0.15f, 1.0f);
-            light.score = light.intensity * light.radius * light.radius * facing / std::max(4.0f, distanceSquared);
+            light.score = light.intensity * light.radius * light.radius / std::max(4.0f, distanceSquared);
 
             auto previous = m_smoothed.find(light.stableId);
             if (previous != m_smoothed.end())
@@ -373,23 +423,79 @@ namespace renderer
             if (a.score != b.score) return a.score > b.score;
             return a.stableId < b.stableId;
         };
-        if (candidates.size() > limit)
+        // Only the best four/eight feed either the surface shader or the
+        // volume march, and the boundary between "in" and "out" used to be
+        // decided on the raw score every frame. Two lamps of similar strength
+        // then swapped places as the player walked between them - one going
+        // dark and another lighting up in the same frame, which is the
+        // reported flicker near a group of lights. Incumbents now hold their
+        // slot until a challenger beats them by kDisplacementMargin, and at
+        // most one slot changes hands per frame.
+        const size_t count = local_light_detail::StablePool(candidates, m_selected, limit, byPriority);
+
+        // Every slot cross-fades. A swap is a real change in what the pool can
+        // show, and it must dissolve rather than pop: a light entering ramps up
+        // over kFadeInMs, one that left keeps its slot while it ramps down over
+        // kFadeOutMs. Bounded by the same 100 ms ceiling as every other frame
+        // delta here, so an Alt+Tab does not manufacture a fade.
+        const ULONGLONG selectionNow = GetTickCount64();
+        const float elapsedMs = m_lastSelectionTick != 0
+            ? float(std::min<ULONGLONG>(selectionNow - m_lastSelectionTick, 100ull))
+            : 16.f;
+        m_lastSelectionTick = selectionNow;
+
+        // Persistent, like m_candidates: the pool is rebuilt every frame on
+        // the render thread and must not allocate one.
+        std::vector<LocalLightSource>& next = m_nextSelected;
+        next.clear();
+        next.reserve(limit);
+        for (size_t index = 0; index < count; ++index)
         {
-            // Only the best four/eight feed either the surface shader or the
-            // volume march. Sorting every nearby manifest source each frame
-            // was unnecessary work; partial_sort retains the same ordered top
-            // set with O(n log limit) comparisons.
-            std::partial_sort(candidates.begin(), candidates.begin() + limit, candidates.end(), byPriority);
-            candidates.resize(limit);
+            LocalLightSource light = candidates[index];
+            const auto weight = m_fade.find(light.stableId);
+            const float fade = local_light_detail::FadeToward(
+                weight != m_fade.end() ? weight->second : 0.f, true, elapsedMs);
+            m_fade[light.stableId] = fade;
+            light.intensity *= fade;
+            next.push_back(light);
         }
-        else
+        // A source that fell out of the candidate set (out of range, its draw
+        // batch ended) is exactly the one a walking player sees blink. Hold it
+        // for the length of its fade, with its last published position.
+        for (auto it = m_fade.begin(); it != m_fade.end();)
         {
-            std::sort(candidates.begin(), candidates.end(), byPriority);
+            bool stillCandidate = false;
+            for (size_t index = 0; index < count; ++index)
+                if (candidates[index].stableId == it->first) { stillCandidate = true; break; }
+            if (stillCandidate) { ++it; continue; }
+            const float previousFade = it->second;
+            const float fade = local_light_detail::FadeToward(previousFade, false, elapsedMs);
+            // Fully dissolved: forget the weight rather than accumulate a zero
+            // entry per light the player has ever walked past. A forgotten
+            // light that comes back later starts its fade-in from zero, which
+            // is the same curve it would have had.
+            if (fade <= 0.001f) { it = m_fade.erase(it); continue; }
+            it->second = fade;
+            if (next.size() >= limit) { ++it; continue; }
+            for (const auto& previous : m_selected)
+            {
+                if (previous.stableId != it->first) continue;
+                LocalLightSource light = previous;
+                // The published copy already carries the fade it had last
+                // frame, so scale it by how much the fade moved, not again by
+                // its whole value.
+                if (previousFade > 1e-3f)
+                    light.intensity *= std::min(1.f, fade / previousFade);
+                next.push_back(light);
+                break;
+            }
+            ++it;
         }
-        m_selected.swap(candidates);
+        m_selected.swap(next);
 
         // Water's per-frame constant cache needs to notice a changed emitter
-        // set even if another water surface draws in the same frame.
+        // set - and a fade in progress - even if another water surface draws
+        // in the same frame.
         m_selectionSignature = local_light_detail::SelectionSignature(m_selected);
 
         if ((m_selectionFrame % 300) == 0)

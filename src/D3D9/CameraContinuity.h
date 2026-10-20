@@ -134,7 +134,249 @@ private:
     bool valid = false;
 };
 
+// ---------------------------------------------------------------------------
+// Sky fallback: which fixed-function VIEW may become this frame's camera
+// ---------------------------------------------------------------------------
+// A shader-driven client uploads its view as vertex-shader constants and only
+// touches the fixed-function transforms on the draws that still need them -
+// WoW's sun and moon billboards above all. Whatever else is left in D3DTS_VIEW
+// on any other draw is an artefact of the last such draw, and a full-screen
+// pass leaves it at identity. Reading that as "the camera" is what made the
+// sky and the dynamic lights wrong in a city, where the terrain capture never
+// latches because everything overhead is culled: the first fixed-function
+// transform of the frame won, the world was anchored to it, and the sky then
+// rotated with the mouse instead of with the world.
+//
+// The fallback therefore stops taking the first transform it sees. It collects
+// every candidate the frame offers and publishes one only when it can be
+// corroborated, by the frame's own sun or moon disc when one was drawn, or by
+// the camera that was already accepted otherwise. A candidate that appears
+// from nowhere is held for one frame first, so one stray full-screen transform
+// cannot take the frame.
+
+// Lowest row agreement between two view bases: 1 for the same orientation,
+// falling fast for a different one. (Row i of a world->view basis is world
+// axis i carried into view space; a rotation about one axis leaves the other
+// two rows unchanged, so the minimum is the honest measure.)
+inline float BasisAgreement(const float a[3][4], const float b[3][4]) noexcept
+{
+    float lowest = 1.f;
+    for (int r = 0; r < 3; ++r)
+        lowest = std::min(lowest, a[r][0] * b[r][0] + a[r][1] * b[r][1] + a[r][2] * b[r][2]);
+    return lowest;
+}
+
+// Where a world direction lands on screen (0..1, v down) through a view basis
+// and the projection's P00/P11 - the same convention CameraCapture and
+// CelestialTracker use for the disc. False when the direction is at or behind
+// the eye, where a screen position does not exist.
+inline bool ProjectWorldDirection(const float basis[3][4], float projectionX, float projectionY,
+                                  const float world[3], float& screenX, float& screenY) noexcept
+{
+    // basis holds rows of the row-vector world->view transform, so a world
+    // direction becomes view space by dotting with its COLUMNS (this is the
+    // same expression as MathTypes' TransformDirectionRowVector and
+    // CelestialTracker's screen projection; dotting with the rows instead is
+    // the inverse rotation, and projects the disc to the wrong half of the
+    // screen for every yaw).
+    const float vx = basis[0][0] * world[0] + basis[1][0] * world[1] + basis[2][0] * world[2];
+    const float vy = basis[0][1] * world[0] + basis[1][1] * world[1] + basis[2][1] * world[2];
+    const float vz = basis[0][2] * world[0] + basis[1][2] * world[1] + basis[2][2] * world[2];
+    if (!(vz > 1e-3f) || !(projectionX > 1e-3f) || !(projectionY > 1e-3f))
+        return false;
+    screenX = 0.5f + 0.5f * (vx / vz) * projectionX;
+    screenY = 0.5f - 0.5f * (vy / vz) * projectionY;
+    return std::isfinite(screenX) && std::isfinite(screenY);
+}
+
+// What the frame's own celestial draw says about the camera. `world` is the
+// stabilized world direction towards the body; `screenX/Y` where the client
+// actually painted it this frame. Both come from independent observations
+// (CelestialTracker's billboard hook and the captured light), so agreement is
+// real evidence rather than a pose compared with itself.
+struct DiscObservation
+{
+    bool available = false;
+    float world[3] = { 0.f, 0.f, 1.f };
+    float screenX = 0.f, screenY = 0.f;
+    float projectionX = 0.f, projectionY = 0.f;
+    // Normalized screen units, ~195 px at 1080p: wide enough to absorb the
+    // tracker's own sampling and the frame's FOV, far tighter than the half
+    // screen a basis borrowed from another camera moves the disc by.
+    float tolerance = .18f;
+};
+
+// True when `basis` puts the observed body somewhere the client did not paint
+// it, i.e. this basis is not the camera the frame was drawn with.
+inline bool ContradictsDisc(const float basis[3][4], const DiscObservation& disc) noexcept
+{
+    if (!disc.available)
+        return false;
+    float x = 0.f, y = 0.f;
+    if (!ProjectWorldDirection(basis, disc.projectionX, disc.projectionY, disc.world, x, y))
+        return true; // the body is in front of the camera; this basis puts it behind
+    return std::abs(x - disc.screenX) > disc.tolerance ||
+           std::abs(y - disc.screenY) > disc.tolerance;
+}
+
+class SkyPoseSelector
+{
+public:
+    // A candidate is "continuous" with the camera we already have when its
+    // rows still agree to within this. A mouse-look frame moves the view by a
+    // degree or two; the bound only has to admit a genuine fast turn and
+    // reject a transform from somewhere else.
+    static constexpr float kContinuityFloor = .75f;    // ~41 degrees
+    // A candidate that is not continuous is believed only after this many
+    // consecutive frames say the same thing: long enough to outlive a stray
+    // full-screen transform, short enough that a real snap is followed at once.
+    static constexpr int kJumpConfirmationFrames = 2;
+    static constexpr unsigned kMaxCandidates = 4;
+
+    void Reset() noexcept
+    {
+        m_candidateCount = 0;
+        m_haveReference = false;
+        m_pendingValid = false;
+        m_pendingFrames = 0;
+    }
+
+    // Called once per frame, before any draw: candidates are per frame.
+    void BeginFrame() noexcept { m_candidateCount = 0; }
+
+    bool HasCandidate() const noexcept { return m_candidateCount != 0; }
+    bool HasReference() const noexcept { return m_haveReference; }
+
+    // A real capture re-synchronises the selector: the next sky candidate is
+    // judged against the camera the draw stream itself just confirmed.
+    void SetReference(const float basis[3][4]) noexcept
+    {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                m_reference[r][c] = basis[r][c];
+        m_haveReference = true;
+        m_pendingValid = false;
+        m_pendingFrames = 0;
+    }
+
+    void Observe(const float basis[3][4]) noexcept
+    {
+        // Keep a handful, not one: the frame can offer the camera's own sky
+        // transform and, before or after it, the leftover of some other pass.
+        // Which one is the camera is decided in Resolve, against evidence that
+        // only exists once the frame has been drawn.
+        for (unsigned i = 0; i < m_candidateCount; ++i)
+            if (BasisAgreement(basis, m_candidates[i]) > .9999f)
+                return;
+        if (m_candidateCount < kMaxCandidates)
+        {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    m_candidates[m_candidateCount][r][c] = basis[r][c];
+            ++m_candidateCount;
+        }
+    }
+
+    // Picks this frame's basis and says whether it is corroborated.
+    bool Resolve(const DiscObservation& disc, float outBasis[3][4], bool& corroborated) noexcept
+    {
+        corroborated = false;
+        if (!m_candidateCount)
+            return false;
+
+        // With a disc on screen the frame carries its own camera evidence:
+        // take the candidate that reproduces where the client painted it.
+        if (disc.available)
+        {
+            int best = -1;
+            float bestError = 0.f;
+            for (unsigned i = 0; i < m_candidateCount; ++i)
+            {
+                if (ContradictsDisc(m_candidates[i], disc))
+                    continue;
+                float x = 0.f, y = 0.f;
+                ProjectWorldDirection(m_candidates[i], disc.projectionX, disc.projectionY,
+                                      disc.world, x, y);
+                const float error = std::max(std::abs(x - disc.screenX), std::abs(y - disc.screenY));
+                if (best < 0 || error < bestError) { best = int(i); bestError = error; }
+            }
+            if (best < 0)
+                return false; // every transform this frame offered contradicts its own disc
+            Copy(m_candidates[best], outBasis);
+            corroborated = true;
+            SetReference(outBasis);
+            return true;
+        }
+
+        // No disc: fall back to continuity with the accepted camera.
+        if (m_haveReference)
+        {
+            int best = -1;
+            float bestAgreement = 0.f;
+            for (unsigned i = 0; i < m_candidateCount; ++i)
+            {
+                const float agreement = BasisAgreement(m_candidates[i], m_reference);
+                if (agreement > bestAgreement) { bestAgreement = agreement; best = int(i); }
+            }
+            if (best >= 0 && bestAgreement >= kContinuityFloor)
+            {
+                Copy(m_candidates[best], outBasis);
+                corroborated = true;
+                SetReference(outBasis);
+                return true;
+            }
+            // Discontinuous: believe it only once the frame has said the same
+            // thing for kJumpConfirmationFrames, then let it become the
+            // reference. A transform that changes every frame never gets there.
+            const float (*chosen)[4] = m_candidates[0];
+            if (m_pendingValid && BasisAgreement(chosen, m_pending) >= .999f)
+            {
+                Copy(chosen, m_pending);
+                if (++m_pendingFrames >= kJumpConfirmationFrames)
+                {
+                    Copy(chosen, outBasis);
+                    corroborated = true;
+                    SetReference(outBasis);
+                    m_pendingValid = false;
+                    m_pendingFrames = 0;
+                    return true;
+                }
+            }
+            else
+            {
+                Copy(chosen, m_pending);
+                m_pendingValid = true;
+                m_pendingFrames = 1;
+            }
+            return false;
+        }
+
+        // Nothing accepted yet this session: the first candidate anchors.
+        Copy(m_candidates[0], outBasis);
+        corroborated = true;
+        SetReference(outBasis);
+        return true;
+    }
+
+private:
+    static void Copy(const float from[3][4], float to[3][4]) noexcept
+    {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                to[r][c] = from[r][c];
+    }
+
+    float m_candidates[kMaxCandidates][3][4]{};
+    unsigned m_candidateCount = 0;
+    float m_reference[3][4]{};
+    bool m_haveReference = false;
+    float m_pending[3][4]{};
+    int m_pendingFrames = 0;
+    bool m_pendingValid = false;
+};
+
 // Converts a direction expressed in the captured camera's view space into
+
 // world space, in the storage layout of viewRaw (the v[0..3] shader constants,
 // whose transpose is the inverse view - CameraCapture builds c4..c7 exactly
 // this way, and derives its world sun direction with this same formula). Do

@@ -223,6 +223,30 @@ int main() try
     Require(clearStep.coverage>.998f&&clearStep.coverage<1,"weather cessation cannot pop the deck away");
     for(int i=0;i<2000;++i) wet=weather.Update(base,open,true,CloudWeather::Clear,0,12,.1f);
     Require(wet.coverage==0&&weather.WeatherAmount()==0,"clearing eventually reaches exact zero and permits the GPU early-out");
+    // A zone change is a discontinuity, not a trend. Rain the client was emitting in the
+    // old zone is not evidence about the new one, so neither the detected weather nor the
+    // wet vector that forced coverage to 1 may cross it. Carrying them across meant a full
+    // overcast hung over a clear zone for the 30 s no-evidence hold plus the slow clearing
+    // ramp - "stuck covering the whole sky, no transition between locations" after a fast
+    // teleport. The new zone's own particles re-wet the deck, and the climate filter below
+    // still eases the field, so the sky changes without popping.
+    {
+        CloudDynamics crossed;
+        crossed.Update(base,open,true,CloudWeather::Clear,0,12,0);
+        for(int i=0;i<1800;++i) crossed.Update(base,open,true,CloudWeather::Rain,1,12,.1f);
+        Require(Near(crossed.WeatherAmount(),1.f,1e-4)&&
+                Near(crossed.Update(base,open,true,CloudWeather::Rain,1,12,.1f).coverage,1.f,1e-5),
+                "rain still reaches a full deck before the move");
+        crossed.ForgetWeather();
+        Require(crossed.WeatherAmount()==0,"a zone change drops the previous zone's precipitation");
+        const auto landed=crossed.Update(base,open,true,CloudWeather::Clear,0,12,.1f);
+        const auto climate=ResolveCloudClimate(base,open,true);
+        Require(Near(landed.coverage,climate.coverage)&&landed.coverage<1.f,
+                "the new zone starts from its own climate, not the old zone's overcast");
+        auto rebuilt=landed;
+        for(int i=0;i<180;++i) rebuilt=crossed.Update(base,open,true,CloudWeather::Rain,1,12,.1f);
+        Require(rebuilt.coverage>landed.coverage,"rain in the new zone still builds its own deck");
+    }
     for(int i=0;i<1000;++i)
     {
         wet=weather.Update(base,desert,true,i%2?CloudWeather::Rain:CloudWeather::Snow,1,12,.1f);
@@ -318,6 +342,19 @@ int main() try
     Require(detected!=std::string::npos&&observed<replacement&&
             weatherSource.find("if (!enabled || !effectEnabled || !active) return;",observed)<replacement,
             "native weather observation precedes optional effect gates and resource loading");
+    {
+        const auto rendererSource=Read("ModernWoWRenderer.cpp");
+        const auto volume=Read("VolumeIntegration.h");
+        const auto clouds=Read("src/Effects/VolumetricClouds.h");
+        Require(rendererSource.find("if(place.valid&&(place.mapId!=g_weatherMapId||place.zoneId!=g_weatherZoneId))")
+                    !=std::string::npos&&
+                rendererSource.find("weathervisuals::ForgetLocation();")!=std::string::npos&&
+                rendererSource.find("volume::ForgetWeather();")!=std::string::npos&&
+                weatherSource.find("inline void ForgetLocation() noexcept")!=std::string::npos&&
+                volume.find("inline void ForgetWeather() noexcept")!=std::string::npos&&
+                clouds.find("void ForgetWeather() noexcept")!=std::string::npos,
+                "a confirmed zone change re-arms both the weather detection and the deck it forced");
+    }
     const auto source=Read("src/Effects/VolumetricClouds.cpp");
     const auto equation="float cov=saturate((w.r+(w.b-.5)*evolution.z-window.x)*window.y);";
     const auto first=source.find(equation);

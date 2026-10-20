@@ -355,6 +355,19 @@ jobs:
           g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/LocalLightingRegression.cpp -o build/local-lighting-test
           ./build/local-lighting-test
 
+      # Three reported symptoms that all had the same shape: something anchored
+      # in the world was being decided by where the camera happened to point -
+      # the fog layer's floor (a screen row that tilts onto a wall), the moon
+      # (any geometry at the sprite's distance), and the light pool (a raw-score
+      # boundary that churns as the player walks). Each rule is device-free and
+      # pinned here, with source checks that the shipped shaders and the pool
+      # manager still apply it.
+      - name: Camera anchoring regressions
+        run: |
+          mkdir -p build
+          g++ -O2 -std=c++20 -Wall -Wextra -Werror -pedantic tools/CameraAnchoringRegression.cpp -o build/camera-anchoring-test
+          ./build/camera-anchoring-test
+
       # The shader text is only compiled on the Windows runner, so the GLSL
       # spellings fxc rejects are checked here, where a shader change can be
       # tested before it is pushed.

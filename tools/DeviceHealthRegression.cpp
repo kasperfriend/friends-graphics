@@ -172,6 +172,212 @@ int main() try
                 Contains(composite, "CaptureSkyFallback()"),
             "sky fallback camera capture keeps clouds alive when looking straight up and terrain is culled");
 
+        // ORGRIMMAR FROM STREET LEVEL: THE CLOUD DECK AND THE LAMPS FOLLOWING THE CAMERA.
+        // Where no draw ever carries a full-frame rigid camera (a city seen from the street,
+        // with everything overhead culled), the fallback used to take the FIRST transform of
+        // the frame as the camera. A leftover sky/moon/identity transform then became the pose:
+        // the deck and the lights were anchored to its translation and swung with the mouse.
+        // Pinned here: candidate selection, the screen convention that lets the frame's own disc
+        // testify, jump confirmation, and the stale-pose guards on every world-anchored pass.
+        auto yawBasis = [](float yaw, float b[3][4]) {
+            const float c = std::cos(yaw), s = std::sin(yaw);
+            for (int r = 0; r < 3; ++r) for (int k = 0; k < 4; ++k) b[r][k] = 0.f;
+            b[0][0] = c; b[0][1] = -s; b[1][0] = s; b[1][1] = c; b[2][2] = 1.f;
+        };
+        float identityBasis[3][4]{};
+        identityBasis[0][0] = identityBasis[1][1] = identityBasis[2][2] = 1.f;
+
+        {
+            // The projection must use COLUMN dots (pos_view = pos_world * V), the
+            // same convention as CelestialTracker's own screen mapping. Row dots
+            // would run the inverse rotation and mirror the disc for every yaw.
+            const float world[3] = { -3.f, 0.f, 4.f };
+            float x0 = 0.f, y0 = 0.f, x1 = 0.f, y1 = 0.f;
+            float turned[3][4];
+            yawBasis(1.57079632679f, turned);
+            Require(ProjectWorldDirection(identityBasis, 1.f, 1.f, world, x0, y0) &&
+                    ProjectWorldDirection(turned, 1.f, 1.f, world, x1, y1),
+                "a disc in front of the camera projects to a screen position");
+            Require(x0 < .5f && std::fabs(y0 - .5f) < 1e-4f,
+                "a body left of the view axis projects left of centre");
+            Require(y1 < .5f && std::fabs(x1 - .5f) < 1e-4f,
+                "a quarter turn moves the body to the top of the screen instead of mirroring it");
+
+            // A pure yaw over one world axis still has to register: the row of
+            // the turned axis stays put, the other two carry the rotation.
+            const float agreement = BasisAgreement(identityBasis, turned);
+            Require(std::fabs(agreement) < 1e-4f,
+                "a quarter turn is not mistaken for a continuous view");
+            float small[3][4];
+            yawBasis(.05f, small);
+            Require(BasisAgreement(identityBasis, small) > .99f,
+                "a normal mouse-look frame still agrees with the previous camera");
+        }
+
+        {
+            // The frame's own painted sun/moon disc is the evidence: the basis
+            // that reproduces where the client put the disc is the camera.
+            const float world[3] = { -3.f, 0.f, 4.f };
+            DiscObservation disc;
+            disc.available = true;
+            disc.projectionX = 1.f;
+            disc.projectionY = 1.f;
+            disc.world[0] = world[0]; disc.world[1] = world[1]; disc.world[2] = world[2];
+            ProjectWorldDirection(identityBasis, 1.f, 1.f, disc.world, disc.screenX, disc.screenY);
+
+            float wrong[3][4];
+            yawBasis(1.57079632679f, wrong);
+            Require(ContradictsDisc(wrong, disc),
+                "a transform that puts the painted disc somewhere else is rejected");
+            Require(!ContradictsDisc(identityBasis, disc),
+                "the camera that painted the disc agrees with it");
+
+            SkyPoseSelector selector;
+            selector.SetReference(identityBasis);
+            float chosen[3][4];
+            bool corroborated = true;
+            selector.BeginFrame();
+            selector.Observe(wrong);
+            Require(!selector.Resolve(disc, chosen, corroborated) && !corroborated,
+                "a sky transform that contradicts the painted disc never becomes the camera");
+
+            selector.BeginFrame();
+            selector.Observe(wrong);
+            selector.Observe(identityBasis);
+            Require(selector.Resolve(disc, chosen, corroborated) && corroborated,
+                "the candidate the disc corroborates is accepted in the same frame");
+            Require(BasisAgreement(chosen, identityBasis) > .9999f,
+                "the disc-consistent candidate is the one published");
+
+            SkyPoseSelector empty;
+            empty.SetReference(identityBasis);
+            empty.BeginFrame();
+            Require(!empty.Resolve(DiscObservation{}, chosen, corroborated),
+                "a frame that offers no transform publishes no pose instead of inventing one");
+        }
+
+        {
+            // No disc on screen (neutral pitch under the Orgrimmar sky): only
+            // continuity with the accepted camera may corroborate. A jump is
+            // held one frame, and a transform that changes every frame is never
+            // adopted, so a stray full-screen transform cannot take the frame.
+            SkyPoseSelector selector;
+            selector.SetReference(identityBasis);
+            float jumped[3][4];
+            yawBasis(1.0f, jumped);
+            const DiscObservation none;
+            float chosen[3][4];
+            bool corroborated = true;
+
+            selector.BeginFrame();
+            selector.Observe(jumped);
+            Require(!selector.Resolve(none, chosen, corroborated) && !corroborated,
+                "a discontinuous pose is not believed on its first frame");
+            selector.BeginFrame();
+            selector.Observe(jumped);
+            Require(selector.Resolve(none, chosen, corroborated) &&
+                    BasisAgreement(chosen, jumped) > .9999f,
+                "the same discontinuous pose twice is confirmed on the second frame");
+
+            for (int i = 0; i < 3; ++i)
+            {
+                float stray[3][4];
+                yawBasis(3.0f + .9f * float(i), stray);
+                selector.BeginFrame();
+                selector.Observe(stray);
+                Require(!selector.Resolve(none, chosen, corroborated),
+                    "a transform that changes every frame is never adopted");
+            }
+        }
+
+        // The guards themselves. Every pass that places something in world
+        // space from this pose must refuse a stale one - the deck, the lamp
+        // pool, the torch emitters and the shafts each reconstruct positions
+        // from the frame camera, and from a held pose the content follows the
+        // player instead of the world.
+        {
+            const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
+            const auto localLighting = Read("src/Effects/LocalLightingRenderer.cpp");
+            const auto torches = Read("src/Lighting/LocalLightManager.cpp");
+            const auto frameReset = Read("src/Core/FrameContext.cpp");
+            Require(Contains(clouds, "if(f.cameraPoseStale)return false;"),
+                "the cloud deck refuses to draw from a stale camera pose");
+            Require(Contains(localLighting, "f.cameraPoseStale") &&
+                    Contains(localLighting, "FrameContext::kCameraEyeHoldMs"),
+                "local lighting refuses a stale pose or an eye no draw carried");
+            Require(Contains(torches, "f.cameraPoseStale") &&
+                    Contains(torches, "FrameContext::kCameraEyeHoldMs"),
+                "torch emitters are not placed through a stale pose");
+            Require(Contains(frameReset, "cameraPoseStale = true;"),
+                "a new frame starts with the previous pose marked unusable");
+        }
+
+        {
+            const auto capture = Read("src/D3D9/CameraCapture.cpp");
+            const auto composite = Read("VolumeIntegration.h");
+            Require(Contains(capture, "m_skyPose.Observe(basis)") &&
+                    !Contains(capture, "m_fallbackCandidateValid"),
+                "the sky fallback collects candidates instead of latching the first transform");
+            Require(Contains(capture, "fabsf(lengthSquared - 1.0f) > 0.01f"),
+                "a scaled or skewed sky transform is not a rigid camera basis");
+            Require(Contains(capture, "const float* anchor = m_cameraGate.Position();") &&
+                    Contains(capture, "cameraPoseSource = FrameContext::PoseHeld"),
+                "the sky fallback anchors the eye to the accepted camera position only");
+            Require(Contains(capture, "frameContext.cameraPoseStale = false;"),
+                "a real capture publishes a fresh pose");
+            Require(Contains(composite, "cameraCaptureShaderHash = 0;") &&
+                    Contains(composite, "capturedViewValid = false;"),
+                "capture evidence is cleared every frame, so a failed attempt cannot linger");
+            const auto attempt = composite.find("ready = CaptureCamera(d);");
+            const auto publish = composite.find("cameraCaptureShaderHash = renderer::g_trackedState.vsHash;");
+            Require(attempt != std::string::npos && publish != std::string::npos && attempt < publish,
+                "the terrain shader is published only after the capture that produced it succeeded");
+        }
+
+        {
+            // THE FIRST FRAME OF A SESSION. The Clear hook is what starts a depth
+            // capture, the depth capture is what used to gate the camera attempt, and
+            // the camera is what every camera-dependent pass needs. Installing the
+            // Clear hook behind "some effect is enabled right now" closed that loop on
+            // itself: a device hooked while nothing was enabled never captured depth,
+            // therefore never captured a camera, therefore never ran anything - and the
+            // next device reset (a loading screen or a teleport) was the only way back.
+            const auto renderer = Read("ModernWoWRenderer.cpp");
+            const auto composite = Read("VolumeIntegration.h");
+            const auto water = Read("WaterEffect.h");
+            const auto count = [](const std::string& text, const char* needle) {
+                size_t total = 0;
+                for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++total;
+                return total;
+            };
+            Require(!Contains(renderer, "if(volume::enabled||watereffect::enabled||watereffect::compiling){"),
+                "the capture hooks are installed on every device, not only when an effect happened to be on at hook time");
+            Require(count(renderer, "InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));") == 2 &&
+                    count(renderer, "renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);") == 1,
+                "both the first hook pass and the post-Reset pass install the Clear hook, and the originals are read once per device");
+            Require(Contains(composite, "if (!ready && !isUi) {") &&
+                    !Contains(composite, "!ready && surface != nullptr && !isUi"),
+                "a captured depth surface is no longer a precondition for capturing the camera");
+            Require(Contains(renderer, "try { volume::Finish(d); } catch (...) {}") &&
+                    Contains(renderer, "try { waterreflection::Finish(); } catch (...) {}"),
+                "the frame teardown runs even when the effect pass threw, so a dead frame cannot latch the capture for the session");
+            // A refusal to create the replacement shaders is retried on a cooldown,
+            // exactly like the cloud deck's, instead of keeping native water until the
+            // device is re-created.
+            Require(Contains(water, "if(GetTickCount64() < shaderFailureRetryAt) return;") &&
+                    Contains(water, "shaderFailureRetryAt=GetTickCount64()+renderer::kOptionalPassRetryMs;") &&
+                    Contains(water, "if(shaderCreationFailed&&GetTickCount64()<shaderFailureRetryAt)return;") &&
+                    !Contains(water, "keeping native water until device reset"),
+                "a failed water shader creation retries after the optional-pass cooldown, and every draw-side gate honours that cooldown");
+            // A frame with no depth capture is still this device's frame: the camera
+            // attempt runs, and the frame is handed to the image pass rather than to a
+            // composite that has no scene copy to paint on.
+            Require(Contains(composite, "(owner != nullptr && owner != d)") &&
+                    Contains(composite, "if (!target || !depth) { composed = PostProcessWithoutCamera(d); return; }") &&
+                    Contains(composite, "if (!target || !depth) return false;"),
+                "a null capture owner no longer blocks the camera attempt, and a pose without a scene copy cannot reach the composite");
+        }
+
         // MULTISAMPLING, AND THE ANTI-ALIASING THAT REPLACES IT. A multisampled depth buffer cannot be
         // sampled by a pixel shader in D3D9 at all, so above 1x every effect here that reads depth
         // loses it - water refraction, absorption and shore foam, ambient occlusion, local lighting,

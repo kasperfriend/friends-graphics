@@ -22,6 +22,7 @@
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Core/FrameClock.h"
 #include "src/Core/FrameContext.h"
+#include "src/Core/DeviceHealth.h"
 #include "src/Water/WaterMaterial.h"
 #include "src/Water/WaveField.h"
 #include "src/Water/WaterSeaState.h"
@@ -45,6 +46,9 @@ float strength=.003f;
 float normalStrength=.16f, specularStrength=.55f;
 float reflectionStrength=.70f,environmentStrength=.24f,reflectionDistance=120.f,reflectionThickness=1.8f;
 float flowSpeed=1.f,flowRotation=.32f;
+// WATER OPACITY: the coverage floor above, 0..100 percent. Read with the other
+// tuning so a per-location override and the F7 slider land in the same place.
+float opacityPercent=85.f;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
@@ -200,8 +204,24 @@ renderer::water::SeaWeather seaWeather;
 renderer::water::SeaStateFilter seaFilter;
 renderer::water::WaveMotion waveMotion;
 renderer::water::DrawAnchor lastWaveAnchor;
+// When that anchor was read, on the same clock the sea integrates on. It may only
+// stand in for a camera the frame did not capture while it is still the place the
+// player is standing: a teleport leaves the last anchor of the OLD zone behind, and
+// a loading screen leaves it behind with no draw to replace it.
+double lastWaveAnchorSeconds=-1.0;
+// How long a draw's own camera may stand in for the frame camera. The field's
+// phases are continuous at the frame pivot (WaveMotion::Advance compensates every
+// heading and size edit there), so a pivot from anywhere but here turns such an
+// edit into a phase shift proportional to the distance - which is the water that
+// "races" for a few seconds after a teleport and then settles.
+constexpr double kAnchorFreshSeconds=.25;
 renderer::FrameClock seaFrameClock;
 void AdvanceSea(float dt);
+inline bool LastWaveAnchorFresh() noexcept {
+    if(!lastWaveAnchor.valid||!(lastWaveAnchorSeconds>=0.0))return false;
+    const double age=renderer::PerformanceSeconds()-lastWaveAnchorSeconds;
+    return age>=0.0&&age<=kAnchorFreshSeconds;
+}
 
 // One frame of the underwater ramp, and the frame the full-screen medium reads. Called
 // from Present, after the water draws have had their say and before the counters reset, so
@@ -451,10 +471,13 @@ void AdvanceUnderwater(float dt) {
 // casts still move as one.
 inline renderer::underwater::Field UnderwaterFieldAt(float cameraX,float cameraY,
     bool cameraValid) noexcept {
+    // The same freshness rule as the pivot below: a stale anchor's phases belong to a
+    // place the player has left (a teleport), and building the net from them slides it
+    // across the bed by the distance between the two places until the next draw.
+    const bool anchorValid=cameraValid||LastWaveAnchorFresh();
     const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];
     const float anchorY=cameraValid?cameraY:lastWaveAnchor.camera[1];
-    const auto wave=waveMotion.Build(anchorX,anchorY,
-        cameraValid||lastWaveAnchor.valid,wavesEnabled);
+    const auto wave=waveMotion.Build(anchorX,anchorY,anchorValid,wavesEnabled);
     renderer::underwater::Field field;
     for(int i=0;i<4;++i)field.lattice[i]=wave.lattice[i];
     field.chopPhase[0]=wave.ripplePhase[0];
@@ -558,6 +581,13 @@ inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
 inline bool shaderCreationFailed = false;
+// When a failed CreatePixelShader/CreateVertexShader may be tried again. A device
+// can refuse a perfectly good blob once - a cold driver JIT, a device that is
+// mid-Reset, a probe sharing the same frame - and the old code latched that
+// refusal until a device reset, which is exactly the report "it works after a
+// reload but not before one". A cooldown retries instead, and still keeps a
+// permanent refusal from recompiling on every draw.
+inline std::uint64_t shaderFailureRetryAt = 0;
 inline bool NeedsScene() {
     // WATER QUALITY can remove the reason to take the copy at all: below level 2 there is no
     // screen-space reflection march and below level 3 no celestial occlusion march, so at
@@ -569,7 +599,7 @@ inline bool NeedsScene() {
         sunGlintEnabled&&qualityPlan.lightSteps>0);
 }
 bool showStatus=false;
-unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0;
+unsigned frameMatches=0,frameCandidates=0,frameSceneMatches=0,frameNearMisses=0,frameBlendOverrides=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
 inline void ReportFailure(const char* operation,HRESULT hr) {
@@ -808,6 +838,13 @@ const char* source=R"HLSL(
 float4 localPosition[8]:register(c180); // view-space emitters
 float4 localColor[8]:register(c188);
 float4 localControl:register(c196); // count, enabled
+// x=how opaque the surface is at least (WATER OPACITY, 0..1). The client's
+// liquid alpha plus depth absorption is all this stage had, and in shallow,
+// clear water that is nearly nothing: the bed read straight through the sea.
+// This is a floor on the coverage, not a second picture of it - the column's
+// own extinction still decides everything above it, so deep water and a
+// reflection still converge where they did.
+float4 opacityControl:register(c199);
 sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
@@ -1335,6 +1372,28 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     bedW=bedZW>=99999?bottomView:bedW;
     bedS=bedZS>=99999?bottomView:bedS;
     bedN=bedZN>=99999?bottomView:bedN;
+    // THE BED IS UNDER THE WATER IT IS UNDER. These four taps are the only geometry this
+    // pass can read, and a tap can land on anything standing IN the water - a figure, a
+    // rock, a post - whose reconstructed point sits ABOVE this fragment's own surface.
+    // The slope between that point and the centre then reads as a cliff, and the shoal
+    // mask reads a cliff as "the bottom comes up fast" and lays foam over it.
+    //
+    // Foam is not a decal in this stage: it takes the mirror away (`reflectionAmount` is
+    // scaled by 1-foamAmount) and the sun road with it (`pathEnergy` alike), so a figure
+    // in the water carried a band of surface with no reflection and no glint - a dark
+    // copy of him lying on the water, which is exactly what disappears when FOAM is
+    // switched off, and which no opacity, refraction or reflection setting can touch
+    // because all three sit downstream of a mask they do not feed.
+    //
+    // `foamDepthSigned` above already answers this question for the centre point: dot
+    // of (surface - bed) with world up is positive when the bed is really below. A tap
+    // that fails the same test is not bed, so it falls back to the centre point, exactly
+    // as a tap on the sky does - four equal points give a flat bed, no shoal and no
+    // invented cliff.
+    bedE=lerp(bedE,bottomView,step(0,dot(bedE-viewPos,upWind.xyz)));
+    bedW=lerp(bedW,bottomView,step(0,dot(bedW-viewPos,upWind.xyz)));
+    bedS=lerp(bedS,bottomView,step(0,dot(bedS-viewPos,upWind.xyz)));
+    bedN=lerp(bedN,bottomView,step(0,dot(bedN-viewPos,upWind.xyz)));
     float3 bedNormal=cross(bedE-bedW,bedS-bedN);
     float bedNormalUp=dot(bedNormal,upWind.xyz);
     float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);
@@ -1703,17 +1762,59 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float3 sheenColor=lightPos;
     // 1. Water body: refracted bottom, absorbed and scattered through the column.
     float3 waterBody=rgb;
+    // The colour an infinitely thick column converges on. It is named once here
+    // because it is also what the water FOGS into: a far sheet that converges on
+    // `deepTint` alone and a near one that converges on `deepTint + inScatter` are
+    // two different seas meeting at one line on screen, and that line is the flat
+    // "chunk over the horizon" that survived every colour change - the sea at the
+    // fog's limit was not the same water as the sea in front of it.
+    float3 seaBody=deepTint.rgb+inScatter;
     // Gated on the capture, exactly as before: without a depth/colour copy there is
     // no column to absorb through, and inventing one would break the promise that an
     // unmatched or uncaptured water pixel keeps the client's own colour.
     if(captureValid>.5) {
         // Refraction strength scales the BLEND, never the colour: with refraction off
         // this has to fall back to the client's own pixels, not to a black bottom.
+        // WATER OPACITY hides the bed from the COLOUR as well as from the blend, and that
+        // is the half that was missing. The alpha floor only decides how much of the scene
+        // the sheet lets past; the body's own colour is built from `refracted`, the captured
+        // seabed attenuated by the column, so at a clear shallow shelf the surface painted
+        // the bed back into the frame at full coverage - the slider moved the alpha and the
+        // picture did not change, which is exactly the report "opacity does nothing".
+        // The captured bottom, unchanged - this is the optics the sheet is for.
         float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;
+        // REFRACTION is how much of that bottom replaces the client's own liquid colour.
         float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));
+        // WATER OPACITY then fades the WHOLE body toward the sea, and this is the line
+        // that finally makes the slider do something you can see. It used to be applied
+        // inside the captured-bottom term above, i.e. to the part REFRACTION scales -
+        // 14% at the shipped setting - so 85% of the surface stayed the client's own pale
+        // liquid colour no matter where the slider was dragged. "Opacity does nothing"
+        // was exactly true: it moved a sixth of the picture. Now the surface converges on
+        // the colour an infinitely thick column converges on, in proportion to the water
+        // really over the pixel (so a shoreline's first yard still shows its sand).
+        // ...and it may never be switched off by a depth reading that is missing,
+        // implausible, or the sheet's own surface. `depthValid` is false both when
+        // the copy has no depth and when the depth it has is not behind this
+        // fragment; treating either as "ankle deep" turned the slider off over
+        // exactly the open water it is for. An unknown bed is not a shallow one,
+        // so the fade falls back to the slider's full authority. A genuine,
+        // measured shallow shelf still keeps its sand.
+        float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);
+        float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);
+        body=lerp(body,seaBody,opacityControl.x*bedFade);
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
-        waterBody=lerp(body,deepTint.rgb+inScatter,saturate(absorption*(.85-.22*fresnel)));
+        waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));
+    } else {
+        // No scene copy at all: there is no bed to refract and no column to absorb through,
+        // and the old fallthrough kept the CLIENT's own liquid colour. Over open ocean that
+        // surface is a pale, nearly transparent sheet - the colour of the sky it sits under,
+        // which is the "still completely transparent water" the screenshots show. Coverage is
+        // already forced to 1 for this case (there is nothing behind to blend), so the only
+        // honest thing for it to show is the body itself: the colour an infinitely thick
+        // column converges on, which is what the covered path below is heading for anyway.
+        waterBody=seaBody;
     }
     // Per-body colour authoring multiplies rather than replaces, so the zone's own
     // painted water survives tinted instead of being overwritten: 0x808080 neutral.
@@ -1832,6 +1933,30 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // Riding the native alpha alone left three quarters of the live scene blended
     // through a shallow sheet at grazing angles, mirror or no mirror.
     surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));
+    // The authored floor. Applied after the optical terms and before the wrong-side
+    // fade below, so a far sheet still dissolves at the silhouette instead of being
+    // held opaque by the floor: the floor says how much sea a pixel is, the fade says
+    // that this fragment is not one.
+    //
+    // A floor is the wrong answer where there is nothing BEHIND the sheet. The capture
+    // writes no geometry over open water - the depth is the cleared far value, which is
+    // already `openOcean` above - so the only thing a partial alpha can reveal there is
+    // the clear colour the copy was never asked to replace. At 85% that is 15% of empty
+    // sky blended into every open-sea pixel: a sheet of glass over the void off
+    // Stormwind's southern barrier and Booty Bay's mouth, reported as "still transparent
+    // where the seabed has run out". Coverage is complete there, because the sea is the
+    // only thing in the column and there is no refraction it owes anyone. Under the
+    // surface the rule is the opposite - `behindZ` is the sky through Snell's window, and
+    // forcing coverage there would paint the window shut - so the term is above-water only.
+    // A frame whose scene copy never landed has no picture behind the surface at all:
+    // `captureValid` is 0, the "behind" a partial alpha would blend is whatever the
+    // client left in the target, and over water that is the clear colour. Nothing
+    // captured is not something to see through, so the sheet covers in full - the same
+    // reasoning as open water, taken to its limit. This is the safety net behind the
+    // report "the whole sea is still a sheet of glass out there": without it, a missing
+    // copy silently turned every water pixel into baseAlpha over an empty background.
+    float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);
+    surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
     // silhouette itself turning away, not a second sheet behind the first.
@@ -1842,7 +1967,27 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // fallback used to supply). Under water the sheet converges on the body's
     // own asymptote instead, which is also what the non-liquid pixels around it
     // converge on, so the plane and its gaps meet at one colour at range.
-    float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);
+    // A sea's horizon is not the sky. The light reaching the eye from a distant water
+    // pixel has crossed the body, and the body's own colour is what makes the far sea read
+    // as a surface instead of a hole in the world: the air fog alone painted the open sea
+    // the exact colour of the sky it fades into, which is the "nothingness in the distance"
+    // report. The tint is weighted by the column's own saturation, so a shallow shore
+    // (where absorption is small) still fades exactly as it did, and only water that the
+    // body has really swallowed takes the deep colour. Under the surface the medium is the
+    // body, so that branch keeps the medium's own asymptote unchanged.
+    // A fogged sea must not become the fog. At 320 yards the air's own haze is close to
+    // opaque, so a target that is mostly `fogColor` erases the water into the sky colour
+    // and the far sea reads as a hole - which is what survives every coverage fix. The
+    // share therefore rises with view distance: near water keeps the air's colour (the
+    // horizon still meets the sky), and past a few hundred yards the sheet converges on
+    // the body instead, so distance deepens it rather than deleting it.
+    float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);
+    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);
+    // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
+    // body the near sheet converges on, so the fog distance stops being a visible
+    // edge in the middle of one continuous plane. The remaining air share keeps the
+    // horizon from becoming a hard line against the sky.
+    float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);
     result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;
@@ -1888,6 +2033,10 @@ void ReloadTuning(){
     flowRotation=std::clamp(ReadTuning(L"FlowRotationPercent",32),0,100)*.01f;
     refractionStrength=std::clamp(ReadTuning(L"RefractionPercent",14),0,100)*.01f;
     absorptionStrength=std::clamp(ReadTuning(L"DepthAbsorptionPercent",38),0,100)*.01f;
+    // Not "clarity": clarity is how far light reaches THROUGH the water and is
+    // a property of the body. This is how much of the scene the surface is
+    // allowed to leave showing, which is a property of the sheet.
+    opacityPercent=float(std::clamp(ReadTuning(L"OpacityPercent",85),0,100));
     depthFogStrength=std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)*.01f;
     shoreFoamStrength=std::clamp(ReadTuning(L"ShoreFoamPercent",28),0,60)*.01f;
     shoreFoamWidth=std::clamp(ReadTuning(L"ShoreFoamWidthPercent",120),25,800)*.01f;
@@ -1933,7 +2082,7 @@ void ReloadTuning(){
         // unchanged, so an existing log still reads the same way.
         std::ostringstream row;
         row<<"tuning enabled="<<effectEnabled<<" master="<<active<<" quality="<<waterQuality
-            <<'('<<renderer::water::QualityName(waterQuality)<<')'<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
+            <<'('<<renderer::water::QualityName(waterQuality)<<')'<<" ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" opacity="<<opacityPercent<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" waves="<<waveScalePercent<<','<<waveSofteningPercent<<" debug="<<waterDebugMode<<'\n';
         static std::string lastRow;
         if(lastRow!=row.str()){lastRow=row.str();std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<lastRow;}
     }
@@ -2041,13 +2190,27 @@ void AdvanceSea(float dt) {
         windStrengthPercent*.01f,frame.wind.DrivesWaves(),frame.wind.strength};
     const auto sea=seaFilter.Observe(tuning,seaWeather,dt,weatherEaseSeconds);
     seaAgitation=sea.agitation;seaMotion=sea.motion;seaShear=sea.shear;seaWind=sea.wind;
-    // Prefer the main camera; waves-only/no-depth frames can use the most
-    // recent accepted draw anchor. It chooses only the turn pivot, never
-    // the per-draw phase (reflection draws retain their own camera below).
+    // Prefer the main camera; waves-only/no-depth frames can use a draw anchor from
+    // THIS place. It chooses only the turn pivot, never the per-draw phase (reflection
+    // draws retain their own camera below).
+    //
+    // The anchor must be fresh, not merely valid. A zone change or a teleport leaves the
+    // previous zone's anchor behind - a loading screen draws nothing, and the first
+    // frames of the new zone capture no camera - so "the most recent accepted draw
+    // anchor" is a point thousands of yards away, in another zone, from before the
+    // teleport. Every heading or WAVE SIZE edit since then is compensated about the
+    // pivot, and compensating about a point in another zone shifts the field's phase by
+    // the distance between the two places: the crests cross the surface at many times
+    // the sea's own speed and then slow down as the heading finishes easing. With no
+    // fresh pivot the lattice simply holds where it was for those frames, which is the
+    // correct behaviour - an unknown camera cannot re-anchor a sea, and the travel
+    // integration below (which moves the field at the sea's own speed) is unaffected.
+    const bool anchorFresh=LastWaveAnchorFresh();
+    const bool pivotValid=frame.cameraValid||anchorFresh;
     const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];
     const float pivotY=frame.cameraValid?frame.cameraPosition.y:lastWaveAnchor.camera[1];
     waveMotion.Advance(dt,flowSpeed*seaMotion,std::clamp(flowRotation*(1.f+seaShear),0.f,1.f),
-        waveScalePercent,frame.wind,pivotX,pivotY,frame.cameraValid||lastWaveAnchor.valid,wavesEnabled);
+        waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);
 }
 void Present() {
     if(!enabled)return;
@@ -2069,7 +2232,8 @@ void Present() {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<"water frame candidates="<<frameCandidates<<" replaced="<<frameMatches
             <<" active="<<active<<" enabled="<<effectEnabled<<" sceneDraws="<<frameSceneMatches
-            <<" liquidLayoutsIgnored="<<frameNearMisses<<" shaderFailure="<<shaderCreationFailed
+            <<" liquidLayoutsIgnored="<<frameNearMisses<<" blendOverridden="<<frameBlendOverrides
+            <<" shaderFailure="<<shaderCreationFailed
             <<" sea="<<seaAgitation<<","<<seaMotion<<","<<seaShear<<" weather="<<seaWeather.kind
             <<','<<seaWeather.strength
             <<" underwater="<<submersionTracker.yards<<","<<submersionTracker.ramp
@@ -2091,7 +2255,7 @@ void Present() {
             <<" vertexZ="<<uwLastVertexZ<<" detNeg="<<uwPlaneDetNeg
             <<" lane="<<uwLastLane<<" published="<<uwPublished
             <<" mediumValid="<<(underwaterFrame.medium.valid?1:0)<<'\n';
-    frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=0;
+    frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=frameBlendOverrides=0;
     uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
@@ -2107,6 +2271,7 @@ inline void Reset(IDirect3DDevice9* d) {
     // Wind, sea state and accumulated phases survive GPU loss. They are CPU
     // state, not device resources; forgetting them would pop every crest.
     lastWaveAnchor.valid=false;
+    lastWaveAnchorSeconds=-1.0;
     localLightConstantCache.valid=false;
     // The hook is invoked for the active device, including replacement
     // devices whose pointer differs from the cached shader owner. These
@@ -2115,6 +2280,7 @@ inline void Reset(IDirect3DDevice9* d) {
     cachedReplacementVS.Reset();
     cachedShaderDevice = nullptr;
     shaderCreationFailed=false;
+    shaderFailureRetryAt=0;
 }
 void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0) noexcept {
     if(!external&&(!enabled||!showStatus))return;
@@ -2469,8 +2635,8 @@ struct Scope {
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
     // Save each touched constant span as one block. Pixel c180..c218 includes
-    // local lights, the untouched c197..c199 gap, and all water controls, so
-    // setup and restoration each cross the D3D9 driver only once.
+    // local lights, the c197/c198 gap, the WATER OPACITY floor at c199, and all
+    // water controls, so setup and restoration each cross the D3D9 driver once.
     float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
     bool pixelConstantsSaved=false,vertexFogFallback=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
@@ -2479,6 +2645,11 @@ struct Scope {
     ComPtr<IDirect3DSurface9> oldDepthRT;bool depthBound=false;
     D3DVIEWPORT9 oldViewport{};
     DWORD oldColorWrite[2]{};
+    // The four states the replacement's coverage depends on. Saved outside a
+    // state block (the legacy path), restored in Restore(); with a block the
+    // block's own Capture/Apply owns them.
+    DWORD oldBlend[5]{};
+    bool blendStateSaved=false;
     bool targetState=false;
     // True while the shared D3DSBT_ALL block holds this scope's original
     // pixel/vertex shader, texture and sampler state (everything the block
@@ -2558,6 +2729,25 @@ struct Scope {
         if(reported.insert(line).second&&!logPath.empty())
             std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
     }
+    // A liquid draw whose native blend cannot show coverage at all. Reported once
+    // per distinct combination: this is the state that decided whether any alpha
+    // the water stage writes could ever be seen, so a log that names it settles
+    // "the slider does nothing to the water I can see through" without a capture.
+    static void ReportBlendOverride(DWORD enable,DWORD src,DWORD dst,DWORD op) {
+        ++frameBlendOverrides;
+        static std::unordered_set<unsigned long long> reported;
+        const unsigned long long key=(static_cast<unsigned long long>(enable)<<48)|
+            (static_cast<unsigned long long>(src)<<32)|
+            (static_cast<unsigned long long>(dst)<<16)|static_cast<unsigned long long>(op);
+        if(reported.size()>=8||!reported.insert(key).second)return;
+        char line[224];
+        std::snprintf(line,sizeof(line),
+            "liquid draw composited with blend enable=%lu src=%lu dst=%lu op=%lu;"
+            " the water stage forces an alpha blend for this draw so coverage means something",
+            static_cast<unsigned long>(enable),static_cast<unsigned long>(src),
+            static_cast<unsigned long>(dst),static_cast<unsigned long>(op));
+        if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
+    }
     static void ReportFogFallback(const renderer::water::Observation& observation,const float* c4) {
         static std::unordered_set<std::string> reported;
         char line[288];
@@ -2575,9 +2765,12 @@ struct Scope {
     explicit Scope(IDirect3DDevice9* d,bool skip=false,
                    const renderer::water::Observation* observed=nullptr) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
-        // A shader-creation failure is permanent until device reset; skip
-        // the Observe + constant reads + all CPU math for every draw.
-        if(shaderCreationFailed)return;
+        // A shader-creation failure skips the Observe + constant reads + all CPU
+        // math for every draw until its cooldown elapses - not for the rest of the
+        // session. A device that refused a blob once (a cold JIT, a Reset in flight)
+        // is asked again instead of leaving native water until something re-creates
+        // the device, which a player experiences as "it only works after a reload".
+        if(shaderCreationFailed&&GetTickCount64()<shaderFailureRetryAt)return;
         try {
             const auto observation=observed?*observed:renderer::water::Observe(d);
             if(!observation.liquid) {
@@ -2656,6 +2849,12 @@ struct Scope {
             // above); it now carries DEPTH FOG - the second leg of the bed's path,
             // 1 with the toggle off, which makes the column below bit-identical.
             controls[19]=depthFogEnabled?depthFogStrength:1.f;
+            // c199 (pixelConstants index 19) is inside the block this draw uploads
+            // and is not declared by the client's own stage; our pixel stage reads
+            // it as the opacity floor. The other three lanes are cleared so a
+            // leftover from the saved client block can never leak into them.
+            pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);
+            pixelConstants[19][1]=pixelConstants[19][2]=pixelConstants[19][3]=0.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops
@@ -2802,7 +3001,10 @@ struct Scope {
                 anchor.up[1]=viewValid?waveFrame.viewRaw.m[2][1]:0.f;
                 anchor.up[2]=viewValid?waveFrame.viewRaw.m[2][2]:1.f;
             }
-            if(anchor.valid)lastWaveAnchor=anchor;
+            if(anchor.valid){
+                lastWaveAnchor=anchor;
+                lastWaveAnchorSeconds=renderer::PerformanceSeconds();
+            }
             // Direction, speed, shear and their phases were integrated once at
             // Present. Both shader stages and every draw share that field.
             const auto wave=waveMotion.Build(anchor.camera[0],anchor.camera[1],anchor.valid,wavesEnabled);
@@ -2965,7 +3167,13 @@ struct Scope {
                 cachedReplacementPS.Reset();cachedReplacementVS.Reset();
                 cachedShaderDevice=d;shaderCreationFailed=false;
             }
-            if(shaderCreationFailed)return;
+            if(shaderCreationFailed) {
+                if(GetTickCount64() < shaderFailureRetryAt) return;
+                // The cooldown has elapsed: the blob and the device may both be fine
+                // now, so make one more attempt rather than keeping native water for
+                // the rest of the session.
+                shaderCreationFailed=false;
+            }
             if(!cachedReplacementPS || !cachedReplacementVS) {
                 // The bytecode is published by the startup compile thread;
                 // take the same lock the publish uses. Empty means still
@@ -3004,11 +3212,13 @@ struct Scope {
                 }
                 if(FAILED(hr)) {
                     shaderCreationFailed=true;
+                    shaderFailureRetryAt=GetTickCount64()+renderer::kOptionalPassRetryMs;
                     D3DCAPS9 caps{};d->GetDeviceCaps(&caps);
                     std::ofstream(std::filesystem::path(logPath),std::ios::app)
                         <<"water shader creation failed hr="<<std::hex<<hr<<std::dec
                         <<" PS30 slots="<<caps.MaxPixelShader30InstructionSlots
-                        <<"; keeping native water until device reset\n";
+                        <<"; keeping native water and retrying in "
+                        <<renderer::kOptionalPassRetryMs<<" ms\n";
                     return;
                 }
             }
@@ -3050,6 +3260,39 @@ struct Scope {
                     }
                 }
             }
+            // COVERAGE IS ONLY MEANINGFUL UNDER AN ALPHA BLEND. The whole contract
+            // of the replacement pixel stage is "this fragment is this much sea":
+            // `result_.color.a` is the column's extinction, and the fixed-function
+            // blend is what lets the world below show through by exactly (1-a).
+            // The native liquid material composites however the client authored it,
+            // and a client that draws its ocean additively - or with ONE as the
+            // source factor - makes alpha a no-op: the seabed stays at full strength
+            // through the sheet at any coverage we write, while changing the body
+            // colour still visibly replaces the client's own liquid texture. That is
+            // the report "opacity changes the old texture but not how much water I
+            // can see through", and no amount of tuning inside the shader could have
+            // reached it. The block captured above restores these with everything
+            // else; on a device without one they are saved here and written back in
+            // Restore(). Only the states that decide coverage are touched.
+            {
+                blendStateSaved=
+                    SUCCEEDED(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&oldBlend[0]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_SRCBLEND,&oldBlend[1]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_DESTBLEND,&oldBlend[2]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
+                if(blendStateSaved&&
+                   (oldBlend[0]!=TRUE||oldBlend[1]!=D3DBLEND_SRCALPHA||
+                    oldBlend[2]!=D3DBLEND_INVSRCALPHA||oldBlend[3]!=D3DBLENDOP_ADD))
+                    ReportBlendOverride(oldBlend[0],oldBlend[1],oldBlend[2],oldBlend[3]);
+                const HRESULT blendHr=
+                    d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
+                if(FAILED(blendHr)){Restore();ReportFailure("water blend state",blendHr);return;}
+            }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
             BindTargets(d);
@@ -3088,8 +3331,9 @@ struct Scope {
                     cache.cameraValid=frame.cameraValid;cache.viewValid=frame.viewRawValid;
                     cache.localLights=qualityPlan.localLights;cache.valid=true;
                 }
-                // Preserve c197..c199 from the saved block, splice in the cached
-                // lights and water controls, then upload c180..c218 in one call.
+                // Preserve c197/c198 and the c199 opacity floor from the block
+                // built above, splice in the cached lights and water controls,
+                // then upload c180..c218 in one call.
                 std::memcpy(pixelConstants,cache.values,sizeof(cache.values));
                 if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],39))){Restore();return;}
             }
@@ -3125,11 +3369,20 @@ struct Scope {
                         device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);
                 }
             }
+            if(blendStateSaved) {
+                device->SetRenderState(D3DRS_ALPHABLENDENABLE,oldBlend[0]);
+                device->SetRenderState(D3DRS_SRCBLEND,oldBlend[1]);
+                device->SetRenderState(D3DRS_DESTBLEND,oldBlend[2]);
+                device->SetRenderState(D3DRS_BLENDOP,oldBlend[3]);
+                // The pass turns separate alpha factors off so SRCALPHA/INVSRCALPHA
+                // govern the whole output; the native draw may have had them on.
+                device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
+            }
         }
         // c4 is outside the block's documented water spans. Restore it after either
         // state-block or manual restoration, including every early-return path.
         if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
-        device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=false;
+        device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=blendStateSaved=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

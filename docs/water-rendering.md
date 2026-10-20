@@ -1370,7 +1370,8 @@ already travelling:
 | `c218.z` (PS) | the shore back-flow run-up in yards, 0 with the feature off (`controls[74]`) |
 
 `controls` is 75 floats of the 156 the saved `c180..c218` span holds, so the save/restore window,
-the single `SetPixelShaderConstantF(180, …, 39)` upload and the untouched `c197..c199` gap are all
+the single `SetPixelShaderConstantF(180, …, 39)` upload, the untouched `c197/c198` gap and the
+WATER OPACITY floor on `c199` are all
 unchanged; `c204.w` and `c218.w` are still spare.
 
 The slot count is the one estimate in this round that was wrong, and it is worth recording exactly
@@ -1449,7 +1450,8 @@ was already available or exactly zero:
   normalization and the exponent-64 specular lobe. Fractional edge visibility,
   partial SSR hits and every in-radius light follow the previous arithmetic.
 - `watereffect::Scope` now saves native pixel constants `c180..c218`, preserves
-  the untouched `c197..c199` gap, splices in local lights/water controls, uploads
+  the untouched `c197/c198` gap, splices in local lights/water controls plus the
+opacity floor on `c199`, uploads
   once and restores once. Native vertex inputs `c5..c35` are likewise read in one
   enclosing block. This reduces constant-state driver crossings from twelve to
   seven per matched tile while retaining complete restoration. The selected local
@@ -2485,6 +2487,383 @@ the reporting player's machine. In-game confirmation still matters.
   a successful rendering test.
 - `tools/Test-Atmosphere.cmd`: includes equal-depth water/terrain boundary
   comparison at MaxZ=.94, in addition to the existing water/fog regressions.
+
+## Round 5: WATER OPACITY, a floor under coverage (2026-10-19)
+
+### What was being seen
+
+At Stormwind Harbor the modern surface was a sheet of glass: the bed, the rocks and the
+shoreline under it read through the sea almost undimmed, while the client's own water next
+to it hid them. F7 showed every water effect enabled, so this was not a missing pass.
+
+Coverage in the pixel stage was built from exactly two terms: the client's painted liquid
+alpha (`baseAlpha=color.a*base.a`) and the column's own extinction (`depthAlpha=absorption`,
+the Beer-Lambert term the body's `ClarityPercent` feeds). Both are small in clear, shallow
+water, and they multiply: `surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha)`. There
+was no term anywhere - not in `[Water]`, not in F7, not in the register map - that said how
+much of the scene the sheet is allowed to leave showing. The renderer had a knob for how far
+light reaches *through* the body and none for how much the *surface* covers.
+
+### Why clarity was not the answer
+
+`WATER CLARITY` drives `bodyStyle.x = .088*(100/clarity*zoneClarity)`, which is extinction
+per yard. Raising it darkens the bed (through the depth-fog and refracted-bed paths) and only
+weakly raises the surface's own coverage, because `absorption` is `1-exp(-sigma*depth)` and at
+a shallow shore the depth is a yard or two. Tuning clarity to make the sheet opaque therefore
+also makes every zone soup, which is the wrong trade and the wrong knob. The surface needed
+its own lane.
+
+### What changed
+
+- **One lane, c199.** `float4 opacityControl:register(c199)` - the first free register in the
+  block the water draw already writes. `pixelConstants[19][0]` carries the floor, the other
+  three lanes are cleared, and it is built *before* the cached-light splice because
+  `localLightConstantCache.values` is 68 floats and stops at c196. No new register was added,
+  no upload grew: `c180..c218` is still one `SetPixelShaderConstantF`, and the span was
+  already saved and restored by `Scope`, so c199 restores with everything else.
+- **A floor, not a second formula.** `surfaceAlpha=max(surfaceAlpha,opacityControl.x)`, placed
+  after the reflection and from-below optical maxima and before the wrong-side fade. After the
+  optics, so it can only add cover where the optics already agreed and deep water still
+  converges on the deep tint. Before the fade, so a far sheet still dissolves at its
+  silhouette instead of being pinned opaque by the floor - the floor says how much sea a pixel
+  is, the fade says that this fragment is not one.
+- **Its own key.** `[Water] OpacityPercent=85`, read exactly like every other water number
+  (`ReadTuning`), so `LocationGraphics.ini` can override it per map/zone/area. Written into the
+  mirror `tools/WaterPreview.cpp` at the same position in the same order, with the shipped
+  default, so `--probe` reports the alpha the DLL draws.
+- **F7.** `WATER OPACITY`, 0..100 step 5, default 85, beside `WATER CLARITY` and bounded by the
+  same clamp the renderer applies.
+
+0 restores the previous look exactly; that is the escape hatch if a body wants the old
+see-through sheet. 85 is roughly the opacity of the client's own water in the report.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the whole chain: the register declaration, the floor's
+position between the underwater maximum and the wrong-side fade, the fact that depth
+absorption is untouched (so clarity keeps its meaning and the two knobs cannot drift into each
+other), the c199 upload ahead of the cached-light splice, the ini default, and the exact F7
+line and bounds.
+
+## Round 6: the sea stops racing after a teleport (2026-10-19)
+
+### What was being seen
+
+Sometimes, right after a teleport, the water moved at several times its normal speed for a
+few seconds and then settled. Nothing about the wind or the sea state had changed more than
+a teleport changes it.
+
+### The cause: a pivot from the wrong place
+
+`WaveMotion::Advance` integrates every phase and compensates each *heading* and *wave size*
+edit about a pivot, so that a sea whose direction is easing does not sweep the crests past a
+player who is standing still: a point `d` away from the pivot shifts by `dot(d, Δlattice)`.
+That is exact at the pivot and nowhere else, which is the point - the pivot is supposed to
+be the camera the player is looking through.
+
+The pivot was `frame.cameraValid ? frame.cameraPosition : lastWaveAnchor.camera`. The
+fallback exists for waves-only and no-depth frames, but it is not "the last camera": it is
+the last *draw* anchor, and a teleport is exactly the event that leaves one behind. A loading
+screen draws nothing, and the first frames of the new zone capture no camera yet, so the
+anchor still described the previous zone - hundreds or thousands of yards away. Every
+heading/size edit in those frames was therefore compensated about a point in another zone,
+and the whole field shifted by the distance between them. The heading eases over ~12 s, so
+the result was a fast sweep that decayed as the ease finished: the reported "extreme speeds,
+then back to normal".
+
+### The fix
+
+The anchor may stand in for the camera only while it is **fresh** (`LastWaveAnchorFresh`,
+250 ms, on the same clock the sea integrates on). With no fresh pivot the lattice simply
+holds where it was for those frames: an unknown camera cannot re-anchor a sea. The travel
+integration is untouched, so crests keep moving at the sea's own speed throughout. The same
+rule now gates the anchor the full-screen medium builds its field from (`UnderwaterFieldAt`),
+so the caustic net cannot slide across the bed by the teleport distance either.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the freshness constant, the `pivotValid` expression that
+`Advance` is called with, the medium's use of the same rule, and the `Reset` that clears the
+stamp. `tools/UnderwaterRegression.cpp`'s "one field, built at composite" pin now also
+requires the fresh-anchor gate.
+
+## Round 7: open water is not a window (2026-10-19)
+
+### What was being seen
+
+WATER OPACITY at its shipped 85% fixed the shallow bed reading straight up through the
+sea, but two views still showed the surface as a sheet of glass: the open water past
+Stormwind Harbor's southern barrier and the mouth of Booty Bay. Neither has any terrain
+under it - the depth capture there holds nothing at all - and the sheet still let the
+empty sky behind it through.
+
+### Why the floor could not cover it
+
+Every optical term in the stage is built from the captured column. Over open water there
+is no captured column: `behindZ` is the cleared far value, `captureValid` is 0 because no
+draw carried a bed, so `depthAlpha=captureValid*(1-transmittance)` is 0 and coverage came
+out as `baseAlpha` - the client's painted liquid alpha, which is a small number. The
+authored floor then raised that to exactly `opacityControl.x`, and a floor of 85% leaves
+15% of whatever is behind the surface showing. Behind an open-ocean pixel there is only
+the clear colour the scene copy was never asked to replace, so 15% of emptiness blended
+into every one of those pixels. A floor is the wrong instrument where there is nothing to
+be translucent *to*.
+
+### The fix
+
+The stage already computes `openOcean` (`step(99999,behindZ)`, the capture's own statement
+that no geometry lies behind this pixel). Coverage is now complete there:
+
+```hlsl
+float openOceanCoverage=openOcean*(1-underwater);
+surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
+```
+
+- Above water the sea is the only thing in the column, so there is no refraction it owes:
+  it covers fully and the body's own deep colour, in-scatter and sky reflection are what
+  the pixel shows. The horizon still fades into the medium through the fog lerp that
+  follows, so the plane meets the sky at the same colour instead of at a hard edge.
+- Under the surface the same `behindZ` is the sky through Snell's window, and forcing
+  coverage there would paint the window shut, so the term is multiplied by `(1-underwater)`.
+  That branch already owns its own coverage rule (`totalInternal`/`transmittance`).
+- The rule is above the wrong-side fade, like the floor, so a far sheet still dissolves at
+  its silhouette rather than being pinned opaque at the edge of a wave.
+- `tools/WaterPreview.cpp` mirrors it (`Mix(.85f,1.f,openOcean)`), because the preview has
+  no underwater camera and its branch is documented as exactly zero.
+
+The knob keeps its meaning: WATER OPACITY still says how much cover the surface may leave
+out where there IS a bed to see, and raising it to 100 hides even that.
+
+Two more things made the same view read as emptiness rather than as sea.
+
+**The horizon took the sky's colour.** The sheet fades into `fogTarget`, and above water
+that was the air's fog colour exactly - so the distant sea converged on the very colour of
+the sky it met, which is the "nothingness in the distance". Light reaching the eye from a
+distant water pixel has crossed the body, and the body's colour is what makes a sea read as
+a surface. The target now takes the deep colour in proportion to the column's own
+saturation (`seaShare = saturate(absorption) * .55` above water), so water that the body has
+really swallowed keeps a sea colour at range, while a shallow shore - where absorption is
+small - still fades exactly as it did. Under the surface the medium's own asymptote is
+unchanged.
+
+The absorption term alone was not enough in fog: at 320 yards the air's haze is close to
+opaque, so a target that is mostly `fogColor` erased the water into the sky colour whatever
+its absorption. `seaShare` therefore also rises with view distance
+(`max(..., smoothstep(40, 320, |viewPos|) * .9)` above water): near water still meets the
+sky at the horizon, and past a few hundred yards the sheet converges on the body, so
+distance deepens the sea instead of deleting it.
+
+A second case has no picture behind the sheet at all: a frame whose scene copy never
+landed (`captureValid` 0). There `depthAlpha` is zero by construction and the "behind" a
+partial alpha would blend is whatever the client left in the target - over water, the
+clear colour. Nothing captured is not something to see through, so that case joins the
+open-ocean branch (`max(openOcean*(1-underwater), 1-captureValid)`). It is a safety net,
+not the normal path: with a capture present nothing about it changes.
+
+### Verification
+
+`tools/WaterRegression.cpp` pins the term, its `(1-underwater)` gate, its position between
+the optical terms and the wrong-side fade, the captureless safety net, the tinted fog target
+(and its preview mirror).
+
+## Round 8: the medium does not depend on which way the camera points (2026-10-19)
+
+### What was being seen
+
+Underwater, the medium (fog, caustics, beams, grade) disappeared at some camera
+positions - most reliably when the view turned up towards the surface - and came back
+when the camera turned back. The water *surface* was still shaded; only the medium was
+missing.
+
+### The cause
+
+`Underwater::Render` refused any frame whose `FrameContext::cameraValid` was false. That
+flag is published by the frame's camera capture, which needs a draw carrying the eye:
+a frame that draws only sky, only a wall, or only UI publishes no fresh pose, so
+`cameraValid` stays false while the retained inverse view, projection unpack and camera
+position are still the last accepted ones (a frame or two old). Looking up from under the
+surface is exactly such a frame, so turning the head switched the whole medium off and a
+terrain draw switched it back on. The state itself was never wrong - the tracker kept the
+submersion the entire time, including ten-second stretches with no liquid draw at all
+(`UnderwaterRegression`'s "diver looking at the seabed" case) - so the camera pose gate
+was the only thing dropping the pass.
+
+### The fix
+
+The retained pose is used for a bounded hold, exactly like the local lights:
+
+```cpp
+const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&
+    frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+```
+
+- Inside `kCameraEyeHoldMs` (1 s) the pass runs on the rows the frame still carries. The
+  reconstruction is off by however far the camera moved since the last eye-carrying draw,
+  which for one hold is the swimmer's own movement - and the tracker refuses to advance
+  the eye on those frames, so nothing drifts.
+- Past the hold the pass refuses as before: a genuinely stale camera is a wrong world
+  position, and the `NoteIdle(7)` line now says which of the two it was.
+
+### The rest of the camera dependence
+
+Holding the pose is the fix for the transient; the pass also reads four *bits* that are
+left over from the camera capture and must be this frame's before the hold applies:
+`projUnpack` (is the depth this frame's projection), `depthMaxZ`, `viewRawValid` (the raw
+view is this frame's) and `cameraValid`. Those are checked before the hold, so a retained
+pose is only ever used with a projection that goes with it - the pair is republished
+together or not at all. The medium itself (clarity, tint, deep colour) is rebuilt from the
+tuning and the environment every frame whether or not a liquid draw ran, so no part of the
+*fog* is carried over from a draw or a previous camera.
+
+### Verification
+
+`tools/UnderwaterRegression.cpp` pins the hold (both the expression and the 1 s bound)
+next to the existing NaN/projection refusals, so the pass cannot go back to dropping the
+medium by camera angle.
+
+## Round 9: WATER OPACITY owns the colour, not only the blend (2026-10-19)
+
+### What was being seen
+
+The slider moved, the sea did not. Coverage was already floor-ed at 85% and had made
+the shallows better, but open water still read as a sheet of glass, and dragging the
+slider between 85 and 100 changed almost nothing.
+
+### Two channels, one of them unwired
+
+There are two independent ways the scene under the water reaches the screen.
+
+1. **The blend.** `surfaceAlpha` decides how much of the captured scene shows beside the
+   water's own colour. This is what the floor from round 5 controls.
+2. **The body's colour.** `bottom = refracted * transmittance + inScatter + deep * absorption`
+   is the *captured seabed*, already inside the water's own output. That is then mixed in
+   at `depthValid * RefractionPercent`, its own authored control, and the result converges
+   on the deep colour by `absorption`.
+
+The floor only ever touched (1). With refraction at its shipped 14% the bed contributed
+little, but at a high REFRACTION setting - or wherever the capture is missing outright -
+the body was the whole picture, and the slider could not touch it. Worse, without a
+capture the stage fell straight through to the client's own liquid colour, which over open
+ocean is a pale, nearly invisible sheet: the colour of the sky it sits under.
+
+### The fix
+
+- `body = lerp(body, seaBody, opacityControl.x * saturate(effectiveDepth * .5))`, **after**
+  `body` has been composed from the client's colour and the captured bottom. This is the
+  line that failed the first time round: the fade was applied *inside* the captured-bottom
+  term, which REFRACTION scales - 14% at the shipped setting - so 85% of the surface stayed
+  the client's own pale liquid colour at every slider position. "Opacity does nothing" was
+  literally true: it moved a sixth of the picture. Now 100 is the sea body and 0 restores
+  the physics exactly, and the depth gate keeps a shoreline honest (the first yard of a
+  sheet cannot hide a bed it is not over).
+- A frame with no scene copy at all now shows `deep + inScatter` rather than the client's
+  liquid. Coverage is already forced to 1 there (round 7), so the surface is a body with
+  nothing to blend - and the body is what it should look like.
+- The CPU preview carries the same `hideBed` at the shipped 85%.
+
+`tools/WaterDeviceRegression.cpp`'s sRGB/refraction block now sets `opacityPercent = 0`
+while it asserts that a copied 128 gray stays 128: with the new term in place, asserting
+the raw refraction round trip *at the shipped opacity* would be asserting that the slider
+does nothing.
+
+## Round 10: coverage needs a blend, and the bed reading cannot veto the slider (2026-10-19)
+
+**The alpha was never reaching the screen.** The replacement pixel stage's whole
+contract is "this fragment is this much sea": `result_.color.a` is the column's
+own extinction and the fixed-function blend is what lets the world below show
+through by exactly `1 - a`. The pass never touched the blend state, so the draw
+composited exactly as the native liquid material was authored to - and an ocean
+composited additively (or with `ONE` as the source factor) makes alpha a no-op.
+On such a client every coverage change we ever shipped was invisible: the body
+colour still replaced the client's own liquid texture (that is what "opacity
+hides the old water"), while the seabed stayed at full strength through the
+sheet at any alpha, which is "it does not regulate real underwater
+transparency". No amount of tuning inside the shader could have reached it.
+
+- The pass now sets `ALPHABLENDENABLE=TRUE`, `SRCALPHA`/`INVSRCALPHA`,
+  `BLENDOP_ADD` and `SEPARATEALPHABLENDENABLE=FALSE` for the replaced draw only.
+  The `D3DSBT_ALL` block the pass already captures restores all of it, and the
+  no-block path saves and writes the four values back itself.
+- A draw whose native blend is not already that is logged once per distinct
+  combination (`liquid draw composited with blend enable=...`), and the periodic
+  line carries `blendOverridden=N`. That sentence is the evidence, without a
+  capture, that this was the client's compositing and not our coverage.
+- `WaterRegression` pins the four writes, the restore, and the log line.
+
+**A missing depth reading used to switch the slider off.** `hideBed` was gated
+by `saturate(effectiveDepth * .5)`, and `effectiveDepth` is 0 whenever the
+captured depth is missing, is not behind the fragment, or is the sheet's own
+surface (`behindZ == viewPos.z`, which is what a copy that already contains the
+water looks like). Treating that as "ankle deep" meant the fade weight was zero
+over exactly the open water the slider exists for: the surface kept the
+captured bed at full strength and the only visible effect left was the alpha.
+
+- `bedTrusted = depthValid * step(viewPos.z + .25, behindZ)` and
+  `bedFade = lerp(1.0, saturate(effectiveDepth * .5), bedTrusted)`: an unknown
+  or implausible bed is **not** a shallow one, so opacity keeps full authority.
+  A genuinely measured shallow shelf still keeps its sand, which was the point
+  of the gate. The CPU preview mirrors it.
+
+## Round 11: the far sea was a different sea (2026-10-19)
+
+The water fogs into `fogTarget`, and `fogTarget` used to be the **deep tint**,
+while the water's own body is the deep tint **plus in-scatter**. Two different
+colours, then, for the same sea at two distances - and the fog is a curve that
+saturates, so the change between them happened over a short span of screen and
+read as a flat grey slab lying on the horizon with the live water in front of
+it. That is the reported "chunk over the horizon": not a missing draw and not a
+zone, but the distance at which the air takes over being a different colour from
+the water it is taking over from. Raising WATER OPACITY could only darken it,
+because the slab was already the water's asymptote - just the wrong one.
+
+- `seaBody = deepTint.rgb + inScatter` is now named once, above the capture
+  branch, and `fogTarget` lerps toward **it** (`lerp(fogColor, seaBody, seaShare)`)
+  above water. A fully fogged sheet is exactly the body a near sheet converges
+  on, so the fog distance cannot be an edge in the middle of one plane.
+- The distance share rises over `smoothstep(40, 600, |viewPos|)` to `.85`, not
+  `.9` at 320: the ramp is long enough not to be a visible band, and the last
+  15% of air keeps the horizon from becoming a hard line against the sky.
+- The uncaptured branch uses the same `seaBody`, and the CPU preview mirrors all
+  three. `WaterRegression` pins that the fog target is the body and that the old
+  `lerp(fogColor.rgb, deepTint.rgb, seaShare)` spelling is gone.
+
+## Round 12: the foam mask was reading a figure as a shoal (2026-10-20)
+
+Reported after a rollback to `79d2907`, so this predates every round after it:
+**turning FOAM off removes the dark second copy of the figure.** That is the
+first report that named a term instead of a symptom, and it names the mechanism.
+
+`shoal` is the one foam source that is not about depth or waves:
+
+```
+shoal = foamDepthValid * saturate(bedSlope * bodyStyle.w * 2.0 - .3) * saturate(1 - foamDepth*.05)
+```
+
+`bedSlope` comes from four depth taps around the pixel (`bedE/W/S/N`), and those
+taps can land on **anything standing in the water**. Reconstructed from a
+figure's depth a tap is a point ABOVE the surface this fragment belongs to, the
+slope between it and the centre reads as a cliff, and the shoal mask reads a
+cliff as *"the bottom comes up fast"* and lays foam over it.
+
+Foam is not a decal in this stage. `reflectionAmount` is scaled by
+`1 - foamAmount*.85` and `pathEnergy` by `1 - foamAmount`, so that band of
+surface loses **the mirror and the sun road** at once: a figure in the water was
+surrounded by a character-shaped region with no reflection and no glint - a
+dark copy of him lying on the water. It is downstream of opacity, refraction and
+reflection, which is why all three sliders left it alone.
+
+The centre point already had the test that answers this - `foamDepthSigned`, the
+world-up dot of (surface - bed). Each tap now gets the same test before any
+slope is derived from it:
+
+```
+bedE = lerp(bedE, bottomView, step(0, dot(bedE - viewPos, upWind.xyz)))
+```
+
+A tap above the surface is not bed and falls back to the centre point, exactly
+as a tap on the sky already did; four equal points give a flat bed, no shoal and
+no invented cliff. A real shoal is unaffected - its taps are below the water by
+definition.
 
 ## In-game verification / troubleshooting
 

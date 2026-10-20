@@ -1757,10 +1757,11 @@ void TestMirror()
     const std::string atmosphere = ReadAlongside("../src/Effects/DirectionalVolumetricLighting.cpp");
     const std::string clouds = ReadAlongside("../src/Effects/VolumetricClouds.cpp");
     const std::string frameContext = ReadAlongside("../src/Core/FrameContext.h");
+    const std::string weather = ReadAlongside("../WeatherVisuals.h");
     const std::string ini = ReadAlongside("../GraphicsEffects.ini");
     const std::string overlay = ReadAlongside("../src/Environment/OverlayItems.h");
     Require(core.size() > 8192 && pass.size() > 8192 && water.size() > 4096 && composite.size() > 4096
-                && rendererCpp.size() > 4096
+                && rendererCpp.size() > 4096 && weather.size() > 4096
                 && atmosphere.size() > 4096 && clouds.size() > 4096 && frameContext.size() > 1024
                 && ini.size() > 1024 && overlay.size() > 1024,
             "every file the underwater path spans is readable as text");
@@ -1897,13 +1898,27 @@ void TestMirror()
     // of water overhead, where std::max(NaN, 0) is not specified to be 0.
     Require(pass.find("float finiteCheck=dot(colour,colour);") != std::string::npos
                 && pass.find("if(!(finiteCheck<1e30)) return scene;") != std::string::npos
-                && pass.find("if (!frameContext.cameraValid) { NoteIdle(7,") != std::string::npos
+                && pass.find("const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&")
+                    != std::string::npos
+                && pass.find("frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;")
+                    != std::string::npos
+                && pass.find("if (!frameContext.cameraValid && !poseRetained) { NoteIdle(7,")
+                    != std::string::npos
                 && pass.find("const float value = frameContext.inverseView.m[row][axis];") != std::string::npos
                 && pass.find("if (!std::isfinite(value))") != std::string::npos
                 && pass.find("if (!(lengthSquared > 1e-8f))") != std::string::npos
                 && pass.find("const float yardsOverhead = std::isfinite(frameContext.underwaterYards)")
                     != std::string::npos,
             "a NaN cannot reach the frame: the stage falls back to it, and the CPU refuses to upload one");
+    // The medium must not be at the mercy of which way the diver happens to look. A frame
+    // whose draws carried no fresh eye (looking up at the surface, a wall, a menu) keeps the
+    // retained pose for the same short hold the lamps use, instead of dropping the fog,
+    // the caustics, the beams and the grade at some camera angles and not others.
+    Require(pass.find("const bool poseRetained = !frameContext.cameraValid && frameContext.viewRawValid &&")
+                != std::string::npos
+                && pass.find("frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;")
+                != std::string::npos,
+            "an un-recaptured pose sustains the medium for kCameraEyeHoldMs instead of switching it off by camera angle");
     // Dirt: the silt gradient and the hundred-yard patch field are spelled identically on both
     // sides of the mirror, ride the spare warp-register lane, and multiply the zone's clarity
     // rather than replacing it - there is still one clarity and the zone still owns it.
@@ -2038,6 +2053,17 @@ void TestMirror()
                 && composite.find("const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();")
                     != std::string::npos,
             "the compositor publishes the water stage's settled answer, gated on the medium's own switch");
+    // The precipitation stage composites during the client's draw stream, before the composite
+    // that settles this frame's medium, so the same answer is published for it one frame ahead:
+    // rain (and snow/sand) fades out below the surface instead of drawing over a diver.
+    Require(frameContext.find("float compositedUnderwaterRamp = 0.f;") != std::string::npos
+                && composite.find("frameCtx.compositedUnderwaterRamp = (!shaftDebug && enabled && active &&")
+                    != std::string::npos
+                && weather.find("const float aboveWater = 1.f - std::clamp(frame.compositedUnderwaterRamp, 0.f, 1.f);")
+                    != std::string::npos
+                && weather.find("intensity * frame.environment[renderer::Weather] * aboveWater") != std::string::npos
+                && weather.find("lensStrength * aboveWater") != std::string::npos,
+            "the draw-stream precipitation pass fades on the same ramp, published one frame ahead of it");
     {
         const auto publish = composite.find("frameCtx.underwaterRamp =");
         const auto atmosphereCall = composite.find("atmosphereRendered = renderer::DirectionalVolumetricLighting");
@@ -2209,15 +2235,17 @@ void TestMirror()
     // all slid by a frame's worth of swimming, visibly, whenever the camera moved or turned.
     // There must be exactly one field construction, at composite, and the anchor inside it
     // must be the camera it was handed.
-    Require(water.find("const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];")
+    Require(water.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();") != std::string::npos
+                && water.find("const float anchorX=cameraValid?cameraX:lastWaveAnchor.camera[0];")
                 != std::string::npos
-                && water.find("cameraValid||lastWaveAnchor.valid,wavesEnabled);") != std::string::npos
+                && water.find("waveMotion.Build(anchorX,anchorY,anchorValid,wavesEnabled);") != std::string::npos
                 && water.find("field.finePhase[0]=wave.ripplePhase[0]*2.f;") != std::string::npos
                 && water.find("field.finePhase[1]=wave.ripplePhase[1]*2.f;") != std::string::npos
                 && water.find("underwaterFrame.field") == std::string::npos
                 && water.find("const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];")
-                    != std::string::npos,
-            "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed");
+                    != std::string::npos
+                && water.find("const bool pivotValid=frame.cameraValid||anchorFresh;") != std::string::npos,
+            "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed (or a fresh local draw anchor)");
     // World +Z in view space is ROW 2 of a row-vector matrix. That is what AnchorFromModelView
     // documents ("world axis i arrives in view space as row i") and what the renderer's
     // world-space helpers use; PlaneOverCamera leans on the same convention one step

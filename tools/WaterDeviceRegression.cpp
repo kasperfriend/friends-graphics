@@ -378,9 +378,15 @@ int main() try {
         Require(scope.device==d.Get(),"replacement installs without scene/depth capture");
         float c[36];Check(d->GetPixelShaderConstantF(200,c,9));
         Require(c[23]==0&&c[13]<0&&c[19]>0,"missing capture has valid depth unpack constants");
-        float gap[12];Check(d->GetPixelShaderConstantF(197,gap,3));
+        // c197/c198 are the client's and stay untouched; c199 is WATER OPACITY, which the
+        // replacement stage reads, so this frame's upload must have written it - inside the
+        // same saved block, so restore() below still puts the client's value back.
+        float gap[8];Check(d->GetPixelShaderConstantF(197,gap,2));
         Require(memcmp(gap,savedPixelConstants+68,sizeof(gap))==0,
-            "batched upload preserves untouched c197..c199 gap");
+            "batched upload preserves the untouched c197/c198 gap");
+        float opacity[4];Check(d->GetPixelShaderConstantF(199,opacity,1));
+        Require(opacity[0]>=.5f&&opacity[0]<=1.f&&opacity[1]==0.f&&opacity[2]==0.f&&opacity[3]==0.f,
+            "the same upload writes the WATER OPACITY floor on c199");
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
     }
     restored();
@@ -500,6 +506,12 @@ int main() try {
     const float savedRefractionStrength=watereffect::refractionStrength;
     watereffect::wavesEnabled=watereffect::foamEnabled=watereffect::depthEnabled=watereffect::sunGlintEnabled=false;
     watereffect::reflectionsEnabled=false;watereffect::refractionEnabled=true;watereffect::refractionStrength=1;
+    // This block isolates the refraction/gamma round trip. WATER OPACITY is a coverage
+    // control on top of it (100 hides the bed entirely), so it is taken out of the way
+    // here - otherwise "a copied 128 gray stays 128" would be asserting that the slider
+    // does nothing, which is the bug this round exists to remove.
+    const float savedOpacity=watereffect::opacityPercent;
+    watereffect::opacityPercent=0;
     auto encodedScene=texture(128,128,0xff808080),sampledDepth=texture(128,128,0xffe5e5e5);
     watereffect::reflectionScene=encodedScene.Get();watereffect::reflectionDepth=sampledDepth.Get();
     watereffect::reflectionData[0]=1.001f;watereffect::reflectionData[1]=-.1f;
@@ -519,6 +531,7 @@ int main() try {
         Require(outputSrgb==srgb,"sweep: water leaves native output gamma state unchanged");
     }
     Check(d->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE));
+    watereffect::opacityPercent=savedOpacity;
     watereffect::reflectionScene=watereffect::reflectionDepth=nullptr;
     watereffect::wavesEnabled=savedWaves;watereffect::foamEnabled=savedFoam;
     watereffect::depthEnabled=savedDepth;watereffect::sunGlintEnabled=savedGlint;

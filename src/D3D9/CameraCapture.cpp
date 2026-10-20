@@ -295,6 +295,22 @@ namespace renderer
                 frameContext.sunDirectionWorld = sunWorld;
         }
 
+        // This frame's pose comes from a draw that carried BOTH the rotation and
+        // the eye, so nothing about it can be stale: publish that, and let the
+        // sky fallback judge its candidates against this camera from now on.
+        float capturedBasis[3][4]{};
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+                capturedBasis[r][c] = v[r][c];
+            capturedBasis[r][3] = 0.f;
+        }
+        m_skyPose.SetReference(capturedBasis);
+        m_lastEyeSeconds = PerformanceSeconds();
+        frameContext.cameraPoseStale = false;
+        frameContext.cameraEyeAgeMs = 0.f;
+        frameContext.cameraPoseSource = FrameContext::PoseCaptured;
+
         m_valid = true;
         ++m_capturedFrames;
         return true;
@@ -346,77 +362,109 @@ namespace renderer
             fabsf(proj.m[2][3] - 1.0f) > 0.001f || fabsf(proj.m[3][3]) > 0.001f)
             return;
 
-        for (int i = 0; i < 3; ++i)
-        {
-            for (int j = 0; j < 3; ++j)
-            {
-                float dot = 0.0f;
-                for (int k = 0; k < 3; ++k)
-                    dot += view.m[i][k] * view.m[j][k];
-                if (fabsf(dot - (i == j ? 1.0f : 0.0f)) > 0.002f)
-                    return;
-            }
-        }
-
-        // Reject the moon billboard's camera-relative identity D3DTS_VIEW.
-        const bool isIdentityRotation =
-            fabsf(view.m[0][0] - 1.0f) < 1e-3f &&
-            fabsf(view.m[1][1] - 1.0f) < 1e-3f &&
-            fabsf(view.m[2][2] - 1.0f) < 1e-3f;
-        if (isIdentityRotation && view.m[3][2] > 4.0f && view.m[3][2] < 16.0f)
-            return;
-
-        m_fallbackSawSceneDraw = true;
-        // Pitch/yaw may change by far more than the normal scene-capture gate's
-        // one-frame threshold when the player snaps the camera toward zenith.
-        // The full-frame viewport and the position check below distinguish that
-        // turn from an unrelated portrait/reflection camera; basis similarity
-        // must not freeze the sky fallback on yesterday's view.
         if (!m_cameraGate.MatchesViewport(vp.Width, vp.Height))
             return;
 
-        const bool zeroTrans =
-            fabsf(view.m[3][0]) < 0.05f &&
-            fabsf(view.m[3][1]) < 0.05f &&
-            fabsf(view.m[3][2]) < 0.05f;
-        bool hasWorldTranslation = false;
-        if (!zeroTrans)
+        float basis[3][4]{};
+        for (int r = 0; r < 3; ++r)
         {
-            const float px = -(view.m[3][0] * view.m[0][0] + view.m[3][1] * view.m[0][1] + view.m[3][2] * view.m[0][2]);
-            const float py = -(view.m[3][0] * view.m[1][0] + view.m[3][1] * view.m[1][1] + view.m[3][2] * view.m[1][2]);
-            const float pz = -(view.m[3][0] * view.m[2][0] + view.m[3][1] * view.m[2][1] + view.m[3][2] * view.m[2][2]);
-            const float* cam = m_cameraGate.Position();
-            const float dx = px - cam[0], dy = py - cam[1], dz = pz - cam[2];
-            if (std::sqrt(dx * dx + dy * dy + dz * dz) <= 40.0f)
-                hasWorldTranslation = true;
+            for (int c = 0; c < 3; ++c)
+                basis[r][c] = view.m[r][c];
+            basis[r][3] = 0.f;
+            const float lengthSquared = basis[r][0] * basis[r][0] + basis[r][1] * basis[r][1] +
+                basis[r][2] * basis[r][2];
+            // A rigid camera basis is unit length; rows of any other length mean
+            // the transform carries a scale (a scaled billboard's, above all) and
+            // its rows are not this camera's axes.
+            if (fabsf(lengthSquared - 1.0f) > 0.01f)
+                return;
+            for (int other = r + 1; other < 3; ++other)
+                if (fabsf(basis[r][0] * basis[other][0] + basis[r][1] * basis[other][1] +
+                          basis[r][2] * basis[other][2]) > 0.02f)
+                    return;
         }
 
-        // Prefer a candidate carrying world translation if one arrives, but
-        // still follow a genuine rotation of the skybox transform. Otherwise
-        // the fallback freezes on the first translated view and the clouds
-        // stay stuck to (and drift with) the camera when looking around,
-        // including straight up.
-        bool rotationChanged = false;
-        if (m_fallbackCandidateValid)
+        m_fallbackSawSceneDraw = true;
+        m_fallbackProj = proj;
+        m_fallbackVp = vp;
+
+        // Does this transform carry the camera's EYE, or a camera-relative
+        // offset? The sun is drawn with a zero view translation (the classic
+        // skybox trick; its rows therefore ARE the camera's rotation) and the
+        // moon as a billboard at a fixed render distance along the light (its
+        // translation swings with the mouse and its rotation is not the
+        // camera's at all). Only a zero translation, or one that lands at the
+        // eye we already accepted, can belong to this frame's camera. Anything
+        // else is dropped here rather than merely remembered as unusable: its
+        // rows are equally not the camera, and collecting them let a stray
+        // identity transform win the "nothing continuous" path.
+        const bool zeroTranslation =
+            fabsf(view.m[3][0]) < 0.05f && fabsf(view.m[3][1]) < 0.05f && fabsf(view.m[3][2]) < 0.05f;
+        bool eyeCompatible = zeroTranslation;
+        if (!zeroTranslation)
         {
-            float lowest = 1.f;
-            for (int r = 0; r < 3; ++r)
-            {
-                float dot = m_fallbackView.m[r][0] * view.m[r][0] +
-                            m_fallbackView.m[r][1] * view.m[r][1] +
-                            m_fallbackView.m[r][2] * view.m[r][2];
-                lowest = std::min(lowest, dot);
-            }
-            rotationChanged = lowest < 0.999f;
+            const float px = -(view.m[3][0] * basis[0][0] + view.m[3][1] * basis[0][1] + view.m[3][2] * basis[0][2]);
+            const float py = -(view.m[3][0] * basis[1][0] + view.m[3][1] * basis[1][1] + view.m[3][2] * basis[1][2]);
+            const float pz = -(view.m[3][0] * basis[2][0] + view.m[3][1] * basis[2][1] + view.m[3][2] * basis[2][2]);
+            const float* anchor = m_cameraGate.Position();
+            const float dx = px - anchor[0], dy = py - anchor[1], dz = pz - anchor[2];
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            eyeCompatible = std::isfinite(distance) && distance <= kSkyEyeLeashYards;
         }
-        if (!m_fallbackCandidateValid || hasWorldTranslation || !m_fallbackHasTranslation || rotationChanged)
+        if (!eyeCompatible)
+            return;
+
+        // The frame's candidates are decided at the UI draw, when the frame's
+        // own sun/moon disc has already been drawn and can testify about the
+        // camera. Collect; do not publish.
+        m_skyPose.Observe(basis);
+    }
+
+    // What the frame's own celestial draw says about the camera: the stabilized
+    // world direction towards the body, and where the client painted it. Both
+    // are independent of the pose being tested, which is what makes agreement
+    // evidence rather than a pose compared with itself.
+    static DiscObservation DiscEvidence(const FrameContext& frameContext, const D3DMATRIX& proj)
+    {
+        DiscObservation disc;
+        const auto& tracker = CelestialTracker::Instance();
+        const auto& sun = tracker.Sun();
+        const auto& moon = tracker.Moon();
+        const bool lightIsMoon = frameContext.directLightValid && frameContext.directLightIsMoon;
+        const CelestialBody* body = lightIsMoon ? &moon : &sun;
+        if (!body->visible)
+            body = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
+        if (!body)
+            return disc;
+        // A disc at the very edge of the frame is half outside it, and its
+        // painted position is then the least reliable thing in the frame.
+        if (!(body->screenX > .03f && body->screenX < .97f && body->screenY > .03f && body->screenY < .97f))
+            return disc;
+        // The direction the tracker derived for the SAME billboard is the one
+        // paired with screenX/Y; only fall back to the captured light when the
+        // tracker's own direction is unusable. (The light direction is a
+        // stabilized, possibly held value - good for shading, less direct as
+        // evidence about this draw.)
+        Vec3 world = body->worldSpaceDirection;
+        float lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
+        if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
         {
-            m_fallbackView = view;
-            m_fallbackProj = proj;
-            m_fallbackVp = vp;
-            m_fallbackHasTranslation = hasWorldTranslation;
-            m_fallbackCandidateValid = true;
+            world = frameContext.directLightValid ? frameContext.directLightDirectionWorld
+                                                  : frameContext.sunDirectionWorld;
+            lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
+            if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
+                return disc;
         }
+        const float inverseLength = 1.0f / std::sqrt(lengthSquared);
+        disc.world[0] = world.x * inverseLength;
+        disc.world[1] = world.y * inverseLength;
+        disc.world[2] = world.z * inverseLength;
+        disc.projectionX = proj.m[0][0];
+        disc.projectionY = proj.m[1][1];
+        disc.screenX = body->screenX;
+        disc.screenY = body->screenY;
+        disc.available = true;
+        return disc;
     }
 
     bool CameraCapture::ApplySkyFallback(
@@ -429,8 +477,28 @@ namespace renderer
         if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid)
             return false;
 
-        if (!m_fallbackCandidateValid)
+        // The eye is whatever a draw last carried. A rotation-only sky
+        // transform says nothing about where the camera is, so it can age.
+        const double now = PerformanceSeconds();
+        const float eyeAge = m_lastEyeSeconds >= 0.0
+            ? float(std::clamp(now - m_lastEyeSeconds, 0.0, 1e6)) : 1e6f;
+        frameContext.cameraEyeAgeMs = eyeAge * 1000.f;
+        frameContext.cameraPoseSource = FrameContext::PoseHeld;
+        frameContext.cameraPoseStale = true; // until something corroborates it below
+
+        float basis[3][4]{};
+        bool corroborated = false;
+        const bool havePose = m_skyPose.HasCandidate() &&
+            m_skyPose.Resolve(DiscEvidence(frameContext, m_fallbackProj), basis, corroborated);
+
+        if (!havePose)
         {
+            // Nothing this frame could be corroborated as the camera. Keep the
+            // previous pose published - the atmosphere and the screen-space
+            // passes still need a direction - and say plainly that it is stale,
+            // so nothing world-anchored is drawn from a camera the player has
+            // already left. This is the guard that turns "the clouds and the
+            // torches follow me around a city" into "they wait a frame".
             if (!m_fallbackSawSceneDraw)
                 return false;
             outConstants[9][0] = float(std::fmod(PerformanceSeconds(), 1200.0));
@@ -444,29 +512,33 @@ namespace renderer
         for (int r = 0; r < 3; ++r)
         {
             for (int c = 0; c < 3; ++c)
-                v[r][c] = m_fallbackView.m[r][c];
+                v[r][c] = basis[r][c];
             v[r][3] = 0.0f;
         }
 
-        float camPos[3]{ m_cameraGate.Position()[0], m_cameraGate.Position()[1], m_cameraGate.Position()[2] };
-        if (m_fallbackHasTranslation)
-        {
-            for (int c = 0; c < 3; ++c)
-                v[3][c] = m_fallbackView.m[3][c];
-            v[3][3] = 1.0f;
-            if (!m_cameraGate.AcceptFallback(v[3], v, m_fallbackVp.Width, m_fallbackVp.Height))
-                return false;
-            camPos[0] = m_cameraGate.Position()[0];
-            camPos[1] = m_cameraGate.Position()[1];
-            camPos[2] = m_cameraGate.Position()[2];
-        }
-        else
-        {
-            m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
-            for (int c = 0; c < 3; ++c)
-                v[3][c] = -(camPos[0] * v[0][c] + camPos[1] * v[1][c] + camPos[2] * v[2][c]);
-            v[3][3] = 1.0f;
-        }
+        // The corroborated rotation is what the gate should expect a real
+        // capture to continue from. Teaching it the basis (never the position -
+        // the position is only ever accepted from a draw that carried it) means
+        // that when terrain draws appear again on higher ground, the first one
+        // is accepted immediately instead of taking three frames to escape the
+        // teleport guard.
+        m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
+
+        // The eye stays the one a draw carried. Deliberately NOT the sky
+        // transform's translation: for a camera-relative billboard that
+        // translation is an offset from the eye that swings with the mouse,
+        // and anchoring the world to it is exactly the reported "clouds and
+        // lights dragged along with the camera". A transform that does carry
+        // the eye only *confirms* that the anchor is plausible; it never
+        // moves it.
+        const float* anchor = m_cameraGate.Position();
+        const float camPos[3] = { anchor[0], anchor[1], anchor[2] };
+        for (int c = 0; c < 3; ++c)
+            v[3][c] = -(camPos[0] * v[0][c] + camPos[1] * v[1][c] + camPos[2] * v[2][c]);
+        v[3][3] = 1.0f;
+
+        frameContext.cameraPoseStale = !corroborated;
+        frameContext.cameraPoseSource = FrameContext::PoseSky;
 
         frameContext.previousViewRaw = frameContext.viewRaw;
         frameContext.previousViewValid = frameContext.viewRawValid;
@@ -553,7 +625,6 @@ namespace renderer
         frameContext.inverseView.m[2][0] = outConstants[6][0]; frameContext.inverseView.m[2][1] = outConstants[6][1]; frameContext.inverseView.m[2][2] = outConstants[6][2]; frameContext.inverseView.m[2][3] = 0.0f;
         frameContext.inverseView.m[3][0] = outConstants[7][0]; frameContext.inverseView.m[3][1] = outConstants[7][1]; frameContext.inverseView.m[3][2] = outConstants[7][2]; frameContext.inverseView.m[3][3] = 1.0f;
 
-        m_fallbackCandidateValid = false;
         ++m_capturedFrames;
         return true;
     }

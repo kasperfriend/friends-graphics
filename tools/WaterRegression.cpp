@@ -920,6 +920,26 @@ int main() try
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(header.size()>4096,"the wave field header both stages mirror is readable");
         Require(vertex.size()>1024&&pixel.size()>8192,"both water stages are readable as text");
+        // (0) The sea's re-anchoring pivot must be THIS place's camera. WaveMotion::Advance
+        // compensates every heading and WAVE SIZE edit about the pivot it is handed, which
+        // keeps the field still at the player and nowhere else: a point d away from the pivot
+        // shifts by dot(d, the lattice change). A teleport leaves the previous zone's draw
+        // anchor behind (a loading screen draws nothing, and the new zone's first frames
+        // capture no camera), so compensating about that anchor sweeps every crest across the
+        // surface by the distance between the two zones - the reported "water races after a
+        // teleport, then slows back to normal", because the heading eases over ~12 s. The
+        // anchor is therefore only allowed to stand in for the frame camera while it is FRESH,
+        // and a stale one freezes the lattice for those frames instead of re-anchoring it.
+        Require(code.find("constexpr double kAnchorFreshSeconds=.25;")!=std::string::npos&&
+                code.find("inline bool LastWaveAnchorFresh() noexcept {")!=std::string::npos&&
+                code.find("const bool pivotValid=frame.cameraValid||anchorFresh;")!=std::string::npos&&
+                code.find("waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);")
+                    !=std::string::npos,
+                "the sea re-anchors only about a fresh, local pivot, never about the previous zone's anchor");
+        Require(code.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();")!=std::string::npos&&
+                code.find("lastWaveAnchorSeconds=renderer::PerformanceSeconds();")!=std::string::npos&&
+                code.find("lastWaveAnchorSeconds=-1.0;")!=std::string::npos,
+                "the full-screen medium's field and the Reset path obey the same freshness rule");
         // (1) The waves followed the camera. Two causes, both a matrix read the wrong way
         // round: the lattice was built from the view axes expressed in world coordinates, so
         // a camera-relative position was rotated by the camera twice and the field turned
@@ -1128,9 +1148,88 @@ int main() try
                 foamGlow!=std::string::npos&&cameraCharge!=std::string::npos&&foamGlow<cameraCharge&&
                 pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));")
                     !=std::string::npos&&
-                pixel.find("float3 fogTarget=lerp(fogColor.rgb,underEnvironment,underwater);")!=std::string::npos&&
+                pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);")
+                    !=std::string::npos&&
                 pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
                 "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
+        // A sea's horizon is not the sky. The air fog alone painted distant water the exact
+        // colour of the sky it faded into, which reads as a hole in the world; the target
+        // takes the body's deep colour in proportion to the column's own saturation, above
+        // water only, so a shallow shore still fades exactly as before.
+        {
+            const auto farSea=pixel.find("float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);");
+            const auto share=pixel.find(
+                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);");
+            const auto body=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
+            const auto target=pixel.find(
+                "float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);");
+            // The far sheet must fog into the SAME body the near sheet converges on.
+            // Fading to `deepTint` alone left two different seas meeting at the fog's
+            // limit, which is the flat band across the horizon ("that chunk").
+            Require(body!=std::string::npos&&body<target&&
+                    pixel.find("lerp(fogColor.rgb,deepTint.rgb,seaShare)")==std::string::npos,
+                    "the water fogs into its own body, so the fog distance is not an edge");
+            const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
+            Require(farSea!=std::string::npos&&share!=std::string::npos&&target!=std::string::npos&&
+                    target==fade&&farSea<share&&share<target,
+                    "the distant sheet fades into the sea's own colour above water, and into the medium below it");
+            const std::string mirror=ReadAlongside("WaterPreview.cpp");
+            Require(mirror.find("const float farSea = Smoothstep(40.f, 600.f, viewZ);")!=std::string::npos&&
+                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f)")!=std::string::npos &&
+                    mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
+                    "the CPU preview fogs toward the same tinted target, deepening with distance");
+        }
+        // WATER OPACITY, second half. The alpha floor only decides how much of the scene the
+        // sheet lets past; the body's COLOUR is built from the refracted seabed, so on a
+        // clear shallow shelf the surface painted the bed back into the frame at full
+        // coverage and the slider moved the alpha without moving the picture - the report
+        // "opacity does nothing visually". The body now converges on the asymptote an
+        // infinitely thick column converges on, gated by the water actually over the pixel.
+        {
+            // `seaBody` is named once, above the capture branch, because the fog
+            // target needs the same value - so it comes BEFORE the body math.
+            const auto sea=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
+            const auto bed=pixel.find("float3 bottom=refracted*transmittance+inScatter+deepTint.rgb*absorption;",sea);
+            const auto bodyLine=pixel.find("float3 body=lerp(rgb,bottom,depthValid*saturate(waterStyle.x));",bed);
+            const auto gate=pixel.find(
+                "float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);",sea);
+            const auto trust=pixel.find(
+                "float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);",gate);
+            const auto fade=pixel.find(
+                "body=lerp(body,seaBody,opacityControl.x*bedFade);",trust);
+            Require(bed!=std::string::npos&&bodyLine!=std::string::npos&&sea!=std::string::npos&&
+                    gate!=std::string::npos&&trust!=std::string::npos&&fade!=std::string::npos&&
+                    sea<bed&&bed<bodyLine&&bodyLine<gate&&gate<trust&&trust<fade,
+                    "water opacity fades the WHOLE body toward the sea, after the refraction mix");
+            // An unknown or implausible bed reading must not switch the slider off.
+            // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
+            Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
+                        !=std::string::npos &&
+                    pixel.find("opacityControl.x*saturate(effectiveDepth*.5)")==std::string::npos,
+                    "a missing or implausible depth reading still lets opacity hide the bed");
+            // The regression that mattered: the fade must come after `body` is composed from
+            // the client's colour and the captured bottom, or it only scales the part
+            // REFRACTION owns (14% at the shipped setting) and the slider does nothing.
+            Require(pixel.find("float3 bottom=lerp(refracted*transmittance")==std::string::npos,
+                    "opacity is not applied inside the refracted term");
+            Require(pixel.find("waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));")
+                        !=std::string::npos,
+                    "the depth transition still converges on the same sea body");
+            const std::string mirror=ReadAlongside("WaterPreview.cpp");
+            Require(mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
+                        !=std::string::npos &&
+                    mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
+                        !=std::string::npos,
+                    "the CPU preview fades the whole body at the shipped opacity too");
+            // And the case with no scene copy at all keeps the BODY, not the client's own
+            // liquid: over open ocean that fallthrough was a pale, nearly transparent sheet
+            // the colour of the sky - the "completely transparent water" of the report.
+            // (Comments are stripped from `pixel`, so only code can be pinned here.)
+            Require(pixel.find("} else {")!=std::string::npos&&
+                    pixel.find("waterBody=seaBody;")!=std::string::npos&&
+                    pixel.find("waterBody=seaBody;")>pixel.find("} else {"),
+                    "an uncaptured surface shows the sea's own colour, never the client's pale liquid");
+        }
         // DEPTH FOG: the view DOWN into the water charges the sunlight's trip to the bed as
         // well as the trip back, so submerged terrain dissolves into the body with depth
         // instead of standing dark under clear-looking water. One register lane that was
@@ -1154,6 +1253,86 @@ int main() try
                 pixel.find("absorption*(.78-.20*fresnel)")==std::string::npos&&
                 pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")!=std::string::npos,
                 "a water face covers by what its own column extinguishes, so the sea behind it cannot show through the sea in front");
+        // WATER OPACITY. Coverage is not the same question as clarity, and the shader had no
+        // lane for it at all: baseAlpha came from the client's painted liquid and depthAlpha
+        // from the body's own extinction, so a clear, shallow sea multiplied to almost nothing
+        // and the bed read straight up through the surface - the picture the report is about.
+        // The knob is a floor under the coverage, applied AFTER the optical terms (so it can
+        // only add cover where the optics already agreed) and BEFORE the wrong-side fade (so a
+        // far sheet still dissolves at its silhouette instead of being pinned opaque by it),
+        // read from its own ini key so it is not a second spelling of WATER CLARITY, and
+        // uploaded on a lane inside the block the draw already writes.
+        {
+            const auto floorRule=pixel.find(
+                "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
+            const auto optics=pixel.find("surfaceAlpha=max(surfaceAlpha,underwater*max(totalInternal,1-transmittance.g));");
+            const auto fade=pixel.find("surfaceAlpha*=1-smoothstep(0.0,.25,wrongSide);");
+            // THE BLEND. Coverage is only an image if the fixed-function blend lets
+            // the world through by (1-a). The native liquid material owns that state,
+            // and an additive (or ONE-sourced) ocean makes every alpha we write a
+            // no-op: the seabed stays at full strength and only the body colour
+            // changes, which is the report "opacity hides the old texture but not
+            // what I can see through". The pass now forces the one blend its output
+            // is authored for and lets the captured state block put the original back.
+            Require(code.find("d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);")!=std::string::npos&&
+                    code.find("d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);")!=std::string::npos&&
+                    code.find("device->SetRenderState(D3DRS_ALPHABLENDENABLE,oldBlend[0]);")!=std::string::npos&&
+                    code.find("liquid draw composited with blend enable=")!=std::string::npos,
+                    "the replaced draw composites with an alpha blend, and the native state is restored");
+            Require(pixel.find("float4 opacityControl:register(c199);")!=std::string::npos&&
+                    floorRule!=std::string::npos&&optics!=std::string::npos&&fade!=std::string::npos&&
+                    optics<floorRule&&floorRule<fade,
+                    "opacity is a floor on coverage: after the optical terms, before the wrong-side fade");
+            // A floor cannot cover what is not there. Over open water the capture holds no
+            // geometry behind the sheet - only the clear colour it was never asked to
+            // replace - so a partial alpha reveals emptiness itself, which is the second
+            // half of the report ("still transparent where the seabed has run out"). The
+            // sea is then the whole column and coverage is complete; under the surface the
+            // same `behindZ` is the sky through Snell's window, so the term is above-water only.
+            {
+                const auto openTerm=pixel.find(
+                    "float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);");
+                const auto openRule=pixel.find(
+                    "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
+                Require(openTerm!=std::string::npos&&openRule!=std::string::npos&&
+                        optics<openTerm&&openTerm<openRule&&openRule<fade,
+                        "open ocean is fully covered, above water only, and still before the wrong-side fade");
+                // A frame with no scene copy has nothing behind the surface either: the
+                // "behind" a partial alpha would blend is whatever the client left in the
+                // target, which over water is the clear colour. Nothing captured is not
+                // something to see through.
+                Require(pixel.find("1-captureValid)")!=std::string::npos,
+                        "a missing scene capture covers the sheet instead of blending the clear colour through it");
+                const std::string mirror=ReadAlongside("WaterPreview.cpp");
+                Require(mirror.find("alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));")!=std::string::npos,
+                        "the CPU preview carries the same open-ocean coverage rule");
+            }
+            Require(pixel.find("float surfaceAlpha=saturate(baseAlpha+(1-baseAlpha)*depthAlpha);")
+                        !=std::string::npos&&
+                    pixel.find("depthAlpha=absorption*opacityControl")==std::string::npos&&
+                    code.find("opacityPercent=float(std::clamp(ReadTuning(L\"OpacityPercent\",85),0,100));")
+                        !=std::string::npos&&
+                    code.find("absorptionStrength=std::clamp(ReadTuning(L\"DepthAbsorptionPercent\",38),0,100)*.01f;")
+                        !=std::string::npos,
+                    "opacity has its own key and does not fold into depth absorption, so clarity keeps its meaning");
+            // The lane is c199, inside the saved/restored c180..c218 block, and the per-frame
+            // upload writes it in the same place the rest of the controls are built - not after
+            // the cached-light memcpy, which stops at c196.
+            const auto lane=code.find("pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);");
+            const auto cached=code.find("std::memcpy(pixelConstants,cache.values,sizeof(cache.values));");
+            Require(lane!=std::string::npos&&cached!=std::string::npos&&lane<cached&&
+                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos,
+                    "opacity rides c199 inside the one c180..c218 upload, ahead of the cached-light splice that only overwrites c180..c196");
+            const std::string ini=ReadAlongside("../GraphicsEffects.ini");
+            const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
+            Require(ini.find("OpacityPercent=85")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"OpacityPercent\",\"WATER OPACITY\",0,100,5,85}")!=std::string::npos&&
+                    overlay.find("L\"Water\",L\"ClarityPercent\",\"WATER CLARITY\",5,200,5,100}")!=std::string::npos,
+                    "opacity ships at 85 in the ini and as its own 0..100 F7 slider beside clarity");
+        }
         // The CPU half: the plane over the camera, read from the draw's own modelView and one
         // of its own vertices - and nothing else. It used to be read against the live VIEW
         // transform and refused outright when the view's basis determinant was negative (the
@@ -1218,6 +1397,26 @@ int main() try
                 mirror.find("const float e = 1.5f;")!=std::string::npos&&
                 mirror.find("validDepth * Saturate(.55f")!=std::string::npos,
                 "shore, shoal and backwash foam use camera-invariant world depth and a yard-scale bed slope while optical depth remains unchanged");
+        // A BED TAP IS ONLY BED IF IT IS UNDER THE WATER. The four taps that read the bed
+        // slope can land on anything standing in the water; reconstructed from a figure's
+        // depth the point is ABOVE the surface, the slope reads as a cliff, and the shoal
+        // mask lays foam over it. Foam removes the mirror and the sun road, so that band
+        // had no reflection and no glint - the dark "second copy" that disappears when
+        // FOAM is switched off. Every tap is now filtered by the same world-up test the
+        // centre point already uses, before any slope is derived from it.
+        const auto countOf=[](const std::string& text,const std::string& needle) {
+            size_t total=0, at=0;
+            while((at=text.find(needle,at))!=std::string::npos){++total;at+=needle.size();}
+            return total;
+        };
+        Require(countOf(pixel,"step(0,dot(bed")==4&&
+                pixel.find("bedE=lerp(bedE,bottomView,step(0,dot(bedE-viewPos,upWind.xyz)));")!=std::string::npos&&
+                pixel.find("bedN=lerp(bedN,bottomView,step(0,dot(bedN-viewPos,upWind.xyz)));")!=std::string::npos&&
+                pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")
+                    < pixel.find("bedE=lerp(bedE,bottomView,step(0,")&&
+                pixel.find("bedE=lerp(bedE,bottomView,step(0,")
+                    < pixel.find("float3 bedNormal=cross(bedE-bedW,bedS-bedN);"),
+                "a bed tap above the surface is not bed, so nothing standing in the water can feed the shoal slope");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&

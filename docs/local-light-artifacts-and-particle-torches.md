@@ -208,3 +208,80 @@ by source type, active normal-spread percentage and each selected source's type,
 ID, position, radius, intensity and score. This makes it possible to tell
 whether nearby flame captures are competing as separate lights instead of
 inferring from the total attached-emitter count alone.
+
+## Pool membership: hysteresis and cross-fade (2026-10-19)
+
+Four (quality 0) or eight (quality 1-2) emitters fit in the constant table, so
+membership is a decision taken every frame. It used to be the raw score
+ordering, which meant two lamps of similar strength traded places as the player
+walked between them - one switching off and the other on in the same frame,
+reported as flicker near a group of lights.
+
+`renderer::local_light_detail::StablePool` (src/Lighting/LocalLightSelection.h)
+now keeps incumbents: a challenger must beat the weakest incumbent by
+`kDisplacementMargin` (30%) to take its slot, and at most one slot changes
+hands per frame. `FadeToward` cross-fades every slot - in over `kFadeInMs`
+(140 ms), out over `kFadeOutMs` (220 ms) - and a light that falls out of the
+candidate set keeps its slot while it dissolves. `SelectionSignature` includes
+the quantized effective intensity so the water pass's per-frame constant cache
+notices a fade in progress, not only a changed id set.
+
+`tools/CameraAnchoringRegression.cpp` pins the one-swap-per-frame rule, the
+margin, the tie behaviour and the fade curve.
+
+## **And it was not only the score: the pool itself was view-dependent.** A native
+source is observed only through the draw calls that consume it, and the client
+submits those only for emitters inside the frustum. Selection still required
+re-observation inside a 1.4 s batch-cadence window, so turning away retired the
+lamp after 1.4 s - its ground lighting going dark while that ground was still on
+screen - and turning back needed six fresh frames before it lit again. That is
+the reported asymmetry exactly: yaw sweeps emitters across the frustum edge far
+more often than pitch does, and no change to scoring could reach a lamp that had
+already left the pool.
+
+**And every pass that draws a lamp has to agree about the pose.** The surface
+lighting was given the `kCameraEyeHoldMs` hold in this round; the volumetric
+march that draws each lamp's shaft and halo was still gated on a bare
+`f.cameraValid`, so on a frame whose draw stream carried no fresh eye the ground
+stayed lit while the glow around it vanished - a lamp that visibly broke. There
+is now one definition, `FrameContext::PoseUsable()`, and both passes ask it.
+
+A confirmed source (`stableFrames >= 6`) is now held across
+`kNativeConfirmedHoldMs = 15000` of silence, while an unconfirmed one keeps the
+old five-part test. The window is finite on purpose: a brazier that is put out
+or a door that closes must not glow forever. A lamp now leaves the pool only
+through slot reuse (a new generation and stable id), expiry of that hold, or the
+distance cull - none of which a head turn can do.
+
+The camera's heading is not a fact about a lamp (2026-10-19)
+
+Two view-dependent gates were left in the pass, and both made the same report -
+"dynamic lights break at some angles and flicker":
+
+- **Selection scored the yaw.** A native emitter's score carried
+  `facing = clamp(dot(delta, forward)/distance * .35 + .65, .15, 1)` - a factor of
+  six between a lamp in front of the camera and one behind it. Turning the head
+  re-ordered the four/eight slots, so a different set of lamps lit the same
+  ground, and `StablePool`'s 30% margin turned the re-ordering into swaps and
+  cross-fades rather than a clean picture. A reduced tie-break (`* .08 + .92`)
+  was still visible in game - "breaks more on left-right rotation than up-down"
+  is that term, and it is exactly the axis it is sensitive to - so the score now
+  reads `intensity * radius^2 / distance^2` and nothing else. `cameraForward`
+  stays in the signature (the volume march and the water stage share the pose)
+  and is deliberately unread.
+- **One radius behind the camera was a hard cut.** `forwardDistance < -radius`
+  deleted a lamp from the candidate list the moment a yaw carried it across that
+  line, so it left the pool and faded - and faded back in on the way past. That
+  test is gone: the frustum already culls what is not drawn, and a lamp just off
+  the edge of the screen still lights ground at its edge. A lamp behind the
+  player is lighting ground the player can turn onto.
+- **The pass refused un-recaptured frames.** `LocalLightingRenderer::Render`
+  required `FrameContext::cameraValid`, which is published only by a draw that
+  carries the eye. A frame with no terrain in view (looking at the sky or a wall)
+  left the flag false while the retained inverse view and camera position were a
+  frame or two old, and every lamp in the city blinked off. The retained pose is
+  now used for `FrameContext::kCameraEyeHoldMs`, exactly like the underwater
+  medium and the lamps' own observation gate, and refused past it.
+
+`tools/LocalLightingRegression.cpp` pins all three: the two selection expressions
+and the absence of the old cut, and the pose hold in the renderer source.

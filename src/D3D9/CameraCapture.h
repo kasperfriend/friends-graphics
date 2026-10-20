@@ -41,8 +41,7 @@ namespace renderer
         // Called at the start of a depth-captured frame.
         void BeginFrame()
         {
-            m_fallbackCandidateValid = false;
-            m_fallbackHasTranslation = false;
+            m_skyPose.BeginFrame();
             m_fallbackSawSceneDraw = false;
         }
 
@@ -71,6 +70,10 @@ namespace renderer
             m_smoothedSunX = -1.0f;
             m_smoothedSunY = -1.0f;
             m_cameraGate.Reset();
+            m_skyPose.Reset();
+            // No draw has carried an eye on the new device yet, so nothing may
+            // claim a fresh one until one does.
+            m_lastEyeSeconds = -1.0;
             BeginFrame();
         }
 
@@ -85,11 +88,27 @@ namespace renderer
         uint64_t m_cameraCaptureShaderHash = 0;
         float m_smoothedSunX = -1.0f;
         float m_smoothedSunY = -1.0f;
-        bool m_fallbackCandidateValid = false;
-        bool m_fallbackHasTranslation = false;
+        // The frame's sky candidates, and the rule that decides whether one of
+        // them may become the frame's camera (see SkyPoseSelector). Candidates
+        // are collected all frame and resolved once, at the UI draw, when the
+        // frame's own celestial disc has already been drawn.
+        SkyPoseSelector m_skyPose;
+        // A transform is only collected as a candidate when it could BE this
+        // camera: either it carries no translation at all (the sun's skybox
+        // trick, where the rows are the camera's own rotation) or the eye it
+        // implies lands within kSkyEyeLeashYards of the accepted one. A
+        // camera-relative billboard (the moon: identity rotation, a 4-16 yard
+        // translation that swings with the mouse) and another pass's camera
+        // (portrait, reflection) fail both and are dropped, because taking
+        // their rows or their translation as the camera is exactly the
+        // reported "clouds and lights dragged along with the camera".
         bool m_fallbackSawSceneDraw = false;
-        D3DMATRIX m_fallbackView{};
         D3DMATRIX m_fallbackProj{};
         D3DVIEWPORT9 m_fallbackVp{};
+        // Performance-clock seconds when a draw last carried the camera's eye.
+        // Published as FrameContext::cameraEyeAgeMs; passes that place things
+        // within a few yards of the camera refuse an older one.
+        double m_lastEyeSeconds = -1.0;
+        static constexpr float kSkyEyeLeashYards = 40.0f;
     };
 }
