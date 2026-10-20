@@ -1397,6 +1397,26 @@ int main() try
                 mirror.find("const float e = 1.5f;")!=std::string::npos&&
                 mirror.find("validDepth * Saturate(.55f")!=std::string::npos,
                 "shore, shoal and backwash foam use camera-invariant world depth and a yard-scale bed slope while optical depth remains unchanged");
+        // A BED TAP IS ONLY BED IF IT IS UNDER THE WATER. The four taps that read the bed
+        // slope can land on anything standing in the water; reconstructed from a figure's
+        // depth the point is ABOVE the surface, the slope reads as a cliff, and the shoal
+        // mask lays foam over it. Foam removes the mirror and the sun road, so that band
+        // had no reflection and no glint - the dark "second copy" that disappears when
+        // FOAM is switched off. Every tap is now filtered by the same world-up test the
+        // centre point already uses, before any slope is derived from it.
+        const auto countOf=[](const std::string& text,const std::string& needle) {
+            size_t total=0, at=0;
+            while((at=text.find(needle,at))!=std::string::npos){++total;at+=needle.size();}
+            return total;
+        };
+        Require(countOf(pixel,"step(0,dot(bed")==4&&
+                pixel.find("bedE=lerp(bedE,bottomView,step(0,dot(bedE-viewPos,upWind.xyz)));")!=std::string::npos&&
+                pixel.find("bedN=lerp(bedN,bottomView,step(0,dot(bedN-viewPos,upWind.xyz)));")!=std::string::npos&&
+                pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")
+                    < pixel.find("bedE=lerp(bedE,bottomView,step(0,")&&
+                pixel.find("bedE=lerp(bedE,bottomView,step(0,")
+                    < pixel.find("float3 bedNormal=cross(bedE-bedW,bedS-bedN);"),
+                "a bed tap above the surface is not bed, so nothing standing in the water can feed the shoal slope");
         Require(vertex.find("waveWarpPhase:register(c203)")!=std::string::npos&&
                 vertex.find("waveGroupPhase:register(c204)")!=std::string::npos&&
                 vertex.find("float4 waveWarp:TEXCOORD7")!=std::string::npos&&

@@ -1372,6 +1372,28 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     bedW=bedZW>=99999?bottomView:bedW;
     bedS=bedZS>=99999?bottomView:bedS;
     bedN=bedZN>=99999?bottomView:bedN;
+    // THE BED IS UNDER THE WATER IT IS UNDER. These four taps are the only geometry this
+    // pass can read, and a tap can land on anything standing IN the water - a figure, a
+    // rock, a post - whose reconstructed point sits ABOVE this fragment's own surface.
+    // The slope between that point and the centre then reads as a cliff, and the shoal
+    // mask reads a cliff as "the bottom comes up fast" and lays foam over it.
+    //
+    // Foam is not a decal in this stage: it takes the mirror away (`reflectionAmount` is
+    // scaled by 1-foamAmount) and the sun road with it (`pathEnergy` alike), so a figure
+    // in the water carried a band of surface with no reflection and no glint - a dark
+    // copy of him lying on the water, which is exactly what disappears when FOAM is
+    // switched off, and which no opacity, refraction or reflection setting can touch
+    // because all three sit downstream of a mask they do not feed.
+    //
+    // `foamDepthSigned` above already answers this question for the centre point: dot
+    // of (surface - bed) with world up is positive when the bed is really below. A tap
+    // that fails the same test is not bed, so it falls back to the centre point, exactly
+    // as a tap on the sky does - four equal points give a flat bed, no shoal and no
+    // invented cliff.
+    bedE=lerp(bedE,bottomView,step(0,dot(bedE-viewPos,upWind.xyz)));
+    bedW=lerp(bedW,bottomView,step(0,dot(bedW-viewPos,upWind.xyz)));
+    bedS=lerp(bedS,bottomView,step(0,dot(bedS-viewPos,upWind.xyz)));
+    bedN=lerp(bedN,bottomView,step(0,dot(bedN-viewPos,upWind.xyz)));
     float3 bedNormal=cross(bedE-bedW,bedS-bedN);
     float bedNormalUp=dot(bedNormal,upWind.xyz);
     float bedSlope=length(bedNormal-upWind.xyz*bedNormalUp)/max(abs(bedNormalUp),1e-6);

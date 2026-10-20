@@ -2827,6 +2827,44 @@ because the slab was already the water's asymptote - just the wrong one.
   three. `WaterRegression` pins that the fog target is the body and that the old
   `lerp(fogColor.rgb, deepTint.rgb, seaShare)` spelling is gone.
 
+## Round 12: the foam mask was reading a figure as a shoal (2026-10-20)
+
+Reported after a rollback to `79d2907`, so this predates every round after it:
+**turning FOAM off removes the dark second copy of the figure.** That is the
+first report that named a term instead of a symptom, and it names the mechanism.
+
+`shoal` is the one foam source that is not about depth or waves:
+
+```
+shoal = foamDepthValid * saturate(bedSlope * bodyStyle.w * 2.0 - .3) * saturate(1 - foamDepth*.05)
+```
+
+`bedSlope` comes from four depth taps around the pixel (`bedE/W/S/N`), and those
+taps can land on **anything standing in the water**. Reconstructed from a
+figure's depth a tap is a point ABOVE the surface this fragment belongs to, the
+slope between it and the centre reads as a cliff, and the shoal mask reads a
+cliff as *"the bottom comes up fast"* and lays foam over it.
+
+Foam is not a decal in this stage. `reflectionAmount` is scaled by
+`1 - foamAmount*.85` and `pathEnergy` by `1 - foamAmount`, so that band of
+surface loses **the mirror and the sun road** at once: a figure in the water was
+surrounded by a character-shaped region with no reflection and no glint - a
+dark copy of him lying on the water. It is downstream of opacity, refraction and
+reflection, which is why all three sliders left it alone.
+
+The centre point already had the test that answers this - `foamDepthSigned`, the
+world-up dot of (surface - bed). Each tap now gets the same test before any
+slope is derived from it:
+
+```
+bedE = lerp(bedE, bottomView, step(0, dot(bedE - viewPos, upWind.xyz)))
+```
+
+A tap above the surface is not bed and falls back to the centre point, exactly
+as a tap on the sky already did; four equal points give a flat bed, no shoal and
+no invented cliff. A real shoal is unaffected - its taps are below the water by
+definition.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
