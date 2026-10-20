@@ -1248,6 +1248,34 @@ int main() try
                     code.find("pixelConstants[19][1]=waterVisibilityYards;")!=std::string::npos&&
                     code.find("pixelConstants[19][2]=horizonFogYards;")!=std::string::npos,
                     "the visibility range and the horizon fog are tunables, not constants");
+            // THE DOUBLE IMAGE. Refraction may only bend the BED, and the old guard
+            // only rejected what was in FRONT of the water. A figure standing in the
+            // water is behind the surface, so its own dark pixels were a legal sample
+            // and got painted a few texels to the side - a second copy beside the real
+            // one, which is the report "duplicated shadow on the water".
+            const auto refractZ=pixel.find(
+                "float refractZ=refractRaw>=.9999?100000:reflectionProjection.y/(refractRaw-reflectionProjection.x);");
+            const auto sameSurface=pixel.find(
+                "float sameSurface=step(abs(refractZ-behindZ),max(behindZ*.08,1.5));",refractZ);
+            Require(refractZ!=std::string::npos&&sameSurface!=std::string::npos&&
+                    pixel.find("sameSurface*step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw)",
+                               sameSurface)!=std::string::npos,
+                    "refraction only samples the surface this pixel is already looking at");
+            // And a bend needs a column to bend through: the quarter-strength floor let
+            // an inch of water pull the sample as hard as a deep lake, which is what put
+            // anything dark under a shallow sheet on screen twice.
+            Require(pixel.find("float bend=waterStyle.x*saturate(column*.07)*contact;")!=std::string::npos&&
+                    pixel.find("saturate(column*.05+.25)")==std::string::npos,
+                    "refraction starts at nothing and grows with the water it crosses");
+            // The two terms that can carry a duplicated image are separable in game:
+            // mode 3 shows the mirror alone, mode 4 the refracted sample alone. The
+            // clamp has to allow them, or the diagnostic is unreachable.
+            Require(pixel.find("if(flowControl.w>3.5){result_.color=float4(saturate(refracted),1);return result_;}")
+                        !=std::string::npos&&
+                    pixel.find("if(flowControl.w>2.5){result_.color=float4(saturate(reflected),1);return result_;}")
+                        !=std::string::npos&&
+                    code.find("std::clamp(ReadTuning(L\"WaterDebugMode\",0),0,4)")!=std::string::npos,
+                    "a duplicated image can be attributed in game: mirror only (3) or bed only (4)");
             // A shallow carve-out belongs to a BEACH. An upright occluder standing in
             // the water is not a shallow bed: with only inches of column over it the
             // gate released most of the slider and the stage refracted its silhouette
@@ -1277,6 +1305,12 @@ int main() try
                     mirror.find("body = Lerp(body, Add(deep, inScatter), murk);")!=std::string::npos &&
                     mirror.find("alpha = std::max(alpha, murk);")!=std::string::npos &&
                     mirror.find("float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
+                        !=std::string::npos &&
+                    mirror.find("const bool otherSurface = std::fabs(refractZ - centreZ) > std::max(centreZ * .08f, 1.5f);")
+                        !=std::string::npos &&
+                    mirror.find("bedFade += (1.f - bedFade) * ((1.f - beach) * (validDepth > .5f ? 1.f : 0.f));")
+                        !=std::string::npos &&
+                    mirror.find("const float bend = refractionStrength * Saturate(column * .07f) * contact;")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
                         !=std::string::npos,

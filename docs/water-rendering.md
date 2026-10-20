@@ -3007,6 +3007,45 @@ bedFade = lerp(bedFade, 1.0, steep * bedTrusted)
 The CPU preview mirrors both terms. `WaterRegression` pins the order (the steep
 term comes after the trust gate and before the body mix) and the preview.
 
+## Round 16: refraction bends the bed, and only the bed (2026-10-20)
+
+The "duplicated shadow on the water" measured as **two dark bands flanking the
+figure at about half the surrounding water's brightness** - a copy, not a
+shadow. Two mechanisms in this stage can produce one, and both were live:
+
+**1. Refraction sampled the wrong surface.** The silhouette guard compared the
+offset sample against the *water surface's own depth*, so it rejected what is in
+front of the water (a rail, a bridge) and accepted everything behind it -
+including a figure standing in the water, whose own dark pixels are a perfectly
+legal sample. The stage then painted those pixels a few texels to the side while
+the alpha blend showed the true silhouette at the same coverage: two copies.
+
+```
+refractZ     = depth of the offset sample
+sameSurface  = step(|refractZ - behindZ|, max(behindZ * .08, 1.5))
+refractUV    = lerp(screenUV, refractUV, sameSurface * inFrontOfSurface)
+```
+
+Refraction bends the BED, so the sample must land on the surface this pixel is
+already looking at. 8% relative (never under a yard and a half) keeps a genuine
+bed gradient at range bending exactly as before.
+
+**2. The bend had a quarter-strength floor.** `saturate(column*.05 + .25)` pulled
+the sample at 25% of full strength through an *inch* of water, and at that range
+a quarter of the offset is many pixels on screen - so anything dark under a
+shallow sheet (a shadow, a stone, a weed bed) also came up twice. The offset is
+now proportional to the water the ray actually crosses, full at about fourteen
+yards:
+
+```
+bend = waterStyle.x * saturate(column * .07) * contact
+```
+
+**And the two terms are now separable in game.** `WaterDebugMode=3` renders the
+mirror alone, `4` the refracted sample alone (the clamp was widened from 2 to 4).
+Whichever one carries a copy names the culprit; there is no third place in this
+stage that can paint an image of something else.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

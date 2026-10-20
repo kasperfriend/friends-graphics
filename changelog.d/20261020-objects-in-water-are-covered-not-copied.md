@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: Nothing standing in the water is copied onto it
+title: Nothing in the water is drawn twice
 ---
-Things standing in the water - characters, rocks, posts - are now covered by the surface instead of being mirrored back up through it, so the surface no longer shows a second, displaced copy of them beside the real one.
+Water refraction now only bends the seabed it is actually over and starts from zero in shallow water, so characters, rocks and posts standing in or lying under the surface are no longer painted a second time beside themselves.

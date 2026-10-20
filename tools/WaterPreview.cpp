@@ -810,13 +810,25 @@ int main(int argc, char** argv)
                     // over the first yard instead of pulling the bottom by the full wave slope
                     // right at the contact. Below that level the contact factor is exactly 1.
                     const float contact = plan.foamGlow ? Saturate(effectiveDepth * .9f) : 1.f;
-                    const float bend = refractionStrength * Saturate(column * .05f + .25f) * contact;
+                    // A bend needs a column to bend through: no floor, full strength at
+                    // about fourteen yards. The floor let an inch of water pull the sample
+                    // by a quarter of full, which at that range is many pixels on screen and
+                    // painted anything dark under a shallow sheet twice.
+                    const float bend = refractionStrength * Saturate(column * .07f) * contact;
                     const V2 uvOffset{ wave.slopes.x * refractGain * bend, -wave.slopes.y * refractGain * bend };
                     float refractU = screenU + uvOffset.x, refractV = screenV + uvOffset.y;
                     const float refractZ = copy.Sample(refractU, refractV);   // raw, no bias
-                    if (!(refractZ > viewZ - .5f)) { refractU = screenU; refractV = screenV; }
-                    // (a refraction that would land in front of the surface is pulled back to the
-                    // unoffset pixel, which is the shader's silhouette rejection in view-Z terms)
+                    // Reject what is in FRONT of the surface (a rail, a bridge)...
+                    const bool inFront = !(refractZ > viewZ - .5f);
+                    // ...and reject a sample that is not on the SAME surface: a figure
+                    // standing in the water is behind the surface, so its own dark
+                    // pixels pass the test above and got painted a few texels to the
+                    // side - a second copy of it beside the real one. Refraction bends
+                    // the bed, so the two depths must agree within 8% (never less than
+                    // a yard and a half).
+                    const float centreZ = copy.Sample(screenU, screenV);
+                    const bool otherSurface = std::fabs(refractZ - centreZ) > std::max(centreZ * .08f, 1.5f);
+                    if (inFront || otherSurface) { refractU = screenU; refractV = screenV; }
                     V3 refracted;
                     copy.Sample(refractU, refractV, &refracted);
 

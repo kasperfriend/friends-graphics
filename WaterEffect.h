@@ -1417,12 +1417,35 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // fading the offset over the first yard lets the bottom come up through undisturbed
     // water instead. One lerp on a uniform gate, so a level below it is untouched.
     float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));
-    float bend=waterStyle.x*saturate(column*.05+.25)*contact;
+    // A BEND NEEDS A COLUMN TO BEND THROUGH. The old expression floored this at a
+    // quarter of full strength, so even an inch of water over a pond's floor pulled
+    // the sample by 25% - and at that depth the "bed" is close enough to the eye that
+    // a quarter of the offset is many pixels on screen. Anything dark under a shallow
+    // sheet (a figure's shadow, a stone, a weed bed) came up twice: once where it is,
+    // once where the offset put it. Refraction is proportional to the water the ray
+    // crosses, so it now starts at nothing and reaches full at about fourteen yards.
+    float bend=waterStyle.x*saturate(column*.07)*contact;
     float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
-    // Reject distortion across foreground silhouettes, rather than pulling
-    // a bridge/character into the water. Missing depth keeps the native body.
+    // Reject distortion across silhouettes, rather than pulling a bridge or a
+    // character into the water. Missing depth keeps the native body.
+    //
+    // The old test only rejected what is IN FRONT of the water - a rail, a bridge -
+    // because it compared the offset sample against the water surface's own depth.
+    // It cannot see the case that actually happens: a figure, a rock or a post
+    // standing IN the water is BEHIND the surface, so its own dark pixels are a
+    // perfectly legal refraction sample and the stage painted them into the water a
+    // few texels to the side, while the alpha blend showed the true silhouette at the
+    // same 85% coverage. Two copies of one object - reported as "duplicated shadow on
+    // the water". Refraction bends the BED, so the sample is kept only when it landed
+    // on the same surface this pixel is already looking at: the two depths must agree
+    // to within 8% (and never less than a yard and a half, so a real bed gradient at
+    // range still bends). Anything nearer is an occluder in the column and the offset
+    // collapses back to the unrefracted pixel.
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
-    refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
+    float refractZ=refractRaw>=.9999?100000:reflectionProjection.y/(refractRaw-reflectionProjection.x);
+    float sameSurface=step(abs(refractZ-behindZ),max(behindZ*.08,1.5));
+    refractUV=lerp(screenUV,refractUV,
+        sameSurface*step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
     float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
     // Beer-Lambert per channel, with the authored deep colour as the asymptote:
     // "clear mountain lake" and "murky swamp" are then one number apart (Clarity)
@@ -1918,7 +1941,15 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // this is the identity it always was.
     float3 underwaterBody=rgb*cameraTransmittance+deepTint.rgb*(1-cameraTransmittance);
     rgb=lerp(rgb,underwaterBody,underwater);
-    if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
+    if(flowControl.w>1.5&&flowControl.w<2.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
+    // Two more modes, because a duplicated image on a water surface can only come from
+    // two places and they need different fixes: the MIRROR (the screen-space reflection
+    // sampling an occluder that stands at the surface's own depth) or the BED (the
+    // refracted sample pulling a silhouette sideways). Mode 3 shows the reflection
+    // term alone, mode 4 the refracted sample alone; whichever carries the copy names
+    // the culprit in one screenshot instead of another round of inference.
+    if(flowControl.w>3.5){result_.color=float4(saturate(refracted),1);return result_;}
+    if(flowControl.w>2.5){result_.color=float4(saturate(reflected),1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     // Coverage is the column's own extinction, not a hand-tuned fraction of it. Water
@@ -2125,7 +2156,7 @@ void ReloadTuning(){
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
-    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
+    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,4));
     // Sea response: shared wind when linked, native weather otherwise.
     // The already-resolved wind includes the zone's weather damping; never
     // apply that multiplier (or a separate rain boost) a second time.
