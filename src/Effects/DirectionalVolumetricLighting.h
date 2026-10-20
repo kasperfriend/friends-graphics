@@ -49,8 +49,8 @@ namespace renderer
         bool edgeFogEnabled = false;
         float edgeFogDistance = 185.f;
         float edgeFogPower = 2.f;
-        bool localFogEnabled = true;
-        float localFogDensity = 0.036f;
+        bool localFogEnabled = false;
+        float localFogDensity = 0.0f;
         float localFogHeightFalloff = 1.f / 3.f;
         float localFogBaseOffset = -1.0f;
         float localFogWakeStrength = 0.85f;
