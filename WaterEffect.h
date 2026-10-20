@@ -1807,6 +1807,19 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // measured shallow shelf still keeps its sand.
         float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);
         float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);
+        // THE SHALLOW CARVE-OUT IS A BEACH, NOT A THING STANDING IN THE WATER.
+        // `bedFade` fades with the depth of the bed so a shoreline's first yard can
+        // still show its sand - but an upright surface under the surface is not a
+        // shallow bed, it is an object INSIDE the water: a figure, a rock, a post.
+        // There `effectiveDepth` is the few inches from the surface to that object,
+        // so the gate released most of the slider and the stage refracted the object's
+        // own silhouette back up through the plane, distorted by the wave offset - a
+        // dark second copy of whatever stands in the pond standing next to it, which
+        // reads exactly as a duplicated shadow. `beach` is the slope the stage already
+        // reads off the captured bed (about twelve degrees is a beach, forty is a
+        // wall), so a steep occluder takes the slider's full authority instead.
+        float steep=1-saturate(beach);
+        bedFade=lerp(bedFade,1.0,steep*bedTrusted);
         body=lerp(body,seaBody,opacityControl.x*bedFade);
         // ...and then the water's own range closes over it, at the slider's authority
         // rather than the depth reading's: this is the original's underwater cover, and

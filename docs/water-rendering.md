@@ -2979,6 +2979,34 @@ upload, one restore (the block grew by the one register this needed). The
 interpolant is still the fallback when a draw's `c4` is not a fog curve, and
 under water the client's own fog is still used unchanged.
 
+## Round 15: a beach is not a thing standing in the water (2026-10-20)
+
+`hideBed` fades with the depth of the bed so a shoreline's first yard can still
+show its sand, and that gate has one flaw the screenshots found: it reads
+*depth*, and an upright surface standing in the water has almost none. A figure,
+a rock, a post has inches of column over it, so `saturate(effectiveDepth * .5)`
+released most of WATER OPACITY, the stage took `refracted` from that occluder's
+own silhouette, and painted it back up through the plane *offset by the wave
+refraction* - a second, displaced copy of whatever was standing in the pond,
+beside the first. It reads as a duplicated shadow: two dark bands either side of
+the figure, at about half the water's brightness.
+
+The slope the stage already reads for the shore (`beach`, from the captured
+bed's normal: about twelve degrees is a beach, forty is a wall) separates the two
+cases, because they are physically different things:
+
+```
+steep   = 1 - saturate(beach)
+bedFade = lerp(bedFade, 1.0, steep * bedTrusted)
+```
+
+- a **beach** keeps the carve-out, so its first yard still shows its sand;
+- a **steep occluder under the surface** takes the slider's full authority, so it
+  is covered by the water instead of duplicated through it.
+
+The CPU preview mirrors both terms. `WaterRegression` pins the order (the steep
+term comes after the trust gate and before the body mix) and the preview.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

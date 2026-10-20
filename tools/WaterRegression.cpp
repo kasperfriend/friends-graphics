@@ -1248,7 +1248,16 @@ int main() try
                     code.find("pixelConstants[19][1]=waterVisibilityYards;")!=std::string::npos&&
                     code.find("pixelConstants[19][2]=horizonFogYards;")!=std::string::npos,
                     "the visibility range and the horizon fog are tunables, not constants");
-            // An unknown or implausible bed reading must not switch the slider off.
+            // A shallow carve-out belongs to a BEACH. An upright occluder standing in
+            // the water is not a shallow bed: with only inches of column over it the
+            // gate released most of the slider and the stage refracted its silhouette
+            // back up through the plane - a second, displaced copy of it (reported as a
+            // duplicated shadow on the water).
+            const auto steep=pixel.find("float steep=1-saturate(beach);",trust);
+            const auto steepFade=pixel.find("bedFade=lerp(bedFade,1.0,steep*bedTrusted);",steep);
+            Require(steep!=std::string::npos&&steepFade!=std::string::npos&&trust<steep&&
+                    steepFade<pixel.find("body=lerp(body,seaBody,opacityControl.x*bedFade);"),
+                    "a steep occluder under the surface takes the slider's full authority");
             // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
             Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
                         !=std::string::npos &&
@@ -1267,7 +1276,7 @@ int main() try
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), murk);")!=std::string::npos &&
                     mirror.find("alpha = std::max(alpha, murk);")!=std::string::npos &&
-                    mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
+                    mirror.find("float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
                         !=std::string::npos,
