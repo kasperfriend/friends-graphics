@@ -1034,13 +1034,11 @@ int main(int argc, char** argv)
                         // trustworthy depth reading the slider keeps full authority,
                         // which is the only way it can hide open water's bed.
                         float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;
-                        // A shallow carve-out is a BEACH, not a thing standing in the
-                        // water: an upright occluder under the surface has only inches of
-                        // column over it, and reading that as "ankle deep" let the stage
-                        // refract its silhouette back up through the plane - a second,
-                        // displaced copy of whatever stands in the pond. Same slope read
-                        // the shore terms use.
-                        bedFade += (1.f - bedFade) * ((1.f - beach) * (validDepth > .5f ? 1.f : 0.f));
+                        // The slope gate that used to force this to 1 over steep beds is
+                        // gone with the shader's: it was written for a duplicate that
+                        // turned out to be two other things, and over a small pond the
+                        // three-yard bed baseline reaches the banks from everywhere, so
+                        // it covered the shallows instead of protecting them.
                         body = Lerp(body, Add(deep, inScatter), .85f * bedFade);
                         body = Lerp(body, Add(deep, inScatter), murk);
                         waterBody = Lerp(body, Add(deep, inScatter), Saturate(absorption * (.85f - .22f * fresnel)));

@@ -1289,16 +1289,16 @@ int main() try
                     pixel.find("if(flowControl.w>5.5){result_.color=float4(tex2Dlod(sceneTexture,float4(screenUV,0,0)).rgb,1);")
                         !=std::string::npos,
                     "the water plane can be removed (5) or turned into a plain window (6) for a report");
-            // A shallow carve-out belongs to a BEACH. An upright occluder standing in
-            // the water is not a shallow bed: with only inches of column over it the
-            // gate released most of the slider and the stage refracted its silhouette
-            // back up through the plane - a second, displaced copy of it (reported as a
-            // duplicated shadow on the water).
-            const auto steep=pixel.find("float steep=1-saturate(beach);",trust);
-            const auto steepFade=pixel.find("bedFade=lerp(bedFade,1.0,steep*bedTrusted);",steep);
-            Require(steep!=std::string::npos&&steepFade!=std::string::npos&&trust<steep&&
-                    steepFade<pixel.find("body=lerp(body,seaBody,opacityControl.x*bedFade);"),
-                    "a steep occluder under the surface takes the slider's full authority");
+            // THE SLOPE GATE IS GONE, AND MUST NOT COME BACK. It forced `bedFade` to 1
+            // over any bed that read as steep, for a duplicate that turned out to be
+            // the refraction guard and the celestial march instead. What it actually
+            // did was cover the shallows: the bed slope comes from a three-yard
+            // baseline, so over a pond the taps reach the banks from everywhere and
+            // the whole sheet read as a wall. `beach` drives the swash and the foam;
+            // it decides nothing about how much of the bed may show through.
+            Require(pixel.find("float steep=1-saturate(beach);")==std::string::npos&&
+                    pixel.find("bedFade=lerp(bedFade,1.0,steep*bedTrusted);")==std::string::npos,
+                    "the shore's carve-out is decided by the column's depth, not by the bed's slope");
             // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
             Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
                         !=std::string::npos &&
@@ -1321,8 +1321,7 @@ int main() try
                         !=std::string::npos &&
                     mirror.find("const bool otherSurface = std::fabs(refractZ - centreZ) > std::max(centreZ * .08f, 1.5f);")
                         !=std::string::npos &&
-                    mirror.find("bedFade += (1.f - bedFade) * ((1.f - beach) * (validDepth > .5f ? 1.f : 0.f));")
-                        !=std::string::npos &&
+                    mirror.find("bedFade += (1.f - bedFade)")==std::string::npos &&
                     mirror.find("const float bend = refractionStrength * Saturate(column * .07f) * contact;")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")

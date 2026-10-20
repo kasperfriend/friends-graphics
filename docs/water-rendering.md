@@ -3117,6 +3117,45 @@ no longer does.
 The CPU preview mirrors the same window, and `WaterRegression` pins the formula,
 the mirror and the numeric consequence (5668 assertions).
 
+## Round 19: the shore gets its carve-out back, and the slope gate goes (2026-10-20)
+
+Reported after round 18: *"water meets shore, it seems to cover all the water -
+wasn't like that before our recent commits."*
+
+It was, and it was round 15. That round added a term that forced `bedFade` to 1
+wherever the captured bed read as **steep**, on the theory that a steep surface
+under the water is a figure or a rock rather than a shore:
+
+```
+steep    = 1 - saturate(beach)
+bedFade  = lerp(bedFade, 1.0, steep * bedTrusted)
+```
+
+The theory was written for the duplicated figure, which turned out to be the
+refraction guard (round 16) and the celestial march (round 18). What the term
+*actually* did is this: `bedSlope` is read from the captured depth over a
+**three-yard baseline**, so in a pond the taps reach the banks from nearly
+everywhere and the whole sheet reads as a wall. `bedFade` then takes the
+opacity slider's full authority across all of the water, and the shore is
+swallowed by its own pond. A shoreline is the one place the carve-out exists
+for.
+
+The gate is removed. `bedFade` is again the column's own depth
+(`lerp(1.0, saturate(effectiveDepth*.5), bedTrusted)`), `beach` again drives
+only the swash and the shore foam, and the regression now asserts the gate is
+**absent** rather than pinning its order.
+
+Two things worth recording, because the report came with a guess attached:
+
+- **It cannot be the fog.** At 25 yards with the shipped numbers, `murk` is
+  `smoothstep(19.8, 90, 25) = 0.016` and `farSea` is `smoothstep(40, 540, 25) = 0`
+  - the near-field water is outside both ramps by two orders of magnitude. The
+  horizon terms and the visibility ramp are functions of *distance*, and a pond
+  in front of you is not distant.
+- A covering that starts at the waterline and spreads over the water is a term
+  that **scales with the bed**, not with the eye: the two candidates were
+  `bedFade` (this) and the shoreline slope read that feeds it.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
