@@ -154,6 +154,12 @@ inline std::vector<Item> items={
  // is a gradient instead of the line where the plane ends.
  // Bounds match `std::clamp(ReadTuning(L"HorizonFogYards",900),100,3000)`.
  {KIND_SLIDER,L"Water",L"HorizonFogYards","HORIZON FOG (YD)",100,3000,50,900},
+ // The water stage's own terms, drawn instead of the water: 3 the screen-space
+ // mirror alone, 4 the refracted sample alone, 5 no surface at all, 6 the
+ // captured scene through the plane. It lives here because a report of "a
+ // second copy on the water" is settled by looking at one of these frames, and
+ // nobody looks for a diagnostic that only exists in an ini file. 0 is normal.
+ {KIND_SLIDER,L"Water",L"WaterDebugMode","WATER DEBUG (3 MIRROR 4 BED 5 NO SURFACE 6 WINDOW)",0,6,1,0},
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WATER WIND / FOAM BIAS",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
  {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},

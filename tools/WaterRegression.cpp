@@ -1445,6 +1445,12 @@ int main() try
                     ini.find("HorizonFogYards=900")!=std::string::npos&&
                     overlay.find("L\"Water\",L\"VisibilityYards\",\"WATER VISIBILITY (YD)\",5,400,5,90}")
                         !=std::string::npos&&
+                    // Reached from the overlay, not only from the ini: a report
+                    // is settled by taking one of these frames, and nobody hunts
+                    // for a diagnostic that is not in the tab they already have
+                    // open.
+                    overlay.find("L\"Water\",L\"WaterDebugMode\",\"WATER DEBUG (3 MIRROR 4 BED 5 NO SURFACE 6 WINDOW)\",0,6,1,0}")
+                        !=std::string::npos&&
                     overlay.find("L\"Water\",L\"HorizonFogYards\",\"HORIZON FOG (YD)\",100,3000,50,900}")
                         !=std::string::npos&&
                     overlay.find("L\"Water\",L\"ClarityPercent\",\"WATER CLARITY\",5,200,5,100}")!=std::string::npos,
