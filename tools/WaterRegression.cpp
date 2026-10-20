@@ -1178,8 +1178,9 @@ int main() try
                         !=std::string::npos&&
                     mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare)")
                         !=std::string::npos &&
-                    mirror.find("const float fogPixel = 1.f - std::exp(-(viewDistance / horizonDistance) * (viewDistance / horizonDistance));")
+                    mirror.find("const float fogShape = Saturate((fogEnd - viewDistance) / (fogEnd - fogStart));")
                         !=std::string::npos &&
+                    mirror.find("const float fogPixel = std::pow(fogShape, 3.f);")!=std::string::npos &&
                     mirror.find("const float fogged = std::max(fogPixel, airShare);")!=std::string::npos &&
                     mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
                     "the CPU preview fogs toward the same tinted target, deepening with distance");
@@ -1223,18 +1224,21 @@ int main() try
             const auto air=pixel.find(
                 "float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);");
             const auto share=pixel.find("float seaShare=max(",air);
-            const auto fogScale=pixel.find("float fogScale=max(opacityControl.w,1.0);",share);
-            const auto fogPixel=pixel.find("float fogPixel=1.0-exp(-fogReach*fogReach);",fogScale);
-            const auto fogFactor=pixel.find("float fogFactor=lerp(max(fogPixel,airShare),fog,underwater);",fogPixel);
+            const auto span=pixel.find("float fogSpan=max(fogCurve.y-fogCurve.x,1.0);",share);
+            const auto shape=pixel.find("float fogShape=saturate((fogCurve.y-viewDistance)/fogSpan);",span);
+            const auto fogPixel=pixel.find("float fogPixel=pow(fogShape,clamp(fogCurve.z,.05,8.0));",shape);
+            const auto fogFactor=pixel.find("float fogAir=lerp(max(fogPixel,airShare),fog,underwater);",fogPixel);
+            Require(pixel.find("float4 fogCurve:register(c219);")!=std::string::npos&&
+                    span!=std::string::npos&&shape!=std::string::npos&&fogPixel!=std::string::npos&&
+                    fogFactor!=std::string::npos,
+                    "the sea evaluates the CLIENT's fog curve at the pixel's own distance");
             const auto usesFog=pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);",fogFactor);
-            Require(air!=std::string::npos&&share!=std::string::npos&&fogScale!=std::string::npos&&
+            Require(air!=std::string::npos&&share!=std::string::npos&&span!=std::string::npos&&
                     fogPixel!=std::string::npos&&fogFactor!=std::string::npos&&
-                    usesFog!=std::string::npos&&air<share&&share<fogScale&&fogScale<fogPixel&&
+                    usesFog!=std::string::npos&&air<share&&share<span&&span<fogPixel&&
                     fogPixel<fogFactor&&fogFactor<usesFog&&
-                    pixel.find("max(fog,airShare)")==std::string::npos&&
-                    pixel.find("float fog=max(fog,airShare);")==std::string::npos&&
-                    pixel.find(")*(1-airShare);")!=std::string::npos&&
-                    pixel.find("fog=max(fog,airShare);")==std::string::npos,
+                    pixel.find("float fogFactor=fogCurve.w>.5?fogAir:")!=std::string::npos&&
+                    pixel.find(")*(1-airShare);")!=std::string::npos,
                     "the sea's fog is sampled per pixel at its own distance, never from a triangle corner");
             // Both distances are player-facing, per-location tunables.
             Require(code.find("waterVisibilityYards=float(std::clamp(ReadTuning(L\"VisibilityYards\",90),5,400));")
@@ -1370,9 +1374,13 @@ int main() try
             // the cached-light memcpy, which stops at c196.
             const auto lane=code.find("pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);");
             const auto cached=code.find("std::memcpy(pixelConstants,cache.values,sizeof(cache.values));");
+            // ...and the block now runs to c219, which carries the client's fog curve
+            // for the per-pixel evaluation, in the same one upload and the same restore.
             Require(lane!=std::string::npos&&cached!=std::string::npos&&lane<cached&&
-                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos,
-                    "opacity rides c199 inside the one c180..c218 upload, ahead of the cached-light splice that only overwrites c180..c196");
+                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],40)")!=std::string::npos&&
+                    code.find("pixelConstants[39][0]=fogCurveValid?fogCurveStart:0.f;")!=std::string::npos&&
+                    code.find("GetPixelShaderConstantF(180,oldPixelConstants,40)")!=std::string::npos,
+                    "opacity rides c199 and the fog curve c219 inside the one c180..c219 upload, ahead of the cached-light splice that only overwrites c180..c196");
             const std::string ini=ReadAlongside("../GraphicsEffects.ini");
             const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
             Require(ini.find("OpacityPercent=85")!=std::string::npos&&
@@ -1460,7 +1468,7 @@ int main() try
                 pixel.find("dot(worldRel.xy,waveLattice.xy)")!=std::string::npos&&
                 pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
                 pixel.find("noiseGradient(groupCoord)")==std::string::npos&&
-                code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos&&
+                code.find("SetPixelShaderConstantF(180,pixelConstants[0],40)")!=std::string::npos&&
                 code.find("SetVertexShaderConstantF(200,vertexControls,5)")!=std::string::npos,
                 "the vertex stage anchors the warp AND the set envelope and interpolates both to pixels without resampling");
         // The envelope has to ride the lanes the two stages already had. Interpolator counts
@@ -1491,14 +1499,17 @@ int main() try
         // every touched register, this keeps the three untouched gap registers byte-for-byte
         // while reducing six D3D9 constant calls per tile to three. The native vertex inputs
         // are likewise fetched through one enclosing c5..c35 span rather than three calls.
-        for (const char* spelling : {"GetPixelShaderConstantF(180,oldPixelConstants,39)",
+        // c180..c219 is the widest span the stage reads: the client's constants, the
+        // WATER OPACITY floor with its range lanes on c199, and the client's own fog
+        // curve on c219 for the per-pixel evaluation. One save, one upload, one restore.
+        for (const char* spelling : {"GetPixelShaderConstantF(180,oldPixelConstants,40)",
                                      "GetVertexShaderConstantF(200,oldVertexControls,5)",
                                      "GetVertexShaderConstantF(5,nativeVertexConstants[0],31)",
-                                     "SetPixelShaderConstantF(180,pixelConstants[0],39)",
-                                     "SetPixelShaderConstantF(180,oldPixelConstants,39)",
+                                     "SetPixelShaderConstantF(180,pixelConstants[0],40)",
+                                     "SetPixelShaderConstantF(180,oldPixelConstants,40)",
                                      "SetVertexShaderConstantF(200,oldVertexControls,5)",
-                                     "float oldPixelConstants[156]{},oldVertexControls[20]{}",
-                                     "float pixelConstants[39][4]","float vertexControls[20]="})
+                                     "float oldPixelConstants[160]{},oldVertexControls[20]{}",
+                                     "float pixelConstants[40][4]","float vertexControls[20]="})
             Require(code.find(spelling)!=std::string::npos,
                     "water constants use the complete batched save/upload/restore windows");
         Require(code.find("GetPixelShaderConstantF(200,")==std::string::npos&&

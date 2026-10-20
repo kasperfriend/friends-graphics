@@ -1085,12 +1085,14 @@ int main(int argc, char** argv)
                     // reveal the clear colour, which reads as glass over emptiness.
                     alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));
                     alpha = std::max(alpha, murk);
-                    // The shader evaluates its fog at THIS pixel's distance from the
-                    // scale the client's curve reduces to, never from the per-vertex
-                    // interpolant: on a tile five hundred yards across, a curve sampled
-                    // at three corners and blended is not the curve, and two sibling
-                    // tiles show their shared edge. Mirrored here at the fallback scale.
-                    const float fogPixel = 1.f - std::exp(-(viewDistance / horizonDistance) * (viewDistance / horizonDistance));
+                    // The shader evaluates the CLIENT's fog curve at THIS pixel's
+                    // distance, never from the per-vertex interpolant: on a tile five
+                    // hundred yards across, a curve sampled at three corners and blended
+                    // is not the curve, and two sibling tiles show their shared edge.
+                    // Same shape here - start, end, exponent - at the preview's own fog.
+                    const float fogStart = horizonDistance * .35f, fogEnd = horizonDistance;
+                    const float fogShape = Saturate((fogEnd - viewDistance) / (fogEnd - fogStart));
+                    const float fogPixel = std::pow(fogShape, 3.f);
                     // A sea's horizon is not the sky: the shader mixes the air fog toward the
                     // body's deep colour in proportion to the column's own saturation
                     // (`seaShare`), so the far water still reads as a surface instead of as a

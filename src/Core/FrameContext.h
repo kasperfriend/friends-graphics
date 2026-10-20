@@ -118,6 +118,14 @@ namespace renderer
         // DirectionalVolumetricLighting.cpp's boundary-depth pass.
         IDirect3DTexture9* waterMaskTexture = nullptr;
         IDirect3DTexture9* waterDepthTexture = nullptr;
+        // The colour the sea converges on at the horizon, published by the water stage
+        // from the same fog colour it fades its own far end into. The atmosphere
+        // composite paints pixels it did not draw BELOW the horizon with this instead of
+        // with the air's haze, so the sea's far edge and the void beyond it - the place
+        // the liquid tiles simply stop - are one colour. Painting that void with the sky's
+        // haze is what put a band of a different colour under the waterline.
+        float horizonWaterColour[3] = { 0.f, 0.f, 0.f };
+        bool horizonWaterValid = false;
         // How far the camera is under the liquid, 0 in air and 1 a yard and a half under it:
         // renderer::underwater::Tracker's ramp, settled once per frame from the liquid draws'
         // own matrices (see WaterEffect.h, controls[75], and src/Water/UnderwaterMedium.h) and

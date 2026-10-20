@@ -2939,6 +2939,46 @@ medium's fog and the pass that owns it is the underwater one.
 `WATER VISIBILITY` rather than 35%: a stone's throw out rather than two, which is
 what the reference does at the diver's own feet.
 
+## Round 14: the far field belongs to the sea, not to the sky (2026-10-19)
+
+Round 13 made the haze cover the water and everything undrawn below the horizon,
+which was right about the *mask* and wrong about the *colour*: it painted that
+whole region with the air's haze (`edgeColor`, `EnvironmentFogCapture`'s ambient
+fog colour). But the pixels below the waterline that the frame did not draw are
+not sky. They are the sea beyond its last liquid tile - and the sea's own far
+colour, the one its water stage fades to, is the client's fog colour for that
+draw. Two colours, one line, which is exactly the band that survived.
+
+The water stage now publishes what it fades into:
+
+- `FrameContext::horizonWaterColour` (+ `horizonWaterValid`), written once per
+  frame from the draw's pixel `c4` - the very `fogColor` the surface stage fogs
+  toward - with a plausibility guard.
+- The atmosphere composite reads it on `c8` and tints its horizon mask with it
+  for everything on the **sea side** of the waterline (`belowHorizon`, or the
+  water mask inside the horizon cone). Above the waterline the sky keeps the
+  air's haze. Terrain is untouched.
+- Result: the water's far end, the void where the liquid tiles stop, and the
+  horizon band are one value by construction rather than two values that were
+  meant to match.
+
+**The fog is the client's own curve, evaluated per pixel.** Round 13 replaced the
+interpolated `fog` with a `1-exp(-d²)` approximation whose scale came from the
+curve's 95% point; when the solve failed it fell back to `HORIZON`, which is much
+further than the air's fog reaches - so mid-distance water kept its full body
+colour while the sky beside it was already hazed, and the band came back. The
+stage now evaluates the client's actual function at the pixel's distance:
+
+```
+start = (1 - y) / x,  end = -y / x  (from the draw's vertex c4)
+fogPixel = clamp((end - d) / (end - start), 0, 1) ^ exponent
+```
+
+`c219` carries `(start, end, exponent, usable)`; `c180..c219` is one save, one
+upload, one restore (the block grew by the one register this needed). The
+interpolant is still the fallback when a draw's `c4` is not a fog curve, and
+under water the client's own fog is still used unchanged.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

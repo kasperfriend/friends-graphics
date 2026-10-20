@@ -319,11 +319,11 @@ int main() try {
     // slid vertex is a clipped pixel - the OFF readbacks below have to measure colour on
     // visible native geometry, not an empty target. z and w stay distinctive sentinels so
     // the restore check still compares against something no real draw would write.
-    float savedPixelConstants[156],savedVertexControls[20];
-    for(unsigned i=0;i<156;++i)savedPixelConstants[i]=float(i+1);
+    float savedPixelConstants[160],savedVertexControls[20];
+    for(unsigned i=0;i<160;++i)savedPixelConstants[i]=float(i+1);
     for(unsigned i=0;i<20;++i)savedVertexControls[i]=float(i+71);
     savedVertexControls[0]=savedVertexControls[1]=0; // keep fixture geometry on the clip plane
-    Check(d->SetPixelShaderConstantF(180,savedPixelConstants,39));
+    Check(d->SetPixelShaderConstantF(180,savedPixelConstants,40));
     Check(d->SetVertexShaderConstantF(200,savedVertexControls,5));
     float nativeConstants[36][4]{};
     for(int i=0;i<4;++i){nativeConstants[i][i]=1;nativeConstants[5+i][i]=1;}
@@ -339,7 +339,7 @@ int main() try {
         ComPtr<IDirect3DPixelShader9> ps;ComPtr<IDirect3DVertexShader9> vs;
         Check(d->GetPixelShader(ps.GetAddressOf()));Check(d->GetVertexShader(vs.GetAddressOf()));
         Require(ps.Get()==originalPS.Get()&&vs.Get()==originalVS.Get(),"actual native shaders restored");
-        float values[156];Check(d->GetPixelShaderConstantF(180,values,39));
+        float values[160];Check(d->GetPixelShaderConstantF(180,values,40));
         Require(memcmp(values,savedPixelConstants,sizeof(savedPixelConstants))==0,
             "batched local-light, gap and water pixel constants restored");
         Check(d->GetVertexShaderConstantF(200,values,5));
@@ -395,11 +395,18 @@ int main() try {
                 opacity[2]==watereffect::horizonFogYards&&
                 opacity[1]>=5.f&&opacity[2]>opacity[1],
             "c199 carries the visibility range and the horizon fog distance");
-        // c199.w is the fog scale the surface evaluates per pixel: the client's own
-        // curve reduced to a distance, or the authored horizon distance when the
-        // curve is not usable. It must always be a distance, never a leftover zero.
+        // c199.w is the fog scale solved from the client's own curve, or the authored
+        // horizon distance when the curve is not usable. It must always be a
+        // distance, never a leftover zero.
         Require(opacity[3]>1.f&&opacity[3]<=4000.f,
             "c199 carries a usable fog scale for the per-pixel distance fog");
+        // c219 is the whole curve (start, end, exponent, usable), because the pixel
+        // stage has to evaluate the CLIENT's fog where the pixel is: on a 500-yard
+        // tile the interpolated factor is not the curve, and two sibling tiles that
+        // resolve it differently show their shared edge.
+        float curve[4];Check(d->GetPixelShaderConstantF(219,curve,1));
+        Require(curve[3]==0.f||(curve[1]>curve[0]&&curve[2]>=.05f&&curve[2]<=8.f),
+            "c219 carries the client's fog curve, or a clean 'not usable'");
         // Coverage only means something under an alpha blend, and the native liquid
         // material owns that state. The replaced draw must composite with
         // SRCALPHA/INVSRCALPHA and the block above must put the original back.

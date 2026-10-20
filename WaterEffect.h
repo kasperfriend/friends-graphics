@@ -58,6 +58,8 @@ float horizonFogYards=900.f;
 // distance cannot fog differently, and a curve sampled once per pixel cannot be
 // distorted by a triangle edge.
 float fogCurveYards=0.f;
+float fogCurveStart=0.f,fogCurveEnd=0.f,fogCurvePower=1.f;
+bool fogCurveValid=false;
 unsigned fogCurveFrame=0xffffffffu;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
@@ -855,6 +857,11 @@ float4 localControl:register(c196); // count, enabled
 // own extinction still decides everything above it, so deep water and a
 // reflection still converge where they did.
 float4 opacityControl:register(c199);
+// The client's own fog curve, exactly: x=start, y=end, z=exponent, w=usable.
+// Evaluated at THIS pixel's distance instead of read off the interpolant, so a
+// five-hundred-yard water tile cannot bend the curve across its own face and two
+// sibling tiles cannot disagree about where the fog ends.
+float4 fogCurve:register(c219);
 sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
@@ -1999,21 +2006,23 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);
     float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);
     float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85)*(1-airShare);
-    // THE FOG IS SAMPLED PER PIXEL, NOT READ OFF A TRIANGLE CORNER.
+    // THE FOG IS THE CLIENT'S OWN CURVE, EVALUATED AT THIS PIXEL'S DISTANCE.
     // `fog` arrives interpolated from the vertex stage, and a water tile is five
     // hundred yards across: a nonlinear curve evaluated at three corners and blended
     // across the face is not the curve, and two sibling tiles that resolve it
-    // differently show their shared edge. The factor here is evaluated at this
-    // pixel's own distance, from the scale the CPU reduced the client's curve to -
-    // so equal distance always means equal fog, on every tile of every sea. The
-    // squared form is the client's own shape (flat until the middle distance, then
-    // saturating) without needing three constants where one will do.
-    float fogScale=max(opacityControl.w,1.0);
-    float fogReach=viewDistance/fogScale;
-    float fogPixel=1.0-exp(-fogReach*fogReach);
+    // differently show their shared edge - one of the ways one continuous sea came
+    // out in pieces. The curve's own parameters are the ones the draw carries in c4,
+    // so this is the same function the client uses, just sampled where the pixel is:
+    // clamp(((end - d) / (end - start)) ^ power), which is exactly
+    // min(pow(max(d*x + y, 0), z), 1) with start=(1-y)/x and end=-y/x.
+    float fogSpan=max(fogCurve.y-fogCurve.x,1.0);
+    float fogShape=saturate((fogCurve.y-viewDistance)/fogSpan);
+    float fogPixel=pow(fogShape,clamp(fogCurve.z,.05,8.0));
     // Under the surface the client's own underwater fog is the right one and it is
-    // kept exactly; above it, the pixel factor and the horizon handover decide.
-    float fogFactor=lerp(max(fogPixel,airShare),fog,underwater);
+    // kept exactly; above it, the pixel factor and the horizon handover decide. A
+    // draw whose c4 did not hold a curve has fogCurve.w=0 and keeps the interpolant.
+    float fogAir=lerp(max(fogPixel,airShare),fog,underwater);
+    float fogFactor=fogCurve.w>.5?fogAir:lerp(max(fog,airShare),fog,underwater);
     // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
     // body the near sheet converges on, so the fog distance stops being a visible
     // edge in the middle of one continuous plane. The remaining air share keeps the
@@ -2673,7 +2682,7 @@ struct Scope {
     // Save each touched constant span as one block. Pixel c180..c218 includes
     // local lights, the c197/c198 gap, the WATER OPACITY floor at c199, and all
     // water controls, so setup and restoration each cross the D3D9 driver once.
-    float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
+    float oldPixelConstants[160]{},oldVertexControls[20]{},oldVertexFog[4]{};
     bool pixelConstantsSaved=false,vertexFogFallback=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
@@ -2823,7 +2832,7 @@ struct Scope {
             // The original pixel/vertex shader is either the block's or the
             // legacy save's to restore, so it is fetched only once the
             // capture path is known (below, after the constant reads).
-            if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,39)))return;
+            if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,40)))return;
             pixelConstantsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
             // c5..c8 provide this draw's model-view transform; c33 and c35
@@ -2853,14 +2862,49 @@ struct Scope {
                 const unsigned frameIndex=renderer::FrameContext::Current().frameIndex;
                 if(frameIndex!=fogCurveFrame) {
                     fogCurveFrame=frameIndex;
+                    // The colour this sea fades into at range is the SAME whether the far
+                    // pixels are liquid or the empty place where the liquid tiles stopped,
+                    // and only this stage knows it: it is the pixel c4 the client set for
+                    // this draw. Publish it for the atmosphere composite, which is the pass
+                    // that owns every pixel nothing was drawn into. Without it that pass
+                    // paints the void below the waterline with the SKY's haze, and the two
+                    // colours meet on the water's silhouette: the band across the horizon.
+                    {
+                        float fogColour[4]{};
+                        if(SUCCEEDED(d->GetPixelShaderConstantF(4,fogColour,1))) {
+                            bool plausible=true;
+                            for(int i=0;i<3;++i)
+                                if(!std::isfinite(fogColour[i])||fogColour[i]<0.f||fogColour[i]>2.f)
+                                    plausible=false;
+                            auto& frame=renderer::FrameContext::Current();
+                            if(plausible) {
+                                frame.horizonWaterColour[0]=fogColour[0];
+                                frame.horizonWaterColour[1]=fogColour[1];
+                                frame.horizonWaterColour[2]=fogColour[2];
+                                frame.horizonWaterValid=true;
+                            }
+                        }
+                    }
                     if(fogCurveRead&&renderer::water::HasFogCurve(oldVertexFog)) {
                         const float exponent=std::max(oldVertexFog[2],.001f);
                         const float solved=(std::pow(0.95f,1.f/exponent)-oldVertexFog[1])/oldVertexFog[0];
                         if(std::isfinite(solved)&&solved>1.f) fogCurveYards=solved;
+                        // The whole curve, not just a scale: start, end and the
+                        // exponent, which is what lets the pixel stage evaluate the
+                        // client's own function at the pixel's own distance.
+                        const float endDistance=-oldVertexFog[1]/oldVertexFog[0];
+                        const float startDistance=(1.f-oldVertexFog[1])/oldVertexFog[0];
+                        if(std::isfinite(endDistance)&&std::isfinite(startDistance)&&
+                           endDistance>startDistance+1.f&&endDistance<8000.f) {
+                            fogCurveStart=startDistance;
+                            fogCurveEnd=endDistance;
+                            fogCurvePower=std::clamp(oldVertexFog[2],.05f,8.f);
+                            fogCurveValid=true;
+                        } else fogCurveValid=false;
                     }
                 }
             }
-            float pixelConstants[39][4];
+            float pixelConstants[40][4];
             std::memcpy(pixelConstants,oldPixelConstants,sizeof(pixelConstants));
             float* controls=pixelConstants[20]; // c200 within the c180 block
             std::fill(controls,controls+76,0.f);
@@ -2918,6 +2962,12 @@ struct Scope {
             // The fog's own scale for this frame: the client's curve where it gave us a
             // usable one, the authored horizon distance otherwise.
             pixelConstants[19][3]=fogCurveYards>1.f?fogCurveYards:horizonFogYards;
+            // c219: the whole curve, so the pixel stage can evaluate the client's own
+            // fog where the pixel is rather than where the triangle's corners are.
+            pixelConstants[39][0]=fogCurveValid?fogCurveStart:0.f;
+            pixelConstants[39][1]=fogCurveValid?fogCurveEnd:0.f;
+            pixelConstants[39][2]=fogCurveValid?fogCurvePower:1.f;
+            pixelConstants[39][3]=fogCurveValid?1.f:0.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops
@@ -3405,7 +3455,7 @@ struct Scope {
                 // built above, splice in the cached lights and water controls,
                 // then upload c180..c218 in one call.
                 std::memcpy(pixelConstants,cache.values,sizeof(cache.values));
-                if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],39))){Restore();return;}
+                if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],40))){Restore();return;}
             }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
@@ -3421,14 +3471,14 @@ struct Scope {
             // The block holds the shader/texture/sampler state: write back
             // only the two constant spans, then let Apply return everything
             // else in a single call.
-            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,40);
             device->SetVertexShaderConstantF(200,oldVertexControls,5);
             renderer::detail::EndPassState();
             blockState=false;
         } else {
             device->SetPixelShader(original.Get());
             device->SetVertexShader(originalVertex.Get());
-            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,40);
             device->SetVertexShaderConstantF(200,oldVertexControls,5);
             if(extraState) {
                 const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,

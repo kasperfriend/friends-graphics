@@ -265,6 +265,10 @@ int main() try
         // sheet and the void below the horizon line, not only the sky above it.
         // Applied where `sky` was true and nowhere else, it painted the sky and
         // stopped dead at the water's silhouette: two colours meeting on one line.
+        Require(Contains(atmosphere, "float4 horizonWater:register(c8);") &&
+                Contains(atmosphere, "edgeTint=lerp(edgeTint,horizonWater.rgb,saturate(horizonWater.w*seaSide));") &&
+                Contains(atmosphere, "result=lerp(result,pow(max(edgeTint,0),2.2),edge);"),
+            "the sea's far field takes the sea's own horizon colour, above and below the waterline");
         Require(Contains(atmosphere, "float belowHorizon=step(dot(skyRay,worldUp.xyz),0.0);") &&
                 Contains(atmosphere, "float airMask=(sky>.5)?max(horizon*horizon,belowHorizon):step(.35,water)*horizon*horizon;") &&
                 Contains(atmosphere, "edge*=airMask;") &&
