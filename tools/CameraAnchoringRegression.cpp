@@ -261,19 +261,6 @@ int main() try
             "the local fog bank hangs from a base that is never above the eye");
         Require(Contains(atmosphere, "!f.cameraPoseStale)?1.f:0.f"),
             "a stale pose publishes no celestial position to the halo");
-        // The horizon haze is a property of the AIR, so it must cover the water
-        // sheet and the void below the horizon line, not only the sky above it.
-        // Applied where `sky` was true and nowhere else, it painted the sky and
-        // stopped dead at the water's silhouette: two colours meeting on one line.
-        Require(Contains(atmosphere, "float4 horizonWater:register(c8);") &&
-                Contains(atmosphere, "edgeTint=lerp(edgeTint,horizonWater.rgb,saturate(horizonWater.w*seaSide));") &&
-                Contains(atmosphere, "result=lerp(result,pow(max(edgeTint,0),2.2),edge);"),
-            "the sea's far field takes the sea's own horizon colour, above and below the waterline");
-        Require(Contains(atmosphere, "float belowHorizon=step(dot(skyRay,worldUp.xyz),0.0);") &&
-                Contains(atmosphere, "float airMask=(sky>.5)?max(horizon*horizon,belowHorizon):step(.35,water)*horizon*horizon;") &&
-                Contains(atmosphere, "edge*=airMask;") &&
-                !Contains(atmosphere, "edge*=sky*horizon*horizon;"),
-            "the horizon haze consumes the water's edge and the void below the horizon");
 
         const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
         Require(Contains(clouds, "float SpriteVerified(float2 centre)") &&

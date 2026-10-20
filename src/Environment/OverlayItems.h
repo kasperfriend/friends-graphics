@@ -145,21 +145,6 @@ inline std::vector<Item> items={
  // a surface you can tune per zone like every other water key. The bounds match the clamp
  // in WaterEffect.h (`std::clamp(ReadTuning(L"OpacityPercent",85),0,100)`).
  {KIND_SLIDER,L"Water",L"OpacityPercent","WATER OPACITY",0,100,5,85},
- // How far the bottom stays visible through the surface, in yards. This is the
- // murk the original game has and this shader did not: past it the sheet is its
- // own body, whatever the clarity of the zone and whatever the slider above says.
- // 0 masks the bed everywhere. Bounds match `std::clamp(ReadTuning(L"VisibilityYards",90),5,400)`.
- {KIND_SLIDER,L"Water",L"VisibilityYards","WATER VISIBILITY (YD)",5,400,5,90},
- // Where the far sea has finished dissolving into the air's haze, so the horizon
- // is a gradient instead of the line where the plane ends.
- // Bounds match `std::clamp(ReadTuning(L"HorizonFogYards",900),100,3000)`.
- {KIND_SLIDER,L"Water",L"HorizonFogYards","HORIZON FOG (YD)",100,3000,50,900},
- // The water stage's own terms, drawn instead of the water: 3 the screen-space
- // mirror alone, 4 the refracted sample alone, 5 no surface at all, 6 the
- // captured scene through the plane. It lives here because a report of "a
- // second copy on the water" is settled by looking at one of these frames, and
- // nobody looks for a diagnostic that only exists in an ini file. 0 is normal.
- {KIND_SLIDER,L"Water",L"WaterDebugMode","WATER DEBUG (3 MIRROR 4 BED 5 NO SURFACE 6 WINDOW)",0,6,1,0},
  {KIND_SLIDER,L"Water",L"WindStrengthPercent","WATER WIND / FOAM BIAS",0,200,5,100},
  {KIND_SLIDER,L"Water",L"SparklePercent","SUN SPARKLE",25,200,5,100},
  {KIND_SLIDER,L"Water",L"FlowSpeedPercent","WAVE SPEED",0,300,5,100},

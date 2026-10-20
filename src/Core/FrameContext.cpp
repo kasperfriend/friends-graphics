@@ -40,8 +40,6 @@ namespace renderer
         shadowMapDistance = 180.0f;
 
         waterMaskTexture = waterDepthTexture = nullptr;
-        horizonWaterColour[0] = horizonWaterColour[1] = horizonWaterColour[2] = 0.f;
-        horizonWaterValid = false;
         // Published by the compositor from the water stage's own tracker before any pass
         // reads it, so a frame that never reaches the composite must not inherit the medium
         // the last one left behind.

@@ -43,9 +43,6 @@ namespace renderer
         RetryGate m_retry;
         bool m_shaderErrorLogged = false;
         bool m_resourceErrorLogged = false;
-        // One refusal line a second, at most: a stuck gate is a log this size, not
-        // a flood of them.
-        ULONGLONG m_stateLogTick = 0;
 
         ComPtr<IDirect3DTexture9> m_lightTexture;
         ComPtr<IDirect3DSurface9> m_lightSurface;

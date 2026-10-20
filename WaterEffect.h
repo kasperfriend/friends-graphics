@@ -49,18 +49,6 @@ float flowSpeed=1.f,flowRotation=.32f;
 // WATER OPACITY: the coverage floor above, 0..100 percent. Read with the other
 // tuning so a per-location override and the F7 slider land in the same place.
 float opacityPercent=85.f;
-float waterVisibilityYards=90.f;
-float horizonFogYards=900.f;
-// The distance at which the CLIENT's own fog curve has all but finished, in yards,
-// reduced once per frame from the curve the draw actually carries. It is the scale
-// of the per-pixel distance fog the surface applies instead of the interpolated
-// per-vertex one: one number for the frame, so two tiles of the same sea at the same
-// distance cannot fog differently, and a curve sampled once per pixel cannot be
-// distorted by a triangle edge.
-float fogCurveYards=0.f;
-float fogCurveStart=0.f,fogCurveEnd=0.f,fogCurvePower=1.f;
-bool fogCurveValid=false;
-unsigned fogCurveFrame=0xffffffffu;
 float refractionStrength=.12f,absorptionStrength=.18f,depthFogStrength=2.f,shoreFoamStrength=.12f,shoreFoamWidth=2.5f;
 float swellStrength=.45f,sunGlintStrength=1.35f,fresnelStrength=1.f,crestFoamStrength=.18f;
 // Wave height, in percent of the shipped sea (100 = the reference look). It is a percent
@@ -857,11 +845,6 @@ float4 localControl:register(c196); // count, enabled
 // own extinction still decides everything above it, so deep water and a
 // reflection still converge where they did.
 float4 opacityControl:register(c199);
-// The client's own fog curve, exactly: x=start, y=end, z=exponent, w=usable.
-// Evaluated at THIS pixel's distance instead of read off the interpolant, so a
-// five-hundred-yard water tile cannot bend the curve across its own face and two
-// sibling tiles cannot disagree about where the fog ends.
-float4 fogCurve:register(c219);
 sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
@@ -1296,16 +1279,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // coverage is different: it belongs to the world, not to the camera ray or pixel grid.
     float openOcean=step(99999,behindZ);
     float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
-    // THE MURK. The original game covers what is under the surface: a stone's throw
-    // out, the bottom is not visible at all, and it gets there as a gradient rather
-    // than at a line. This shader had the optics of the column (transmittance, which
-    // CLARITY drives and which a clear tropical shelf barely touches) but no range at
-    // which the water simply hides its own floor - so the bed stayed legible to the
-    // horizon and the sea read as a window rather than as water. Distance from the eye
-    // is the honest variable: it is what the player judges the depth by, and unlike a
-    // depth reading it cannot be missing.
-    float viewDistance=length(viewPos);
-    float murk=smoothstep(opacityControl.y*.22,max(opacityControl.y,.001),viewDistance)*(1-underwater);
     // The camera-to-fragment ray length, capped the way the far column is capped. Computed
     // here rather than down with the camera-column absorption because the column below now
     // needs it too, and the two have to be the same number: one is the length of water this
@@ -1417,35 +1390,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // fading the offset over the first yard lets the bottom come up through undisturbed
     // water instead. One lerp on a uniform gate, so a level below it is untouched.
     float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));
-    // A BEND NEEDS A COLUMN TO BEND THROUGH. The old expression floored this at a
-    // quarter of full strength, so even an inch of water over a pond's floor pulled
-    // the sample by 25% - and at that depth the "bed" is close enough to the eye that
-    // a quarter of the offset is many pixels on screen. Anything dark under a shallow
-    // sheet (a figure's shadow, a stone, a weed bed) came up twice: once where it is,
-    // once where the offset put it. Refraction is proportional to the water the ray
-    // crosses, so it now starts at nothing and reaches full at about fourteen yards.
-    float bend=waterStyle.x*saturate(column*.07)*contact;
+    float bend=waterStyle.x*saturate(column*.05+.25)*contact;
     float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
-    // Reject distortion across silhouettes, rather than pulling a bridge or a
-    // character into the water. Missing depth keeps the native body.
-    //
-    // The old test only rejected what is IN FRONT of the water - a rail, a bridge -
-    // because it compared the offset sample against the water surface's own depth.
-    // It cannot see the case that actually happens: a figure, a rock or a post
-    // standing IN the water is BEHIND the surface, so its own dark pixels are a
-    // perfectly legal refraction sample and the stage painted them into the water a
-    // few texels to the side, while the alpha blend showed the true silhouette at the
-    // same 85% coverage. Two copies of one object - reported as "duplicated shadow on
-    // the water". Refraction bends the BED, so the sample is kept only when it landed
-    // on the same surface this pixel is already looking at: the two depths must agree
-    // to within 8% (and never less than a yard and a half, so a real bed gradient at
-    // range still bends). Anything nearer is an occluder in the column and the offset
-    // collapses back to the unrefracted pixel.
+    // Reject distortion across foreground silhouettes, rather than pulling
+    // a bridge/character into the water. Missing depth keeps the native body.
     float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
-    float refractZ=refractRaw>=.9999?100000:reflectionProjection.y/(refractRaw-reflectionProjection.x);
-    float sameSurface=step(abs(refractZ-behindZ),max(behindZ*.08,1.5));
-    refractUV=lerp(screenUV,refractUV,
-        sameSurface*step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
+    refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
     float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
     // Beer-Lambert per channel, with the authored deep colour as the asymptote:
     // "clear mountain lake" and "murky swamp" are then one number apart (Clarity)
@@ -1776,24 +1726,10 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                     min(1-lightUV.x,1-lightUV.y))*8);
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
-            // A HIT HAS TO BE ON THE RAY, NOT MERELY IN FRONT OF IT. This test used to
-            // accept "anything nearer than the sample" on the single-sided band, and a
-            // screen-space march cannot tell a surface the light ray passes THROUGH from
-            // a surface standing in front of the eye at the same pixel: a figure with his
-            // back to the viewer covers a dozen pixels of the path, the depth buffer
-            // reports him as many yards nearer than the sample, and one blocked step
-            // multiplies the whole path to zero. The sun road was then extinguished in
-            // exactly his screen silhouette - a second, dark copy of him lying on the
-            // water, which no opacity, refraction or reflection setting can remove
-            // because none of them touch the glint's visibility.
-            //
-            // The mirror march below has always used a thickness window (`reflectionStyle.z`
-            // plus the step's own travel) for exactly this reason: the ray is inside the
-            // surface it hit, not in front of it by an arbitrary distance. The same window,
-            // from the same register and the same formula, is what the light march wants.
-            float lightGap=lightSample.z-blockerZ;
-            float lightThickness=reflectionStyle.z+traceDistance*.05;
-            float blocked=inside*step(1.5,lightGap)*step(lightGap,lightThickness+1.5);
+            // Anything nearer than the sample point occludes the source: a single
+            // sided band where the old version tested a thickness window on top of
+            // an in-range test, which cost three more slots to say the same thing.
+            float blocked=inside*step(blockerZ+1.5,lightSample.z);
             lightVisibility*=1.0-blocked;
             // Once an interior sample is blocked the product is exactly zero;
             // the loop condition skips remaining depth reads. Edge-faded samples
@@ -1844,25 +1780,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
         // measured shallow shelf still keeps its sand.
         float bedTrusted=depthValid*step(viewPos.z+.25,behindZ);
         float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);
-        // THE SHORE KEEPS ITS CARVE-OUT. There was, for a while, a second term here
-        // that forced `bedFade` to 1 wherever the captured bed read as steep, on the
-        // theory that a steep surface under the water is a figure or a rock rather
-        // than a shore. It was written for the "duplicated shadow", and the duplicate
-        // turned out to be two other things entirely (the refraction guard and the
-        // celestial march), so what was left was the theory's cost: the bed slope is
-        // read over a three-yard baseline from the depth of the seabed, so over a pond
-        // the size of the one in the report the taps reach the banks from everywhere
-        // and the WHOLE sheet read as a wall. The slider then went to its full
-        // authority over all of it, and the water covered its own shallows - a shore
-        // swallowed by its pond, reported as "water meets shore and it covers all the
-        // water". `beach` still drives the swash and the shore foam; it no longer
-        // decides how much of the bed may show through, because the only honest
-        // reading of that is the depth of the column.
         body=lerp(body,seaBody,opacityControl.x*bedFade);
-        // ...and then the water's own range closes over it, at the slider's authority
-        // rather than the depth reading's: this is the original's underwater cover, and
-        // it is what makes the sea read as water instead of a window onto the floor.
-        body=lerp(body,seaBody,murk);
         // And the depth transition stays independent of it, so a lake with refraction
         // switched off still gets dark the further the bottom is away.
         waterBody=lerp(body,seaBody,saturate(absorption*(.85-.22*fresnel)));
@@ -1956,24 +1874,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // this is the identity it always was.
     float3 underwaterBody=rgb*cameraTransmittance+deepTint.rgb*(1-cameraTransmittance);
     rgb=lerp(rgb,underwaterBody,underwater);
-    if(flowControl.w>1.5&&flowControl.w<2.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
-    // Two more modes, because a duplicated image on a water surface can only come from
-    // two places and they need different fixes: the MIRROR (the screen-space reflection
-    // sampling an occluder that stands at the surface's own depth) or the BED (the
-    // refracted sample pulling a silhouette sideways). Mode 3 shows the reflection
-    // term alone, mode 4 the refracted sample alone; whichever carries the copy names
-    // the culprit in one screenshot instead of another round of inference.
-    if(flowControl.w>3.5&&flowControl.w<4.5){result_.color=float4(saturate(refracted),1);return result_;}
-    if(flowControl.w>2.5&&flowControl.w<3.5){result_.color=float4(saturate(reflected),1);return result_;}
-    // Modes 5 and 6 answer the one question the shading modes cannot: is the
-    // thing being looked at even a water pixel? 5 removes the plane outright -
-    // the frame is exactly what the client drew, no water stage at all - and 6
-    // keeps the pixels but paints the captured scene through them untouched,
-    // so the water is a plain window with no colour, no fog and no foam. A
-    // copy that survives 5 was never drawn here; one that survives 6 but not
-    // the live frame is this stage's shading sitting on top of it.
-    if(flowControl.w>5.5){result_.color=float4(tex2Dlod(sceneTexture,float4(screenUV,0,0)).rgb,1);return result_;}
-    if(flowControl.w>4.5){discard;}
+    if(flowControl.w>1.5){result_.color=float4(saturate(pathEnergy*3).xxx,1);return result_;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     // Coverage is the column's own extinction, not a hand-tuned fraction of it. Water
@@ -2034,10 +1935,6 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // copy silently turned every water pixel into baseAlpha over an empty background.
     float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);
     surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
-    // Past the visibility range there is nothing to see through, so the sheet is the
-    // surface: a world that is masked in colour must not still show the raw scene
-    // through 15% of alpha, which on a bright seabed is most of what a player sees.
-    surfaceAlpha=max(surfaceAlpha,murk);
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
     // silhouette itself turning away, not a second sheet behind the first.
@@ -2062,41 +1959,14 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // share therefore rises with view distance: near water keeps the air's colour (the
     // horizon still meets the sky), and past a few hundred yards the sheet converges on
     // the body instead, so distance deepens it rather than deleting it.
-    // THE HANDOVER TO AIR. Two things have to be true at once at the horizon: the
-    // sea keeps its own colour through the middle distance (a sea that turns into
-    // the sky early is the "nothingness" report), and by the time the plane actually
-    // stops the air has taken it over completely, so its edge is not a line against
-    // the sky. So the sea's share of the target RISES with distance and then FALLS
-    // back to nothing as the haze finishes, and the fog factor is driven by the same
-    // distance per pixel - not by the client's per-vertex curve, which different
-    // tiles of the same sea resolve differently (that is the rectangular step in the
-    // middle of the water in the screenshots).
-    float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);
-    float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);
-    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85)*(1-airShare);
-    // THE FOG IS THE CLIENT'S OWN CURVE, EVALUATED AT THIS PIXEL'S DISTANCE.
-    // `fog` arrives interpolated from the vertex stage, and a water tile is five
-    // hundred yards across: a nonlinear curve evaluated at three corners and blended
-    // across the face is not the curve, and two sibling tiles that resolve it
-    // differently show their shared edge - one of the ways one continuous sea came
-    // out in pieces. The curve's own parameters are the ones the draw carries in c4,
-    // so this is the same function the client uses, just sampled where the pixel is:
-    // clamp(((end - d) / (end - start)) ^ power), which is exactly
-    // min(pow(max(d*x + y, 0), z), 1) with start=(1-y)/x and end=-y/x.
-    float fogSpan=max(fogCurve.y-fogCurve.x,1.0);
-    float fogShape=saturate((fogCurve.y-viewDistance)/fogSpan);
-    float fogPixel=pow(fogShape,clamp(fogCurve.z,.05,8.0));
-    // Under the surface the client's own underwater fog is the right one and it is
-    // kept exactly; above it, the pixel factor and the horizon handover decide. A
-    // draw whose c4 did not hold a curve has fogCurve.w=0 and keeps the interpolant.
-    float fogAir=lerp(max(fogPixel,airShare),fog,underwater);
-    float fogFactor=fogCurve.w>.5?fogAir:lerp(max(fog,airShare),fog,underwater);
+    float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);
+    float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);
     // `seaBody`, not `deepTint`: the target a fully fogged sheet converges on IS the
     // body the near sheet converges on, so the fog distance stops being a visible
     // edge in the middle of one continuous plane. The remaining air share keeps the
     // horizon from becoming a hard line against the sky.
     float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);
-    result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);
+    result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);
     result_.mask.a=result_.color.a;
     return result_;
 }
@@ -2145,11 +2015,6 @@ void ReloadTuning(){
     // a property of the body. This is how much of the scene the surface is
     // allowed to leave showing, which is a property of the sheet.
     opacityPercent=float(std::clamp(ReadTuning(L"OpacityPercent",85),0,100));
-    // The two distances that make the sea behave like water at range. Both are per
-    // location like every other water key, and both are yards because that is the
-    // unit a player can picture.
-    waterVisibilityYards=float(std::clamp(ReadTuning(L"VisibilityYards",90),5,400));
-    horizonFogYards=float(std::clamp(ReadTuning(L"HorizonFogYards",900),100,3000));
     depthFogStrength=std::clamp(ReadTuning(L"DepthFogPercent",200),100,400)*.01f;
     shoreFoamStrength=std::clamp(ReadTuning(L"ShoreFoamPercent",28),0,60)*.01f;
     shoreFoamWidth=std::clamp(ReadTuning(L"ShoreFoamWidthPercent",120),25,800)*.01f;
@@ -2180,7 +2045,7 @@ void ReloadTuning(){
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
-    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,6));
+    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
     // Sea response: shared wind when linked, native weather otherwise.
     // The already-resolved wind includes the zone's weather damping; never
     // apply that multiplier (or a separate rain boost) a second time.
@@ -2750,7 +2615,7 @@ struct Scope {
     // Save each touched constant span as one block. Pixel c180..c218 includes
     // local lights, the c197/c198 gap, the WATER OPACITY floor at c199, and all
     // water controls, so setup and restoration each cross the D3D9 driver once.
-    float oldPixelConstants[160]{},oldVertexControls[20]{},oldVertexFog[4]{};
+    float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
     bool pixelConstantsSaved=false,vertexFogFallback=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
@@ -2763,7 +2628,6 @@ struct Scope {
     // block's own Capture/Apply owns them.
     DWORD oldBlend[5]{};
     bool blendStateSaved=false;
-    bool blendSeparateSaved=false;
     bool targetState=false;
     // True while the shared D3DSBT_ALL block holds this scope's original
     // pixel/vertex shader, texture and sampler state (everything the block
@@ -2900,7 +2764,7 @@ struct Scope {
             // The original pixel/vertex shader is either the block's or the
             // legacy save's to restore, so it is fetched only once the
             // capture path is known (below, after the constant reads).
-            if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,40)))return;
+            if(FAILED(d->GetPixelShaderConstantF(180,oldPixelConstants,39)))return;
             pixelConstantsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,5)))return;
             // c5..c8 provide this draw's model-view transform; c33 and c35
@@ -2915,64 +2779,12 @@ struct Scope {
             // curve's finite shape, replace them with the identity fog curve for this
             // draw; otherwise a garbage exponent/offset can collapse the whole water
             // colour to fogColor and look like the water shader switched off.
-            const bool fogCurveRead=SUCCEEDED(d->GetVertexShaderConstantF(4,oldVertexFog,1));
-            if(fogCurveRead&&!renderer::water::HasFogCurve(oldVertexFog)) {
+            if(SUCCEEDED(d->GetVertexShaderConstantF(4,oldVertexFog,1))&&
+               !renderer::water::HasFogCurve(oldVertexFog)) {
                 vertexFogFallback=true;
                 ReportFogFallback(observation,oldVertexFog);
             }
-            // Reduce this draw's fog curve to the one distance the surface needs: where
-            // it has all but finished (95%). Solved once per FRAME - not per draw - so
-            // every liquid draw in a frame agrees even if the client hands sibling tiles
-            // slightly different curves; that disagreement was one of the ways one body of
-            // water came out in pieces. A curve that does not solve to a usable distance
-            // leaves the authored horizon distance in charge.
-            {
-                const unsigned frameIndex=renderer::FrameContext::Current().frameIndex;
-                if(frameIndex!=fogCurveFrame) {
-                    fogCurveFrame=frameIndex;
-                    // The colour this sea fades into at range is the SAME whether the far
-                    // pixels are liquid or the empty place where the liquid tiles stopped,
-                    // and only this stage knows it: it is the pixel c4 the client set for
-                    // this draw. Publish it for the atmosphere composite, which is the pass
-                    // that owns every pixel nothing was drawn into. Without it that pass
-                    // paints the void below the waterline with the SKY's haze, and the two
-                    // colours meet on the water's silhouette: the band across the horizon.
-                    {
-                        float fogColour[4]{};
-                        if(SUCCEEDED(d->GetPixelShaderConstantF(4,fogColour,1))) {
-                            bool plausible=true;
-                            for(int i=0;i<3;++i)
-                                if(!std::isfinite(fogColour[i])||fogColour[i]<0.f||fogColour[i]>2.f)
-                                    plausible=false;
-                            auto& frame=renderer::FrameContext::Current();
-                            if(plausible) {
-                                frame.horizonWaterColour[0]=fogColour[0];
-                                frame.horizonWaterColour[1]=fogColour[1];
-                                frame.horizonWaterColour[2]=fogColour[2];
-                                frame.horizonWaterValid=true;
-                            }
-                        }
-                    }
-                    if(fogCurveRead&&renderer::water::HasFogCurve(oldVertexFog)) {
-                        const float exponent=std::max(oldVertexFog[2],.001f);
-                        const float solved=(std::pow(0.95f,1.f/exponent)-oldVertexFog[1])/oldVertexFog[0];
-                        if(std::isfinite(solved)&&solved>1.f) fogCurveYards=solved;
-                        // The whole curve, not just a scale: start, end and the
-                        // exponent, which is what lets the pixel stage evaluate the
-                        // client's own function at the pixel's own distance.
-                        const float endDistance=-oldVertexFog[1]/oldVertexFog[0];
-                        const float startDistance=(1.f-oldVertexFog[1])/oldVertexFog[0];
-                        if(std::isfinite(endDistance)&&std::isfinite(startDistance)&&
-                           endDistance>startDistance+1.f&&endDistance<8000.f) {
-                            fogCurveStart=startDistance;
-                            fogCurveEnd=endDistance;
-                            fogCurvePower=std::clamp(oldVertexFog[2],.05f,8.f);
-                            fogCurveValid=true;
-                        } else fogCurveValid=false;
-                    }
-                }
-            }
-            float pixelConstants[40][4];
+            float pixelConstants[39][4];
             std::memcpy(pixelConstants,oldPixelConstants,sizeof(pixelConstants));
             float* controls=pixelConstants[20]; // c200 within the c180 block
             std::fill(controls,controls+76,0.f);
@@ -3020,22 +2832,7 @@ struct Scope {
             // it as the opacity floor. The other three lanes are cleared so a
             // leftover from the saved client block can never leak into them.
             pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);
-            // c199's spare lanes carry the two range parameters the same stage reads:
-            // how far the bed stays visible, and where the far sea has finished
-            // dissolving into the air. They ride this register because it is already
-            // inside the block this draw uploads and restores - no new span, no new
-            // state to keep in step with the surface shader.
-            pixelConstants[19][1]=waterVisibilityYards;
-            pixelConstants[19][2]=horizonFogYards;
-            // The fog's own scale for this frame: the client's curve where it gave us a
-            // usable one, the authored horizon distance otherwise.
-            pixelConstants[19][3]=fogCurveYards>1.f?fogCurveYards:horizonFogYards;
-            // c219: the whole curve, so the pixel stage can evaluate the client's own
-            // fog where the pixel is rather than where the triangle's corners are.
-            pixelConstants[39][0]=fogCurveValid?fogCurveStart:0.f;
-            pixelConstants[39][1]=fogCurveValid?fogCurveEnd:0.f;
-            pixelConstants[39][2]=fogCurveValid?fogCurvePower:1.f;
-            pixelConstants[39][3]=fogCurveValid?1.f:0.f;
+            pixelConstants[19][1]=pixelConstants[19][2]=pixelConstants[19][3]=0.f;
             controls[16]=reflectionsEnabled&&haveCapture?reflectionStrength:0;
             // c204.yz: the two ray marches' trip counts, straight out of the quality ladder.
             // Zero skips the loop through the same test that already stopped it, and the loops
@@ -3456,17 +3253,12 @@ struct Scope {
             // else; on a device without one they are saved here and written back in
             // Restore(). Only the states that decide coverage are touched.
             {
-                // The four core states are saved as one unit and are the ones whose
-                // restore must not be lost; SEPARATEALPHABLENDENABLE is optional in
-                // D3D9 (D3DPMISCCAPS_SEPARATEALPHABLEND) and is handled separately, so
-                // a device that does not know it neither fails the draw nor leaks the
-                // state it did have.
                 blendStateSaved=
                     SUCCEEDED(d->GetRenderState(D3DRS_ALPHABLENDENABLE,&oldBlend[0]))&&
                     SUCCEEDED(d->GetRenderState(D3DRS_SRCBLEND,&oldBlend[1]))&&
                     SUCCEEDED(d->GetRenderState(D3DRS_DESTBLEND,&oldBlend[2]))&&
-                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]));
-                blendSeparateSaved=SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
+                    SUCCEEDED(d->GetRenderState(D3DRS_BLENDOP,&oldBlend[3]))&&
+                    SUCCEEDED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,&oldBlend[4]));
                 if(blendStateSaved&&
                    (oldBlend[0]!=TRUE||oldBlend[1]!=D3DBLEND_SRCALPHA||
                     oldBlend[2]!=D3DBLEND_INVSRCALPHA||oldBlend[3]!=D3DBLENDOP_ADD))
@@ -3476,9 +3268,7 @@ struct Scope {
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
                 if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_BLENDOP,D3DBLENDOP_ADD);
-                // Best effort: alpha and colour share one blend unless the device says
-                // otherwise, and asking is harmless where it is unknown.
-                d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
+                if(SUCCEEDED(blendHr))d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,FALSE);
                 if(FAILED(blendHr)){Restore();ReportFailure("water blend state",blendHr);return;}
             }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
@@ -3523,22 +3313,10 @@ struct Scope {
                 // built above, splice in the cached lights and water controls,
                 // then upload c180..c218 in one call.
                 std::memcpy(pixelConstants,cache.values,sizeof(cache.values));
-                if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],40))){Restore();return;}
+                if(FAILED(d->SetPixelShaderConstantF(180,pixelConstants[0],39))){Restore();return;}
             }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
-            // Which water the client actually has, named once per session and per
-            // shader family. Every "the sliders do nothing to THIS water" report is
-            // answered by this line: a pond drawn by a family that is not listed here
-            // is water this stage never touched, and the near-miss lines above it name
-            // the identity to add. Cheap - one small set, hit once per family.
-            {
-                static std::unordered_set<unsigned long long> loggedFamilies;
-                if(loggedFamilies.size()<32&&loggedFamilies.insert(renderer::g_trackedState.psHash).second&&!logPath.empty()) {
-                    std::ofstream log(std::filesystem::path(logPath),std::ios::app);
-                    log<<"water shader family replaced: ps=0x"<<std::hex<<renderer::g_trackedState.psHash<<std::dec<<'\n';
-                }
-            }
             static bool reflectionReported=false;if(reflectionScene&&reflectionDepth&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             ++frameMatches;
             if(reflectionScene&&reflectionDepth)++frameSceneMatches;
@@ -3551,14 +3329,14 @@ struct Scope {
             // The block holds the shader/texture/sampler state: write back
             // only the two constant spans, then let Apply return everything
             // else in a single call.
-            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,40);
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
             device->SetVertexShaderConstantF(200,oldVertexControls,5);
             renderer::detail::EndPassState();
             blockState=false;
         } else {
             device->SetPixelShader(original.Get());
             device->SetVertexShader(originalVertex.Get());
-            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,40);
+            if(pixelConstantsSaved)device->SetPixelShaderConstantF(180,oldPixelConstants,39);
             device->SetVertexShaderConstantF(200,oldVertexControls,5);
             if(extraState) {
                 const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,
@@ -3576,15 +3354,13 @@ struct Scope {
                 device->SetRenderState(D3DRS_BLENDOP,oldBlend[3]);
                 // The pass turns separate alpha factors off so SRCALPHA/INVSRCALPHA
                 // govern the whole output; the native draw may have had them on.
-                if(blendSeparateSaved)
-                    device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
+                device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
             }
         }
         // c4 is outside the block's documented water spans. Restore it after either
         // state-block or manual restoration, including every early-return path.
         if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
         device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=blendStateSaved=false;
-        blendSeparateSaved=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

@@ -1150,15 +1150,16 @@ int main() try
                     !=std::string::npos&&
                 pixel.find("float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);")
                     !=std::string::npos&&
-                pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
+                pixel.find("result_.color=float4(fog*(rgb-fogTarget)+fogTarget,surfaceAlpha);")!=std::string::npos,
                 "from below the sheet reflects and fogs into the medium it is in, covers where it mirrors, and charges the camera segment to the finished pixel");
         // A sea's horizon is not the sky. The air fog alone painted distant water the exact
         // colour of the sky it faded into, which reads as a hole in the world; the target
         // takes the body's deep colour in proportion to the column's own saturation, above
         // water only, so a shallow shore still fades exactly as before.
         {
-            const auto farSea=pixel.find("float farSea=smoothstep(40.0,max(opacityControl.z,.001)*.6,viewDistance)*(1-underwater);");
-            const auto share=pixel.find("float seaShare=max(",farSea);
+            const auto farSea=pixel.find("float farSea=smoothstep(40.0,600.0,length(viewPos))*(1-underwater);");
+            const auto share=pixel.find(
+                "float seaShare=max(saturate(absorption)*(1-underwater)*.55,farSea*.85);");
             const auto body=pixel.find("float3 seaBody=deepTint.rgb+inScatter;");
             const auto target=pixel.find(
                 "float3 fogTarget=lerp(lerp(fogColor.rgb,seaBody,seaShare),underEnvironment,underwater);");
@@ -1170,18 +1171,11 @@ int main() try
                     "the water fogs into its own body, so the fog distance is not an edge");
             const auto fade=pixel.find("float3 fogTarget=lerp(lerp(");   // exactly one author
             Require(farSea!=std::string::npos&&share!=std::string::npos&&target!=std::string::npos&&
-                    target==fade&&farSea<share&&share<target&&
-                    pixel.find(")*(1-airShare);")!=std::string::npos,
+                    target==fade&&farSea<share&&share<target,
                     "the distant sheet fades into the sea's own colour above water, and into the medium below it");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float farSea = Smoothstep(40.f, horizonDistance * .6f, viewDistance);")
-                        !=std::string::npos&&
-                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f) * (1.f - airShare)")
-                        !=std::string::npos &&
-                    mirror.find("const float fogShape = Saturate((fogEnd - viewDistance) / (fogEnd - fogStart));")
-                        !=std::string::npos &&
-                    mirror.find("const float fogPixel = std::pow(fogShape, 3.f);")!=std::string::npos &&
-                    mirror.find("const float fogged = std::max(fogPixel, airShare);")!=std::string::npos &&
+            Require(mirror.find("const float farSea = Smoothstep(40.f, 600.f, viewZ);")!=std::string::npos&&
+                    mirror.find("std::max(Saturate(absorption) * .55f, farSea * .85f)")!=std::string::npos &&
                     mirror.find("Lerp(c.fog, Add(deep, inScatter),")!=std::string::npos,
                     "the CPU preview fogs toward the same tinted target, deepening with distance");
         }
@@ -1207,98 +1201,7 @@ int main() try
                     gate!=std::string::npos&&trust!=std::string::npos&&fade!=std::string::npos&&
                     sea<bed&&bed<bodyLine&&bodyLine<gate&&gate<trust&&trust<fade,
                     "water opacity fades the WHOLE body toward the sea, after the refraction mix");
-            // THE MURK: the original's underwater cover. A distance ramp - not the
-            // column's transmittance, which CLARITY owns and a clear shelf barely
-            // moves - that closes the body over the bed and takes coverage to 1.
-            const auto murk=pixel.find(
-                "float murk=smoothstep(opacityControl.y*.22,max(opacityControl.y,.001),viewDistance)*(1-underwater);");
-            const auto murkBody=pixel.find("body=lerp(body,seaBody,murk);",fade);
-            const auto murkCover=pixel.find("surfaceAlpha=max(surfaceAlpha,murk);");
-            Require(murk!=std::string::npos&&murkBody!=std::string::npos&&murkCover!=std::string::npos&&
-                    fade<murkBody&&murk<fade,
-                    "the water's own murk covers the bed at range, in colour and in coverage");
-            // THE HANDOVER TO AIR: the sea keeps its colour through the middle
-            // distance, hands over to the fog at the horizon, and the fog factor is a
-            // per-pixel distance ramp - so two tiles of the same sea cannot resolve
-            // the client's per-vertex curve differently and step against each other.
-            const auto air=pixel.find(
-                "float airShare=smoothstep(max(opacityControl.z,.001)*.6,max(opacityControl.z,.001),viewDistance)*(1-underwater);");
-            const auto share=pixel.find("float seaShare=max(",air);
-            const auto span=pixel.find("float fogSpan=max(fogCurve.y-fogCurve.x,1.0);",share);
-            const auto shape=pixel.find("float fogShape=saturate((fogCurve.y-viewDistance)/fogSpan);",span);
-            const auto fogPixel=pixel.find("float fogPixel=pow(fogShape,clamp(fogCurve.z,.05,8.0));",shape);
-            const auto fogFactor=pixel.find("float fogAir=lerp(max(fogPixel,airShare),fog,underwater);",fogPixel);
-            Require(pixel.find("float4 fogCurve:register(c219);")!=std::string::npos&&
-                    span!=std::string::npos&&shape!=std::string::npos&&fogPixel!=std::string::npos&&
-                    fogFactor!=std::string::npos,
-                    "the sea evaluates the CLIENT's fog curve at the pixel's own distance");
-            const auto usesFog=pixel.find("result_.color=float4(fogFactor*(rgb-fogTarget)+fogTarget,surfaceAlpha);",fogFactor);
-            Require(air!=std::string::npos&&share!=std::string::npos&&span!=std::string::npos&&
-                    fogPixel!=std::string::npos&&fogFactor!=std::string::npos&&
-                    usesFog!=std::string::npos&&air<share&&share<span&&span<fogPixel&&
-                    fogPixel<fogFactor&&fogFactor<usesFog&&
-                    pixel.find("float fogFactor=fogCurve.w>.5?fogAir:")!=std::string::npos&&
-                    pixel.find(")*(1-airShare);")!=std::string::npos,
-                    "the sea's fog is sampled per pixel at its own distance, never from a triangle corner");
-            // Both distances are player-facing, per-location tunables.
-            Require(code.find("waterVisibilityYards=float(std::clamp(ReadTuning(L\"VisibilityYards\",90),5,400));")
-                        !=std::string::npos&&
-                    code.find("horizonFogYards=float(std::clamp(ReadTuning(L\"HorizonFogYards\",900),100,3000));")
-                        !=std::string::npos&&
-                    code.find("pixelConstants[19][1]=waterVisibilityYards;")!=std::string::npos&&
-                    code.find("pixelConstants[19][2]=horizonFogYards;")!=std::string::npos,
-                    "the visibility range and the horizon fog are tunables, not constants");
-            // THE DOUBLE IMAGE. Refraction may only bend the BED, and the old guard
-            // only rejected what was in FRONT of the water. A figure standing in the
-            // water is behind the surface, so its own dark pixels were a legal sample
-            // and got painted a few texels to the side - a second copy beside the real
-            // one, which is the report "duplicated shadow on the water".
-            const auto refractZ=pixel.find(
-                "float refractZ=refractRaw>=.9999?100000:reflectionProjection.y/(refractRaw-reflectionProjection.x);");
-            const auto sameSurface=pixel.find(
-                "float sameSurface=step(abs(refractZ-behindZ),max(behindZ*.08,1.5));",refractZ);
-            Require(refractZ!=std::string::npos&&sameSurface!=std::string::npos&&
-                    pixel.find("sameSurface*step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw)",
-                               sameSurface)!=std::string::npos,
-                    "refraction only samples the surface this pixel is already looking at");
-            // And a bend needs a column to bend through: the quarter-strength floor let
-            // an inch of water pull the sample as hard as a deep lake, which is what put
-            // anything dark under a shallow sheet on screen twice.
-            Require(pixel.find("float bend=waterStyle.x*saturate(column*.07)*contact;")!=std::string::npos&&
-                    pixel.find("saturate(column*.05+.25)")==std::string::npos,
-                    "refraction starts at nothing and grows with the water it crosses");
-            // The two terms that can carry a duplicated image are separable in game:
-            // mode 3 shows the mirror alone, mode 4 the refracted sample alone. The
-            // clamp has to allow them, or the diagnostic is unreachable.
-            Require(pixel.find("if(flowControl.w>3.5&&flowControl.w<4.5){result_.color=float4(saturate(refracted),1);")
-                        !=std::string::npos&&
-                    pixel.find("if(flowControl.w>2.5&&flowControl.w<3.5){result_.color=float4(saturate(reflected),1);")
-                        !=std::string::npos&&
-                    code.find("std::clamp(ReadTuning(L\"WaterDebugMode\",0),0,6)")!=std::string::npos,
-                    "a duplicated image can be attributed in game: mirror only (3) or bed only (4)");
-            // Modes 5 and 6 exist so the water stage can be excluded from a
-            // report instead of inferred about: 5 discards the plane, 6 paints
-            // the captured scene straight through it.
-            // The log has to name the water it actually replaced, or a report of
-            // "the sliders do nothing to THIS pond" cannot be told apart from a
-            // replacement that never ran there.
-            Require(code.find("water shader family replaced: ps=0x")!=std::string::npos&&
-                    code.find("loggedFamilies.insert(renderer::g_trackedState.psHash)")!=std::string::npos,
-                    "the water log names every shader family the replacement was installed on");
-            Require(pixel.find("if(flowControl.w>4.5){discard;}")!=std::string::npos&&
-                    pixel.find("if(flowControl.w>5.5){result_.color=float4(tex2Dlod(sceneTexture,float4(screenUV,0,0)).rgb,1);")
-                        !=std::string::npos,
-                    "the water plane can be removed (5) or turned into a plain window (6) for a report");
-            // THE SLOPE GATE IS GONE, AND MUST NOT COME BACK. It forced `bedFade` to 1
-            // over any bed that read as steep, for a duplicate that turned out to be
-            // the refraction guard and the celestial march instead. What it actually
-            // did was cover the shallows: the bed slope comes from a three-yard
-            // baseline, so over a pond the taps reach the banks from everywhere and
-            // the whole sheet read as a wall. `beach` drives the swash and the foam;
-            // it decides nothing about how much of the bed may show through.
-            Require(pixel.find("float steep=1-saturate(beach);")==std::string::npos&&
-                    pixel.find("bedFade=lerp(bedFade,1.0,steep*bedTrusted);")==std::string::npos,
-                    "the shore's carve-out is decided by the column's depth, not by the bed's slope");
+            // An unknown or implausible bed reading must not switch the slider off.
             // `lerp(1.0, ...)` is the whole point: untrusted means full authority.
             Require(pixel.find("float bedFade=lerp(1.0,saturate(effectiveDepth*.5),bedTrusted);")
                         !=std::string::npos &&
@@ -1313,16 +1216,7 @@ int main() try
                         !=std::string::npos,
                     "the depth transition still converges on the same sea body");
             const std::string mirror=ReadAlongside("WaterPreview.cpp");
-            Require(mirror.find("const float murk = Smoothstep(murkDistance * .22f, murkDistance, viewDistance);")
-                        !=std::string::npos &&
-                    mirror.find("body = Lerp(body, Add(deep, inScatter), murk);")!=std::string::npos &&
-                    mirror.find("alpha = std::max(alpha, murk);")!=std::string::npos &&
-                    mirror.find("float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
-                        !=std::string::npos &&
-                    mirror.find("const bool otherSurface = std::fabs(refractZ - centreZ) > std::max(centreZ * .08f, 1.5f);")
-                        !=std::string::npos &&
-                    mirror.find("bedFade += (1.f - bedFade)")==std::string::npos &&
-                    mirror.find("const float bend = refractionStrength * Saturate(column * .07f) * contact;")
+            Require(mirror.find("const float bedFade = validDepth > .5f ? Saturate(effectiveDepth * .5f) : 1.f;")
                         !=std::string::npos &&
                     mirror.find("body = Lerp(body, Add(deep, inScatter), .85f * bedFade);")
                         !=std::string::npos,
@@ -1429,29 +1323,13 @@ int main() try
             // the cached-light memcpy, which stops at c196.
             const auto lane=code.find("pixelConstants[19][0]=std::clamp(opacityPercent*.01f,0.f,1.f);");
             const auto cached=code.find("std::memcpy(pixelConstants,cache.values,sizeof(cache.values));");
-            // ...and the block now runs to c219, which carries the client's fog curve
-            // for the per-pixel evaluation, in the same one upload and the same restore.
             Require(lane!=std::string::npos&&cached!=std::string::npos&&lane<cached&&
-                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],40)")!=std::string::npos&&
-                    code.find("pixelConstants[39][0]=fogCurveValid?fogCurveStart:0.f;")!=std::string::npos&&
-                    code.find("GetPixelShaderConstantF(180,oldPixelConstants,40)")!=std::string::npos,
-                    "opacity rides c199 and the fog curve c219 inside the one c180..c219 upload, ahead of the cached-light splice that only overwrites c180..c196");
+                    code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos,
+                    "opacity rides c199 inside the one c180..c218 upload, ahead of the cached-light splice that only overwrites c180..c196");
             const std::string ini=ReadAlongside("../GraphicsEffects.ini");
             const std::string overlay=ReadAlongside("../src/Environment/OverlayItems.h");
             Require(ini.find("OpacityPercent=85")!=std::string::npos&&
                     overlay.find("L\"Water\",L\"OpacityPercent\",\"WATER OPACITY\",0,100,5,85}")!=std::string::npos&&
-                    ini.find("VisibilityYards=90")!=std::string::npos&&
-                    ini.find("HorizonFogYards=900")!=std::string::npos&&
-                    overlay.find("L\"Water\",L\"VisibilityYards\",\"WATER VISIBILITY (YD)\",5,400,5,90}")
-                        !=std::string::npos&&
-                    // Reached from the overlay, not only from the ini: a report
-                    // is settled by taking one of these frames, and nobody hunts
-                    // for a diagnostic that is not in the tab they already have
-                    // open.
-                    overlay.find("L\"Water\",L\"WaterDebugMode\",\"WATER DEBUG (3 MIRROR 4 BED 5 NO SURFACE 6 WINDOW)\",0,6,1,0}")
-                        !=std::string::npos&&
-                    overlay.find("L\"Water\",L\"HorizonFogYards\",\"HORIZON FOG (YD)\",100,3000,50,900}")
-                        !=std::string::npos&&
                     overlay.find("L\"Water\",L\"ClarityPercent\",\"WATER CLARITY\",5,200,5,100}")!=std::string::npos,
                     "opacity ships at 85 in the ini and as its own 0..100 F7 slider beside clarity");
         }
@@ -1529,7 +1407,7 @@ int main() try
                 pixel.find("dot(worldRel.xy,waveLattice.xy)")!=std::string::npos&&
                 pixel.find("noiseGradient(warpCoord)")==std::string::npos&&
                 pixel.find("noiseGradient(groupCoord)")==std::string::npos&&
-                code.find("SetPixelShaderConstantF(180,pixelConstants[0],40)")!=std::string::npos&&
+                code.find("SetPixelShaderConstantF(180,pixelConstants[0],39)")!=std::string::npos&&
                 code.find("SetVertexShaderConstantF(200,vertexControls,5)")!=std::string::npos,
                 "the vertex stage anchors the warp AND the set envelope and interpolates both to pixels without resampling");
         // The envelope has to ride the lanes the two stages already had. Interpolator counts
@@ -1560,17 +1438,14 @@ int main() try
         // every touched register, this keeps the three untouched gap registers byte-for-byte
         // while reducing six D3D9 constant calls per tile to three. The native vertex inputs
         // are likewise fetched through one enclosing c5..c35 span rather than three calls.
-        // c180..c219 is the widest span the stage reads: the client's constants, the
-        // WATER OPACITY floor with its range lanes on c199, and the client's own fog
-        // curve on c219 for the per-pixel evaluation. One save, one upload, one restore.
-        for (const char* spelling : {"GetPixelShaderConstantF(180,oldPixelConstants,40)",
+        for (const char* spelling : {"GetPixelShaderConstantF(180,oldPixelConstants,39)",
                                      "GetVertexShaderConstantF(200,oldVertexControls,5)",
                                      "GetVertexShaderConstantF(5,nativeVertexConstants[0],31)",
-                                     "SetPixelShaderConstantF(180,pixelConstants[0],40)",
-                                     "SetPixelShaderConstantF(180,oldPixelConstants,40)",
+                                     "SetPixelShaderConstantF(180,pixelConstants[0],39)",
+                                     "SetPixelShaderConstantF(180,oldPixelConstants,39)",
                                      "SetVertexShaderConstantF(200,oldVertexControls,5)",
-                                     "float oldPixelConstants[160]{},oldVertexControls[20]{}",
-                                     "float pixelConstants[40][4]","float vertexControls[20]="})
+                                     "float oldPixelConstants[156]{},oldVertexControls[20]{}",
+                                     "float pixelConstants[39][4]","float vertexControls[20]="})
             Require(code.find(spelling)!=std::string::npos,
                     "water constants use the complete batched save/upload/restore windows");
         Require(code.find("GetPixelShaderConstantF(200,")==std::string::npos&&
@@ -1599,38 +1474,6 @@ int main() try
                 pixel.find("lightStep<12 && lightStep<lightSteps && lightVisibility>0")!=std::string::npos&&
                 pixel.find("[branch] if(distanceSquared>=radius*radius) continue;")!=std::string::npos,
                 "zero-contribution SSR, celestial and local-light work exits before expensive samples");
-        // A LIGHT-RAY HIT IS A POINT INSIDE A SURFACE, NOT ANYTHING NEARER THAN THE
-        // SAMPLE. The single-sided "nearer than the sample" test let a figure standing
-        // in the water - who covers a dozen pixels of the march's own screen path while
-        // sitting many yards in front of it - block the sun and multiply the whole path
-        // to zero, extinguishing the sun road in his silhouette. Both marches now use
-        // one thickness window, from the same register and the same formula.
-        Require(pixel.find("float lightGap=lightSample.z-blockerZ;")!=std::string::npos&&
-                pixel.find("float lightThickness=reflectionStyle.z+traceDistance*.05;")!=std::string::npos&&
-                pixel.find("float blocked=inside*step(1.5,lightGap)*step(lightGap,lightThickness+1.5);")
-                    !=std::string::npos&&
-                pixel.find("step(blockerZ+1.5,lightSample.z)")==std::string::npos,
-                "the celestial march accepts a hit only inside a surface, the way the mirror march does");
-        // The consequence, in yards, at the shader's own numbers: with
-        // `reflectionStyle.z` = 1.8 and a 40-yard step (thickness 1.8 + 2.0),
-        // a blocker counts only when it sits between 1.5 and 5.3 yards in
-        // front of the ray sample. The figure in the report - 20 yards in
-        // front of a path he only crosses on screen - is outside that window
-        // and no longer extinguishes the glint; a wall the ray genuinely runs
-        // into (0-2 yards) still does.
-        {
-            const auto blockedBy = [](float gap,float thickness){
-                return gap>=1.5f && gap<=thickness+1.5f;
-            };
-            const float thicknessAt40Yards=1.8f+40.f*.05f;
-            Require(!blockedBy(20.f,thicknessAt40Yards)&&blockedBy(2.f,thicknessAt40Yards)&&
-                    blockedBy(thicknessAt40Yards+1.f,thicknessAt40Yards),
-                    "a screen-space silhouette 20 yards in front of the path stops blocking the sun road");
-        }
-        Require(mirror.find("const float lightGap = sampleZ - blockerZ;")!=std::string::npos&&
-                mirror.find("const float lightThickness = traceThickness + traceDistance * .05f;")!=std::string::npos&&
-                mirror.find("Step(lightGap, lightThickness + 1.5f)")!=std::string::npos,
-                "the CPU preview's own light march carries the same thickness window");
         // WATER QUALITY hands both marches a trip count instead of a compile-time one, so a
         // level can buy or give back ray steps without a second compiled shader. Pinned in all
         // three parts: the count arrives from a constant register, the loop is WRITTEN against
