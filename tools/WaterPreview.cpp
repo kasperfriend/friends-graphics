@@ -996,7 +996,13 @@ int main(int argc, char** argv)
                             const float sv = .5f - .5f * Dot(rel, v.up) / sampleZ;
                             const float inside = Step(.05f, sampleZ) * Saturate(std::min(std::min(su, sv), std::min(1.f - su, 1.f - sv)) * 8.f);
                             const float blockerZ = copy.Sample(su, sv);
-                            const float blocked = inside * Step(blockerZ + 1.5f, sampleZ);
+                            // The shader's own thickness window, from the same registers and the
+                            // same formula: a hit has to be on the ray, not merely nearer than it,
+                            // or a foreground silhouette blocks a path it never crossed.
+                            const float lightGap = sampleZ - blockerZ;
+                            const float lightThickness = traceThickness + traceDistance * .05f;
+                            const float blocked = inside * Step(1.5f, lightGap) *
+                                Step(lightGap, lightThickness + 1.5f);
                             lightVisibility *= 1.f - blocked;
                         }
                         celestialPath *= lightVisibility;

@@ -1776,10 +1776,24 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                     min(1-lightUV.x,1-lightUV.y))*8);
             float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
-            // Anything nearer than the sample point occludes the source: a single
-            // sided band where the old version tested a thickness window on top of
-            // an in-range test, which cost three more slots to say the same thing.
-            float blocked=inside*step(blockerZ+1.5,lightSample.z);
+            // A HIT HAS TO BE ON THE RAY, NOT MERELY IN FRONT OF IT. This test used to
+            // accept "anything nearer than the sample" on the single-sided band, and a
+            // screen-space march cannot tell a surface the light ray passes THROUGH from
+            // a surface standing in front of the eye at the same pixel: a figure with his
+            // back to the viewer covers a dozen pixels of the path, the depth buffer
+            // reports him as many yards nearer than the sample, and one blocked step
+            // multiplies the whole path to zero. The sun road was then extinguished in
+            // exactly his screen silhouette - a second, dark copy of him lying on the
+            // water, which no opacity, refraction or reflection setting can remove
+            // because none of them touch the glint's visibility.
+            //
+            // The mirror march below has always used a thickness window (`reflectionStyle.z`
+            // plus the step's own travel) for exactly this reason: the ray is inside the
+            // surface it hit, not in front of it by an arbitrary distance. The same window,
+            // from the same register and the same formula, is what the light march wants.
+            float lightGap=lightSample.z-blockerZ;
+            float lightThickness=reflectionStyle.z+traceDistance*.05;
+            float blocked=inside*step(1.5,lightGap)*step(lightGap,lightThickness+1.5);
             lightVisibility*=1.0-blocked;
             // Once an interior sample is blocked the product is exactly zero;
             // the loop condition skips remaining depth reads. Edge-faded samples

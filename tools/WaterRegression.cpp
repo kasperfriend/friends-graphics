@@ -1600,6 +1600,38 @@ int main() try
                 pixel.find("lightStep<12 && lightStep<lightSteps && lightVisibility>0")!=std::string::npos&&
                 pixel.find("[branch] if(distanceSquared>=radius*radius) continue;")!=std::string::npos,
                 "zero-contribution SSR, celestial and local-light work exits before expensive samples");
+        // A LIGHT-RAY HIT IS A POINT INSIDE A SURFACE, NOT ANYTHING NEARER THAN THE
+        // SAMPLE. The single-sided "nearer than the sample" test let a figure standing
+        // in the water - who covers a dozen pixels of the march's own screen path while
+        // sitting many yards in front of it - block the sun and multiply the whole path
+        // to zero, extinguishing the sun road in his silhouette. Both marches now use
+        // one thickness window, from the same register and the same formula.
+        Require(pixel.find("float lightGap=lightSample.z-blockerZ;")!=std::string::npos&&
+                pixel.find("float lightThickness=reflectionStyle.z+traceDistance*.05;")!=std::string::npos&&
+                pixel.find("float blocked=inside*step(1.5,lightGap)*step(lightGap,lightThickness+1.5);")
+                    !=std::string::npos&&
+                pixel.find("step(blockerZ+1.5,lightSample.z)")==std::string::npos,
+                "the celestial march accepts a hit only inside a surface, the way the mirror march does");
+        // The consequence, in yards, at the shader's own numbers: with
+        // `reflectionStyle.z` = 1.8 and a 40-yard step (thickness 1.8 + 2.0),
+        // a blocker counts only when it sits between 1.5 and 5.3 yards in
+        // front of the ray sample. The figure in the report - 20 yards in
+        // front of a path he only crosses on screen - is outside that window
+        // and no longer extinguishes the glint; a wall the ray genuinely runs
+        // into (0-2 yards) still does.
+        {
+            const auto blockedBy = [](float gap,float thickness){
+                return gap>=1.5f && gap<=thickness+1.5f;
+            };
+            const float thicknessAt40Yards=1.8f+40.f*.05f;
+            Require(!blockedBy(20.f,thicknessAt40Yards)&&blockedBy(2.f,thicknessAt40Yards)&&
+                    blockedBy(thicknessAt40Yards+1.f,thicknessAt40Yards),
+                    "a screen-space silhouette 20 yards in front of the path stops blocking the sun road");
+        }
+        Require(mirror.find("const float lightGap = sampleZ - blockerZ;")!=std::string::npos&&
+                mirror.find("const float lightThickness = traceThickness + traceDistance * .05f;")!=std::string::npos&&
+                mirror.find("Step(lightGap, lightThickness + 1.5f)")!=std::string::npos,
+                "the CPU preview's own light march carries the same thickness window");
         // WATER QUALITY hands both marches a trip count instead of a compile-time one, so a
         // level can buy or give back ray steps without a second compiled shader. Pinned in all
         // three parts: the count arrives from a constant register, the loop is WRITTEN against

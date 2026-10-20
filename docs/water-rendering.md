@@ -3081,6 +3081,42 @@ The lesson worth keeping: a report that says *which knobs changed nothing* is
 worth more than one that says the bug is still there. Those three lanes are the
 whole dark side of this stage.
 
+## Round 18: a light-ray hit is a point inside a surface, not anything nearer (2026-10-20)
+
+"No copy at any of the debug modes" closed the last open question, and it closed
+it the other way round. Every debug mode either makes the sheet **opaque** (1-4,
+6) or removes it (5), so the copy can only exist in a frame where the water is
+present *and* shaded normally. Combined with the earlier report - refraction,
+reflections and opacity leave it alone - that leaves exactly one thing in this
+stage that can compute a **shadow**: the celestial occlusion march.
+
+It asks one question per step - "is the depth buffer nearer than this point of
+the ray?" - and multiplies the path to zero if the answer is ever yes. That test
+is *single-sided*: it accepts **anything** nearer than the sample, however many
+yards nearer. A figure standing in the water covers a dozen pixels of the
+march's own screen path while sitting many yards in front of it, so he read as
+an occluder of the sun and the glint - the sun road, and the light it carries -
+was extinguished in exactly his screen silhouette. One blocked step, whole path
+gone: a hard, dark copy of him lying on the surface.
+
+The mirror march twenty lines below has always had the guard that prevents this,
+and the light march had lost it:
+
+```
+thickness = reflectionStyle.z + traceDistance * .05      // the mirror's own window
+gap       = lightSample.z - blockerZ
+blocked   = inside * step(1.5, gap) * step(gap, thickness + 1.5)
+```
+
+A hit is now a point **inside** a surface the ray ran into, not a surface
+arbitrarily in front of it. At the shader's numbers a blocker counts only
+between 1.5 and ~5.3 yards in front of a 40-yard step: a wall the ray genuinely
+enters still shadows the glint, and a silhouette 20 yards in front of the path
+no longer does.
+
+The CPU preview mirrors the same window, and `WaterRegression` pins the formula,
+the mirror and the numeric consequence (5668 assertions).
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and
