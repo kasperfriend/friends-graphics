@@ -1,5 +1,10 @@
 # Local fog field (PR #5)
 
+The layer ships SWITCHED OFF (`Enabled=0`, `DensityPermille=0` under
+`[LocalFog]` in GraphicsEffects.ini, and the same values as the in-code
+defaults when the keys are missing). Everything below describes the layer
+as it behaves when enabled; set `Enabled=1` to see any of it.
+
 The near fog now samples a 256 x 256 world-space patch covering 256 world
 units. RGBA holds four density slices at 0, 0.5, 1 and 1.5 times HeightUnits
 above the layer base. The raymarch interpolates those slices using the local

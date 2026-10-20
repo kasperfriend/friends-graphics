@@ -1,5 +1,99 @@
 # Water rendering audit
 
+## Full rework round 21: the crossfade was measured against the mean plane (2026-10-20)
+
+The report, after round 20: the underwater shader is secured against the exit rule
+but still "disables mostly near surfaces" - a swimmer a yard or two under the
+waterline watches the medium (fog, beams, net, grade) thin to almost nothing and
+breathe back, over and over, wherever he looks.
+
+**What the crossfade was reading.** The tracker's plane is the liquid tile's MEAN
+lattice plane, and the ramp ran over depth above that mean: `Smoothstep(.22, 1.5,
+yards)`. But the visible surface is the mean plane plus the geometry waves, and at
+the shipped sliders a set's crest rides about a yard and a half over the mean
+(`1.62 x amplitude x kGroupMax`, amplitude capped at `1.2 x cell`). A camera one
+yard under the mean plane is therefore alternately two yards deep and at the
+surface - and the shipped crossfade band spans exactly that range, so every swell
+cycle swept the ramp from ~1 toward 0 while the diver watched the seabed. Still
+water never showed it; any sea did. (The same lens explains why it read as "near
+surfaces": two yards down, the reach can no longer reach the band.)
+
+**The fix.** The hysteresis and the ramp are measured against the visible surface:
+`Tracker::Advance` takes the caller's `waveBandYards` - the displaced trains' own
+height at THIS camera (the field phases already carry the camera's projection, so
+`SwellTheta(train, 0, 0, phase)` is the absolute cell under the swimmer), times the
+grouping envelope's worst case so a set's top is covered, floored at zero (a trough
+below the mean must not subtract water from a swimmer the mean plane holds) and
+capped by `kMaxWaveBandYards`. WATER QUALITY 8 renormalizes its third displaced
+train to the two-train peak, so the two-train evaluation is the peak at every
+quality; the production caller in `WaterEffect.h` builds the same
+`BuildGeometryWaves` the draws build and gives zero band when waves or geometry
+waves are off or the camera is unknown - still water is band zero and behaves
+exactly as shipped. Depth below the mean and the wave's reach now add up: the ramp
+breathes with the sea but can no longer fall away while the depth alone would hold
+it, and surfacing still fades the medium out because the depth term falls with the
+swimmer.
+
+Verification: UnderwaterRegression 209 (six new: the still-water identity half a
+yard down, the swell hold at the same depth, ten seconds of swell cycle with the
+ramp breathing but never falling away, air above the crests that the reach must not
+hold, a NaN reach, and a trough that subtracts nothing). The pin was proven to bite
+by reverting the band, which fails the swell fixture alone. The rest of the
+portable battery is green, sanitizers included.
+
+
+## Full rework round 20: the exit that caught the diver (2026-10-20)
+
+The report: the underwater shader "gets lost periodically, any angle" - a diver
+swimming at depth watches the medium (the fog, the beams, the caustic net, the
+grade) drain away over a few seconds and pour back, over and over, whichever way
+he faces.
+
+**What the exit was reading.** Round 17 bought the remembered plane its exit: a
+camera that travels from where a sheet last covered it, while known footprints in
+view keep saying "none of them is over you", is on dry ground below the sheet's
+level, and three quarters of a second plus eight yards of that retires the memory.
+The evidence cannot distinguish that walker from a swimmer. A liquid body is drawn
+chunk against the client's frustum, so a diver under open water receives exactly
+the walker's testimony - local sheets, every footprint answering "not over YOU" -
+because his own covering chunk is behind or above the view he is actually looking
+at. The two states are identical in every number the tracker holds; the retirement
+resolved the ambiguity toward the walker, and every swim paid for it. Unobserved
+frames (the seabed filling the view) accrue the outside count, eight yards of
+travel pass in moments, the plane retires, `cleared` answers air, and the ramp
+drains to zero in about a fifth of a second. Looking forward or up again puts a
+sheet containing the camera back in frame, the memory re-enters, and the medium
+pours back - which is the report's "periodically".
+
+**The fix.** The exit keeps its walker and loses the swimmer by counting the one
+thing that differs between them, which is where the camera is looking. `Tracker::
+Advance` now takes the caller's word on whether the covering region - the
+remembered plane over the camera's own position, sampled again ten and twenty-five
+yards along the view's horizontal forward - was inside the client's frustum this
+frame. The test lives beside the tracker (`CoveringPlaneInView` in
+`src/Water/UnderwaterMedium.h`), spends the capture's own projection scales
+(P00/P11, the screen mapping the celestial tracker reads), keeps a quarter frame
+of slack (the covering chunk only has to be eligible to draw, not centred), and is
+unit-tested against level, forty-five-down, straight-down, shore and degenerate
+views. On a frame that could not have seen the sheet over the camera, "no sheet
+over the camera" is a fact about the view: the outside count does not accrue, and
+it restarts, so a long swim cannot earn the exit one glance at a time. The
+production caller in `WaterEffect.h` spends the frame's own pose - this frame's
+capture, or the retained pose inside the same short hold every consumer keeps -
+and hands over no evidence whenever the pose or the projection cannot be tested:
+refusing the test retires nothing, while passing it wrongly retires a diver. The
+walker is untouched: his view of the shore puts the sheet's region in frame, which
+is what "still looking at it" always meant.
+
+Verification: UnderwaterRegression 202 (thirteen new: the diver who swims fifty
+yards at depth with no surface in frame and holds the medium throughout, the same
+walk with the covering region in view still retiring, the glance-and-look-away
+sequence that must never accrue against the sustained look that must, and the
+covering-region test's own views). The swimmer pin was proven to bite by reverting
+the gate, which fails that fixture alone. The rest of the portable battery is
+green, sanitizers included.
+
+
 ## Full rework round 19: the ticks on the shallow bed (2026-10-19)
 
 The report: dark ticks in rows on the submerged sand in the shallows, gone the moment

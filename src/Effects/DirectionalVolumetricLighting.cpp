@@ -635,8 +635,8 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,13));
  const auto readLocal=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
- m_settings.localFogEnabled=readLocal(L"Enabled",1)!=0;
- m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",12),0,100)*.003f;
+ m_settings.localFogEnabled=readLocal(L"Enabled",0)!=0;
+ m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",0),0,100)*.003f;
  // Height is now a real thickness in world units: higher means taller.
  m_settings.localFogHeightFalloff=1.f/std::clamp(readLocal(L"HeightUnits",3),1,8);
  m_settings.localFogBaseOffset=float(std::clamp(readLocal(L"BaseOffset",-1),-20,20));

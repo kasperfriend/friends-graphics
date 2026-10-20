@@ -583,6 +583,13 @@ struct Tracker
     // under a neighbouring sheet's level, which is the exit this buys.
     static inline constexpr float kOutsideMemorySeconds = .75f;
     static inline constexpr float kOutsideTravelYards = 8.f;
+    // The surface the tracker measures against is the liquid tile's MEAN
+    // plane, but the visible surface rides geometry waves above it - at the
+    // shipped sliders a set's crest reaches about a yard and a half over the
+    // mean. The caller folds that reach into the ramp and the hysteresis
+    // (waveBandYards below), capped here so an absurd slider combination
+    // cannot push the band past what a player could ever be under.
+    static inline constexpr float kMaxWaveBandYards = 25.f;
 
     // This frame's raw reading: the plane nearest the camera, of the draws that
     // reported one.
@@ -692,7 +699,8 @@ struct Tracker
         Accept(reading.yards, overhead && reading.yards > kExitYards);
     }
 
-    inline void Advance(float deltaSeconds, const float cameraWorld[3], bool cameraValidNow) noexcept
+    inline void Advance(float deltaSeconds, const float cameraWorld[3], bool cameraValidNow,
+                        bool coveringPlaneInView = true, float waveBandYards = 0.f) noexcept
     {
         const float dt = std::isfinite(deltaSeconds) ? std::clamp(deltaSeconds, 0.f, .25f) : 0.f;
         // All three axes, not only the height this line used first: the jump
@@ -769,7 +777,23 @@ struct Tracker
             // chunk seams and frustum flicker, that is not "no information" -
             // it is the geometry saying the camera left the water it can
             // see, and the remembered plane retires.
-            if (sawOutside) outsideSeconds += dt;
+            //
+            // But only on frames where the client could actually have been
+            // looking at where the covering sheet would have to be. A liquid
+            // body is drawn chunk against the client's frustum, so a camera
+            // swimming under open water receives exactly the testimony a
+            // walker on a bank below the sheet's level receives: local
+            // sheets, every one answering "not over YOU". What separates
+            // them is where the camera is looking - the swimmer's own
+            // covering chunk is behind or above the view (it was last
+            // confirmed where the anchor now sits, and the client only
+            // draws what the frustum holds), while the walker has shore
+            // and sky where his would be. When the caller reports the
+            // covering region out of the client's view, "no sheet over the
+            // camera" is a fact about the view and not about the water:
+            // the evidence does not count, and the count restarts, so a
+            // long swim cannot accrue it one glance at a time either.
+            if (sawOutside && coveringPlaneInView) outsideSeconds += dt;
             else outsideSeconds = 0.f;
             if (sawOutside && outsideSeconds >= kOutsideMemorySeconds
                 && haveCamera && planeKnown)
@@ -825,11 +849,24 @@ struct Tracker
         // strobe between two media.
         yards = Lerp(yards, raw, 1.f - std::exp(-dt * kSmoothingRate));
         if (!std::isfinite(yards)) { yards = -1.f; raw = -1.f; }
-        ramp = Smoothstep(kEnterYards, kRampYards, yards);
+        // The hysteresis and the ramp are measured against the visible surface, not the
+        // mean plane: `waveBandYards` is the caller's reach of the geometry waves over the
+        // mean at this camera (crest height, floored at zero - a trough below the mean
+        // must not subtract water from a swimmer the mean plane holds). Without it, a
+        // camera a yard under the mean plane in a moderate sea spends every swell cycle
+        // inside the crossfade band and the medium thins to nothing while he watches the
+        // seabed - the reported "disables mostly near surfaces". With it, depth below the
+        // mean and the wave's reach add up, the medium holds through crest passage, and
+        // still water (band zero) behaves exactly as before.
+        const float band = std::isfinite(waveBandYards)
+            ? std::clamp(waveBandYards, 0.f, kMaxWaveBandYards) : 0.f;
+        const float submergence = yards + band;
+        ramp = Smoothstep(kEnterYards, kRampYards, submergence);
         // Hysteresis: entering takes more water over the camera than leaving does, so a
         // camera parked exactly at the surface cannot toggle a whole frame's fog pipeline
-        // on and off.
-        submerged = submerged ? yards > kExitYards : yards > kEnterYards;
+        // on and off. Measured on the same submergence, so the reach that holds the ramp
+        // holds the pipeline switch too.
+        submerged = submerged ? submergence > kExitYards : submergence > kEnterYards;
         // A dry camera whose last overhead evidence is stale has no use for
         // a remembered plane, and keeping one is how a height comes back to
         // answer for ground it was never over. The next entry will be seen
@@ -842,6 +879,62 @@ struct Tracker
     // matrices gave no plane: the frame's answer, which is the same water.
     inline float HeldYards() const noexcept { return observed ? raw : yards; }
 };
+
+// Whether the client could have been looking at the sheet that would cover the camera.
+//
+// The tracker's outside-evidence exit - local footprints, none of them over the
+// camera - is only testimony about the WATER when the covering region was eligible
+// to be drawn. The client culls liquid chunks against its frustum, so a swimmer
+// looking down at the seabed goes unobserved every frame no matter how much water
+// is over him; his "no sheet over me" evidence is a fact about the view, and the
+// same numbers arrive from a walker on a bank below the sheet's level who IS dry.
+// The view is the difference, and the view is what this asks: sample the remembered
+// plane over the camera and a little way along the view's horizontal forward, and
+// report whether any of it lands inside the client's frustum (with a quarter frame
+// of slack - the covering chunk only has to be eligible to draw, not centred).
+//
+// `viewRaw` is the captured view in v[0..3] storage: rows are the world axes in
+// view space, the same convention PlaneOverCamera's callers read, so a point goes
+// over by projection against the columns and the world direction of view +z is
+// the column of third components, flattened. `xScale`/`yScale` are the projection's
+// P00/P11 (projUnpack[2]/[3]): the screen mapping |x/z|*P00 <= 1, same as the
+// celestial tracker's screenX. A degenerate pose (forward with no horizontal
+// part - a camera staring straight down - or an unusable scale, refused by the
+// caller) answers false: a frame that cannot test the frustum hands the exit no
+// evidence, because refusing here retires nothing while passing here can retire
+// a diver.
+inline bool CoveringPlaneInView(const float viewRaw[16], const float cameraWorld[3],
+                                float planeZ, float xScale, float yScale) noexcept
+{
+    if (!viewRaw || !cameraWorld || !(xScale > 0.f) || !(yScale > 0.f)
+        || !std::isfinite(xScale) || !std::isfinite(yScale)
+        || !std::isfinite(planeZ))
+        return false;
+    for (int axis = 0; axis < 12; ++axis)
+        if (!std::isfinite(viewRaw[axis])) return false;
+    // World direction of view +z, flattened to the horizontal plane.
+    const float forwardX = viewRaw[2], forwardY = viewRaw[6];
+    const float forwardLength = std::sqrt(forwardX * forwardX + forwardY * forwardY);
+    if (!(forwardLength > 1e-4f)) return false;
+    constexpr float kCoveringInViewMargin = 1.3f;
+    for (const float distance : {0.f, 10.f, 25.f})
+    {
+        const float point[3] = { cameraWorld[0] + forwardX / forwardLength * distance,
+                                 cameraWorld[1] + forwardY / forwardLength * distance,
+                                 planeZ };
+        const float viewX = point[0] * viewRaw[0] + point[1] * viewRaw[4]
+            + point[2] * viewRaw[8] + viewRaw[12];
+        const float viewY = point[0] * viewRaw[1] + point[1] * viewRaw[5]
+            + point[2] * viewRaw[9] + viewRaw[13];
+        const float viewZ = point[0] * viewRaw[2] + point[1] * viewRaw[6]
+            + point[2] * viewRaw[10] + viewRaw[14];
+        if (viewZ > 0.5f
+            && std::fabs(viewX) <= viewZ * kCoveringInViewMargin / xScale
+            && std::fabs(viewY) <= viewZ * kCoveringInViewMargin / yScale)
+            return true;
+    }
+    return false;
+}
 
 // The signed yards one liquid draw may classify ITSELF with (the water
 // stage's c218.w and everything folded from it). The same entry rule as the

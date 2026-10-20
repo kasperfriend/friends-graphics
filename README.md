@@ -43,8 +43,8 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 ### Atmosphere and volumetric lighting
 
 - Sun and moon god rays are a whole-frame, depth-aware gather toward the tracked celestial source: sky shows as beams, while trees, characters and buildings cast visible shadows along them and clouds break them into gaps. The math lives in `src/Effects/GodRayCore.h`; `tools/GodRayPreview.cpp` renders a reference frame and `tools/GodRayRegression.cpp` checks it.
-- Height fog, aerial haze, ground mist, and animated terrain-relative local fog are integrated in world space.
-- Local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
+- Height fog, aerial haze, and ground mist are integrated in world space. The animated terrain-relative local fog layer is integrated the same way but ships switched off; `Enabled=1` under `[LocalFog]` in GraphicsEffects.ini turns it on.
+- When enabled, local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
 - Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.
 
 ### Volumetric clouds
@@ -226,7 +226,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | Section | Purpose |
 | --- | --- |
 | `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
-| `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
+| `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. Ships off; `Enabled=1` turns it on. |
 | `[DynamicLighting]` | Direct local-light pools, volumetric-scattering scale, quality, smoothing and debug views. Direct pools need `[Volume] Enabled=1` but no other effect; volumetric scattering uses the active atmosphere/local-fog medium. |
 | `[WeatherVisuals]` | Native-weather intensity (also used by wind/cloud/sea response), rain particle speed, density, length, width, opacity, wind influence and debug views, plus occlusion and lens droplets; rain follows `[Wind]`. Rendering off/F10 does not disable weather detection. |
 | `[Wind]` | Shared eight-direction wind, strength/gust timing, weather response, wave/cloud links, continuity-layer drift and diagnostic HUD. |
@@ -292,6 +292,14 @@ tools\Test-Atmosphere.cmd
 tools\Test-Water.cmd
 tools\Test-Weather.cmd
 powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
+```
+
+The device-free suites (wind, clouds, water, underwater, ambient occlusion, local lighting, camera anchoring, location and settings caches, the overlay geometry and the tracked-state mirror) also build and run on any Linux/macOS machine in one command - the same battery CI runs on every commit:
+
+```bash
+tools/RunPortableRegressions.sh          # build all suites in parallel, run them
+tools/RunPortableRegressions.sh --san    # every suite under ASan+UBSan as well
+tools/RunPortableRegressions.sh --only water,underwater   # one suite while iterating
 ```
 
 The tests cover eight-way wind/time/weather response, wind/cloud/wave phase continuity, F7 wind settings, fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, embedded shader compilation, the ambient-occlusion look (open surfaces untouched, contacts and corners darkened, fade with distance, blur not crossing edges), and the device-loss, frame-gap and retry rules used after Alt+Tab. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.

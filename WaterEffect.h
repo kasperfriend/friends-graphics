@@ -381,6 +381,11 @@ inline void ClearLiquidVertexZCache() noexcept {
     liquidDeclarationCache.Reset();
     liquidDeclarationCacheValid=false;
 }
+// The geometry waves' reach over the mean liquid plane at this frame's camera, for the
+// submersion tracker's crossfade. Defined below the wave state it reads (waveMotion,
+// qualityPlan, the sea state); declared here because AdvanceUnderwater above spends it.
+float UnderwaterWaveBandYards(const renderer::FrameContext& frame);
+
 void AdvanceUnderwater(float dt) {
     // Wrapped here rather than only in the consumer, because a clock that grows without bound
     // loses its fraction bits: renderer::underwater::Wobble wraps its own argument into the
@@ -407,7 +412,32 @@ void AdvanceUnderwater(float dt) {
     }
     const auto& frame=renderer::FrameContext::Current();
     const float camera[3]={frame.cameraPosition.x,frame.cameraPosition.y,frame.cameraPosition.z};
-    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid);
+    // Whether the client could have been looking at the sheet that would cover the camera.
+    // The tracker's outside-evidence exit (local footprints, none over the camera) is only
+    // about the water when the covering region was eligible to be drawn: the client culls
+    // liquid chunks against its frustum, so a swimmer looking down at the seabed goes
+    // unobserved every frame no matter how much water is over him. The test itself is the
+    // tracker's own CoveringPlaneInView - same header, compiled and unit-tested where the
+    // tracker is. The pose must be this frame's (or inside the same short hold every
+    // consumer of the retained pose keeps); a frame that cannot test the frustum hands the
+    // exit no evidence - refusing the test retires nothing, while passing it wrongly
+    // retires a diver.
+    const bool poseFresh=frame.cameraValid
+        ||(frame.viewRawValid&&frame.cameraEyeAgeMs<=renderer::FrameContext::kCameraEyeHoldMs);
+    const bool coveringPlaneInView=poseFresh&&frame.viewRawValid
+        &&frame.projUnpack[2]>0.f&&frame.projUnpack[3]>0.f
+        &&renderer::underwater::CoveringPlaneInView(&frame.viewRaw.m[0][0],camera,
+            submersionTracker.planeZ,frame.projUnpack[2],frame.projUnpack[3]);
+    // The ramp and the hysteresis are measured against the VISIBLE surface, not the mean
+    // lattice plane: the geometry waves lift crests up to a yard and a half over the mean
+    // at the shipped sliders, so a camera a yard under the mean plane spends every swell
+    // cycle inside the crossfade band and the medium thins to nothing mid-swim - the
+    // reported "disables mostly near surfaces". The reach is the displaced trains' own
+    // height at THIS camera, folded into the tracker by UnderwaterWaveBandYards below
+    // (defined after the wave state it reads); still water, waves off or geometry off
+    // give a zero band and the tracker behaves exactly as before.
+    const float waveBandYards=UnderwaterWaveBandYards(frame);
+    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView,waveBandYards);
     submersionTracker.BeginFrame();
     // Keep the published frame current on a frame that drew no liquid at all - which, for a
     // diver looking at the seabed, is most frames: the surface is behind the camera and
@@ -501,6 +531,31 @@ inline renderer::underwater::Field UnderwaterFieldAt(float cameraX,float cameraY
 // src/Water/WaterQuality.h and a per-draw lookup would be a per-draw way to disagree with it.
 int waterQuality=renderer::water::kQualityDefault;
 renderer::water::QualityPlan qualityPlan=renderer::water::QualityPlanFor(renderer::water::kQualityDefault);
+
+// The geometry waves' reach over the MEAN liquid plane at this frame's camera, in yards:
+// the displaced trains' own height at the swimmer's position (their phases already carry
+// the camera's projection, so SwellTheta at the wrapped phase is the absolute cell under
+// him), times the grouping envelope's worst case so a set's top is covered, floored at
+// zero - a trough below the mean must not subtract water from a swimmer the mean plane
+// holds - and capped by the tracker. WATER QUALITY 8 renormalizes its third displaced
+// train to the two-train peak, so the two-train evaluation is the peak at every quality.
+// Still water, waves off, geometry waves off, or a camera the frame does not know give a
+// zero band and the tracker behaves exactly as it did before the band existed.
+float UnderwaterWaveBandYards(const renderer::FrameContext& frame)
+{
+    if(!wavesEnabled||!geometryWavesEnabled||!frame.cameraValid
+       ||qualityPlan.geometryTrains<renderer::water::kGeometryTrainCount)return 0.f;
+    const auto geometry=renderer::water::BuildGeometryWaves(geometryWavePercent,
+        waveMotion.ScalePercent(),seaAgitation,true,true);
+    if(!(geometry.amplitude>0.f))return 0.f;
+    const auto field=waveMotion.Build(frame.cameraPosition.x,frame.cameraPosition.y,true,wavesEnabled);
+    float lift=0.f;
+    for(int train=0;train<renderer::water::kGeometryTrainCount;++train)
+        lift+=renderer::water::kTrainWeight[train]
+            *std::sin(renderer::water::SwellTheta(train,0.f,0.f,field.swellPhase));
+    return std::clamp(geometry.amplitude*lift*renderer::water::kGroupMax,0.f,
+        renderer::underwater::Tracker::kMaxWaveBandYards);
+}
 float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;

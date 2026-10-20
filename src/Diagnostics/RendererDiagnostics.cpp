@@ -29,27 +29,30 @@ namespace renderer
     {
         // The render thread's whole-frame batch is committed under the lock
         // exactly once here; between frames the Record* paths never touch
-        // m_mutex at all.
-        if (m_frameBatch.drawCalls || m_frameBatch.cameraCaptures ||
-            m_frameBatch.depthCaptures || m_frameBatch.compositedFrames)
+        // m_mutex at all. The batch commit and the frame count share one
+        // critical section: a second acquisition after the first would cost
+        // every frame an extra lock/unlock pair for nothing.
         {
             std::lock_guard lock(m_mutex);
-            m_counters.classifiedDrawCalls += m_frameBatch.classifiedDrawCalls;
-            m_counters.unknownDrawCalls += m_frameBatch.unknownDrawCalls;
-            m_counters.shadowCasterDraws += m_frameBatch.shadowCasterDraws;
-            m_counters.waterDraws += m_frameBatch.waterDraws;
-            m_counters.uiDraws += m_frameBatch.uiDraws;
-            m_counters.cameraCaptures += m_frameBatch.cameraCaptures;
-            m_counters.depthCaptures += m_frameBatch.depthCaptures;
-            m_counters.compositedFrames += m_frameBatch.compositedFrames;
-            m_frameBatch = FrameBatch{};
-        }
-        std::lock_guard lock(m_mutex);
-        ++m_counters.totalFrames;
+            if (m_frameBatch.drawCalls || m_frameBatch.cameraCaptures ||
+                m_frameBatch.depthCaptures || m_frameBatch.compositedFrames)
+            {
+                m_counters.classifiedDrawCalls += m_frameBatch.classifiedDrawCalls;
+                m_counters.unknownDrawCalls += m_frameBatch.unknownDrawCalls;
+                m_counters.shadowCasterDraws += m_frameBatch.shadowCasterDraws;
+                m_counters.waterDraws += m_frameBatch.waterDraws;
+                m_counters.uiDraws += m_frameBatch.uiDraws;
+                m_counters.cameraCaptures += m_frameBatch.cameraCaptures;
+                m_counters.depthCaptures += m_frameBatch.depthCaptures;
+                m_counters.compositedFrames += m_frameBatch.compositedFrames;
+                m_frameBatch = FrameBatch{};
+            }
+            ++m_counters.totalFrames;
 
-        if (m_counters.totalFrames % 600 == 120)
-        {
-            FlushAggregatedLog();
+            if (m_counters.totalFrames % 600 == 120)
+            {
+                FlushAggregatedLog();
+            }
         }
     }
 

@@ -875,6 +875,167 @@ void TestTracker()
         }
         Require(!entering.submerged && entering.ramp == 0.f && !entering.planeKnown,
                 "outside evidence sustained while walking away from the water retires the remembered plane");
+        // WHO THE EXIT MAY NOT CATCH. A walker on a bank below the sheet's
+        // level and a swimmer under open water receive the same tracker
+        // testimony - local sheets, every footprint answering "not over
+        // YOU" - and differ only in where the camera is looking: the
+        // swimmer's own covering chunk is behind or above the view, because
+        // the client draws liquid chunks against its frustum and he is
+        // looking at the seabed. When the caller reports the covering
+        // region out of the client's view, "no sheet over the camera" is a
+        // fact about the view; the evidence must not count, or every swim
+        // drains the medium eight yards after the surface last passed
+        // overhead - the reported "underwater shader gets lost periodically".
+        PlaneReading overheadDeep = overhead;
+        overheadDeep.yards = 8.f;
+        Tracker swimmer;
+        const float diving[3] = { 0.f, 0.f, -8.f };
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            swimmer.BeginFrame();
+            swimmer.Observe(overheadDeep);
+            swimmer.Advance(1.f / 60.f, diving, true);
+        }
+        Require(swimmer.submerged && swimmer.ramp == 1.f && swimmer.planeKnown,
+                "a diver at depth is submerged with the plane remembered");
+        PlaneReading neighbourTile = raisedBeside;
+        neighbourTile.yards = 8.f;
+        for (int frame = 0; frame < 240; ++frame)
+        {
+            const float swimming[3] = { frame * 0.2f, 0.f, -8.f };
+            swimmer.BeginFrame();
+            swimmer.Observe(neighbourTile);
+            swimmer.Advance(1.f / 60.f, swimming, true, false);
+        }
+        Require(swimmer.submerged && swimmer.ramp == 1.f && swimmer.planeKnown,
+                "a swimmer at depth whose covering chunk is out of view holds the medium - fifty yards, four seconds, no surface in frame");
+        // The same walk with the covering region IN view is still the
+        // geometry's answer and still retires: the caller's flag, not the
+        // travel, is what changed.
+        Tracker bankWalker;
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            bankWalker.BeginFrame();
+            bankWalker.Observe(overhead);
+            bankWalker.Advance(1.f / 60.f, onShore, true);
+        }
+        for (int frame = 0; frame < 120; ++frame)
+        {
+            const float alongTheBank[3] = { frame * 0.1f, 0.f, 0.f };
+            bankWalker.BeginFrame();
+            bankWalker.Observe(raisedBeside);
+            bankWalker.Advance(1.f / 60.f, alongTheBank, true, true);
+        }
+        Require(!bankWalker.submerged && bankWalker.ramp == 0.f && !bankWalker.planeKnown,
+                "the same walk with the covering region in view still retires the remembered plane");
+        // And the count cannot accrue one glance at a time: a frame that
+        // does not count RESTARTS it, so alternating looks at the water and
+        // away from it never reach the grace - while a sustained look does.
+        Tracker glancing;
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            glancing.BeginFrame();
+            glancing.Observe(overhead);
+            glancing.Advance(1.f / 60.f, onShore, true);
+        }
+        for (int frame = 0; frame < 240; ++frame)
+        {
+            const float strolling[3] = { frame * 0.1f, 0.f, 0.f };
+            const bool lookingAtTheWater = (frame / 20) % 2 == 0;
+            glancing.BeginFrame();
+            glancing.Observe(raisedBeside);
+            glancing.Advance(1.f / 60.f, strolling, true, lookingAtTheWater);
+        }
+        Require(glancing.submerged && glancing.planeKnown,
+                "outside evidence cannot accrue one glance at a time - looking away restarts the count");
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            const float keepsLooking[3] = { (240 + frame) * 0.1f, 0.f, 0.f };
+            glancing.BeginFrame();
+            glancing.Observe(raisedBeside);
+            glancing.Advance(1.f / 60.f, keepsLooking, true, true);
+        }
+        Require(!glancing.submerged && !glancing.planeKnown,
+                "a sustained look at where the sheet would be still exits");
+        // THE RAMP IS MEASURED AGAINST THE VISIBLE SURFACE. The tracker's plane is the
+        // liquid tile's MEAN plane, but geometry waves lift crests about a yard and a half
+        // over it at the shipped sliders, so a camera a yard under the mean plane spends
+        // every swell cycle inside the crossfade band and the medium thins to nothing
+        // while he watches the seabed. The caller folds the waves' reach at the camera
+        // into the ramp and the hysteresis; still water (band zero) must behave exactly
+        // as before.
+        {
+            Tracker still;
+            const float shallow[3] = { 0.f, 0.f, -0.5f };
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                still.BeginFrame();
+                still.Observe(0.5f);
+                still.Advance(1.f / 60.f, shallow, true);
+            }
+            // Smoothstep(.22, 1.5, .5): the shipped still-water ramp half a yard down.
+            Require(still.ramp > 0.12f && still.ramp < 0.15f && still.submerged,
+                    "still water keeps the shipped crossfade half a yard under the mean plane");
+            Tracker swell;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                swell.BeginFrame();
+                swell.Observe(0.5f);
+                swell.Advance(1.f / 60.f, shallow, true, true, 1.4f);
+            }
+            Require(swell.ramp > 0.85f && swell.submerged,
+                    "half a yard under the mean plane in a swell holds the medium through the wave's reach");
+            // A full swell cycle: the reach rises and falls with the phase; the ramp may
+            // breathe with it but must never fall back into the crossfade floor while the
+            // depth alone would hold it.
+            Tracker cycle;
+            float lowestRamp = 1.f;
+            bool stayedSubmerged = true;
+            for (int frame = 0; frame < 600; ++frame)
+            {
+                const float reach = 0.7f + 0.7f * std::sin(frame * (6.2831853f / 240.f));
+                cycle.BeginFrame();
+                cycle.Observe(0.8f);
+                cycle.Advance(1.f / 60.f, shallow, true, true, reach);
+                if (frame >= 30)
+                {
+                    lowestRamp = std::min(lowestRamp, cycle.ramp);
+                    stayedSubmerged = stayedSubmerged && cycle.submerged;
+                }
+            }
+            Require(lowestRamp >= 0.28f && stayedSubmerged && cycle.ramp >= 0.28f && cycle.submerged,
+                    "ten seconds of swell leave the swimmer in the medium, the ramp breathing but never falling away");
+            // Air above the crests: the reach must not hold a camera the water cannot.
+            Tracker above;
+            const float airborne[3] = { 0.f, 0.f, 2.f };
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                above.BeginFrame();
+                above.Observe(-2.f);
+                above.Advance(1.f / 60.f, airborne, true, true, 1.4f);
+            }
+            Require(!above.submerged && above.ramp == 0.f,
+                    "the wave's reach cannot hold the medium on a camera above the crests");
+            // A non-finite or negative band is no band at all.
+            Tracker guarded;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                guarded.BeginFrame();
+                guarded.Observe(0.5f);
+                guarded.Advance(1.f / 60.f, shallow, true, true, std::nanf(""));
+            }
+            Require(guarded.ramp > 0.12f && guarded.ramp < 0.15f,
+                    "a NaN reach is still water");
+            Tracker floored;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                floored.BeginFrame();
+                floored.Observe(0.5f);
+                floored.Advance(1.f / 60.f, shallow, true, true, -3.f);
+            }
+            Require(floored.ramp > 0.12f && floored.ramp < 0.15f,
+                    "a trough below the mean plane subtracts nothing from a held swimmer");
+        }
         // MEMORY MAY NOT START WHAT THE GATE REFUSED. The Sholazar basin
         // sequence, and the round-14 gate's bypass: stand ABOVE the same
         // nearby sheet first (its "air" reading quite properly observes),
@@ -947,6 +1108,81 @@ void TestTracker()
         above.Observe(air);
         Require(above.observed && !above.submerged,
                 "a sheet outside the footprint may always testify that the camera is in air");
+    }
+}
+
+void TestCoveringPlaneInView()
+{
+    std::printf("\n-- the covering-region test --\n");
+    // The view matrices below are written in viewRaw's v[0..3] storage: rows are
+    // the world axes in view space, translation is -(row . camera). The projection
+    // is a 45-degree vertical one: P11 = cot(22.5 degrees) = 2.414, square aspect.
+    constexpr float kYScale = 2.414213562373095f;
+    // A level camera eight yards under a plane at world z=0, facing world +y:
+    // view x = world x, view y (screen up) = world z, view z (forward) = world y.
+    {
+        const float level[16] = {
+            1.f, 0.f, 0.f, 0.f,
+            0.f, 0.f, 1.f, 0.f,
+            0.f, 1.f, 0.f, 0.f,
+            0.f, 8.f, 0.f, 1.f };
+        const float camera[3] = { 0.f, 0.f, -8.f };
+        // Straight overhead is never "in view" - it is not in front of the eye -
+        // but the plane ahead is: at twenty-five yards the sheet sits seventeen
+        // degrees up, inside a 22.5-degree half-fov even from eight yards down.
+        Require(CoveringPlaneInView(level, camera, 0.f, kYScale, kYScale),
+                "a level camera under the plane has its covering region in view ahead");
+    }
+    // The swimmer's own view: forty-five degrees down at the seabed. Every
+    // sample of the covering plane is sixty-plus degrees off the view axis,
+    // which is exactly why the client culled the covering chunk - and why the
+    // frame's "no sheet over the camera" must not count as water evidence.
+    {
+        const float down[16] = {
+            1.f, 0.f, 0.f, 0.f,
+            0.f, .70710678f, .70710678f, 0.f,
+            0.f, .70710678f, -.70710678f, 0.f,
+            0.f, 5.65685425f, -5.65685425f, 1.f };
+        const float camera[3] = { 0.f, 0.f, -8.f };
+        Require(!CoveringPlaneInView(down, camera, 0.f, kYScale, kYScale),
+                "a swimmer looking down at the seabed cannot see the sheet over him");
+        // And staring straight down has no horizontal forward at all.
+        const float straightDown[16] = {
+            1.f, 0.f, 0.f, 0.f,
+            0.f, 1.f, 0.f, 0.f,
+            0.f, 0.f, -1.f, 0.f,
+            0.f, 0.f, -8.f, 1.f };
+        Require(!CoveringPlaneInView(straightDown, camera, 0.f, kYScale, kYScale),
+                "a camera with no horizontal forward cannot test the covering region");
+    }
+    // The bank walker: level camera ON the shore, the sheet three yards overhead
+    // beginning ten yards out. The plane ahead is close to the view axis, which
+    // is what "still looking at it" means - his outside evidence counts.
+    {
+        const float level[16] = {
+            1.f, 0.f, 0.f, 0.f,
+            0.f, 0.f, 1.f, 0.f,
+            0.f, 1.f, 0.f, 0.f,
+            0.f, 0.f, 0.f, 1.f };
+        const float camera[3] = { 0.f, 0.f, 0.f };
+        Require(CoveringPlaneInView(level, camera, 3.f, kYScale, kYScale),
+                "a bank walker looking along the shore has the sheet's region in view");
+    }
+    // Degenerate inputs answer false - a frame that cannot test the frustum
+    // hands the exit no evidence.
+    {
+        const float level[16] = {
+            1.f, 0.f, 0.f, 0.f,
+            0.f, 0.f, 1.f, 0.f,
+            0.f, 1.f, 0.f, 0.f,
+            0.f, 0.f, 0.f, 1.f };
+        const float camera[3] = { 0.f, 0.f, 0.f };
+        const float nanCamera[3] = { 0.f, std::nanf(""), 0.f };
+        Require(!CoveringPlaneInView(level, camera, 3.f, 0.f, kYScale)
+                    && !CoveringPlaneInView(level, camera, 3.f, kYScale, std::nanf(""))
+                    && !CoveringPlaneInView(level, nanCamera, 3.f, kYScale, kYScale)
+                    && !CoveringPlaneInView(nullptr, camera, 3.f, kYScale, kYScale),
+                "an unusable pose, projection or camera answers not-in-view");
     }
 }
 
@@ -2187,10 +2423,37 @@ void TestMirror()
                 && pass.find("read(L\"ClarityPercent\"") == std::string::npos,
             "there is one clarity, authored by WATER CLARITY, and [Underwater] cannot override it");
     Require(water.find("AdvanceUnderwater(dt);") != std::string::npos
-                && water.find("submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid);")
+                && water.find("submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView,waveBandYards);")
                     != std::string::npos
                 && water.find("submersionTracker.BeginFrame();") != std::string::npos,
             "the frame's answer is settled at Present, after every liquid draw has reported");
+    // The outside-evidence exit spends the client's own frustum: the tracker
+    // may retire a remembered plane only while the covering region was in
+    // view, the test itself is the tracker header's CoveringPlaneInView (the
+    // fixtures above unit-test its math), and a frame that cannot test the
+    // frustum hands over no evidence at all. The tracker restarts the count
+    // on any frame that does not count, so a long swim cannot accrue the
+    // exit one glance at a time.
+    Require(core.find("if (sawOutside && coveringPlaneInView) outsideSeconds += dt;")
+                != std::string::npos
+                && water.find("renderer::underwater::CoveringPlaneInView(&frame.viewRaw.m[0][0],camera,")
+                    != std::string::npos
+                && water.find("frame.cameraEyeAgeMs<=renderer::FrameContext::kCameraEyeHoldMs")
+                    != std::string::npos,
+            "the remembered plane retires only on frames that could have seen the sheet over the camera");
+    // The ramp and the hysteresis spend the waves' reach at the camera: the caller
+    // evaluates the displaced trains' own phase at the swimmer (times the grouping
+    // envelope's worst case, floored at zero and capped by the tracker), so the medium
+    // is measured against the visible surface and still water is band zero.
+    Require(core.find("const float submergence = yards + band;") != std::string::npos
+                && core.find("kMaxWaveBandYards") != std::string::npos
+                && water.find("renderer::water::SwellTheta(train,0.f,0.f,field.swellPhase)")
+                    != std::string::npos
+                && water.find("renderer::water::BuildGeometryWaves(geometryWavePercent,")
+                    != std::string::npos
+                && water.find("renderer::underwater::Tracker::kMaxWaveBandYards")
+                    != std::string::npos,
+            "the crossfade is measured against the visible surface, and still water is band zero");
     // Which pass a draw belongs to is the render target's fact, and a tile's water level may
     // live in its vertices rather than its matrix: both are plumbed in explicitly, because
     // neither can be derived inside the draw. The composite publishes the surface the
@@ -2309,6 +2572,7 @@ int main() try
 {
     TestPlaneReading();
     TestTracker();
+    TestCoveringPlaneInView();
     TestWorldAnchoring();
     TestMedium();
     TestShadePixel();
