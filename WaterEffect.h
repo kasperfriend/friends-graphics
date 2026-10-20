@@ -3519,10 +3519,10 @@ struct Scope {
             // the identity to add. Cheap - one small set, hit once per family.
             {
                 static std::unordered_set<unsigned long long> loggedFamilies;
-                if(loggedFamilies.size()<32&&loggedFamilies.insert(renderer::g_trackedState.psHash).second&&!logPath.empty())
-                    std::ofstream log(std::filesystem::path(logPath),std::ios::app)
-                        <<"water shader family replaced: ps=0x"<<std::hex<<renderer::g_trackedState.psHash<<std::dec
-                        <<"\n";
+                if(loggedFamilies.size()<32&&loggedFamilies.insert(renderer::g_trackedState.psHash).second&&!logPath.empty()) {
+                    std::ofstream log(std::filesystem::path(logPath),std::ios::app);
+                    log<<"water shader family replaced: ps=0x"<<std::hex<<renderer::g_trackedState.psHash<<std::dec<<'\n';
+                }
             }
             static bool reflectionReported=false;if(reflectionScene&&reflectionDepth&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             ++frameMatches;
