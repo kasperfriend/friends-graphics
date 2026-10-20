@@ -1270,12 +1270,25 @@ int main() try
             // The two terms that can carry a duplicated image are separable in game:
             // mode 3 shows the mirror alone, mode 4 the refracted sample alone. The
             // clamp has to allow them, or the diagnostic is unreachable.
-            Require(pixel.find("if(flowControl.w>3.5){result_.color=float4(saturate(refracted),1);return result_;}")
+            Require(pixel.find("if(flowControl.w>3.5&&flowControl.w<4.5){result_.color=float4(saturate(refracted),1);")
                         !=std::string::npos&&
-                    pixel.find("if(flowControl.w>2.5){result_.color=float4(saturate(reflected),1);return result_;}")
+                    pixel.find("if(flowControl.w>2.5&&flowControl.w<3.5){result_.color=float4(saturate(reflected),1);")
                         !=std::string::npos&&
-                    code.find("std::clamp(ReadTuning(L\"WaterDebugMode\",0),0,4)")!=std::string::npos,
+                    code.find("std::clamp(ReadTuning(L\"WaterDebugMode\",0),0,6)")!=std::string::npos,
                     "a duplicated image can be attributed in game: mirror only (3) or bed only (4)");
+            // Modes 5 and 6 exist so the water stage can be excluded from a
+            // report instead of inferred about: 5 discards the plane, 6 paints
+            // the captured scene straight through it.
+            // The log has to name the water it actually replaced, or a report of
+            // "the sliders do nothing to THIS pond" cannot be told apart from a
+            // replacement that never ran there.
+            Require(code.find("water shader family replaced: ps=0x")!=std::string::npos&&
+                    code.find("loggedFamilies.insert(renderer::g_trackedState.psHash)")!=std::string::npos,
+                    "the water log names every shader family the replacement was installed on");
+            Require(pixel.find("if(flowControl.w>4.5){discard;}")!=std::string::npos&&
+                    pixel.find("if(flowControl.w>5.5){result_.color=float4(tex2Dlod(sceneTexture,float4(screenUV,0,0)).rgb,1);")
+                        !=std::string::npos,
+                    "the water plane can be removed (5) or turned into a plain window (6) for a report");
             // A shallow carve-out belongs to a BEACH. An upright occluder standing in
             // the water is not a shallow bed: with only inches of column over it the
             // gate released most of the slider and the stage refracted its silhouette

@@ -3046,6 +3046,41 @@ mirror alone, `4` the refracted sample alone (the clamp was widened from 2 to 4)
 Whichever one carries a copy names the culprit; there is no third place in this
 stage that can paint an image of something else.
 
+## Round 17: the water plane can be taken out of the picture (2026-10-20)
+
+The report after round 16 was the most useful one so far, because it ruled
+something out: **refraction, reflections and opacity all leave the copy where it
+is.** Those three knobs *are* the water stage's dark terms. Nothing else in
+`WaterEffect.h` can darken a pixel toward a figure: the stage is a full pixel
+shader replacement with four samplers (base, surface detail, scene colour,
+scene depth) and no shadow map, so it cannot paint a native shadow at all, and
+its body, its fog and its coverage are exactly the three lanes that were moved.
+
+That leaves two possibilities, and they need different fixes:
+
+1. the copy is drawn by the client beneath the plane and simply seen through
+   the sheet, or
+2. it is painted over the plane by a pass this stage does not own.
+
+Neither can be settled by another reading of the maths, so `WaterDebugMode`
+grew the two modes that remove the stage from the frame instead of shading it:
+
+```
+5   discard;                       no water pixels at all
+6   scene colour at screenUV       the plane as a plain window, no shading
+```
+
+A copy that survives **5** was never drawn here - it is in the frame the client
+produced, and the fix belongs in whatever draws it (a native shadow blob, a
+native reflection, a post pass). A copy that survives **6** but not the live
+frame is this stage's shading sitting on top of a correct capture. A copy that
+survives neither is this stage's own colour, and modes 3 and 4 then name which
+term.
+
+The lesson worth keeping: a report that says *which knobs changed nothing* is
+worth more than one that says the bug is still there. Those three lanes are the
+whole dark side of this stage.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

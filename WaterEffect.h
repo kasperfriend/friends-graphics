@@ -1948,8 +1948,17 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // refracted sample pulling a silhouette sideways). Mode 3 shows the reflection
     // term alone, mode 4 the refracted sample alone; whichever carries the copy names
     // the culprit in one screenshot instead of another round of inference.
-    if(flowControl.w>3.5){result_.color=float4(saturate(refracted),1);return result_;}
-    if(flowControl.w>2.5){result_.color=float4(saturate(reflected),1);return result_;}
+    if(flowControl.w>3.5&&flowControl.w<4.5){result_.color=float4(saturate(refracted),1);return result_;}
+    if(flowControl.w>2.5&&flowControl.w<3.5){result_.color=float4(saturate(reflected),1);return result_;}
+    // Modes 5 and 6 answer the one question the shading modes cannot: is the
+    // thing being looked at even a water pixel? 5 removes the plane outright -
+    // the frame is exactly what the client drew, no water stage at all - and 6
+    // keeps the pixels but paints the captured scene through them untouched,
+    // so the water is a plain window with no colour, no fog and no foam. A
+    // copy that survives 5 was never drawn here; one that survives 6 but not
+    // the live frame is this stage's shading sitting on top of it.
+    if(flowControl.w>5.5){result_.color=float4(tex2Dlod(sceneTexture,float4(screenUV,0,0)).rgb,1);return result_;}
+    if(flowControl.w>4.5){discard;}
     if(flowControl.w>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     // Coverage is the column's own extinction, not a hand-tuned fraction of it. Water
@@ -2156,7 +2165,7 @@ void ReloadTuning(){
     // 2=grayscale celestial-glint term only (x3 gain), isolated from the
     // rest of the water shading - for debugging "the sun path isn't
     // showing" without guessing which term is actually zero.
-    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,4));
+    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,6));
     // Sea response: shared wind when linked, native weather otherwise.
     // The already-resolved wind includes the zone's weather damping; never
     // apply that multiplier (or a separate rain boost) a second time.
@@ -3503,6 +3512,18 @@ struct Scope {
             }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
+            // Which water the client actually has, named once per session and per
+            // shader family. Every "the sliders do nothing to THIS water" report is
+            // answered by this line: a pond drawn by a family that is not listed here
+            // is water this stage never touched, and the near-miss lines above it name
+            // the identity to add. Cheap - one small set, hit once per family.
+            {
+                static std::unordered_set<unsigned long long> loggedFamilies;
+                if(loggedFamilies.size()<32&&loggedFamilies.insert(renderer::g_trackedState.psHash).second&&!logPath.empty())
+                    std::ofstream log(std::filesystem::path(logPath),std::ios::app)
+                        <<"water shader family replaced: ps=0x"<<std::hex<<renderer::g_trackedState.psHash<<std::dec
+                        <<"\n";
+            }
             static bool reflectionReported=false;if(reflectionScene&&reflectionDepth&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             ++frameMatches;
             if(reflectionScene&&reflectionDepth)++frameSceneMatches;
