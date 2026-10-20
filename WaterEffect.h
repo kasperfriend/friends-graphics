@@ -407,7 +407,23 @@ void AdvanceUnderwater(float dt) {
     }
     const auto& frame=renderer::FrameContext::Current();
     const float camera[3]={frame.cameraPosition.x,frame.cameraPosition.y,frame.cameraPosition.z};
-    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid);
+    // Whether the client could have been looking at the sheet that would cover the camera.
+    // The tracker's outside-evidence exit (local footprints, none over the camera) is only
+    // about the water when the covering region was eligible to be drawn: the client culls
+    // liquid chunks against its frustum, so a swimmer looking down at the seabed goes
+    // unobserved every frame no matter how much water is over him. The test itself is the
+    // tracker's own CoveringPlaneInView - same header, compiled and unit-tested where the
+    // tracker is. The pose must be this frame's (or inside the same short hold every
+    // consumer of the retained pose keeps); a frame that cannot test the frustum hands the
+    // exit no evidence - refusing the test retires nothing, while passing it wrongly
+    // retires a diver.
+    const bool poseFresh=frame.cameraValid
+        ||(frame.viewRawValid&&frame.cameraEyeAgeMs<=renderer::FrameContext::kCameraEyeHoldMs);
+    const bool coveringPlaneInView=poseFresh&&frame.viewRawValid
+        &&frame.projUnpack[2]>0.f&&frame.projUnpack[3]>0.f
+        &&renderer::underwater::CoveringPlaneInView(&frame.viewRaw.m[0][0],camera,
+            submersionTracker.planeZ,frame.projUnpack[2],frame.projUnpack[3]);
+    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView);
     submersionTracker.BeginFrame();
     // Keep the published frame current on a frame that drew no liquid at all - which, for a
     // diver looking at the seabed, is most frames: the surface is behind the camera and
