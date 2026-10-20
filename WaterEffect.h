@@ -423,7 +423,36 @@ void AdvanceUnderwater(float dt) {
         &&frame.projUnpack[2]>0.f&&frame.projUnpack[3]>0.f
         &&renderer::underwater::CoveringPlaneInView(&frame.viewRaw.m[0][0],camera,
             submersionTracker.planeZ,frame.projUnpack[2],frame.projUnpack[3]);
-    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView);
+    // The ramp and the hysteresis are measured against the VISIBLE surface, not the mean
+    // lattice plane: the geometry waves lift crests up to a yard and a half over the mean
+    // at the shipped sliders, so a camera a yard under the mean plane spends every swell
+    // cycle inside the crossfade band and the medium thins to nothing mid-swim - the
+    // reported "disables mostly near surfaces". The reach here is the displaced trains'
+    // own height at THIS camera (their phases already carry the camera's projection, so
+    // the sample is the absolute cell under the swimmer), times the grouping envelope's
+    // worst case so a set's top is covered, floored at zero - a trough below the mean
+    // must not subtract water - and capped by the tracker. WATER QUALITY 8 renormalizes
+    // its third displaced train to the two-train peak, so the two-train evaluation is the
+    // peak at every quality; still water, waves off or geometry off give a zero band and
+    // the tracker behaves exactly as before.
+    float waveBandYards=0.f;
+    if(wavesEnabled&&geometryWavesEnabled&&frame.cameraValid
+       &&qualityPlan.geometryTrains>=renderer::water::kGeometryTrainCount)
+    {
+        const auto geometry=renderer::water::BuildGeometryWaves(geometryWavePercent,
+            waveMotion.ScalePercent(),seaAgitation,true,true);
+        if(geometry.amplitude>0.f)
+        {
+            const auto field=waveMotion.Build(frame.cameraPosition.x,frame.cameraPosition.y,true,wavesEnabled);
+            float lift=0.f;
+            for(int train=0;train<renderer::water::kGeometryTrainCount;++train)
+                lift+=renderer::water::kTrainWeight[train]
+                    *std::sin(renderer::water::SwellTheta(train,0.f,0.f,field.swellPhase));
+            waveBandYards=std::clamp(geometry.amplitude*lift*renderer::water::kGroupMax,0.f,
+                renderer::underwater::Tracker::kMaxWaveBandYards);
+        }
+    }
+    submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView,waveBandYards);
     submersionTracker.BeginFrame();
     // Keep the published frame current on a frame that drew no liquid at all - which, for a
     // diver looking at the seabed, is most frames: the surface is behind the camera and

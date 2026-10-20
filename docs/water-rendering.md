@@ -1,5 +1,47 @@
 # Water rendering audit
 
+## Full rework round 21: the crossfade was measured against the mean plane (2026-10-20)
+
+The report, after round 20: the underwater shader is secured against the exit rule
+but still "disables mostly near surfaces" - a swimmer a yard or two under the
+waterline watches the medium (fog, beams, net, grade) thin to almost nothing and
+breathe back, over and over, wherever he looks.
+
+**What the crossfade was reading.** The tracker's plane is the liquid tile's MEAN
+lattice plane, and the ramp ran over depth above that mean: `Smoothstep(.22, 1.5,
+yards)`. But the visible surface is the mean plane plus the geometry waves, and at
+the shipped sliders a set's crest rides about a yard and a half over the mean
+(`1.62 x amplitude x kGroupMax`, amplitude capped at `1.2 x cell`). A camera one
+yard under the mean plane is therefore alternately two yards deep and at the
+surface - and the shipped crossfade band spans exactly that range, so every swell
+cycle swept the ramp from ~1 toward 0 while the diver watched the seabed. Still
+water never showed it; any sea did. (The same lens explains why it read as "near
+surfaces": two yards down, the reach can no longer reach the band.)
+
+**The fix.** The hysteresis and the ramp are measured against the visible surface:
+`Tracker::Advance` takes the caller's `waveBandYards` - the displaced trains' own
+height at THIS camera (the field phases already carry the camera's projection, so
+`SwellTheta(train, 0, 0, phase)` is the absolute cell under the swimmer), times the
+grouping envelope's worst case so a set's top is covered, floored at zero (a trough
+below the mean must not subtract water from a swimmer the mean plane holds) and
+capped by `kMaxWaveBandYards`. WATER QUALITY 8 renormalizes its third displaced
+train to the two-train peak, so the two-train evaluation is the peak at every
+quality; the production caller in `WaterEffect.h` builds the same
+`BuildGeometryWaves` the draws build and gives zero band when waves or geometry
+waves are off or the camera is unknown - still water is band zero and behaves
+exactly as shipped. Depth below the mean and the wave's reach now add up: the ramp
+breathes with the sea but can no longer fall away while the depth alone would hold
+it, and surfacing still fades the medium out because the depth term falls with the
+swimmer.
+
+Verification: UnderwaterRegression 209 (six new: the still-water identity half a
+yard down, the swell hold at the same depth, ten seconds of swell cycle with the
+ramp breathing but never falling away, air above the crests that the reach must not
+hold, a NaN reach, and a trough that subtracts nothing). The pin was proven to bite
+by reverting the band, which fails the swell fixture alone. The rest of the
+portable battery is green, sanitizers included.
+
+
 ## Full rework round 20: the exit that caught the diver (2026-10-20)
 
 The report: the underwater shader "gets lost periodically, any angle" - a diver

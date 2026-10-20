@@ -957,6 +957,85 @@ void TestTracker()
         }
         Require(!glancing.submerged && !glancing.planeKnown,
                 "a sustained look at where the sheet would be still exits");
+        // THE RAMP IS MEASURED AGAINST THE VISIBLE SURFACE. The tracker's plane is the
+        // liquid tile's MEAN plane, but geometry waves lift crests about a yard and a half
+        // over it at the shipped sliders, so a camera a yard under the mean plane spends
+        // every swell cycle inside the crossfade band and the medium thins to nothing
+        // while he watches the seabed. The caller folds the waves' reach at the camera
+        // into the ramp and the hysteresis; still water (band zero) must behave exactly
+        // as before.
+        {
+            Tracker still;
+            const float shallow[3] = { 0.f, 0.f, -0.5f };
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                still.BeginFrame();
+                still.Observe(0.5f);
+                still.Advance(1.f / 60.f, shallow, true);
+            }
+            // Smoothstep(.22, 1.5, .5): the shipped still-water ramp half a yard down.
+            Require(still.ramp > 0.12f && still.ramp < 0.15f && still.submerged,
+                    "still water keeps the shipped crossfade half a yard under the mean plane");
+            Tracker swell;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                swell.BeginFrame();
+                swell.Observe(0.5f);
+                swell.Advance(1.f / 60.f, shallow, true, true, 1.4f);
+            }
+            Require(swell.ramp > 0.85f && swell.submerged,
+                    "half a yard under the mean plane in a swell holds the medium through the wave's reach");
+            // A full swell cycle: the reach rises and falls with the phase; the ramp may
+            // breathe with it but must never fall back into the crossfade floor while the
+            // depth alone would hold it.
+            Tracker cycle;
+            float lowestRamp = 1.f;
+            bool stayedSubmerged = true;
+            for (int frame = 0; frame < 600; ++frame)
+            {
+                const float reach = 0.7f + 0.7f * std::sin(frame * (6.2831853f / 240.f));
+                cycle.BeginFrame();
+                cycle.Observe(0.8f);
+                cycle.Advance(1.f / 60.f, shallow, true, true, reach);
+                if (frame >= 30)
+                {
+                    lowestRamp = std::min(lowestRamp, cycle.ramp);
+                    stayedSubmerged = stayedSubmerged && cycle.submerged;
+                }
+            }
+            Require(lowestRamp >= 0.28f && stayedSubmerged && cycle.ramp >= 0.28f && cycle.submerged,
+                    "ten seconds of swell leave the swimmer in the medium, the ramp breathing but never falling away");
+            // Air above the crests: the reach must not hold a camera the water cannot.
+            Tracker above;
+            const float airborne[3] = { 0.f, 0.f, 2.f };
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                above.BeginFrame();
+                above.Observe(-2.f);
+                above.Advance(1.f / 60.f, airborne, true, true, 1.4f);
+            }
+            Require(!above.submerged && above.ramp == 0.f,
+                    "the wave's reach cannot hold the medium on a camera above the crests");
+            // A non-finite or negative band is no band at all.
+            Tracker guarded;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                guarded.BeginFrame();
+                guarded.Observe(0.5f);
+                guarded.Advance(1.f / 60.f, shallow, true, true, std::nanf(""));
+            }
+            Require(guarded.ramp > 0.12f && guarded.ramp < 0.15f,
+                    "a NaN reach is still water");
+            Tracker floored;
+            for (int frame = 0; frame < 60; ++frame)
+            {
+                floored.BeginFrame();
+                floored.Observe(0.5f);
+                floored.Advance(1.f / 60.f, shallow, true, true, -3.f);
+            }
+            Require(floored.ramp > 0.12f && floored.ramp < 0.15f,
+                    "a trough below the mean plane subtracts nothing from a held swimmer");
+        }
         // MEMORY MAY NOT START WHAT THE GATE REFUSED. The Sholazar basin
         // sequence, and the round-14 gate's bypass: stand ABOVE the same
         // nearby sheet first (its "air" reading quite properly observes),
@@ -2344,7 +2423,7 @@ void TestMirror()
                 && pass.find("read(L\"ClarityPercent\"") == std::string::npos,
             "there is one clarity, authored by WATER CLARITY, and [Underwater] cannot override it");
     Require(water.find("AdvanceUnderwater(dt);") != std::string::npos
-                && water.find("submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView);")
+                && water.find("submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView,waveBandYards);")
                     != std::string::npos
                 && water.find("submersionTracker.BeginFrame();") != std::string::npos,
             "the frame's answer is settled at Present, after every liquid draw has reported");
@@ -2362,6 +2441,19 @@ void TestMirror()
                 && water.find("frame.cameraEyeAgeMs<=renderer::FrameContext::kCameraEyeHoldMs")
                     != std::string::npos,
             "the remembered plane retires only on frames that could have seen the sheet over the camera");
+    // The ramp and the hysteresis spend the waves' reach at the camera: the caller
+    // evaluates the displaced trains' own phase at the swimmer (times the grouping
+    // envelope's worst case, floored at zero and capped by the tracker), so the medium
+    // is measured against the visible surface and still water is band zero.
+    Require(core.find("const float submergence = yards + band;") != std::string::npos
+                && core.find("kMaxWaveBandYards") != std::string::npos
+                && water.find("renderer::water::SwellTheta(train,0.f,0.f,field.swellPhase)")
+                    != std::string::npos
+                && water.find("renderer::water::BuildGeometryWaves(geometryWavePercent,")
+                    != std::string::npos
+                && water.find("renderer::underwater::Tracker::kMaxWaveBandYards")
+                    != std::string::npos,
+            "the crossfade is measured against the visible surface, and still water is band zero");
     // Which pass a draw belongs to is the render target's fact, and a tile's water level may
     // live in its vertices rather than its matrix: both are plumbed in explicitly, because
     // neither can be derived inside the draw. The composite publishes the surface the

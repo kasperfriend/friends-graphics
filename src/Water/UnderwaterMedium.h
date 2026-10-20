@@ -583,6 +583,13 @@ struct Tracker
     // under a neighbouring sheet's level, which is the exit this buys.
     static inline constexpr float kOutsideMemorySeconds = .75f;
     static inline constexpr float kOutsideTravelYards = 8.f;
+    // The surface the tracker measures against is the liquid tile's MEAN
+    // plane, but the visible surface rides geometry waves above it - at the
+    // shipped sliders a set's crest reaches about a yard and a half over the
+    // mean. The caller folds that reach into the ramp and the hysteresis
+    // (waveBandYards below), capped here so an absurd slider combination
+    // cannot push the band past what a player could ever be under.
+    static inline constexpr float kMaxWaveBandYards = 25.f;
 
     // This frame's raw reading: the plane nearest the camera, of the draws that
     // reported one.
@@ -693,7 +700,7 @@ struct Tracker
     }
 
     inline void Advance(float deltaSeconds, const float cameraWorld[3], bool cameraValidNow,
-                        bool coveringPlaneInView = true) noexcept
+                        bool coveringPlaneInView = true, float waveBandYards = 0.f) noexcept
     {
         const float dt = std::isfinite(deltaSeconds) ? std::clamp(deltaSeconds, 0.f, .25f) : 0.f;
         // All three axes, not only the height this line used first: the jump
@@ -842,11 +849,24 @@ struct Tracker
         // strobe between two media.
         yards = Lerp(yards, raw, 1.f - std::exp(-dt * kSmoothingRate));
         if (!std::isfinite(yards)) { yards = -1.f; raw = -1.f; }
-        ramp = Smoothstep(kEnterYards, kRampYards, yards);
+        // The hysteresis and the ramp are measured against the visible surface, not the
+        // mean plane: `waveBandYards` is the caller's reach of the geometry waves over the
+        // mean at this camera (crest height, floored at zero - a trough below the mean
+        // must not subtract water from a swimmer the mean plane holds). Without it, a
+        // camera a yard under the mean plane in a moderate sea spends every swell cycle
+        // inside the crossfade band and the medium thins to nothing while he watches the
+        // seabed - the reported "disables mostly near surfaces". With it, depth below the
+        // mean and the wave's reach add up, the medium holds through crest passage, and
+        // still water (band zero) behaves exactly as before.
+        const float band = std::isfinite(waveBandYards)
+            ? std::clamp(waveBandYards, 0.f, kMaxWaveBandYards) : 0.f;
+        const float submergence = yards + band;
+        ramp = Smoothstep(kEnterYards, kRampYards, submergence);
         // Hysteresis: entering takes more water over the camera than leaving does, so a
         // camera parked exactly at the surface cannot toggle a whole frame's fog pipeline
-        // on and off.
-        submerged = submerged ? yards > kExitYards : yards > kEnterYards;
+        // on and off. Measured on the same submergence, so the reach that holds the ramp
+        // holds the pipeline switch too.
+        submerged = submerged ? submergence > kExitYards : submergence > kEnterYards;
         // A dry camera whose last overhead evidence is stale has no use for
         // a remembered plane, and keeping one is how a height comes back to
         // answer for ground it was never over. The next entry will be seen
