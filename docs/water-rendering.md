@@ -1,5 +1,145 @@
 # Water rendering audit
 
+## Round 23: the sea lost its light when the sun left the frame (2026-10-21)
+
+Reported from a coast: **when the camera looks up above the horizon line, the water suddenly
+loses a lot of brightness - "could be related to the sun disc disappearing?"** It was.
+
+### A frustum event was gating a lighting fact
+
+The direction the surface is lit from arrives in the pixel stage as c201, and the upload chose
+it like this:
+
+```
+body = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
+if (body) c201 = -body->viewSpaceDirection;      // else: the client's own c33, copied above
+```
+
+`CelestialBody::visible` means *the client painted that billboard this frame*. The sun
+billboard is a skybox-style quad along the light direction, so the client stops drawing it the
+moment it leaves the frustum - and pitching the camera up above the horizon is exactly how a
+low sun leaves it, out of the bottom of the frame. The sun had neither moved nor set; the
+camera had. One frame of pitch handed the light back to the client's own `c33`, the constant
+`CelestialTracker` exists because it drifts from the visible disc (round 2's report: the sun
+road "pointing at empty sky instead of the real sun"), and everything that reads the light
+moved with it at once:
+
+| term | what it lost |
+| --- | --- |
+| `sunElev = dot(l, upWind)` | the elevation every gate below is a function of |
+| `inScatter *= saturate(sunElev*2.5+.2)` | four fifths of the column's in-scatter, which is most of an open sea's body colour |
+| `celestialPath = pow(NoH,sharpness)*...*saturate(NoL)` | the sun road itself: a flat sheet's `NoL` *is* `sunElev` |
+| `sky += lightPos*pow(saturate(dot(ray,l)),160)*waterTint.a` | the reflected disc |
+| `sky = lerp(fogColor, ...*saturate(sunElev*2+.25), rayUp*rayUp)` | the zenith blue of the reflected sky |
+| `sharpness = lerp(26,230,saturate(sunElev*1.8))` | the road's width, so what survived of it smeared |
+| crest-veil glow (quality 10), `g = .3+.34*saturate(sunElev)` | the backlit crest and the phase lobe's asymmetry |
+
+That is the report: not a term out of place but most of the surface's brightness, in the frame
+the disc went off screen.
+
+The same gate had a twin in `AdvanceUnderwater`, the backfill that keeps the published medium
+current on a frame that drew no liquid - which, for a diver looking at the seabed, is most
+frames. With no disc visible it *held* the last published `lightDir`, and that vector is
+view-space: the up axis next to it was refreshed from this frame's captured view (round 13's
+fix for exactly this class of staleness), so `sunElevation` was recomputed as the dot of a new
+camera's up with an old camera's light. A diver who turned his head lost the medium's own
+`saturate(elevation*2.5+.2)` gate, its beams and its sky glow.
+
+### The fix: a world direction, expressed per draw
+
+A direction is a world fact, so it now travels as one. `CelestialTracker` already retains each
+body's `worldSpaceDirection` across frames - `BeginFrame` clears `visible` and nothing else -
+which is the same contract `CelestialDirectionStabilizer` gives the clouds, the god rays and
+the shadows, so the sea and the sky cannot disagree about where the light is. The draw takes
+that world direction and expresses it in **its own** basis:
+
+```
+basis  = anchor.valid ? modelView : (viewRawValid ? viewRaw : nullptr);
+toward = Normalize(TransformDirectionRowVector(body->worldSpaceDirection, basis));
+c201   = -toward;                       // the stage negates it to point at the source
+```
+
+Two things fall out of doing it per draw rather than per frame. The client renders its own
+water reflection pass under a camera mirrored about the plane, and a view-space direction
+measured from the player's camera points somewhere else entirely in it - the old upload handed
+that draw the player's vector. And the basis falls back to the frame's captured view exactly
+where the up axis does, so a draw with no rigid matrix of its own is still lit consistently
+with the axis it shades against. With no basis at all, a disc painted this frame still carries
+its own view-space direction, which is what the upload was before.
+
+Which body answers is `renderer::ChooseCelestialTrack` in `src/D3D9/CelestialStability.h`, and
+it is deliberately not "whichever disc the camera can see":
+
+* the **dominant** body from the scene's own day/night factors - the same dominance the
+  compositor's glare origin uses - supplies its direction whether it was painted this frame or
+  merely confirmed once and culled since. A daytime moon inside the frustum does not take the
+  light from the sun, which is the mistake the compositor made before it was given that test;
+* a body that was **never confirmed** supplies nothing, and the caller keeps its own fallback:
+  a direction retained from before sunset must not light a night the moon was never seen in;
+* the dominant body never confirmed but the other one **painted this frame** is live evidence
+  of a real light and beats a client constant;
+* a non-finite or collapsed world direction is refused rather than shaded with.
+
+### The vertex stage, and a constant nobody validated
+
+The vertex stage shades the sheet with `diffuse * saturate(dot(-c33, n)) + ambient`, and that
+colour is the base the pixel stage starts from (`rgb = surface + color.rgb * base.rgb`). Both
+stages therefore have to agree about where the light is, or the sea's body is lit from one
+direction while its sun road runs toward another - so a draw that replaces c201 now hands c33
+the same direction, **at the client's own magnitude**: that length is the client's business and
+the sheet's brightness must not move with this fix. `c33` is saved and restored around the draw
+the way the c4 fog fallback is, because the register belongs to the client's own water shader
+the moment the scope ends, and the next draw is not necessarily a liquid one.
+
+`c33` is also no longer consumed blind. Round 5 found a camera-selected vertex variant that
+binds something other than a fog curve to c4, where a malformed value flattened the whole
+surface to `fogColor`; c33 had the identical exposure with no test at all. `HasLightDirection`
+(`src/Water/WaterPolicy.h`, next to `HasFogCurve`) requires a finite, non-degenerate xyz and
+never reads the w lane no stage uses. A malformed register is refused for both stages - the
+sheet is then lit from above, world up in the draw's own view space, rather than from a
+constant that is not a direction - and reported once per distinct signature in
+`WaterEffect.log`, naming the variant and the value, so a player's log answers "which variant
+binds what to c33" without an F8 capture.
+
+### What did not change
+
+The light's *colour* is still the per-draw c35 the medium holds; the sea state, the wave field,
+the optical column, foam, coverage and every slider are untouched. A client that has never had
+a disc confirmed - the first seconds after a login, or a signature this build's tracker does not
+recognise - shades exactly as it did, from the client's own constant. And the god-ray/glare
+*origin* is still gated on the disc being on screen, which is the one thing that gate is for:
+there is no beam to draw toward a sun that is not in the frame.
+
+### Verification
+
+`tools/DeviceHealthRegression.cpp` (portable, CI): the choice rule answers for a painted sun, a
+culled sun, a body never confirmed, a daytime moon in frame, moonlight after sunset, a night
+whose moon was never confirmed, a painted sun at night, and non-finite/collapsed/never-confirmed
+directions. The report itself is pinned as a number: for six cameras from five degrees below the
+horizon to eighty-four above it, the direction a water draw computes from a **retained** world
+direction equals the one the tracker measured while the disc was painted, and
+`dot(toward, row2(basis))` - the `sunElev` the surface shades with - equals the sun's own world
+elevation at every pitch, so no camera movement can move it. The mirrored reflection basis is
+pinned as a different view-space direction with the same elevation off its own rows.
+
+`tools/WaterRegression.cpp` (portable, CI): `HasLightDirection` accepts a real direction and
+refuses zero, NaN, infinity, a 1e-6 remnant and a null pointer while ignoring the w lane;
+`LightAgreement` reads 1 for a constant that agrees with the confirmed body - at three times
+its length, so the register's magnitude cannot scale an angle - and `DriftDegrees` turns that
+into 0 for agreement, 90 for a perpendicular constant and 180 for a reversed one, while an
+unanswered pair reads as agreement rather than as a guess. The two are split because every
+liquid draw of every frame measures the agreement and only the interval pays the acos.
+Source pins hold the production side: both the draw and the medium's backfill ask
+`ChooseCelestialTrack`, no water light direction is gated on `sunBody.visible`, the retained
+direction is expressed in the draw's own basis and in `viewRaw` for the backfill, and a
+malformed c33 lights neither stage with the client's register restored on every exit.
+
+In game, `WaterEffect.log`'s interval line now reports `light=disc/held/native/refused` and
+`drift=` - the widest angle seen between the client's constant and a confirmed body. Watching a
+coast and pitching up past the horizon should move counts from `disc` to `held` with no change
+in the water; `drift` is how far the client's own constant would have pointed instead, on the
+client that logged it.
+
 ## Round 22: the medium cannot be started by the waves, or carried across a teleport (2026-10-21)
 
 Reported after round 13: **teleporting from a zone with water to one that has water nearby

@@ -592,6 +592,109 @@ int main() try
                 "non-finite observation cannot poison cloud shadows");
     }
 
+    {
+        // Which body supplies a direction to a consumer that runs INSIDE the draw stream -
+        // water's per-draw light above all - and what happens to it when the camera pitches
+        // up past the horizon and the client stops painting the billboard. `drawn` is a
+        // frustum event; a direction is a world fact, and the report this pins is "the
+        // water loses a lot of brightness when I look up above the horizon line".
+        const Vec3 sun = Normalize({.62f, -.31f, .28f});    // a low sun, sixteen degrees up
+        const Vec3 moon = Normalize({-.44f, .58f, .31f});
+        const CelestialTrack sunDrawn{true, true, sun};
+        const CelestialTrack sunCulled{false, true, sun};   // off screen, confirmed earlier
+        const CelestialTrack moonDrawn{true, true, moon};
+        const CelestialTrack moonCulled{false, true, moon};
+        const CelestialTrack never{false, false, Vec3{0.f, 0.f, 1.f}};
+        Require(ChooseCelestialTrack(sunDrawn, never, .9f, .0f) == 1,
+                "a painted sun supplies the direction the water is shaded with");
+        Require(ChooseCelestialTrack(sunCulled, never, .9f, .0f) == 1,
+                "a sun the camera culled still supplies it: the disc leaving the frame is not sunset");
+        Require(ChooseCelestialTrack(never, never, .9f, .0f) == 0,
+                "a body never confirmed invents nothing, and the caller keeps its own source");
+        Require(ChooseCelestialTrack(sunCulled, moonDrawn, .9f, .0f) == 1,
+                "a daytime moon in frame does not take the light from the sun");
+        Require(ChooseCelestialTrack(sunCulled, moonCulled, .1f, .8f) == 2,
+                "moonlight takes the direction from a sun that has set");
+        Require(ChooseCelestialTrack(sunCulled, never, .1f, .8f) == 0,
+                "a direction retained from before sunset does not light a night the moon was never confirmed in");
+        Require(ChooseCelestialTrack(never, moonDrawn, .1f, .8f) == 2,
+                "the dominant body's own disc is evidence enough when it is the only one confirmed");
+        Require(ChooseCelestialTrack(sunDrawn, never, .1f, .8f) == 1,
+                "a painted sun beats a client constant even when the scene says night");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        Require(ChooseCelestialTrack({true, true, Vec3{nan, 0.f, 1.f}}, never, .9f, .0f) == 0,
+                "a non-finite world direction is refused rather than shading the sea with it");
+        Require(ChooseCelestialTrack({true, true, Vec3{0.f, 0.f, 0.f}}, never, .9f, .0f) == 0,
+                "a collapsed world direction is refused");
+        Require(ChooseCelestialTrack({false, false, sun}, never, .9f, .0f) == 0,
+                "a direction no disc ever confirmed is not retained either");
+    }
+
+    {
+        // The number the report is about. Water takes the confirmed body's WORLD direction
+        // and expresses it in the draw's own basis, so pitching the camera up above the
+        // horizon changes the coordinates the direction travels in and never the direction:
+        // the elevation the surface's own `sunElev` reads - the gate on its in-scatter, its
+        // sky gradient, its glint width and its sun road - is the sun's elevation in the
+        // world at every pitch, which is why one frame of camera movement can no longer take
+        // most of the brightness off the sea.
+        const Vec3 sunWorld = Normalize({.62f, -.31f, .28f});
+        constexpr float yawPitchDegrees[][2] = {
+            {0.f, -5.f}, {38.f, 4.f}, {-117.f, 19.f}, {90.f, 41.f}, {12.f, 63.f}, {-45.f, 84.f}};
+        for (const auto& angles : yawPitchDegrees)
+        {
+            const float yaw = angles[0] * 3.14159265358979f / 180.f;
+            const float pitch = angles[1] * 3.14159265358979f / 180.f;
+            const float cy = std::cos(yaw), sy = std::sin(yaw);
+            const float cp = std::cos(pitch), sp = std::sin(pitch);
+            Matrix4 yawView, pitchView;
+            yawView.m[0][0] = cy;   yawView.m[0][1] = sy;
+            yawView.m[1][0] = -sy;  yawView.m[1][1] = cy;
+            pitchView.m[1][1] = cp; pitchView.m[1][2] = sp;
+            pitchView.m[2][1] = -sp; pitchView.m[2][2] = cp;
+            const Matrix4 view = Matrix4::Multiply(yawView, pitchView);
+            // What the tracker measures when the billboard IS painted, and what a water draw
+            // computes from the retained world direction when it is not.
+            const Vec3 fromDisc = TransformDirectionRowVector(sunWorld, view.m);
+            const Vec3 fromWorld = TransformDirectionRowVector(
+                ViewDirectionToWorld(fromDisc, view.m), view.m);
+            if (Length(fromDisc - fromWorld) > 1e-5f)
+                throw std::runtime_error("a culled disc lit the water from another direction");
+            // World +Z in view space is ROW 2 of a row-vector matrix - the convention the
+            // water stage's up axis and AnchorFromModelView both use - and the elevation the
+            // surface shades with is the dot of the two.
+            const Vec3 up{view.m[2][0], view.m[2][1], view.m[2][2]};
+            const float elevation = Dot(Normalize(fromWorld), up);
+            if (std::fabs(elevation - sunWorld.z) > 1e-5f)
+                throw std::runtime_error("camera pitch moved the sun's elevation out of the water");
+        }
+        Require(true, "the sun's elevation over the sea is the same at every camera pitch, disc drawn or culled");
+
+        // And the mirrored camera the client renders its own water reflection under: a
+        // view-space direction measured from the player's camera points somewhere else in
+        // it, which is why the direction travels in world space and is re-expressed per
+        // draw rather than handed to every draw in the frame as one view-space vector.
+        const float yaw = 48.f * 3.14159265358979f / 180.f;
+        const float cy = std::cos(yaw), sy = std::sin(yaw);
+        Matrix4 player, mirrored;
+        player.m[0][0] = cy;  player.m[0][1] = sy;
+        player.m[1][0] = -sy; player.m[1][1] = cy;
+        std::memcpy(&mirrored, &player, sizeof(Matrix4));
+        mirrored.m[1][0] = -mirrored.m[1][0];   // flip the view's up axis about the plane
+        mirrored.m[1][1] = -mirrored.m[1][1];
+        mirrored.m[1][2] = -mirrored.m[1][2];
+        const Vec3 playerView = TransformDirectionRowVector(sunWorld, player.m);
+        const Vec3 reflectedView = TransformDirectionRowVector(sunWorld, mirrored.m);
+        Require(Length(playerView - reflectedView) > 1e-3f &&
+                std::fabs(Length(reflectedView) - 1.f) < 1e-5f,
+                "a reflected water pass is lit in its own camera, not in the player's");
+        // The mirrored basis is still rigid, so the elevation the reflected sea shades with
+        // is still the sun's own: mirroring flips the up axis and the light's y with it.
+        const Vec3 mirroredUp{mirrored.m[2][0], mirrored.m[2][1], mirrored.m[2][2]};
+        Require(std::fabs(Dot(reflectedView, mirroredUp) - sunWorld.z) < 1e-5f,
+                "the reflected sea reads the same sun elevation off its own basis");
+    }
+
     Require(CloudShadowElevationFade(0.0f) == 0.0f, "cloud shadows are off for a disc below the horizon");
     Require(CloudShadowElevationFade(0.03f) == 0.0f, "cloud shadows fade in from the horizon gate");
     Require(CloudShadowElevationFade(0.15f) == 1.0f, "cloud shadows reach full strength above the fade band");

@@ -55,6 +55,66 @@ namespace renderer::water
                params[0] <= 0.f && params[1] >= 0.f && params[2] > 0.f;
     }
 
+    // c33 is the client's own light-direction constant, and BOTH replacement stages
+    // consume it: the vertex stage shades the sheet with
+    // `diffuse * saturate(dot(-c33, n)) + ambient`, which is the base colour the pixel
+    // stage starts from (`rgb = surface + color.rgb * base.rgb`), and the pixel stage
+    // takes its sun/moon direction from it on any frame the celestial tracker has
+    // nothing to say. That is the same exposure c4 had: a camera-selected vertex
+    // variant binding something else to the register is consumed blind, and the whole
+    // surface changes with it. A zero vector leaves the pixel stage's safeNormalize
+    // with no direction at all - the sun road, the reflected disc and the in-scatter's
+    // elevation gate go together - and a NaN reaches every term that reads the light,
+    // because nothing between the register and the output saturates the colour.
+    // The w lane is deliberately not tested: neither stage reads it, so a variant that
+    // leaves it uninitialised must not cost the draw its light.
+    inline bool HasLightDirection(const float* direction) noexcept
+    {
+        if (!direction) return false;
+        if (!std::isfinite(direction[0]) || !std::isfinite(direction[1]) ||
+            !std::isfinite(direction[2])) return false;
+        const float lengthSquared = direction[0] * direction[0] + direction[1] * direction[1] +
+                                    direction[2] * direction[2];
+        return std::isfinite(lengthSquared) && lengthSquared > 1e-8f;
+    }
+
+    // How closely the client's own light constant agrees with a confirmed sun/moon, as a
+    // cosine, for the diagnostics line: the tracker exists because that constant drifts
+    // from the visible disc, and a player's log is the only place the size of the drift on
+    // THEIR client and camera can be read. 1 when either direction is missing or malformed,
+    // so an unanswered draw cannot be reported as a disagreement. Deliberately a cosine and
+    // not an angle: this is measured on every liquid draw of every frame, and the one acos
+    // that turns it into degrees is paid once per reporting interval instead.
+    inline float LightAgreement(const float* nativeDirection, const float toward[3]) noexcept
+    {
+        if (!HasLightDirection(nativeDirection) || !toward) return 1.f;
+        if (!std::isfinite(toward[0]) || !std::isfinite(toward[1]) || !std::isfinite(toward[2]))
+            return 1.f;
+        // The vertex stage's own reading of the register: -c33 points at the source. Both
+        // vectors are normalized here rather than trusted - the register's length is the
+        // client's business, and the override preserves it exactly for that reason.
+        const float length = std::sqrt(nativeDirection[0] * nativeDirection[0] +
+                                       nativeDirection[1] * nativeDirection[1] +
+                                       nativeDirection[2] * nativeDirection[2]);
+        const float towardLength = std::sqrt(toward[0] * toward[0] + toward[1] * toward[1] +
+                                             toward[2] * toward[2]);
+        if (!(length > 1e-4f) || !(towardLength > 1e-4f) || !std::isfinite(length) ||
+            !std::isfinite(towardLength)) return 1.f;
+        const float agreement = -(nativeDirection[0] * toward[0] + nativeDirection[1] * toward[1] +
+                                  nativeDirection[2] * toward[2]) / (length * towardLength);
+        if (!std::isfinite(agreement)) return 1.f;
+        return agreement < -1.f ? -1.f : (agreement > 1.f ? 1.f : agreement);
+    }
+
+    // The angle that agreement reads as, in degrees: 0 when the constant points where the
+    // confirmed body is, 180 when it points the other way.
+    inline float DriftDegrees(float agreement) noexcept
+    {
+        if (!std::isfinite(agreement)) return 0.f;
+        const float clamped = agreement < -1.f ? -1.f : (agreement > 1.f ? 1.f : agreement);
+        return std::acos(clamped) * 57.29577951308232f;
+    }
+
     // Materials that must never be restyled as water, even when they bind the
     // liquid ripple lookup. The native precipitation vertex shaders are listed
     // here because that lookup is shared with them; they were captured from the

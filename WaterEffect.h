@@ -17,6 +17,7 @@
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
+#include "src/D3D9/CelestialStability.h"
 #include "src/D3D9/ShaderBytecodeCache.h"
 #include "src/D3D9/ScopedPassState.h"
 #include "src/Lighting/LocalLightManager.h"
@@ -296,6 +297,18 @@ int uwPlaneOutside=0,uwLastCoverage=0,uwLastContains=0;
 float uwLastYards=0.f,uwLastVertexZ=0.f,uwLastHorizontal=0.f,uwLastFootprint=0.f;
 float uwLastLane=0.f;
 int uwPublished=0;
+// Where the light direction every liquid draw was shaded with came from, counted per
+// reporting interval: 1 the disc was painted this frame, 2 a confirmed body's world
+// direction was held while its billboard was culled (the case that used to fall back to
+// the client's own constant and darken the sea), 3 no body has ever been confirmed so the
+// client's constant is all there is, 4 that constant was malformed and refused. `drift` is
+// the tightest agreement seen between the client's own constant and a confirmed body over
+// the same interval, reported as an angle - the tracker exists because that constant drifts
+// from the visible disc, and this is the only place the size of the drift on a player's own
+// client is readable. It is held as a cosine until the line is written: every liquid draw of
+// every frame measures it, and the one acos belongs to the interval, not to the draw.
+int lightFromDisc=0,lightFromHeld=0,lightFromNative=0,lightRefused=0;
+float lightAgreement=1.f;
 // The render target the player's own view is being drawn into this frame: the
 // volume composite's scene target while that path runs, published by
 // VolumeIntegration every frame it prepares one, null when the client draws to
@@ -528,21 +541,34 @@ void AdvanceUnderwater(float dt) {
         if(frame.viewRawValid) {
             for(int i=0;i<3;++i)underwaterFrame.up[i]=frame.viewRaw.m[2][i];
         }
-        // viewSpaceDirection already points TOWARD the source, which is the direction the pass
-        // wants; the draw path arrives at the same vector by negating c201, which the draw path
-        // itself uploaded pre-negated.
+        // The pass wants a direction pointing TOWARD the source in the view space it
+        // reconstructs with - this frame's captured view - and the draw path arrives at the
+        // same vector by negating c201, which that path itself uploaded pre-negated. Both
+        // take it from the same choice, for the same two reasons: `visible` is a frustum
+        // event, so gating on it left a diver whose disc had scrolled off screen holding a
+        // direction from the camera that last saw one (the stale-view-space half of the bug
+        // the up axis was fixed for, and the medium's sun gate is the same
+        // `saturate(elevation*2.5+.2)` the surface's in-scatter is), and a world direction
+        // is the only one that can be re-expressed for a camera that has since turned.
         const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
         const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
-        const renderer::CelestialBody* body=sunBody.visible?&sunBody
-            :(moonBody.visible?&moonBody:nullptr);
+        const int track=renderer::ChooseCelestialTrack(
+            {sunBody.visible,sunBody.lastSeenFrame!=0,sunBody.worldSpaceDirection},
+            {moonBody.visible,moonBody.lastSeenFrame!=0,moonBody.worldSpaceDirection},
+            frame.daylightFactor,frame.moonlightFactor);
+        const renderer::CelestialBody* body=track==1?&sunBody:(track==2?&moonBody:nullptr);
         if(body) {
-            const float lx=body->viewSpaceDirection.x,ly=body->viewSpaceDirection.y,
-                lz=body->viewSpaceDirection.z;
-            const float ll=std::sqrt(lx*lx+ly*ly+lz*lz);
-            if(ll>1e-5f) {
-                underwaterFrame.lightDir[0]=lx/ll;
-                underwaterFrame.lightDir[1]=ly/ll;
-                underwaterFrame.lightDir[2]=lz/ll;
+            renderer::Vec3 toward{};
+            if(frame.viewRawValid)
+                toward=renderer::Normalize(renderer::TransformDirectionRowVector(
+                    body->worldSpaceDirection,frame.viewRaw.m));
+            // No captured camera to express it in: a disc painted this frame still carries
+            // its own view-space direction, which is this frame's camera by construction.
+            if(renderer::Length(toward)<1e-5f&&body->visible)toward=body->viewSpaceDirection;
+            if(renderer::Length(toward)>1e-5f) {
+                underwaterFrame.lightDir[0]=toward.x;
+                underwaterFrame.lightDir[1]=toward.y;
+                underwaterFrame.lightDir[2]=toward.z;
             }
         }
         underwaterFrame.sunElevation=underwaterFrame.lightDir[0]*underwaterFrame.up[0]
@@ -2455,9 +2481,20 @@ void Present() {
             // settles come from a jump, and yaw/scale say whether anything moved at all.
             <<" uwJumps="<<uwPlaceJumps
             <<" pivot="<<seaPivotSource<<" jumps="<<seaPivotJumps
-            <<" yaw="<<waveMotion.YawDegrees()<<" scale="<<waveMotion.ScalePercent()<<'\n';
+            <<" yaw="<<waveMotion.YawDegrees()<<" scale="<<waveMotion.ScalePercent()
+            // The light the sea was shaded by over the same interval: how many draws took
+            // a disc painted this frame, how many took a confirmed body's world direction
+            // while its billboard was culled (the camera pitched up past the horizon, which
+            // used to cost the surface most of its brightness), how many had nothing
+            // confirmed and stayed on the client's own constant, how many found that
+            // constant malformed, and the widest angle it was seen to drift from a
+            // confirmed body. `held` rising with `disc` is the fix working; `drift` is how
+            // far the client's own constant would have pointed instead.
+            <<" light="<<lightFromDisc<<"/"<<lightFromHeld<<"/"<<lightFromNative
+            <<"/"<<lightRefused<<" drift="<<renderer::water::DriftDegrees(lightAgreement)<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=frameBlendOverrides=0;
     seaPivotJumps=uwPlaceJumps=0;
+    lightFromDisc=lightFromHeld=lightFromNative=lightRefused=0;lightAgreement=1.f;
     uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
@@ -2847,6 +2884,11 @@ struct Scope {
     // water controls, so setup and restoration each cross the D3D9 driver once.
     float oldPixelConstants[156]{},oldVertexControls[20]{},oldVertexFog[4]{};
     bool pixelConstantsSaved=false,vertexFogFallback=false;
+    // c33, the client's light-direction constant, is read by BOTH replacement stages, so
+    // a draw that replaces it saves and restores it the same way the c4 fog fallback does:
+    // the register belongs to the client's own water shader the moment this scope ends.
+    float oldVertexLight[4]{},vertexLight[4]{};
+    bool vertexLightOverride=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
@@ -2969,6 +3011,28 @@ struct Scope {
         if(reported.insert(line).second&&!logPath.empty())
             std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
     }
+    // The light twin of the fog report above, and the answer to "which variant binds
+    // what to c33": both replacement stages read that register, the vertex stage for the
+    // sheet's base colour and the pixel stage for the direction it shades with, so a
+    // variant that puts something else there is a surface that lost its light at one
+    // camera angle. Reported once per distinct signature and constant, with the
+    // substitute the draw was given instead.
+    static void ReportLightFallback(const renderer::water::Observation& observation,const float* c33) {
+        static std::unordered_set<std::string> reported;
+        // Bounded like the near-miss report above: the constant's own value is in the text,
+        // so a register that changes every frame would otherwise write a line every frame.
+        if(reported.size()>=32)return;
+        char line[320];
+        std::snprintf(line,sizeof(line),
+            "water vertex light c33 is not a direction; lighting the sheet from above:"
+            " slot0=%ux%u slot1=%ux%u vs=0x%016llx ps=0x%016llx c33=(%.7g,%.7g,%.7g,%.7g)",
+            observation.width[0],observation.height[0],observation.width[1],observation.height[1],
+            static_cast<unsigned long long>(renderer::g_trackedState.vsHash),
+            static_cast<unsigned long long>(renderer::g_trackedState.psHash),
+            c33[0],c33[1],c33[2],c33[3]);
+        if(reported.insert(line).second&&!logPath.empty())
+            std::ofstream(std::filesystem::path(logPath),std::ios::app)<<line<<'\n';
+    }
 
     explicit Scope(IDirect3DDevice9* d,bool skip=false,
                    const renderer::water::Observation* observed=nullptr) noexcept {
@@ -3021,25 +3085,14 @@ struct Scope {
             controls[1]=strength;controls[2]=normalStrength;controls[3]=specularStrength;
             std::memcpy(controls+4,nativeVertexConstants[28],sizeof(float)*4); // c33
             std::memcpy(controls+8,nativeVertexConstants[30],sizeof(float)*4); // c35
-            // Prefer CelestialTracker's confirmed sun/moon direction (from
-            // the actual disc draw call, same source the sky rays/glow use)
-            // over WoW's own light-direction constant for the glint path -
-            // that constant can drift from the visible disc (the whole
-            // reason CelestialTracker exists), which showed up as the water
-            // "sun road" pointing at empty sky instead of the real sun.
-            // viewSpaceDirection already points TOWARD the source; the
-            // shader negates lightDirection to get that vector, so upload
-            // it pre-negated.
-            {
-                const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
-                const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
-                const renderer::CelestialBody* body=sunBody.visible?&sunBody:(moonBody.visible?&moonBody:nullptr);
-                if(body){
-                    controls[4]=-body->viewSpaceDirection.x;
-                    controls[5]=-body->viewSpaceDirection.y;
-                    controls[6]=-body->viewSpaceDirection.z;
-                }
-            }
+            // c201 starts as the client's own light constant. The celestial override
+            // - CelestialTracker's confirmed sun/moon direction, preferred over that
+            // constant because it can drift from the visible disc (the whole reason
+            // the tracker exists), which showed up as the water "sun road" pointing at
+            // empty sky instead of the real sun - is applied below, once this draw's
+            // own basis has been read: the direction is a WORLD fact and has to be
+            // expressed in the camera this draw is actually rendered from. See
+            // "The light this draw is shaded by" under the anchor.
             const bool haveCapture=reflectionScene&&reflectionDepth;
             // Viewport MaxZ is folded into the depth unpack pair here, so
             // recovering a captured depth is one subtraction and one divide
@@ -3199,6 +3252,104 @@ struct Scope {
             else if(planeReading.reason==1)uwPlaneRigid++;
             else if(planeReading.reason==3)uwPlaneRot++;
             else uwPlaneRange++;
+            // THE LIGHT THIS DRAW IS SHADED BY, and the fix for "the sea loses a lot of
+            // its brightness the moment I look up above the horizon".
+            //
+            // CelestialTracker's `visible` means the client painted the sun/moon
+            // billboard THIS frame, which is a frustum event and not a lighting fact:
+            // pitch the camera up past the horizon and a low sun leaves the bottom of the
+            // frame, its draw stops, and the flag drops while the sun itself has neither
+            // moved nor set. The c201 upload used to be gated on exactly that flag, so
+            // the frame the disc went off screen handed the light back to the client's
+            // own c33 - the constant the tracker exists because it drifts from the
+            // visible disc - and every term that reads `sunElev` moved with it at once:
+            // the in-scatter's five-fold elevation gate, the sky gradient's zenith blue,
+            // the reflected disc, the glint lobe's width and the sun road's own
+            // `saturate(NoL)`. One frame of camera pitch, most of the surface's
+            // brightness, and nothing about the sun had changed.
+            //
+            // A direction is a WORLD fact, so this takes the confirmed body's world
+            // direction - which the tracker retains while its billboard is culled, the
+            // same contract CelestialDirectionStabilizer gives the clouds, the god rays
+            // and the shadows, so the sea and the sky cannot disagree about where the
+            // light is - and expresses it in THIS draw's own basis. That last part is
+            // what makes a reflected water pass correct too: the client renders it under
+            // a camera mirrored about the plane, and a view-space direction measured from
+            // the player's camera points somewhere else entirely in it.
+            //
+            // The basis is this draw's matrix while that matrix is rigid, and the frame's
+            // captured view otherwise - the same fallback the up axis takes below. With no
+            // basis at all, a disc painted this frame still carries its own view-space
+            // direction, which is what this upload was before.
+            {
+                const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
+                const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
+                const int track=renderer::ChooseCelestialTrack(
+                    {sunBody.visible,sunBody.lastSeenFrame!=0,sunBody.worldSpaceDirection},
+                    {moonBody.visible,moonBody.lastSeenFrame!=0,moonBody.worldSpaceDirection},
+                    waveFrame.daylightFactor,waveFrame.moonlightFactor);
+                const renderer::CelestialBody* body=track==1?&sunBody:(track==2?&moonBody:nullptr);
+                const float(*basis)[4]=anchor.valid?modelView
+                    :(waveFrame.viewRawValid?waveFrame.viewRaw.m:nullptr);
+                renderer::Vec3 toward{};
+                if(body&&basis)
+                    toward=renderer::Normalize(renderer::TransformDirectionRowVector(
+                        body->worldSpaceDirection,basis));
+                if(body&&renderer::Length(toward)<1e-4f&&body->visible)toward=body->viewSpaceDirection;
+                const bool celestial=body&&renderer::Length(toward)>1e-4f;
+                // Neither stage consumes a malformed c33 blind - the guard c4's fog curve
+                // already has, for the same reason: a camera-selected vertex variant that
+                // binds something else to the register takes the sheet's base colour with
+                // it, and a NaN reaches every term that reads the light because nothing
+                // between the register and the output saturates the colour. With no
+                // confirmed body to ask either, the sheet is lit from above - world up in
+                // this draw's own view space - instead of from a constant that is not a
+                // direction.
+                const bool nativeUsable=renderer::water::HasLightDirection(nativeVertexConstants[28]);
+                if(!celestial&&!nativeUsable) {
+                    toward=basis?renderer::Normalize(renderer::TransformDirectionRowVector(
+                        renderer::Vec3{0.f,0.f,1.f},basis)):renderer::Vec3{0.f,0.f,1.f};
+                    if(renderer::Length(toward)<1e-4f)toward={0.f,0.f,1.f};
+                }
+                // c201 is uploaded pre-negated because the pixel stage negates it to get a
+                // vector pointing AT the source, and `toward` already points there. The
+                // register is a direction, so it travels unit - and it is replaced on both
+                // of the two frames that need it: the one with a confirmed body to ask, and
+                // the one whose own constant is not a direction at all. A draw that has
+                // neither keeps the client's constant exactly as it arrived.
+                const bool replaced=celestial||!nativeUsable;
+                if(replaced) {
+                    controls[4]=-toward.x;controls[5]=-toward.y;controls[6]=-toward.z;
+                }
+                if(celestial) {
+                    if(body->visible)++lightFromDisc;else ++lightFromHeld;
+                    if(nativeUsable)
+                        lightAgreement=std::min(lightAgreement,renderer::water::LightAgreement(
+                            nativeVertexConstants[28],&toward.x));
+                } else if(nativeUsable) {
+                    ++lightFromNative;
+                }
+                // The vertex stage shades the sheet with `diffuse * saturate(dot(-c33, n))
+                // + ambient`, and that colour is the base the pixel stage starts from
+                // (`rgb = surface + color.rgb * base.rgb`), so a light the two stages
+                // disagree about is a sea whose body is lit from one direction and whose
+                // sun road runs toward another. It is handed the SAME direction - and its
+                // own magnitude is preserved exactly, because that length is the client's
+                // business and the sheet's brightness must not move with this fix - which
+                // also means a malformed register cannot reach either stage.
+                if(replaced) {
+                    const float* native=nativeVertexConstants[28];
+                    const float magnitude=nativeUsable
+                        ?std::sqrt(native[0]*native[0]+native[1]*native[1]+native[2]*native[2])
+                        :1.f;
+                    std::memcpy(oldVertexLight,native,sizeof(oldVertexLight));
+                    vertexLight[0]=-toward.x*magnitude;vertexLight[1]=-toward.y*magnitude;
+                    vertexLight[2]=-toward.z*magnitude;
+                    vertexLight[3]=std::isfinite(native[3])?native[3]:0.f;
+                    vertexLightOverride=true;
+                    if(!nativeUsable){++lightRefused;ReportLightFallback(observation,native);}
+                }
+            }
             if(!anchor.valid) {
                 // No rigid basis on this draw (an unfilled constant register, a fixture):
                 // fall back to the captured camera, which is at least the right world, and
@@ -3473,6 +3624,13 @@ struct Scope {
                     const float noFog[4]={0.f,1.f,1.f,0.f};
                     if(FAILED(d->SetVertexShaderConstantF(4,noFog,1))){Restore();return;}
                 }
+                if(vertexLightOverride) {
+                    // The same direction the pixel stage got, at the client's own
+                    // magnitude, so the sheet's base colour and its sun road are lit from
+                    // one place. Written here rather than with the pixel block because c33
+                    // is the client's register, outside every span this pass owns.
+                    if(FAILED(d->SetVertexShaderConstantF(33,vertexLight,1))){Restore();return;}
+                }
                 if(FAILED(d->SetTexture(2,reflectionScene))||FAILED(d->SetTexture(3,reflectionDepth))){Restore();return;}
                 for(unsigned slot=0;slot<2;++slot) {
                     const DWORD values[]={DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),DWORD(slot?D3DTEXF_POINT:D3DTEXF_LINEAR),
@@ -3602,10 +3760,14 @@ struct Scope {
                 device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,oldBlend[4]);
             }
         }
-        // c4 is outside the block's documented water spans. Restore it after either
-        // state-block or manual restoration, including every early-return path.
+        // c4 and c33 are outside the block's documented water spans. Restore them after
+        // either state-block or manual restoration, including every early-return path:
+        // both belong to the client's own water shader, and the next draw the client makes
+        // is not necessarily a liquid one.
         if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);
+        if(vertexLightOverride)device->SetVertexShaderConstantF(33,oldVertexLight,1);
         device=nullptr;extraState=pixelConstantsSaved=vertexFogFallback=blendStateSaved=false;
+        vertexLightOverride=false;
     }
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;

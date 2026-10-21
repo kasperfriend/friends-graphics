@@ -111,6 +111,11 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
 - Refraction that bends the bottom further the deeper the column is, per-channel depth
   absorption with light scattering back out of the water, shoreline/crest/shoal foam, ripples,
   Schlick Fresnel response, and a sun glint that broadens as the source drops toward the horizon.
+- The surface keeps the light a disc confirmed while that disc is off screen, so pitching the
+  camera up above the horizon no longer takes the sun road, the mirrored disc and most of the
+  sea's brightness with it in a single frame. The direction travels in world space and is
+  expressed per draw, which also lights the client's own mirrored reflection pass in the camera
+  it is rendered from.
 - The long swell is analytic and shared with the vertex stage, so a displaced crest and the
   light on it are the same wave; only the chop fades when a pixel cannot resolve it. A mid-wave
   band between the swell and the chop carries the texture a player reads as "waves", and above

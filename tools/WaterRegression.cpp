@@ -67,6 +67,50 @@ int main() try
     const float nanFog[4]={std::numeric_limits<float>::quiet_NaN(),0.f,1.f,0.f};
     Require(HasFogCurve(validFog)&&!HasFogCurve(invalidFog)&&!HasFogCurve(nanFog),
             "water c4 accepts only a finite fog-curve shape; malformed camera variants use the no-fog fallback");
+    // c33 is the light-direction register BOTH replacement stages read: the vertex stage
+    // shades the sheet with `diffuse * saturate(dot(-c33, n)) + ambient`, which is the base
+    // colour the pixel stage starts from, and the pixel stage takes the direction every sun
+    // term reads out of it. It is the light twin of the fog curve above - a camera-selected
+    // variant that binds something else there must not be consumed blind, because a zero
+    // leaves the pixel stage with no direction at all (the sun road, the reflected disc and
+    // the in-scatter's elevation gate go together) and a NaN reaches the output unsaturated.
+    {
+        const float validLight[4]={-.41f,.27f,-.87f,0.f};
+        const float zeroLight[4]={0.f,0.f,0.f,0.f};
+        const float nanLight[4]={std::numeric_limits<float>::quiet_NaN(),0.f,1.f,0.f};
+        const float tinyLight[4]={1e-6f,0.f,0.f,0.f};
+        const float infLight[4]={std::numeric_limits<float>::infinity(),0.f,0.f,0.f};
+        const float unusedW[4]={0.f,0.f,1.f,std::numeric_limits<float>::quiet_NaN()};
+        Require(HasLightDirection(validLight)&&!HasLightDirection(zeroLight)&&
+                !HasLightDirection(nanLight)&&!HasLightDirection(tinyLight)&&
+                !HasLightDirection(infLight)&&!HasLightDirection(nullptr),
+                "water c33 accepts only a finite non-degenerate direction, so a malformed variant is lit from above instead");
+        Require(HasLightDirection(unusedW),
+                "the c33 lane no stage reads cannot cost a draw its light");
+        // The angle the diagnostics line reports between the client's own constant and a
+        // confirmed body: how far the sea would have been lit from, on a player's own
+        // client, had the constant been trusted. It is measured as an agreement per draw -
+        // every liquid draw of every frame takes one - and the single acos that turns it
+        // into degrees belongs to the interval. Being an angle, the register's own length
+        // (the client's business, and preserved exactly by the override) cannot scale it.
+        const float toward[3]={0.f,0.f,1.f};
+        const float away[4]={0.f,0.f,-3.f,0.f};       // -toward, at three times the length
+        const float reversed[4]={0.f,0.f,1.f,0.f};    // the same vector with the wrong sign
+        const float side[4]={0.f,2.f,0.f,0.f};
+        const float zero[4]={0.f,0.f,0.f,0.f};
+        const float nanValue=std::numeric_limits<float>::quiet_NaN();
+        Require(LightAgreement(away,toward)>1.f-1e-6f&&DriftDegrees(LightAgreement(away,toward))<1e-3f,
+                "a light constant that agrees with the confirmed sun reports no drift");
+        Require(std::fabs(DriftDegrees(LightAgreement(reversed,toward))-180.f)<1e-2f,
+                "a constant pointing the other way is reported as the half turn it is");
+        Require(std::fabs(DriftDegrees(LightAgreement(side,toward))-90.f)<1e-2f,
+                "the reported drift is an angle the register's length cannot scale");
+        Require(LightAgreement(zero,toward)==1.f&&LightAgreement(away,nullptr)==1.f&&
+                DriftDegrees(LightAgreement(zero,toward))==0.f,
+                "an unanswered drift reads as agreement rather than as a guess");
+        Require(DriftDegrees(2.f)==0.f&&DriftDegrees(-2.f)>179.9f&&DriftDegrees(nanValue)==0.f,
+                "an agreement outside its range cannot produce an impossible angle");
+    }
     {
         const std::array<float,3> up={0.f,0.f,1.f},normal={-.31f,.22f,1.f};
         const float expected=std::hypot(.31f,.22f);
@@ -961,6 +1005,32 @@ int main() try
                 shader.find("const float noFog[4]={0.f,1.f,1.f,0.f};")!=std::string::npos&&
                 shader.find("if(vertexFogFallback)device->SetVertexShaderConstantF(4,oldVertexFog,1);")!=std::string::npos,
                 "an angle-dependent water VS with non-fog c4 cannot fog the replacement surface away, and c4 is restored on every exit");
+        // The light the sea is shaded with is a WORLD fact, taken from a body a disc
+        // confirmed and expressed in the draw's own basis - never gated on the client having
+        // painted that billboard THIS frame, which is a frustum event: pitching the camera up
+        // past the horizon used to hand the direction, and with it the in-scatter's elevation
+        // gate, the sky gradient, the reflected disc and the sun road, back to the client's own
+        // c33 for exactly as long as the sun was off screen.
+        {
+            size_t choices=0,at=0;
+            while((at=shader.find("renderer::ChooseCelestialTrack(",at))!=std::string::npos){++choices;at+=10;}
+            Require(choices==2,
+                    "the water draw and the medium's no-draw backfill both ask which body lights the scene");
+        }
+        Require(shader.find("const renderer::CelestialBody* body=sunBody.visible?&sunBody:(moonBody.visible?&moonBody:nullptr);")==std::string::npos,
+                "no water light direction is gated on the disc having been painted this frame");
+        Require(shader.find("body->worldSpaceDirection,basis)")!=std::string::npos&&
+                shader.find("const float(*basis)[4]=anchor.valid?modelView")!=std::string::npos,
+                "the direction a culled body retains is expressed in the draw's own camera, so a reflected pass is lit in it too");
+        Require(shader.find("body->worldSpaceDirection,frame.viewRaw.m)")!=std::string::npos,
+                "the medium's backfill re-expresses the same world direction for the frame it shades");
+        Require(shader.find("renderer::water::LightAgreement(")!=std::string::npos&&
+                shader.find("renderer::water::DriftDegrees(lightAgreement)")!=std::string::npos,
+                "the interval log reports how far the client's own constant drifts from a confirmed body");
+        Require(shader.find("renderer::water::HasLightDirection(nativeVertexConstants[28])")!=std::string::npos&&
+                shader.find("if(FAILED(d->SetVertexShaderConstantF(33,vertexLight,1))){Restore();return;}")!=std::string::npos&&
+                shader.find("if(vertexLightOverride)device->SetVertexShaderConstantF(33,oldVertexLight,1);")!=std::string::npos,
+                "a malformed c33 lights neither stage, and the client's own register is restored on every exit");
         // The whole file with its comments off, for the pins that assert an expression is
         // NOT there: both sources explain what the lattice orientation used to be by name.
         // The header is read too, because the wave model itself - the train table, the
