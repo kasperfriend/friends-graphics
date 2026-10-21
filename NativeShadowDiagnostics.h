@@ -8,17 +8,20 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "src/D3D9/ScopedPassState.h"
+#include "src/Effects/ShadowReceiverBytecode.h"
 
 namespace nativeshadowdiag
 {
@@ -309,8 +312,14 @@ inline bool FindReceiverRegisterLayout(uint64_t hash, UINT& startRegister, UINT&
         0xca8fa34d6b69a7baull, 0xcc75b5e865b2f869ull, 0xdd40e9d5fc1ef426ull,
         0xf71ca77414ce780eull
     };
+    // 0x449b66c5fb94fede used to sit in this list. A live session reported it
+    // ACTIVE with `cascadeStage=-1` - the four native cascades were not bound
+    // at its draws, which no receiver of theirs can say - while the shader that
+    // WAS drawn with the cascades bound at stage 4 was refused as unknown. It
+    // has been removed: a whitelist entry that fires without the cascades is
+    // scaling constants that are not a Poisson kernel.
     static constexpr uint64_t kFamilyB[] = { // register layout: c3, count 8
-        0x08b17d1abaad8eceull, 0x449b66c5fb94fedeull, 0x634793193e26059dull,
+        0x08b17d1abaad8eceull, 0x634793193e26059dull,
         0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull
     };
     if (std::find(std::begin(kFamilyA), std::end(kFamilyA), hash) != std::end(kFamilyA))
@@ -354,61 +363,47 @@ inline bool IsStrengthConfirmedHash(uint64_t hash)
     return std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) != std::end(kConfirmed);
 }
 
-inline bool IsFamilyAStrengthHash(uint64_t hash)
-{
-    static constexpr uint64_t kConfirmed[] = {
-        0x06b49731d6b3d33eull, 0x42c3a115d145164aull, 0x6ef54f064e5141ddull,
-        0x827c05c3635b689full, 0xb52eba6fbc7f34f2ull, 0xca8fa34d6b69a7baull,
-        0xdd40e9d5fc1ef426ull, 0xf71ca77414ce780eull
-    };
-    return std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) != std::end(kConfirmed);
-}
-
 // c12 turned out to be a `def`-declared shader literal (compiled into the
 // instruction stream), not a runtime constant - SetPixelShaderConstantF on
 // it is a silent no-op, confirmed live (0% difference across the slider
 // range). The only way to actually change it is to patch the compiled
 // bytecode's literal and use that as a replacement shader for the exact
-// same draws SoftnessScope already validates (same hash whitelist, same
-// cascade/colourWrite guards) - the same "swap the shader for one draw,
-// restore after" technique WaterEffect already uses, just building the
+// same receiver draws the scope validates - the same "swap the shader for one
+// draw, restore after" technique WaterEffect already uses, just building the
 // replacement once instead of writing HLSL by hand.
 //
-// D3D9 SM3 bytecode: a `def cN, x, y, z, w` instruction is the fixed byte
-// sequence [opcode+length][dest register token][4 raw floats]. Verified
-// byte-for-byte in the dumped .bin for all 4 confirmed hashes:
-//   0x05000051 (D3DSIO_DEF, length=5) 0xA00F000C (dest = c12, full mask)
-//   followed immediately by the four x/y/z/w float DWORDs.
+// The instruction is a fixed shape and the walk below reads it as one:
+//   0x05000051 (D3DSIO_DEF, length=5) [dest register token] [4 raw floats]
+// The literal is then identified by ITS OWN VALUES, not by which register the
+// shader was said to use: the client's shadow curve is
+// `visibility * darkening + floor` with darkening + floor == 1, so the pair is
+// the one place in a receiver where two complementary fractions sum to one
+// (see renderer::shadowreceiver::ShadowDarkeningPair). That is what lets the
+// strength slider reach a receiver whose registers nobody has disassembled -
+// the same reason the softness side learned to read the bytecode.
+//
 // Patching only rewrites those two floats in a private copy of the
 // bytecode; instruction count, opcodes and control flow are untouched.
-inline bool PatchStrengthLiteral(const std::vector<BYTE>& original, uint64_t hash,
-                                 float darkening, float floor, std::vector<DWORD>& patched)
+inline bool PatchStrengthLiteral(const std::vector<BYTE>& original,
+                                 float darkening, float floor, std::vector<DWORD>& patched,
+                                 int* patchedConstant = nullptr)
 {
     if (original.size() % 4 != 0 || original.size() < 24) return false;
     patched.assign(original.size() / 4, 0);
     std::memcpy(patched.data(), original.data(), original.size());
-    const bool familyA = IsFamilyAStrengthHash(hash);
-    const DWORD expectedDest = familyA ? 0xA00F0008u : 0xA00F000Cu; // c8 or c12
-    for (size_t i = 0; i + 24 <= original.size(); i += 4)
+    renderer::shadowreceiver::DefLiteral literals[8];
+    renderer::shadowreceiver::Scan scan;
+    if (!renderer::shadowreceiver::ScanBytecode(
+            reinterpret_cast<const std::uint32_t*>(original.data()), original.size() / 4,
+            scan, literals, std::size(literals)))
+        return false;
+    for (const auto& literal : literals)
     {
-        DWORD opcode, dest;
-        std::memcpy(&opcode, original.data() + i, 4);
-        std::memcpy(&dest, original.data() + i + 4, 4);
-        if (opcode != 0x05000051u || dest != expectedDest) continue;
-        float floats[4];
-        std::memcpy(floats, original.data() + i + 8, 16);
-        const bool shapeMatches = familyA
-            ? (std::abs(floats[0] - 1.2f) <= 1e-4f &&
-               std::abs(floats[1] - .3f) <= 1e-4f &&
-               std::abs(floats[2] - .7f) <= 1e-4f)
-            : (std::abs(floats[0] - .3f) <= 1e-4f &&
-               std::abs(floats[1] - .7f) <= 1e-4f &&
-               floats[2] == 0.f && floats[3] == 0.f);
-        if (!shapeMatches) continue; // do not touch an unverified literal shape
-        const size_t darkeningOffset = i + (familyA ? 12 : 8);
-        const size_t floorOffset = i + (familyA ? 16 : 12);
-        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + darkeningOffset, &darkening, 4);
-        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + floorOffset, &floor, 4);
+        const int pair = renderer::shadowreceiver::ShadowDarkeningPair(literal.value);
+        if (pair < 0) continue; // not the shadow curve: do not touch it
+        std::memcpy(patched.data() + literal.dataWord + size_t(pair), &darkening, 4);
+        std::memcpy(patched.data() + literal.dataWord + size_t(pair) + 1, &floor, 4);
+        if (patchedConstant) *patchedConstant = int(literal.constant);
         return true;
     }
     return false;
@@ -421,10 +416,10 @@ struct PatchedStrengthShader
 };
 inline std::unordered_map<uint64_t, PatchedStrengthShader> patchedStrengthShaders;
 
-// Returns a shader identical to `original` except c12's literal scaled by
-// the current strengthScale, rebuilding only when the slider actually
-// changes. Returns null (leave the native shader bound) if the def
-// instruction wasn't found in the expected shape, or on any failure -
+// Returns a shader identical to `original` except its shadow-curve literal
+// scaled by the current strengthScale, rebuilding only when the slider
+// actually changes. Returns null (leave the native shader bound) if no `def`
+// literal in the stream has the darkening/floor shape, or on any failure -
 // this must never be the reason a receiver draw doesn't render.
 inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint64_t hash, IDirect3DPixelShader9* original)
 {
@@ -438,7 +433,8 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
 
     const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
     std::vector<DWORD> patched;
-    if (!PatchStrengthLiteral(bytecode, hash, darkening, 1.f - darkening, patched)) return nullptr;
+    int patchedConstant = -1;
+    if (!PatchStrengthLiteral(bytecode, darkening, 1.f - darkening, patched, &patchedConstant)) return nullptr;
 
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> created;
     if (FAILED(d->CreatePixelShader(patched.data(), created.GetAddressOf()))) return nullptr;
@@ -447,9 +443,34 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     entry.builtForScale = strengthScale;
     std::ostringstream s;
     s << "[STRENGTH] built patched shader for psHash=0x" << std::hex << hash << std::dec
-      << " darkening 0.3 -> " << darkening << "\n";
+      << " (literal c" << patchedConstant << ") darkening 0.3 -> " << darkening << "\n";
     Append(s.str());
     return entry.shader.Get();
+}
+
+// One of the client's four native cascades: a square depth texture of the
+// cascade size the client uses (2048 square at the shipped settings, 1024 and
+// 4096 have both been seen in neighbouring quality tiers).
+//
+// This used to demand D24X8 exactly, and the comment that replaced the check
+// said why it was loosened - the client exposes the cascades through a
+// driver-specific depth FourCC on some drivers, so a valid receiver was
+// rejected as "no cascades". Requiring the exact format is what makes a probe
+// answer "no" for water that is there; requiring a DEPTH format of square,
+// cascade-sized dimensions is the property the question is actually about.
+inline bool IsCascadeShaped(const D3DSURFACE_DESC& desc)
+{
+    if (desc.Width != desc.Height || desc.Width < 1024 || desc.Width > 4096) return false;
+    switch (desc.Format)
+    {
+    case D3DFMT_D16: case D3DFMT_D15S1: case D3DFMT_D24X8: case D3DFMT_D24S8:
+    case D3DFMT_D24X4S4: case D3DFMT_D32: case D3DFMT_D32F_LOCKABLE: case D3DFMT_NULL:
+        return true;
+    default: break;
+    }
+    // Every driver-private (FourCC) format lives in the upper half of the
+    // D3DFORMAT range; the client's cascades have been reported with one.
+    return static_cast<UINT>(desc.Format) > 0x7FFFFFFFu;
 }
 
 inline bool HasFourNativeCascades(IDirect3DDevice9* device, int firstStage)
@@ -465,13 +486,126 @@ inline bool HasFourNativeCascades(IDirect3DDevice9* device, int firstStage)
         {
             IDirect3DTexture9* texture = static_cast<IDirect3DTexture9*>(baseTexture);
             D3DSURFACE_DESC desc{};
-            valid = SUCCEEDED(texture->GetLevelDesc(0, &desc)) &&
-                desc.Width == 2048 && desc.Height == 2048 && desc.Format == D3DFMT_D24X8;
+            valid = SUCCEEDED(texture->GetLevelDesc(0, &desc)) && IsCascadeShaped(desc);
         }
         baseTexture->Release();
         if (!valid) return false;
     }
     return true;
+}
+
+// The number of sampler stages in the native cascade window a pixel shader's
+// own bytecode samples. Four is a receiver; the capture's "cascades bound at
+// stage 4" is the runtime half of the same statement.
+inline unsigned CascadeStageProbe(IDirect3DDevice9* device)
+{
+    for (int firstStage = 4; firstStage <= 8; ++firstStage)
+        if (HasFourNativeCascades(device, firstStage)) return static_cast<unsigned>(firstStage);
+    return 0u;
+}
+
+inline bool ReadShaderBytecode(IDirect3DPixelShader9* shader, std::vector<BYTE>& bytes)
+{
+    UINT size = 0;
+    if (!shader || FAILED(shader->GetFunction(nullptr, &size)) || !size || size > 65536) return false;
+    bytes.resize(size);
+    if (FAILED(shader->GetFunction(bytes.data(), &size))) return false;
+    bytes.resize(size);
+    return true;
+}
+
+// A pixel shader this session identified as a receiver by its own bytecode,
+// and the constants that bytecode reads as two-component UV offsets. The mask
+// is what the softness slider may scale; every draw still has to pass the
+// value test (a register that does not look like a tiny offset in THIS draw is
+// left alone), so a shader that uses c7.xy for something unrelated in another
+// branch of its material code is not touched there.
+struct LearnedReceiver
+{
+    std::uint32_t xyConstants = 0;
+    unsigned cascadeStages = 0;
+    unsigned cascadeProbe = 0;
+};
+
+inline std::unordered_map<uint64_t, LearnedReceiver>& LearnedReceivers()
+{
+    static std::unordered_map<uint64_t, LearnedReceiver> learned;
+    return learned;
+}
+
+// Learn a receiver ONCE per hash, on its first draw. Two independent
+// statements have to agree before anything is scaled:
+//   * the four native cascades are bound to the device at this draw, and
+//   * the shader itself samples the cascade window,
+// and the shader must name at least one constant it reads as a two-component
+// offset. A hash that fails any of these is recorded as answered and never
+// probed again, so a frame full of materials costs one probe per material and
+// not one per draw.
+inline const LearnedReceiver* LearnReceiver(IDirect3DDevice9* device, uint64_t psHash,
+                                           IDirect3DPixelShader9* shader)
+{
+    static std::unordered_set<uint64_t> attempted;
+    if (!psHash || !shader || attempted.size() >= 4096 || !attempted.insert(psHash).second)
+        return nullptr;
+
+    std::vector<BYTE> bytecode;
+    renderer::shadowreceiver::Scan scan;
+    if (!ReadShaderBytecode(shader, bytecode) ||
+        !renderer::shadowreceiver::ScanBytecode(
+            reinterpret_cast<const std::uint32_t*>(bytecode.data()), bytecode.size() / 4, scan))
+    {
+        std::ostringstream s;
+        s << "[SOFTNESS] psHash=0x" << std::hex << psHash << std::dec
+          << " is not in the receiver whitelist and its bytecode could not be read - "
+             "the sliders cannot reach it\n";
+        Append(s.str());
+        return nullptr;
+    }
+
+    const unsigned cascades = renderer::shadowreceiver::CascadeStageCount(scan.samplerStages);
+    // The device is only asked when the shader itself says something that could
+    // be a kernel: four GetTexture probes per unknown material, not per draw.
+    const unsigned probe = scan.xyConstants ? CascadeStageProbe(device) : 0u;
+    if (!scan.xyConstants || (cascades < 3 && !probe))
+    {
+        std::ostringstream s;
+        s << "[SOFTNESS] psHash=0x" << std::hex << psHash << std::dec
+          << " is not a receiver this session can prove: samples " << cascades
+          << " cascade slots, device had them at stage ";
+        if (probe) s << probe; else s << "none";
+        s << ", two-component UV offsets " << (scan.xyConstants ? "yes" : "none")
+          << " - left alone\n";
+        Append(s.str());
+        return nullptr;
+    }
+
+    LearnedReceiver learned;
+    learned.xyConstants = scan.xyConstants;
+    learned.cascadeStages = cascades;
+    learned.cascadeProbe = probe;
+    auto inserted = LearnedReceivers().emplace(psHash, learned);
+    std::ostringstream s;
+    s << "[SOFTNESS] LEARNED receiver psHash=0x" << std::hex << psHash << std::dec
+      << " (samples " << cascades << " cascade slots, device had them at stage ";
+    if (probe) s << probe; else s << "s5-or-lower";
+    s << ") - the softness slider may scale";
+    for (unsigned reg = 0; reg < 32; ++reg)
+        if (learned.xyConstants & (1u << reg)) s << " c" << reg;
+    s << "\n";
+    Append(s.str());
+    return &inserted.first->second;
+}
+
+// The value test every softness path shares: a Poisson kernel's offsets are a
+// few ten-thousandths of a UV, two components, with nothing in .z/.w. A
+// register that fails this in the draw at hand is left exactly as the client
+// wrote it, whatever the bytecode says about it elsewhere.
+inline bool LooksLikeUvOffset(const float value[4]) noexcept
+{
+    const float x = value[0], y = value[1];
+    return std::abs(x) <= .002f && std::abs(y) <= .002f &&
+        (std::abs(x) + std::abs(y)) > .00001f &&
+        std::abs(value[2]) < .00001f && std::abs(value[3]) < .00001f;
 }
 
 class SoftnessScope
@@ -484,81 +618,77 @@ public:
         if (!enhancementEnabled || !device || (!needSoftness && !needStrength) || currentRtTexture)
             return;
 
-        // The exact receiver hashes were verified from dumped shader bytecode,
-        // and this scope runs on EVERY back-buffer draw - so the whitelist is
-        // checked in memory first. A non-receiver pixel shader then costs a
-        // dozen comparisons and returns, instead of crossing the D3D9 driver
-        // for the GetPixelShader check, the cascade texture probe (several
-        // GetTexture/GetLevelDesc/Release calls) and a render-state query on
-        // every single draw. The whitelist is the authoritative safety gate;
-        // the cascade probe's result is diagnostic only.
+        // This scope runs on EVERY back-buffer draw, so the cheap gate comes
+        // first: the verified families are a dozen in-memory comparisons, and
+        // the handful of hashes a session has already learned are one map
+        // lookup. Only a pixel shader that is neither pays for a bytecode read,
+        // and that happens once per hash for the whole session.
         UINT startRegister = 0, registerCount = 0;
         bool oddRegistersOnly = false;
-        const bool isSoftnessReceiver = needSoftness &&
-            FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly);
-        const bool isStrengthReceiver = needStrength && IsStrengthConfirmedHash(psHash);
-        if (!isSoftnessReceiver && !isStrengthReceiver)
+        const bool windowed = FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly);
+        bool strengthEligible = IsStrengthConfirmedHash(psHash);
+        const LearnedReceiver* learned = nullptr;
+        bool bound = false;
+        if (!windowed && !strengthEligible)
         {
-            // New-receiver discovery survives the pre-gate: a hash the game
-            // draws with the native cascades bound is exactly the variant the
-            // whitelist wants to grow for (OnDraw's candidate log does not
-            // see back-buffer receiver draws). Each unknown pixel shader is
-            // probed ONCE per session - on its first draw - then cached;
-            // distinct pixel shaders are bounded, so discovery costs a few
-            // dozen probes when a new zone's materials first appear, never
-            // per draw. A first draw seen without cascades bound is assumed
-            // not to be a receiver (the game binds the four cascade textures
-            // on every draw of a shadow-sampling material).
-            if (needSoftness)
+            const auto found = LearnedReceivers().find(psHash);
+            if (found != LearnedReceivers().end()) learned = &found->second;
+            else
             {
-                static std::unordered_set<uint64_t> probedUnknown;
-                if (probedUnknown.size() < 1024 && probedUnknown.insert(psHash).second)
+                // The one path that READS the shader object. trackedState holds
+                // the client's raw pointer without a reference, so it is only
+                // safe to read once the device confirms that same object is
+                // what is bound right now - otherwise a recycled identity's
+                // bytes are read as this shader's.
+                IDirect3DPixelShader9* candidate = nullptr;
+                if (FAILED(device->GetPixelShader(&candidate)) || candidate != trackedShader)
                 {
-                    const int stage = HasFourNativeCascades(device, 4) ? 4 :
-                        (HasFourNativeCascades(device, 5) ? 5 : -1);
-                    if (stage >= 0)
-                    {
-                        static std::unordered_set<uint64_t> loggedVariants;
-                        if (loggedVariants.insert(psHash).second)
-                        {
-                            std::ostringstream s;
-                            s << "[SOFTNESS] cascades bound at stage " << stage
-                              << " but psHash=0x" << std::hex << psHash << std::dec
-                              << " is not in the receiver whitelist\n";
-                            Append(s.str());
-                        }
-                    }
+                    if (candidate) candidate->Release();
+                    return;
                 }
+                if (candidate) candidate->Release();
+                bound = true;
+                learned = LearnReceiver(device, psHash, trackedShader);
             }
-            return;
+            if (!learned) return;
+            strengthEligible = true;
         }
-
-        IDirect3DPixelShader9* actualShader = nullptr;
-        if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
+        else if (windowed && !strengthEligible)
         {
-            if (actualShader) actualShader->Release();
-            return;
+            // A verified softness family whose darkening literal nobody has
+            // confirmed. The shape test in PatchStrengthLiteral still has to
+            // find the curve before a patched copy is built, so this only
+            // widens where the strength slider may look, never what it may
+            // touch.
+            strengthEligible = needStrength;
         }
-        if (actualShader) actualShader->Release();
 
-        // Requiring GetLevelDesc to report four D24X8 textures was not
-        // portable across D3D9 wrappers: this client exposes its native
-        // cascade resources with a driver-specific depth FourCC, so valid
-        // receivers were rejected before either slider could run. Hence the
-        // probe stays diagnostic only.
-        firstStage = HasFourNativeCascades(device, 4) ? 4 : (HasFourNativeCascades(device, 5) ? 5 : -1);
+        if (!bound)
+        {
+            IDirect3DPixelShader9* actualShader = nullptr;
+            if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
+            {
+                if (actualShader) actualShader->Release();
+                return;
+            }
+            if (actualShader) actualShader->Release();
+        }
 
         DWORD colorWrite = 0;
         if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
 
-        if (isSoftnessReceiver) ApplySoftness(psHash);
-        if (isStrengthReceiver) ApplyStrength(psHash);
+        if (needSoftness)
+        {
+            if (windowed) ApplySoftnessWindow(psHash, startRegister, registerCount, oddRegistersOnly);
+            else if (learned) ApplySoftnessMask(psHash, learned->xyConstants);
+        }
+        if (needStrength && strengthEligible) ApplyStrength(psHash);
     }
 
     ~SoftnessScope()
     {
         if (!device) return;
-        if (softnessActive) device->SetPixelShaderConstantF(softnessStart, softnessOriginal[0], softnessCount);
+        if (softnessActive) device->SetPixelShaderConstantF(softnessStart, &softnessOriginal[0][0], softnessCount);
         if (strengthShaderSwapped) device->SetPixelShader(originalShaderForRestore.Get());
     }
 
@@ -566,23 +696,12 @@ public:
     SoftnessScope& operator=(const SoftnessScope&) = delete;
 
 private:
-    void ApplySoftness(uint64_t psHash)
+    // The verified families: a window of registers whose odd (or all)
+    // entries the client uses as UV offsets.
+    void ApplySoftnessWindow(uint64_t psHash, UINT startRegister, UINT registerCount, bool oddRegistersOnly)
     {
-        bool oddRegistersOnly = false;
-        UINT startRegister = 0, registerCount = 0;
-        if (!FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly))
-        {
-            static std::unordered_set<uint64_t> loggedUnmatched;
-            if (loggedUnmatched.insert(psHash).second)
-            {
-                std::ostringstream s;
-                s << "[SOFTNESS] cascades bound at stage " << firstStage << " but psHash=0x" << std::hex << psHash << std::dec << " is not in the receiver whitelist\n";
-                Append(s.str());
-            }
-            return;
-        }
-
         float original[8][4]{}, adjusted[8][4]{};
+        if (registerCount == 0 || registerCount > 8) return;
         if (FAILED(device->GetPixelShaderConstantF(startRegister, original[0], registerCount))) return;
         std::copy(&original[0][0], &original[0][0] + registerCount * 4, &adjusted[0][0]);
 
@@ -590,52 +709,97 @@ private:
         for (UINT r = 0; r < registerCount; ++r)
         {
             const UINT absoluteRegister = startRegister + r;
-            const bool usedOffset = oddRegistersOnly ? (absoluteRegister % 2 == 1) : true;
-            const float x = adjusted[r][0], y = adjusted[r][1];
-            const bool looksLikeUvOffset = usedOffset && std::abs(x) <= .002f && std::abs(y) <= .002f &&
-                (std::abs(x) + std::abs(y)) > .00001f && std::abs(adjusted[r][2]) < .00001f &&
-                std::abs(adjusted[r][3]) < .00001f;
-            if (!looksLikeUvOffset) continue;
+            if (oddRegistersOnly && absoluteRegister % 2 == 0) continue;
+            if (!LooksLikeUvOffset(adjusted[r])) continue;
             adjusted[r][0] *= softnessScale;
             adjusted[r][1] *= softnessScale;
             changed = true;
         }
-        static bool loggedNoOffsetFound = false;
         if (!changed)
         {
+            static bool loggedNoOffsetFound = false;
             if (!loggedNoOffsetFound)
             {
                 loggedNoOffsetFound = true;
                 std::ostringstream s;
                 s << "[SOFTNESS] matched receiver psHash=0x" << std::hex << psHash << std::dec
-                  << " at stage " << firstStage << " but none of the " << registerCount
-                  << " registers from c" << startRegister << " looked like a UV offset - nothing scaled\n";
+                  << " but none of the " << registerCount << " registers from c" << startRegister
+                  << " looked like a UV offset in this draw - nothing scaled\n";
                 Append(s.str());
             }
             return;
         }
-        if (SUCCEEDED(device->SetPixelShaderConstantF(startRegister, adjusted[0], registerCount)))
+        Commit(psHash, startRegister, registerCount, original, adjusted, "verified");
+    }
+
+    // A receiver learned from its own bytecode: exactly the constants it reads
+    // as two-component offsets, each still subject to the value test.
+    void ApplySoftnessMask(uint64_t psHash, std::uint32_t mask)
+    {
+        if (!mask) return;
+        UINT first = 0, last = 31;
+        while (first < 32 && !(mask & (1u << first))) ++first;
+        while (last > first && !(mask & (1u << last))) --last;
+        if (first >= 32) return;
+        const UINT count = last - first + 1;
+        if (count > 32) return;
+
+        float original[32][4]{}, adjusted[32][4]{};
+        if (FAILED(device->GetPixelShaderConstantF(first, original[0], count))) return;
+        std::copy(&original[0][0], &original[0][0] + count * 4, &adjusted[0][0]);
+
+        bool changed = false;
+        for (UINT r = 0; r < count; ++r)
         {
-            softnessStart = startRegister; softnessCount = registerCount;
-            std::copy(&original[0][0], &original[0][0] + registerCount * 4, &softnessOriginal[0][0]);
-            softnessActive = true;
-            static bool loggedActive = false;
-            if (!loggedActive)
+            if (!(mask & (1u << (first + r)))) continue;
+            if (!LooksLikeUvOffset(adjusted[r])) continue;
+            adjusted[r][0] *= softnessScale;
+            adjusted[r][1] *= softnessScale;
+            changed = true;
+        }
+        if (!changed)
+        {
+            static bool loggedMaskMiss = false;
+            if (!loggedMaskMiss)
             {
-                loggedActive = true;
+                loggedMaskMiss = true;
                 std::ostringstream s;
-                s << "[SOFTNESS] ACTIVE: scaled registers c" << startRegister << ".." << (startRegister + registerCount - 1)
-                  << " by " << softnessScale << "x for psHash=0x" << std::hex << psHash << std::dec
-                  << " cascadeStage=" << firstStage << "\n";
+                s << "[SOFTNESS] learned receiver psHash=0x" << std::hex << psHash << std::dec
+                  << " declared UV-offset constants but none of them held a tiny offset in this draw\n";
                 Append(s.str());
             }
+            return;
+        }
+        Commit(psHash, first, count, original, adjusted, "learned");
+    }
+
+    void Commit(uint64_t psHash, UINT startRegister, UINT count, const float original[][4],
+                const float adjusted[][4], const char* how)
+    {
+        if (FAILED(device->SetPixelShaderConstantF(startRegister, &adjusted[0][0], count))) return;
+        softnessStart = startRegister;
+        softnessCount = count;
+        std::copy(&original[0][0], &original[0][0] + count * 4, &softnessOriginal[0][0]);
+        softnessActive = true;
+        if (!loggedActive.exchange(true))
+        {
+            // Logged once per session, and only here: the cascade probe is four
+            // driver round trips, which is affordable for one line and not for
+            // every receiver draw of every frame.
+            const unsigned probe = CascadeStageProbe(device);
+            std::ostringstream s;
+            s << "[SOFTNESS] ACTIVE (" << how << "): scaled registers c" << startRegister
+              << ".." << (startRegister + count - 1) << " by " << softnessScale
+              << "x for psHash=0x" << std::hex << psHash << std::dec
+              << " cascadeStage=";
+            if (probe) s << probe; else s << -1;
+            s << "\n";
+            Append(s.str());
         }
     }
 
     void ApplyStrength(uint64_t psHash)
     {
-        if (!IsStrengthConfirmedHash(psHash)) return;
-
         IDirect3DPixelShader9* current = nullptr;
         if (FAILED(device->GetPixelShader(&current)) || !current) return;
 
@@ -662,12 +826,12 @@ private:
     }
 
     IDirect3DDevice9* device = nullptr;
-    int firstStage = -1;
     bool softnessActive = false;
     UINT softnessStart = 0;
     UINT softnessCount = 0;
-    float softnessOriginal[8][4]{};
+    float softnessOriginal[32][4]{};
     bool strengthShaderSwapped = false;
+    static inline std::atomic<bool> loggedActive{false};
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> originalShaderForRestore;
 };
 

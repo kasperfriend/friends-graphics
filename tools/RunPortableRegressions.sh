@@ -59,6 +59,9 @@ SUITES=(
     "local-lighting|-O2 -std=c++20 -Wall -Wextra -Werror -pedantic|tools/LocalLightingRegression.cpp"
     "camera-anchoring|-O2 -std=c++20 -Wall -Wextra -Werror -pedantic|tools/CameraAnchoringRegression.cpp"
     "shader-source|-O2 -std=c++20 -Wall -Wextra -Werror|tools/ShaderSourceRegression.cpp"
+    # The native-shadow enhancement decides what to touch from the shader's own
+    # bytecode, so the token walk is tested here rather than in the client.
+    "shadow|-O2 -std=c++20 -Wall -Wextra -Werror -pedantic|tools/ShadowRegression.cpp"
     "location-status|-O2 -std=c++20 -Wall -Wextra -Werror|tools/LocationStatusRegression.cpp"
     "file-sink|-O2 -std=c++20 -Wall -Wextra -Werror -pedantic -Itools/fixtures|tools/FileSinkRegression.cpp"
     "location-tuning-cache|-O2 -std=c++20 -Wall -Wextra -Itools/fixtures|tools/LocationTuningCacheRegression.cpp tools/LocationTuningCacheOtherTu.cpp"

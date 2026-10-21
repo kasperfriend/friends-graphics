@@ -91,3 +91,60 @@ sun-time changes before naming projection/light registers.
 
 The retired custom `ShadowDraw` replay and long screen-space directional march
 remain compile-time unreachable.
+
+## Round 7: the sliders reach a receiver nobody disassembled (2026-10-21)
+
+Reported after the water rounds: **"Native shadows don't work at all."** The
+session's `NativeShadowDiagnostics.log` answered it in two lines:
+
+```
+[SOFTNESS] ACTIVE: scaled registers c3..10 by 1.45x for psHash=0x449b66c5fb94fede cascadeStage=-1
+[SOFTNESS] cascades bound at stage 4 but psHash=0xbeec8ff97f375ed1 is not in the receiver whitelist
+```
+
+Read together, those two lines are the whole fault. The enhancement knew about
+seventeen pixel-shader **hashes** that somebody had disassembled by hand. The
+shader the client actually drew with the four cascades bound was not one of
+them, so every slider was inert; and the shader that *was* being scaled had no
+cascades bound at its draws at all (`cascadeStage=-1`), so what it scaled was
+not a Poisson kernel. A client update that recompiles its material shaders
+therefore turns both sliders off, permanently and silently - which is exactly
+what "don't work at all" means from the player's seat.
+
+### What replaced the hash list
+
+The shader can state both facts about itself, and the enhancement now asks it.
+`src/Effects/ShadowReceiverBytecode.h` walks the pixel shader's own SM2/SM3
+token stream (portable, exercised by `tools/ShadowRegression.cpp`):
+
+* **Is this a receiver?** Does it sample the native cascade window? The
+  register type in a D3D9 parameter token is five bits and not adjacent -
+  bits 30:28 plus bits 12:11 (`D3DSP_REGTYPE_MASK` / `D3DSP_REGTYPE_MASK2`) -
+  which is the only thing that separates a constant (type 2) from a sampler
+  (type 10) when their low three bits agree. Four sampled stages in s4..s8 (or
+  the runtime cascade probe finding the four cascade targets bound at that
+  draw) is a receiver. `dcl_2d sN` is read too: it is the only place a pixel
+  shader names a stage in the destination slot.
+* **Which constants may softness scale?** Only those read with a swizzle that
+  never touches .z or .w - the offsets added to a texture coordinate's x/y.
+  Each draw still has to hold a value that looks like a tiny 2-component
+  offset, so a register used differently in another branch of a material is
+  left alone.
+* **Which literal may strength patch?** The `def` whose floats are a
+  complementary pair summing to one - the client's own
+  `visibility * darkening + floor` curve, at either of the two component
+  positions the captured families use. That is a shape, not a register guess,
+  so a receiver nobody has disassembled can still have its shadows darkened.
+
+The hand-verified families stay as a fast path (a dozen in-memory comparisons
+before the driver is touched), a learned receiver is recorded once per session
+with the constants it declared (`[SOFTNESS] LEARNED receiver ...`), and the one
+whitelist entry the live log proved was *not* a receiver
+(`0x449b66c5fb94fede`, `cascadeStage=-1`) is gone. The cascade probe itself no
+longer demands one exact depth format: a square depth target of cascade size is
+what the question is about, and the client exposes its cascades through a
+driver FourCC on some drivers.
+
+Nothing about the client's caster pass, receiver placement or shadow matrices
+changes - this is still an enhancement of the client's own cascaded shadow
+maps, never a second shadow system.

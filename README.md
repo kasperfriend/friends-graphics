@@ -147,7 +147,7 @@ sky, the rows are what the zone asks for, and every panel shares a clock and a c
 
 ### Native shadows and post-processing
 
-- Softness and strength controls enhance the client-created cascaded shadow maps.
+- Softness and strength controls enhance the client-created cascaded shadow maps. The receivers are recognised from the shader's own bytecode (it samples the four cascade slots, and the constants it adds to a UV are its kernel), so a client update that recompiles its material shaders does not silently turn the sliders off.
 - Optional brightness, contrast, gamma, and sharpness post-processing.
 - Native distance-fog controls remain available for compatibility with the client's own fog path.
 
