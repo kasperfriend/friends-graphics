@@ -289,6 +289,57 @@ int main() try
         const float notReplicated[4] = { .3f, .7f, .3f, .2f };
         Require(bc::ShadowDarkeningPair(notReplicated) == -1,
                 "four non-zero components that are not two copies of one pair are not the curve");
+
+        // THE TERRAIN LITERAL. Live, the ground-casting receivers declare
+        // `def c13 = (1.2, .3, .7, 2)`: family A with its fourth component in
+        // use. Requiring `.w == 0` refused every one of them, so the strength
+        // slider darkened the objects and left the ground untouched.
+        const float terrain[4] = { 1.2f, .3f, .7f, 2.f };
+        Require(bc::ShadowDarkeningPair(terrain) == 1,
+                "family A is recognised by its 1.2 and its complementary pair even when .w is in use - that is the terrain literal");
+        const float terrainOther[4] = { 1.2f, .55f, .45f, -7.f };
+        Require(bc::ShadowDarkeningPair(terrainOther) == 1,
+                "the packed fourth component never decides whether a family-A literal is the curve, whatever value it holds");
+        // But it must not open the door to literals that merely contain two
+        // fractions: without the 1.2 anchor those are something else.
+        const float anchored[4] = { .9f, .3f, .7f, 2.f };
+        Require(bc::ShadowDarkeningPair(anchored) == -1,
+                "two complementary fractions beside a non-1.2 first component are not a family-A curve, however the tail reads");
+        // Family B still needs an empty or replicated tail, for the same reason.
+        const float familyBTail[4] = { .3f, .7f, 0.f, 2.f };
+        Require(bc::ShadowDarkeningPair(familyBTail) == -1,
+                "family B, whose pair sits at components 0 and 1, still requires an empty or replicated tail");
+    }
+
+    std::printf("\n-- a dump reports the literals that exist --\n");
+    {
+        // A fixed-size buffer printed whole (the first live dump did) emits
+        // dozens of `def c0=(0,0,0,0)` lines that read as evidence and are not.
+        bc::DefLiteral literals[16];
+        const auto code = Receiver();
+        bc::Scan scan;
+        Require(bc::ScanBytecode(code.data(), code.size(), scan, literals, std::size(literals)) &&
+                    scan.literalCount == 1,
+                "the scan counts the defs it actually found");
+        bc::DefLiteral small[1];
+        bc::Scan capped;
+        Require(bc::ScanBytecode(code.data(), code.size(), capped, small, std::size(small)) &&
+                    capped.literalCount == 1 && small[0].constant == 12,
+                "the count describes the stream, and the buffer holds what it has room for");
+        // More defs than the buffer holds: the count is still the truth about
+        // the shader, so nothing is printed past the last real literal.
+        auto many = Receiver();
+        for (std::uint32_t extra = 0; extra < 5; ++extra)
+        {
+            many.insert(many.end() - 1, Inst(opDef, 5));
+            many.insert(many.end() - 1, Dst(kConst, 20u + extra));
+            for (float value : { .1f, .2f, .3f, .4f }) many.insert(many.end() - 1, FloatWord(value));
+        }
+        bc::Scan counted;
+        bc::DefLiteral two[2];
+        Require(bc::ScanBytecode(many.data(), many.size(), counted, two, std::size(two)) &&
+                    counted.literalCount == 6 && two[0].constant == 12 && two[1].constant == 20,
+                "every def is counted even when the buffer fills, so the dump can print exactly as many as exist");
     }
 
     std::printf("\n-- the renderer uses these rules, and only on proven receivers --\n");
@@ -389,6 +440,18 @@ int main() try
                     shadow.find("D3DDisassemble(bytecode.data(), bytecode.size(),") != std::string::npos &&
                     shadow.find("ps_%016llx.asm") != std::string::npos,
                 "a receiver neither slider can fully handle is described in the log and written out as assembly");
+        // ... and it prints the literals that exist, not the buffer it read them
+        // into: the first live dump held fifty `def c0=(0,0,0,0)` lines.
+        Require(shadow.find("for (std::size_t i = 0; i < scan.literalCount && i < std::size(literals); ++i)") != std::string::npos &&
+                    shadow.find("s << \" defs=\" << scan.literalCount;") != std::string::npos,
+                "the dump prints one line per def the shader declares, and no phantom ones");
+        // The terrain family's `.w` is a live value the shader packs beside the
+        // curve: the patch must leave it exactly as it found it, or the ground
+        // shading breaks in a new way.
+        Require(shadow.find("std::memcpy(patched.data() + literal.dataWord + size_t(pair), &darkening, 4);")
+                        != std::string::npos &&
+                    shadow.find("Write the pair and NOTHING else.") != std::string::npos,
+                "patching writes the pair and leaves the literal's other components - the family-A .w - alone");
     }
 
     std::printf("\nALL SHADOW TESTS PASSED\n");

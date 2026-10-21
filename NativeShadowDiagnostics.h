@@ -404,10 +404,17 @@ inline bool PatchStrengthLiteral(const std::vector<BYTE>& original,
             reinterpret_cast<const std::uint32_t*>(original.data()), original.size() / 4,
             scan, literals, std::size(literals)))
         return false;
-    for (const auto& literal : literals)
+    // Only the entries the walk actually wrote: the rest of the buffer is
+    // zeroes, and a zero literal is not the curve, but reading past the count
+    // is how a diagnostic turns into a guess.
+    for (std::size_t i = 0; i < scan.literalCount && i < std::size(literals); ++i)
     {
+        const auto& literal = literals[i];
         const int pair = renderer::shadowreceiver::ShadowDarkeningPair(literal.value);
         if (pair < 0) continue; // not the shadow curve: do not touch it
+        // Write the pair and NOTHING else. Family A's `.w` (the terrain
+        // literal carries 2 there) is a value the shader packs beside the
+        // curve, and overwriting it would break the ground in a new way.
         std::memcpy(patched.data() + literal.dataWord + size_t(pair), &darkening, 4);
         std::memcpy(patched.data() + literal.dataWord + size_t(pair) + 1, &floor, 4);
         // A replicated pair (a, b, a, b) is read twice; both copies move, or
@@ -451,9 +458,17 @@ inline void DescribeReceiver(uint64_t psHash, const std::vector<BYTE>& bytecode,
         list(s, "samplers", scan.samplerStages);
         list(s, "xyOnly", scan.xyConstants);
         list(s, "any", scan.anyConstants);
-        for (const auto& literal : literals)
+        // `literals` is a fixed-size buffer; only the first `literalCount`
+        // entries were written. Printing the whole array (the first live dump
+        // did) emits dozens of phantom `def c0=(0,0,0,0)` lines that look like
+        // evidence and are not.
+        s << " defs=" << scan.literalCount;
+        for (std::size_t i = 0; i < scan.literalCount && i < std::size(literals); ++i)
+        {
+            const auto& literal = literals[i];
             s << " def c" << literal.constant << "=(" << literal.value[0] << ',' << literal.value[1]
               << ',' << literal.value[2] << ',' << literal.value[3] << ')';
+        }
     }
     else s << " (its instruction stream could not be walked)";
     s << "\n";

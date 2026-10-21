@@ -223,3 +223,38 @@ line with its literals and the constants it reads, plus its disassembly under
 `NativeShadowShaders\ps_<hash>.asm` - so the next family is supported from its
 own code instead of from another log round trip. `[ShadowDiagnostics] DumpReceivers=0`
 turns it off.
+
+## Round 9: the terrain literal's fourth component (2026-10-21)
+
+The dump from the third session answered the question the previous round could
+not. Four-cascade (terrain) receivers declare their curve as the *verified*
+family-A shape with a fourth component in use:
+
+```
+[SHADOW-DUMP] psHash=0xa3d9e226a21a5739 (...) ps_3_0 samplers=c0,c4,c5,c6,c7
+  xyOnly=c0,c1,c13,c14 any=c0..c14 def c13=(1.2,0.3,0.7,2) def c14=(0,1,0.5,-0.2)
+```
+
+`def c13 = (1.2, .3, .7, 2)` is family A - `1.2 = 1/darkening`, then the
+complementary pair - but the rule demanded `.w == 0`, so the one literal that
+mattered was rejected and the strength slider logged
+`declares no darkening/floor literal` for exactly the receivers that shade the
+ground. One-cascade object receivers happened to carry `.w = 0` and patched
+fine, which is why the slider "worked on objects and not on the ground".
+
+* **Family A is recognised by its anchor, not its tail.** Component 0 within
+  `0.01` of `1.2`, components 1 and 2 fractions summing to one - component 3
+  is unconstrained and is preserved untouched when the pair is patched. Family
+  B (pair at components 0,1) still requires an empty or replicated tail,
+  because otherwise any literal with two complementary fractions would match.
+* **The dump prints only the literals that exist.** The first version printed
+  its whole 64-entry buffer, which produced fifty `def c0=(0,0,0,0)` lines that
+  read as evidence and were not. `Scan` now carries `literalCount`, the count of
+  every `def` in the stream (even past the buffer's capacity), and both the dump
+  and the patcher walk only those entries.
+
+Round 9 pins: `.w = 2` accepted at pair 1,2; the packed `.w` never deciding
+family A whatever it holds; a `0.9` first component still rejected; family B
+with a non-zero `.w` still rejected; `literalCount` correct when the buffer is
+exactly full and when it overflows; the dump's loop bounded by `literalCount`;
+the patcher writing the pair and nothing else.

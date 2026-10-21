@@ -88,6 +88,11 @@ struct Scan
     std::uint32_t xyConstants = 0;  // bit n: cN read with a swizzle that avoids .z and .w
     std::uint32_t anyConstants = 0; // bit n: cN read at all
     std::uint32_t samplerStages = 0;// bit n: sN declared or sampled
+    // How many `def` instructions the stream declared. A caller that hands in
+    // a literal buffer must only read this many of its entries: the rest are
+    // untouched, and printing them (as a first version of the dump did) says
+    // a shader declares fifty copies of `def c0, 0,0,0,0`.
+    std::size_t literalCount = 0;
 };
 
 namespace detail
@@ -132,7 +137,6 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
 {
     out = Scan{};
     if (!code || words < 2) return false;
-    std::size_t literalCount = 0;
     std::size_t start = 0;
     if ((code[0] & kVersionTokenMask) == kVersionTokenValue)
     {
@@ -179,14 +183,14 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
                 const std::uint32_t destination = code[i + 1];
                 if (detail::IsConstantToken(destination))
                 {
-                    if (literals && literalCount < maxLiterals)
+                    if (literals && out.literalCount < maxLiterals)
                     {
-                        DefLiteral& literal = literals[literalCount];
+                        DefLiteral& literal = literals[out.literalCount];
                         literal.constant = detail::RegisterIndex(destination);
                         literal.dataWord = i + 2;
                         std::memcpy(literal.value, &code[i + 2], sizeof(literal.value));
                     }
-                    ++literalCount;
+                    ++out.literalCount;
                 }
             }
         }
@@ -233,39 +237,48 @@ inline unsigned CascadeStageCount(std::uint32_t samplerStages) noexcept
     return count;
 }
 
-// The pair (darkening, floor) inside a `def` literal, if the literal is one:
-// the client's own shadow curve, `result = visibility * darkening + floor`
-// with darkening + floor == 1 (shadows never below `floor` brightness). The
-// two shapes the verified receiver families use:
-//   family A: def c8,  1.2, .3, .7, 0   -> pair at components 1,2
-//   family B: def c12, .3, .7, 0, 0     -> pair at components 0,1
-// Returns the index of the pair's first component, or -1. Nothing else in a
-// receiver declares two complementary fractions that sum to one, so this is a
-// shape test rather than a register guess - which is what lets the strength
-// slider work on a receiver whose register layout nobody has disassembled.
-// The third shape is the same pair written twice - (a, b, a, b) - which is what
-// a compiler emits when the receiver feeds the curve to a `mad` over a
-// two-component swizzle pair; the caller must then patch all four components,
-// or the shader would read one scaled pair and one not.
+// The same pair written twice - (a, b, a, b) - which is what a compiler emits
+// when the receiver feeds the curve to a `mad` over a two-component swizzle
+// pair; the caller must then patch all four components, or the shader would
+// read one scaled pair and one not.
 inline bool ShadowReplicatedPair(const float value[4]) noexcept
 {
     constexpr float epsilon = 1e-3f;
     return std::abs(value[2] - value[0]) <= epsilon && std::abs(value[3] - value[1]) <= epsilon;
 }
 
+// The pair (darkening, floor) inside a `def` literal: the client's own shadow
+// curve, `result = visibility * darkening + floor` with darkening + floor == 1
+// (shadows never below `floor` brightness). The shapes observed in receivers:
+//   family A:   def c8,  1.2, .3, .7, 0   -> pair at components 1,2
+//   family B:   def c12, .3, .7, 0, 0     -> pair at components 0,1
+//   replicated: .3, .7, .3, .7            -> pair at components 0,1
+// and the one that took a live round to find: the SAME family-A literal with a
+// fourth component that is not zero -
+//   def c13, 1.2, .3, .7, 2
+// That is the terrain family, the one whose shadows are cast on the GROUND.
+// Demanding `.w == 0` refused exactly it, so the strength slider darkened the
+// object shadows and left the ground alone. The `.w` here is a separate value
+// the shader packs alongside the curve and must be preserved, not read.
+// Family A is therefore recognised by its own first component (1.2) and its two
+// complementary fractions; family B, whose pair sits at components 0 and 1,
+// still requires an empty or replicated tail, or any two fractions in a
+// four-component literal would qualify.
+// Returns the index of the pair's first component, or -1.
 inline int ShadowDarkeningPair(const float value[4]) noexcept
 {
     constexpr float epsilon = 1e-3f;
     const auto fraction = [](float v) { return v > 0.f && v < 1.f; };
-    if (value[2] == 0.f && value[3] == 0.f && fraction(value[0]) && fraction(value[1]) &&
-        std::abs(value[0] + value[1] - 1.f) <= epsilon)
-        return 0;
-    if (value[3] == 0.f && fraction(value[1]) && fraction(value[2]) &&
+    // Family A: (1.2, darkening, floor, anything).
+    if (std::abs(value[0] - 1.2f) <= .01f && fraction(value[1]) && fraction(value[2]) &&
         std::abs(value[1] + value[2] - 1.f) <= epsilon)
         return 1;
+    // Family B: (darkening, floor, 0, 0), or the pair written twice.
     if (fraction(value[0]) && fraction(value[1]) &&
-        std::abs(value[0] + value[1] - 1.f) <= epsilon && ShadowReplicatedPair(value))
+        std::abs(value[0] + value[1] - 1.f) <= epsilon &&
+        ((value[2] == 0.f && value[3] == 0.f) || ShadowReplicatedPair(value)))
         return 0;
     return -1;
 }
+
 } // namespace renderer::shadowreceiver
