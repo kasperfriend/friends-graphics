@@ -278,6 +278,11 @@ inline int ShadowDarkeningPair(const float value[4]) noexcept
         std::abs(value[0] + value[1] - 1.f) <= epsilon &&
         ((value[2] == 0.f && value[3] == 0.f) || ShadowReplicatedPair(value)))
         return 0;
+    // Family C: (-11.1111, 11, darkening, floor).
+    if (std::abs(value[0] + 11.1111f) <= .01f && std::abs(value[1] - 11.f) <= .01f &&
+        fraction(value[2]) && fraction(value[3]) &&
+        std::abs(value[2] + value[3] - 1.f) <= epsilon)
+        return 2;
     return -1;
 }
 
