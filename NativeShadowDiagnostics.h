@@ -464,7 +464,7 @@ inline bool IsCascadeShaped(const D3DSURFACE_DESC& desc)
     switch (desc.Format)
     {
     case D3DFMT_D16: case D3DFMT_D15S1: case D3DFMT_D24X8: case D3DFMT_D24S8:
-    case D3DFMT_D24X4S4: case D3DFMT_D32: case D3DFMT_D32F_LOCKABLE: case D3DFMT_NULL:
+    case D3DFMT_D24X4S4: case D3DFMT_D32: case D3DFMT_D32F_LOCKABLE:
         return true;
     default: break;
     }
