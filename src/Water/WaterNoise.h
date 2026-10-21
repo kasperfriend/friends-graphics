@@ -28,12 +28,18 @@ namespace renderer::water
     // lands on the same corner as the shader's.
     inline float Fraction(float value) { return value - std::floor(value); }
 
-    inline NoiseSample NoiseGradient(float x, float y)
+    // The wrap period is a parameter because one octave needs a smaller one: the
+    // half-frequency chop reads half of a quarter turn of the absolute cell, so the
+    // phase's 64-cell reduction arrives as 32 of that octave's own cells, and a hash that
+    // wraps at 32 keeps the seam invisible exactly as the 64-cell wrap does for the others
+    // (see noiseGradientWrapped in WaterEffect.h). The corner ids stay packed on
+    // kLatticeWrap - the period decides which indices coincide, not how they are hashed.
+    inline NoiseSample NoiseGradientWrapped(float x, float y, float period)
     {
         const float ix = std::floor(x), iy = std::floor(y);
         const float fx = x - ix, fy = y - iy;
-        const float wx = ix - std::floor(ix * (1.f / kLatticeWrap)) * kLatticeWrap;
-        const float wy = iy - std::floor(iy * (1.f / kLatticeWrap)) * kLatticeWrap;
+        const float wx = ix - std::floor(ix / period) * period;
+        const float wy = iy - std::floor(iy / period) * period;
         // Corner ids in the packed index: (0,0), (1,0), (0,1), (1,1).
         const float base = wx + wy * kLatticeWrap;
         float h[4];
@@ -52,6 +58,13 @@ namespace renderer::water
                  day * ((h[2] - h[0]) + k * ux) };
     }
 
+    // The base chop octave, the warp and the grouping envelope all read the field at the
+    // lattice's own period.
+    inline NoiseSample NoiseGradient(float x, float y)
+    {
+        return NoiseGradientWrapped(x, y, kLatticeWrap);
+    }
+
     struct WavePlane
     {
         float x = 0.f;
@@ -66,18 +79,20 @@ namespace renderer::water
         float gradientY = 0.f; // derivative of the scalar warp with respect to cell Y
     };
 
-    // The foam lace's fine fleck. It cannot read the fine chop octave: that octave is a moving
-    // surface grain, sampled counter-phased (plane*2.17 with the phase lanes swapped and
-    // scaled by 1.31), so at a fixed world point its coordinate still moves when the camera
-    // moves. As a wave slope that drift is invisible under a drifting sea; as a high-contrast
-    // foam mask laid over a stable bed it crawls - the flecks swim across shoal foam and read
-    // as hash. This sample is the anchored alternative: the absolute cell (relative plane plus
-    // the camera-carrying ripple phase) under the integer matrix [[2,1],[-1,2]], a rotation by
-    // -26.6 degrees scaled by sqrt(5)=2.236. Integer entries keep the 64-cell wrap exact (a
-    // 64-cell step in the absolute cell is a whole number of 64-cell steps here), and because
-    // the matrix is a scaled rotation the fleck cells stay square, at 2.5/2.236 yards - the
-    // fine octave's own scale, without its camera drift. The swell offset matches the fine
-    // octave's, so the flecks still ride the swell they tear.
+    // The foam lace's fine fleck. It was split off the fine chop octave because that octave
+    // used to be a moving surface grain - sampled counter-phased from the relative cell plus a
+    // rotated copy of the camera's own phase, so at a fixed world point its coordinate still
+    // moved when the camera moved. As a wave slope that drift was invisible under a drifting
+    // sea; as a high-contrast foam mask laid over a stable bed it crawled, and the flecks swam
+    // across shoal foam and read as hash. (Round 13 fixed the octave itself the same way, so
+    // the two are anchored on the same rule now; this sample keeps its own matrix because a
+    // square, rotated fleck cell is what the lace's look was tuned against.) It reads the
+    // absolute cell (relative plane plus the camera-carrying ripple phase) under the integer
+    // matrix [[2,1],[-1,2]], a rotation by -26.6 degrees scaled by sqrt(5)=2.236. Integer
+    // entries keep the 64-cell wrap exact (a 64-cell step in the absolute cell is a whole
+    // number of 64-cell steps here), and because the matrix is a scaled rotation the fleck
+    // cells stay square, at 2.5/2.236 yards - the fine octave's own scale. The swell offset
+    // matches the fine octave's, so the flecks still ride the swell they tear.
     inline float FoamLaceFineValue(const WaveField& field, float planeX, float planeY, float swell)
     {
         const float absoluteX = planeX + field.ripplePhase[0];

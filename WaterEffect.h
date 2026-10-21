@@ -215,12 +215,60 @@ double lastWaveAnchorSeconds=-1.0;
 // edit into a phase shift proportional to the distance - which is the water that
 // "races" for a few seconds after a teleport and then settles.
 constexpr double kAnchorFreshSeconds=.25;
+// WHICH FRAME the anchor above was read in. Age is not identity, and the difference is
+// exactly a teleport: `frame.cameraValid` only says a pose was published, and the pose a
+// frame publishes while the draw stream (or the camera gate) has not confirmed a new one
+// is the one it HOLDS - the place the player left. Its eye-age clock is fresh, because a
+// draw really did carry that eye a few frames ago, so the age rule above is satisfied by
+// the wrong place. A liquid draw cannot be wrong that way: its anchor is read out of the
+// matrix the draw was transformed by, for the frame that is ending. So the pivot prefers
+// that anchor when it belongs to THIS frame, and otherwise takes the frame's captured
+// camera only when it was really captured this frame.
+uint64_t lastWaveAnchorFrame=0;
+// The point this frame's sea may turn and resize about, and where it came from.
+// 0 none (the lattice holds where it was), 1 this frame's own liquid draw, 2 the frame's
+// own captured camera. Reported in the status line.
+int seaPivotSource=0,seaPivotJumps=0;
+bool seaPivotLastValid=false;
+float seaPivotLast[2]{};
+// A camera jump - a teleport, a hearth, a portal, a zone change - moves further in one
+// frame than any step a player takes: the same distance the underwater tracker and the
+// atmosphere's history guard call a discontinuity. Past it the sea is in a different
+// place, and the heading ease that belongs to the old place is settled rather than
+// carried across (WaveMotion::Settle).
+constexpr float kSeaReanchorYards=renderer::underwater::Tracker::kCameraJumpYards;
 renderer::FrameClock seaFrameClock;
 void AdvanceSea(float dt);
 inline bool LastWaveAnchorFresh() noexcept {
     if(!lastWaveAnchor.valid||!(lastWaveAnchorSeconds>=0.0))return false;
     const double age=renderer::PerformanceSeconds()-lastWaveAnchorSeconds;
     return age>=0.0&&age<=kAnchorFreshSeconds;
+}
+// Is the frame's published camera THIS frame's own - a real capture, and not the pose the
+// capture held while it waited for the draw stream (or the camera gate) to confirm a new
+// one? The distinction only matters after a jump, which is when the held pose is the old
+// zone; everywhere else the two agree and this is the identity.
+inline bool FrameCameraIsCaptured() noexcept {
+    const auto& frame=renderer::FrameContext::Current();
+    return frame.cameraValid
+        &&frame.cameraPoseSource==renderer::FrameContext::PoseCaptured
+        &&std::isfinite(frame.cameraPosition.x)&&std::isfinite(frame.cameraPosition.y);
+}
+// The camera the sea is allowed to re-anchor about this frame, in world x/y, and where
+// it came from. See the note on lastWaveAnchorFrame for why identity beats age here.
+inline bool SeaPivotForFrame(float& x,float& y,int& source) noexcept {
+    const auto& frame=renderer::FrameContext::Current();
+    if(lastWaveAnchor.valid&&lastWaveAnchorFrame==frame.frameIndex
+       &&std::isfinite(lastWaveAnchor.camera[0])&&std::isfinite(lastWaveAnchor.camera[1])) {
+        x=lastWaveAnchor.camera[0];y=lastWaveAnchor.camera[1];source=1;
+        return true;
+    }
+    if(FrameCameraIsCaptured()) {
+        x=frame.cameraPosition.x;y=frame.cameraPosition.y;source=2;
+        return true;
+    }
+    source=0;
+    return false;
 }
 
 // One frame of the underwater ramp, and the frame the full-screen medium reads. Called
@@ -1001,6 +1049,29 @@ float3 noiseGradient(float2 p) {
     return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
                   du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
 }
+// The same bounded hash at a caller-chosen period, for the two upper chop octaves.
+//
+// The CPU reduces every phase modulo 64 cells (kLatticeWrap), so an octave whose
+// coordinate is an INTEGER combination of the absolute cell still tiles correctly: a
+// 64-cell jump of the phase arrives as a whole number of that octave's own periods and
+// lands on identical hash cells. The half-frequency octave is the exception that needs
+// the period spelled: its coordinate is half an integer combination, so a 64-cell jump
+// is 32 of its own cells - and a hash that wraps at 32 makes that invisible too. (Past
+// that, the period is only how often the pattern repeats: 32 of this octave's cells are
+// 64 of the base lattice's, the same 160 yards the base octave itself repeats over.)
+// Both halves are fed by the SAME absolute cell, which is what keeps the grain on the
+// water while the camera moves; see the note on worldCell below.
+float3 noiseGradientWrapped(float2 p,float period) {
+    float2 i=floor(p),f=p-i;
+    i-=floor(i/period)*period;
+    float4 h=frac((i.x+i.y*64.0+float4(0,1,64,65))*.1031);
+    h*=h+33.33;
+    h=frac(h*(h+h));
+    float2 u=f*f*(3-2*f),du=6*f*(1-f);
+    float k=h.x-h.y-h.z+h.w;
+    return float3(h.x+(h.y-h.x)*u.x+(h.z-h.x)*u.y+k*u.x*u.y,
+                  du.x*((h.y-h.x)+k*u.y),du.y*((h.z-h.x)+k*u.x));
+}
 // The swell: EIGHT ANALYTIC, DIRECTIONAL sine trains on that one lattice, in a fan whose
 // crest lines (0, -34, 21, 47, 83, 110, 65, 128 degrees) are never closer than 18 degrees
 // apart, with wavelengths in a ~1.35 ratio (40, 28.75, 20, 14.5,
@@ -1208,6 +1279,30 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // gives up, because a sea read from a distance is a silhouette and a colour long before
     // it is a texture.
     float qualityLevel=waveFlow.z;
+    // THE WORLD CELL ITSELF, and the only coordinate the three noise octaves are allowed
+    // to read. `plane` is this pixel's lattice coordinate RELATIVE to the draw's camera
+    // and `wavePhase.xy` is that camera's own contribution (wrapped into the lattice's
+    // period), so their sum is the absolute lattice cell under the pixel - the same
+    // number for the same world point from every camera, every tile and every pass.
+    //
+    // The two upper octaves used to build their coordinate out of the relative half and a
+    // ROTATED copy of the phase half (2.17*plane + 1.31*R90(phase), .46*plane -
+    // .87*R90(phase)). Those are not the same transform, so at a fixed world point the
+    // sum moved with the camera: about 2.5 lattice cells for every yard the camera
+    // travelled on the fine octave and about 1 on the mid one - the fine grain of the sea
+    // sliding over the swell whenever the view moved, and a teleport's worth of
+    // re-randomisation in the frame the player lands. It is the same fault that was
+    // retired from the foam lace's fleck (where it printed as crawling hash) while these
+    // two consumers kept reading it. Each octave is now the rotated, scaled reading of
+    // the one absolute cell: the rotation that keeps it counter-phased with the base
+    // octave is a matrix on the cell, not a second opinion about where the cell is.
+    //
+    // The matrices are INTEGER (and the half-frequency one is half of one, with a hash
+    // period of its own to match), so the 64-cell wrap the CPU applies to the phase stays
+    // invisible: a whole number of these octaves' periods, exactly as it is for the base
+    // octave. A non-integer scale here would re-roll the grain every time the camera
+    // crossed a wrap - 160 yards of walking - on top of the camera-dependence it replaces.
+    float2 worldCell=plane+wavePhase.xy;
     // The chop rides the swell instead of scrolling over it: sampling the noise at a
     // coordinate the swell itself offsets is what ties the small ripples to the big
     // forms, so they travel together and the surface reads as one body of water.
@@ -1216,17 +1311,17 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // consumer of the sample already treats as "no chop here".
     float3 ripple=float3(.5,0,0);
     [branch] if(qualityLevel>=1.5)
-        ripple=noiseGradient(plane+wavePhase.xy+swell*float2(.62,.33));
-    // A second, finer chop octave, sampled at a little over twice the base frequency
-    // on a phase that runs the other way around the lattice. One noise octave is a
-    // texture; two incommensurate ones are weather - the fine octave is what stops
-    // the short swell trains and the base chop from aligning into corduroy at the
-    // distance where neither is quite resolvable. It fades with the SQUARE of the
-    // footprint filter, so it is gone before it can alias, and it rides the swell
-    // further than the base octave does, which keeps it glued to the same crests.
+        ripple=noiseGradient(worldCell+swell*float2(.62,.33));
+    // A second, finer chop octave, sampled at a little over twice the base frequency on a
+    // sheared (rotated and slightly anisotropic) cell. One noise octave is a texture; two
+    // incommensurate ones are weather - the fine octave is what stops the short swell trains
+    // and the base chop from aligning into corduroy at the distance where neither is quite
+    // resolvable. It fades with the SQUARE of the footprint filter, so it is gone before it
+    // can alias, and it rides the swell further than the base octave does, which keeps it
+    // glued to the same crests.
     float3 rippleFine=float3(.5,0,0);
     [branch] if(qualityLevel>=3.5)
-        rippleFine=noiseGradient(plane*2.17+float2(wavePhase.y,-wavePhase.x)*1.31+swell*float2(.9,.47));
+        rippleFine=noiseGradient(float2(2.0*worldCell.x+worldCell.y,2.0*worldCell.y)+swell*float2(.9,.47));
     // MID-WAVES: the band between the shortest analytic train (a 4.9 yard wavelength) and
     // the base chop (one 2.5 yard cell) is where a sea carries the texture a player reads
     // as "waves", and the analytic band alone leaves that band regular - eight sines
@@ -1240,9 +1335,12 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // where it is the only thing standing between the swell and corduroy. The weight is
     // authored against the octave's own coordinate, like the fine octave's .30 is, so the
     // two numbers mean the same thing.
+    // Its half frequency is spelled as half of a QUARTER TURN of the cell, which is the
+    // lowest-frequency rotation an integer wrap can carry: the hash runs at a period of 32
+    // cells, so the phase's 64-cell jump is one whole period of this octave.
     float3 rippleMid=float3(.5,0,0);
     [branch] if(qualityLevel>=6.5)
-        rippleMid=noiseGradient(plane*.46+float2(-wavePhase.x,wavePhase.y)*.87+swell*float2(.40,.66));
+        rippleMid=noiseGradientWrapped(.5*float2(-worldCell.y,worldCell.x)+swell*float2(.40,.66),32.0);
     // waveFlow.w is the wave gate. With WAVES off - or WATER QUALITY at FLAT, which zeroes
     // it from the other direction - there is no slope, no refraction distortion, no
     // roughness and no foam, whatever the field would have said.
@@ -2260,12 +2358,29 @@ void AdvanceSea(float dt) {
     // fresh pivot the lattice simply holds where it was for those frames, which is the
     // correct behaviour - an unknown camera cannot re-anchor a sea, and the travel
     // integration below (which moves the field at the sea's own speed) is unaffected.
-    const bool anchorFresh=LastWaveAnchorFresh();
-    const bool pivotValid=frame.cameraValid||anchorFresh;
-    const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];
-    const float pivotY=frame.cameraValid?frame.cameraPosition.y:lastWaveAnchor.camera[1];
+    //
+    // Round 13: that rule asks the wrong question. Nothing in it distinguishes a
+    // *fresh* anchor from the *right* one, and after a teleport the frame publishes a
+    // pose it held from the old zone whose eye-age clock reads fresh (a draw really did
+    // carry that eye a few frames ago). The pivot is now chosen by IDENTITY - the camera
+    // this frame's own liquid draws were rendered from, else a camera captured this
+    // frame - and a pivot that lands somewhere else than the last one is treated as the
+    // jump it is: the sea settles the pending turn and size change in that frame instead
+    // of easing them out over the next twelve seconds (see WaveMotion::Settle).
+    float pivotX=0.f,pivotY=0.f;
+    int pivotSource=0;
+    const bool pivotValid=SeaPivotForFrame(pivotX,pivotY,pivotSource);
+    seaPivotSource=pivotSource;
+    const bool jumped=pivotValid&&seaPivotLastValid
+        &&std::hypot(pivotX-seaPivotLast[0],pivotY-seaPivotLast[1])>kSeaReanchorYards;
+    if(pivotValid) {
+        if(jumped) {++seaPivotJumps;waveMotion.Settle(frame.wind,waveScalePercent);}
+        seaPivotLast[0]=pivotX;seaPivotLast[1]=pivotY;seaPivotLastValid=true;
+    }
+    // A settled sea is already at its heading and size; this frame still advances the
+    // travel (the sea's own pace through the new place) but must not re-anchor anything.
     waveMotion.Advance(dt,flowSpeed*seaMotion,std::clamp(flowRotation*(1.f+seaShear),0.f,1.f),
-        waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);
+        waveScalePercent,frame.wind,pivotX,pivotY,pivotValid&&!jumped,wavesEnabled);
 }
 void Present() {
     if(!enabled)return;
@@ -2309,8 +2424,18 @@ void Present() {
             <<" cover="<<uwLastCoverage<<" contains="<<uwLastContains
             <<" vertexZ="<<uwLastVertexZ<<" detNeg="<<uwPlaneDetNeg
             <<" lane="<<uwLastLane<<" published="<<uwPublished
-            <<" mediumValid="<<(underwaterFrame.medium.valid?1:0)<<'\n';
+            <<" mediumValid="<<(underwaterFrame.medium.valid?1:0)
+            // The sea's own side of the same question: which camera the lattice was
+            // allowed to re-anchor about over this interval (1 this frame's own liquid
+            // draw, 2 the frame's own captured camera, 0 neither - the lattice held),
+            // how many camera jumps settled the heading instead of easing it, and where
+            // the two ended up. A report of "the water races after a teleport" is now
+            // readable from these: sweeps come from a pivot (0 says there was none),
+            // settles come from a jump, and yaw/scale say whether anything moved at all.
+            <<" pivot="<<seaPivotSource<<" jumps="<<seaPivotJumps
+            <<" yaw="<<waveMotion.YawDegrees()<<" scale="<<waveMotion.ScalePercent()<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=frameBlendOverrides=0;
+    seaPivotJumps=0;
     uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
@@ -2327,6 +2452,10 @@ inline void Reset(IDirect3DDevice9* d) {
     // state, not device resources; forgetting them would pop every crest.
     lastWaveAnchor.valid=false;
     lastWaveAnchorSeconds=-1.0;
+    lastWaveAnchorFrame=0;
+    // The pivot itself is remembered only so a jump can be told from a step. A device
+    // reset is not a place: the next frame's pivot is adopted without settling.
+    seaPivotLastValid=false;
     localLightConstantCache.valid=false;
     // The hook is invoked for the active device, including replacement
     // devices whose pointer differs from the cached shader owner. These
@@ -3059,6 +3188,10 @@ struct Scope {
             if(anchor.valid){
                 lastWaveAnchor=anchor;
                 lastWaveAnchorSeconds=renderer::PerformanceSeconds();
+                // Which frame carried it: the sea's pivot prefers THIS frame's own draw
+                // camera over the frame's published pose, which after a teleport is the
+                // pose the capture held from the place the player left.
+                lastWaveAnchorFrame=waveFrame.frameIndex;
             }
             // Direction, speed, shear and their phases were integrated once at
             // Present. Both shader stages and every draw share that field.

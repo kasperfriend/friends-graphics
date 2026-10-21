@@ -2959,6 +2959,75 @@ as a tap on the sky already did; four equal points give a flat bed, no shoal and
 no invented cliff. A real shoal is unaffected - its taps are below the water by
 definition.
 
+## Round 13: the sea re-anchors on the camera it was drawn from (2026-10-21)
+
+### What was being seen
+
+Round 6 stopped the sea from pivoting about the previous zone's *draw anchor*, and the report
+came back: **the water still races after a teleport, and mostly where the surface is seen
+edge-on rather than ahead.** That detail is what round 6 could not explain, because it fixed the
+age of the pivot and not its identity.
+
+### Why round 6 was still open
+
+`frame.cameraValid` does not mean "this frame's camera". `CameraContinuityGate` accepts a new
+camera position only after **three consecutive candidates agree**, so for the first frames after
+a jump the frame publishes the pose it *holds* - the place the player left - and marks it
+`PoseHeld`. Its eye-age clock reads fresh, because a draw really did carry that eye a few frames
+ago. The round-6 rule (`frame.cameraValid || LastWaveAnchorFresh()`) therefore still handed
+`WaveMotion::Advance` a pivot thousands of yards away from the water being drawn, and every
+heading edit in those frames was compensated about the old zone.
+
+Two further things kept the sea moving after the landing frame:
+
+* the heading ease is **12 seconds long**. Whatever is left of it at the landing keeps sweeping,
+  and it sweeps proportional to distance from the pivot - which is the other half of "edge-on
+  rather than ahead": the far side of a bay is where the sweep has the most distance to cover.
+* the two upper chop octaves were built from the *relative* cell plus a rotated copy of the
+  camera's own phase (`2.17*plane + 1.31*R90(phase)`, `.46*plane - .87*R90(phase)`). Those two
+  halves are not the same transform, so at a fixed world point that coordinate moved with the
+  camera: about **2.5 lattice cells per yard travelled** for the fine octave. The tree had
+  already found this fault and retired it from the foam lace's fleck, where it printed as
+  crawling hash; the chop itself kept reading it.
+
+### The fix
+
+1. **Identity, not age.** `SeaPivotForFrame` takes the point from
+   - this frame's own liquid draw (`lastWaveAnchor`, tagged with `frameIndex`), else
+   - the frame's captured camera, and only when `cameraPoseSource == PoseCaptured`.
+
+   A held pose is never a pivot, and an anchor from an earlier frame never is either. The
+   medium's own anchor rule (`UnderwaterFieldAt`) is unchanged, because that pass reconstructs
+   its offsets against the same `frameCtx.cameraPosition` it is handed - the two halves of *that*
+   field agree even when the pose is held.
+2. **A jump settles instead of easing.** A pivot that lands more than
+   `Tracker::kCameraJumpYards` (50) from the last one is a teleport, a hearth, a portal or a
+   zone change. `WaveMotion::Settle` finishes the pending turn and the WAVE SIZE change in that
+   frame - no easing, no pivot compensation - so the lattice the player arrives to is the one
+   the wind already asked for. Nothing from the old place is carried across, and there is no
+   ease left to watch. Travel for the frame is still integrated normally.
+3. **The octaves read the absolute cell.** `worldCell = plane + wavePhase.xy` once, and then
+   every octave is a fixed matrix on it:
+   - base: `worldCell` (unchanged),
+   - fine: `[[2,1],[0,2]]` - sheared, ~2.2x the base frequency, rotated, incommensurate,
+   - mid: `-.5*y, .5*x` - half frequency as half of a quarter turn, counter-phased.
+
+   The matrices are **integer** (the mid one half of an integer, with a hash period of 32 to
+   match) so the CPU's 64-cell phase reduction stays invisible: a 64-cell step is a whole number
+   of each octave's periods, exactly as it already was for the base octave. A non-integer scale
+   would have re-rolled the grain every 160 yards of walking.
+
+### Verification
+
+`tools/WaterRegression.cpp` measures the two octaves' coordinates at one fixed world point from
+five cameras (and three WAVE SIZEs) and requires them to agree to phase precision, checks that a
+64-cell reduction of the phase is a whole number of each octave's periods, and pins the new
+pivot/settle expressions. `tools/WindRegression.cpp` proves `Settle` lands exactly on the sea the
+wind and WAVE SIZE ask for, that it is not a freeze (travel and later turns continue), and that
+calm air still keeps the residual swell's heading. `tools/WaterPreview.cpp` mirrors both octaves.
+The status line now carries `pivot=` (1 this frame's draw, 2 a capture, 0 held), `jumps=`, `yaw=`
+and `scale=`, so a player's log says whether a sweep had a pivot at all.
+
 ## In-game verification / troubleshooting
 
 1. Install the rebuilt **32-bit** `d3d9.dll` next to the client executable and

@@ -357,22 +357,31 @@ static WaveState SampleWaves(const Config& c, const WaveField& field, const Geom
     // does not sample stays at the neutral value/zero slope the shader seeds its sample with,
     // so "no chop here" means the same surface in both halves of the renderer.
     const NoiseSample neutral{ .5f, 0.f, 0.f };
+    // The absolute lattice cell, exactly as the shader spells it: its `plane` is relative to
+    // the draw's camera and `wavePhase.xy` is that camera's contribution, while this mirror
+    // already has the world coordinate, so here the two halves are added for the same sum.
+    // Every octave below reads this one cell, rotated and scaled by a fixed matrix - a
+    // coordinate that cannot move at a fixed world point when the camera does.
+    const V2 worldCell{ plane.x + field.ripplePhase[0], plane.y + field.ripplePhase[1] };
     const NoiseSample ripple = plan.chopOctaves >= 1
-        ? NoiseGradient(plane.x + field.ripplePhase[0] + swell * .62f,
-                        plane.y + field.ripplePhase[1] + swell * .33f)
+        ? NoiseGradient(worldCell.x + swell * .62f, worldCell.y + swell * .33f)
         : neutral;
-    // The shader's second chop octave: finer, counter-phased, footprint-faded sooner.
+    // The shader's second chop octave: finer, counter-phased (a sheared integer cell),
+    // footprint-faded sooner. Integer entries keep the phase's 64-cell wrap invisible.
     const NoiseSample rippleFine = plan.chopOctaves >= 2
-        ? NoiseGradient(plane.x * 2.17f + field.ripplePhase[1] * 1.31f + swell * .9f,
-                        plane.y * 2.17f - field.ripplePhase[0] * 1.31f + swell * .47f)
+        ? NoiseGradient(worldCell.x * 2.f + worldCell.y + swell * .9f,
+                        worldCell.y * 2.f + swell * .47f)
         : neutral;
     // The shader's mid octave, the band between the shortest analytic train and the base chop:
-    // just under half the base frequency, counter-phased against the base octave the way the
-    // fine one is, riding the swell between the two, and faded by `filter` rather than by its
-    // square because it stays resolvable about twice as far.
+    // half the base frequency as half of a quarter turn of the cell, counter-phased against the
+    // base octave the way the fine one is, riding the swell between the two, and faded by
+    // `filter` rather than by its square because it stays resolvable about twice as far. Half
+    // of the cell means the hash must wrap at 32 of its own cells (the shader's
+    // noiseGradientWrapped(...,32.0)), which is what keeps the phase's 64-cell reduction a
+    // whole period here too.
     const NoiseSample rippleMid = plan.chopOctaves >= 3
-        ? NoiseGradient(plane.x * .46f - field.ripplePhase[0] * .87f + swell * .40f,
-                        plane.y * .46f + field.ripplePhase[1] * .87f + swell * .66f)
+        ? NoiseGradientWrapped(worldCell.x * -.5f + swell * .40f,
+                               worldCell.y * .5f + swell * .66f, 32.f)
         : neutral;
     const float strength = c.ripple * .001f, normalResponse = c.normalResponse * .01f;
     // The shader's waveFlow.w gate, which the DLL fills from WAVES rather than from the

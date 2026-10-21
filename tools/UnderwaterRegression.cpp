@@ -2505,9 +2505,14 @@ void TestMirror()
                 && water.find("field.finePhase[0]=wave.ripplePhase[0]*2.f;") != std::string::npos
                 && water.find("field.finePhase[1]=wave.ripplePhase[1]*2.f;") != std::string::npos
                 && water.find("underwaterFrame.field") == std::string::npos
-                && water.find("const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];")
+                // Round 13: the sea's pivot is chosen by identity (this frame's own liquid
+                // draw, else a camera captured this frame) rather than by a clock, and a
+                // pivot that lands somewhere else settles the pending heading instead of
+                // easing it across the jump. The medium's own anchor rule above is unchanged.
+                && water.find("const bool pivotValid=SeaPivotForFrame(pivotX,pivotY,pivotSource);")
                     != std::string::npos
-                && water.find("const bool pivotValid=frame.cameraValid||anchorFresh;") != std::string::npos,
+                && water.find("lastWaveAnchorFrame==frame.frameIndex") != std::string::npos
+                && water.find("waveMotion.Settle(frame.wind,waveScalePercent);") != std::string::npos,
             "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed (or a fresh local draw anchor)");
     // World +Z in view space is ROW 2 of a row-vector matrix. That is what AnchorFromModelView
     // documents ("world axis i arrives in view space as row i") and what the renderer's

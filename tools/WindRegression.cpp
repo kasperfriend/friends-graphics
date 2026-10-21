@@ -553,6 +553,49 @@ static void TestWaveMotion()
     }
     Pass("direction/size changes re-anchor locally even at continent coordinates; no world-origin sweep");
 
+    // A camera jump (a teleport, a hearth, a portal, a zone change) is a change of place, and
+    // the heading ease that keeps a standing player from watching crests sweep past has
+    // nothing left to protect in the new zone: carried across the jump it does the opposite,
+    // and the sea keeps sweeping at several times its own speed for as long as the ease runs
+    // - the reported "the water races after I teleport". Settle finishes the pending turn and
+    // size change in the landing frame, so the lattice the player arrives to is the one the
+    // wind and WAVE SIZE already asked for, with no residual motion of any kind.
+    {
+        WaveMotion eased;
+        eased.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
+        for (int i = 0; i < 100; ++i) eased.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
+        eased.Settle(turnedWind, 25.f);
+        WaveMotion reference;
+        reference.Advance(0, 1, .32f, 25, turnedWind, 4213, -7781, true, true);
+        const auto settled = eased.Build(4213, -7781, true, true);
+        const auto target = reference.Build(4213, -7781, true, true);
+        for (int i = 0; i < 4; ++i)
+            Check(std::fabs(settled.lattice[i] - target.lattice[i]) < 1e-5f,
+                  "a settled sea is exactly the sea the wind and WAVE SIZE asked for, not a heading still easing toward them");
+        Check(std::fabs(eased.YawDegrees() - reference.YawDegrees()) < 1e-3f,
+              "the settled heading is the target heading, reported as such");
+        Check(eased.ScalePercent() == 25.f, "a settled sea takes the authored wave size at once");
+        // Still a sea: the next frames keep integrating travel and keep turning if the wind
+        // moves again - settling is a change of place, not a freeze.
+        eased.Advance(.25f, 1, .32f, 25, turnedWind, 4213, -7781, true, true);
+        Check(PeriodDistance(settled.swellPhase[0], eased.Build(4213, -7781, true, true).swellPhase[0],
+                             kTrainCells[0]) > 1e-3,
+              "a settled sea carries on travelling at its own pace");
+        eased.Advance(.25f, 1, .32f, 25, startWind, 4213, -7781, true, true);
+        Check(std::fabs(eased.YawDegrees() - reference.YawDegrees()) > 1e-3f,
+              "a settled sea turns again when the wind does");
+        // Calm air cannot steer the residual swell even across a settle: the heading the
+        // water already had is the one it keeps.
+        WaveMotion calm;
+        calm.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
+        for (int i = 0; i < 100; ++i) calm.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
+        const float beforeCalm = calm.YawDegrees();
+        calm.Settle(Air(WindDirection::South, 0), 100.f);
+        Check(std::fabs(calm.YawDegrees() - beforeCalm) < 1e-3f,
+              "a settle in calm air keeps the residual swell's heading, exactly as an eased frame would");
+    }
+    Pass("a camera jump settles the pending heading and size, so nothing from the old place sweeps the new one");
+
     WaveMotion motion;
     motion.Advance(.1f, 1, .32f, 100, startWind, 4213, -7781, true, true);
     for (int i = 0; i < 1000; ++i) motion.Advance(.1f, 1, .32f, 100, turnedWind, 4213, -7781, true, true);

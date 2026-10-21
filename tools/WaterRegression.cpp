@@ -233,6 +233,30 @@ int main() try
         const float difference=std::fabs(a-b);
         return std::fmin(difference,kLatticeWrap-difference);
     };
+    // The two upper chop octaves, spelled as the pixel stage spells them: the absolute cell
+    // (relative plane plus the camera-carrying ripple phase) under an integer matrix for the
+    // fine one, and half of a quarter turn under a hash that wraps at 32 cells for the mid
+    // one. Their VALUE at a fixed world point is what has to hold still - the octave the
+    // shader used to carry mixed the relative cell with a rotated copy of the phase half, so
+    // its value changed with the camera at a fixed world point, which is grain sliding over
+    // the sea whenever the view moved.
+    auto fineChopCoord=[](const WaveField& field,float relativeX,float relativeY) {
+        const float x=relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.ripplePhase[0];
+        const float y=relativeX*field.lattice[2]+relativeY*field.lattice[3]+field.ripplePhase[1];
+        return std::array<float,2>{2.f*x+y,2.f*y};
+    };
+    auto midChopCoord=[](const WaveField& field,float relativeX,float relativeY) {
+        const float x=relativeX*field.lattice[0]+relativeY*field.lattice[1]+field.ripplePhase[0];
+        const float y=relativeX*field.lattice[2]+relativeY*field.lattice[3]+field.ripplePhase[1];
+        return std::array<float,2>{-.5f*y,.5f*x};
+    };
+    // Distance between two octave coordinates modulo the octave's OWN period: a coordinate
+    // that differs by a whole period (or 64 cells, before the period is applied) is the same
+    // grain, which is what makes the phase's reduction invisible and what "the same world
+    // point" means for these octaves.
+    auto OctaveDistance=[](float a,float b,float period) {
+        return std::fabs(a-b-period*std::round((a-b)/period));
+    };
     for (double time : {0.0, 3.7, 61.0, 3600.0, 100000.0})
     for (float counter : {0.f, .32f, 1.f})
     for (float scale : {25.f, 100.f, 400.f})
@@ -270,6 +294,36 @@ int main() try
             Require(std::fabs(FoamLaceFineValue(field,cellX,cellY,.37f)-
                               FoamLaceFineValue(reference,worldCellX,worldCellY,.37f))<.06f,
                     "the foam lace fleck stays on the same world point from any camera");
+            // The chop octaves themselves, not only the fleck cut from them: an integer
+            // matrix on the absolute cell and a 32-cell hash period for the half-frequency
+            // one mean the same terrain point carries the same grain from every camera, and
+            // the phase's own 64-cell reduction cannot show as a seam in either.
+            const auto fineHere=fineChopCoord(field,relativeX,relativeY);
+            const auto fineThere=fineChopCoord(reference,4213.f,-7781.f);
+            const auto midHere=midChopCoord(field,relativeX,relativeY);
+            const auto midThere=midChopCoord(reference,4213.f,-7781.f);
+            // The tolerance is float32 phase precision, not tune: at the 25% WAVE SIZE a base
+            // cell is .625 yards, so this point is thousands of octave cells from the origin
+            // and a sixteenth of one cell is the arithmetic's own step (measured: 0.0625).
+            // A coordinate that mixed in the camera would be thousands of cells out instead.
+            Require(OctaveDistance(fineHere[0],fineThere[0],64.f)<.12f&&
+                    OctaveDistance(fineHere[1],fineThere[1],64.f)<.12f,
+                    "the fine chop octave reads one absolute world cell, so it does not slide with the camera");
+            Require(OctaveDistance(midHere[0],midThere[0],32.f)<.02f&&
+                    OctaveDistance(midHere[1],midThere[1],32.f)<.02f,
+                    "the half-frequency chop octave is world-anchored too, not one octave of grain that moves");
+            // The seam test. The CPU reduces the phase modulo 64 cells, so each octave's
+            // coordinate has to be unchanged by exactly that reduction: a 64-cell step is a
+            // whole number of the fine octave's periods (integer matrix) and 32 of the
+            // half-frequency one's (its hash wraps at 32). A non-integer scale here re-rolled
+            // the grain every 160 yards of walking, on top of the camera drift.
+            const auto fineSample=[](float x,float y){ return NoiseGradient(2.f*x+y,2.f*y).value; };
+            const auto midSample=[](float x,float y){ return NoiseGradientWrapped(-.5f*y,.5f*x,32.f).value; };
+            Require(std::fabs(fineSample(worldCellX,worldCellY)-
+                              fineSample(worldCellX+kLatticeWrap,worldCellY-kLatticeWrap))<.02f&&
+                    std::fabs(midSample(worldCellX,worldCellY)-
+                              midSample(worldCellX+kLatticeWrap,worldCellY+kLatticeWrap))<.02f,
+                    "each chop octave takes the field's 64-cell phase reduction as a whole number of its own periods");
             Require(FoamLaceFilter(0.f,0.f)==1.f&&FoamLaceFilter(.08f,.03f)==1.f&&
                     FoamLaceFilter(.12f,.05f)>.5f&&FoamLaceFilter(.12f,.05f)<1.f&&
                     FoamLaceFilter(.21f,.1f)==0.f,
@@ -932,12 +986,32 @@ int main() try
         // and a stale one freezes the lattice for those frames instead of re-anchoring it.
         Require(code.find("constexpr double kAnchorFreshSeconds=.25;")!=std::string::npos&&
                 code.find("inline bool LastWaveAnchorFresh() noexcept {")!=std::string::npos&&
-                code.find("const bool pivotValid=frame.cameraValid||anchorFresh;")!=std::string::npos&&
-                code.find("waveScalePercent,frame.wind,pivotX,pivotY,pivotValid,wavesEnabled);")
+                code.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();")!=std::string::npos&&
+                code.find("waveScalePercent,frame.wind,pivotX,pivotY,pivotValid&&!jumped,wavesEnabled);")
                     !=std::string::npos,
                 "the sea re-anchors only about a fresh, local pivot, never about the previous zone's anchor");
-        Require(code.find("const bool anchorValid=cameraValid||LastWaveAnchorFresh();")!=std::string::npos&&
-                code.find("lastWaveAnchorSeconds=renderer::PerformanceSeconds();")!=std::string::npos&&
+        // ... and freshness alone was not enough, which is round 13. `frame.cameraValid` only
+        // says a pose was PUBLISHED; after a teleport the frame publishes the pose it held from
+        // the place the player left (the camera gate needs three agreeing candidates) and its
+        // eye-age clock reads fresh, because a draw really did carry that eye a few frames ago.
+        // The pivot is chosen by IDENTITY instead: this frame's own liquid draw, or a camera
+        // captured this frame - never a held one, and never a draw from an earlier frame.
+        Require(code.find("uint64_t lastWaveAnchorFrame=0;")!=std::string::npos&&
+                code.find("lastWaveAnchorFrame=waveFrame.frameIndex;")!=std::string::npos&&
+                code.find("lastWaveAnchor.valid&&lastWaveAnchorFrame==frame.frameIndex")!=std::string::npos&&
+                code.find("frame.cameraPoseSource==renderer::FrameContext::PoseCaptured")!=std::string::npos&&
+                code.find("const bool pivotValid=SeaPivotForFrame(pivotX,pivotY,pivotSource);")!=std::string::npos,
+                "the sea's pivot is this frame's own draw camera, else a camera captured this frame - never the held pose a jump leaves behind");
+        // A pivot that lands somewhere else than the last one is the teleport itself, and the
+        // heading ease belonging to the old place is settled (finished) in that frame rather
+        // than carried into the new one: the sweep it would otherwise produce lasts as long as
+        // the ease does, which is twelve seconds of water at several times the sea's own speed.
+        Require(code.find("constexpr float kSeaReanchorYards=renderer::underwater::Tracker::kCameraJumpYards;")!=std::string::npos&&
+                code.find("std::hypot(pivotX-seaPivotLast[0],pivotY-seaPivotLast[1])>kSeaReanchorYards")!=std::string::npos&&
+                code.find("waveMotion.Settle(frame.wind,waveScalePercent);")!=std::string::npos&&
+                code.find("seaPivotLastValid=false;")!=std::string::npos,
+                "a camera jump settles the sea's pending turn instead of easing it across the teleport, and a device reset does not jump");
+        Require(code.find("lastWaveAnchorSeconds=renderer::PerformanceSeconds();")!=std::string::npos&&
                 code.find("lastWaveAnchorSeconds=-1.0;")!=std::string::npos,
                 "the full-screen medium's field and the Reset path obey the same freshness rule");
         // (1) The waves followed the camera. Two causes, both a matrix read the wrong way
@@ -1021,7 +1095,7 @@ int main() try
         // with its square because at half the base frequency it stays resolvable twice as far.
         // Both are pinned because a mid octave faded like the fine one disappears from the
         // middle distance, which is the only place it was added for.
-        Require(pixel.find("rippleMid=noiseGradient(plane*.46+float2(-wavePhase.x,wavePhase.y)*.87+swell*float2(.40,.66));")
+        Require(pixel.find("rippleMid=noiseGradientWrapped(.5*float2(-worldCell.y,worldCell.x)+swell*float2(.40,.66),32.0);")
                     !=std::string::npos&&
                 pixel.find("rippleMid.yz*.40*filter)")!=std::string::npos&&
                 pixel.find("rippleMid.yz*.40*filter*filter")==std::string::npos,
@@ -1674,8 +1748,17 @@ int main() try
                 && mirror.find("swell * kSwellToUnit") != std::string::npos,
                 "the CPU preview tilts the same way and normalizes the swell by the same divisor");
         Require(mirror.find("rippleFine.dx * .30f * filter * filter") != std::string::npos
-                && mirror.find("plane.x * 2.17f + field.ripplePhase[1] * 1.31f") != std::string::npos,
+                && mirror.find("worldCell.x * 2.f + worldCell.y + swell * .9f") != std::string::npos,
                 "the CPU preview mirrors the fine chop octave at the same frequency and phase");
+        // The absolute cell every octave reads: `plane` plus the camera's own phase, spelled in
+        // both halves of the renderer, and no octave allowed to keep its own idea of where the
+        // world point is (the relative-plus-rotated-phase form moved with the camera).
+        Require(code.find("float2 worldCell=plane+wavePhase.xy;") != std::string::npos
+                && code.find("ripple=noiseGradient(worldCell+swell*float2(.62,.33))") != std::string::npos
+                && code.find("rippleFine=noiseGradient(float2(2.0*worldCell.x+worldCell.y,2.0*worldCell.y)") != std::string::npos
+                && code.find("rippleMid=noiseGradientWrapped(.5*float2(-worldCell.y,worldCell.x)") != std::string::npos
+                && mirror.find("const V2 worldCell{ plane.x + field.ripplePhase[0], plane.y + field.ripplePhase[1] }") != std::string::npos,
+                "every chop octave reads one absolute world cell, in both the shader and the preview");
         Require(mirror.find("Smoothstep(foamThreshold, foamThreshold + .14f, capBand)") != std::string::npos
                 && mirror.find(".45f * warp.noiseValue + .55f * w.detail") != std::string::npos
                 && mirror.find("const float foamWind = Saturate(wind)") != std::string::npos
@@ -1855,7 +1938,7 @@ int main() try
         Require(mirror.find("const QualityPlan plan = QualityPlanFor(c.quality);") != std::string::npos
                 && mirror.find("const float swashYards = SwashYards(plan, geometry.amplitude);") != std::string::npos
                 && mirror.find("const NoiseSample rippleMid = plan.chopOctaves >= 3") != std::string::npos
-                && mirror.find("plane.x * .46f - field.ripplePhase[0] * .87f") != std::string::npos,
+                && mirror.find("NoiseGradientWrapped(worldCell.x * -.5f") != std::string::npos,
                 "the CPU preview resolves the same ladder and mirrors the mid octave it adds");
         Require(mirror.find("const float lace = plan.midWaves") != std::string::npos
                 && mirror.find("const float backwash = plan.midWaves") != std::string::npos
