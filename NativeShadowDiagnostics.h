@@ -62,6 +62,12 @@ inline std::array<bool, 16> boundFormerRt{};
 inline std::array<IDirect3DTexture9*, 16> previewTextureByStage{};
 inline std::unordered_set<uint64_t> dumpedVertexShaders;
 inline std::unordered_set<uint64_t> dumpedPixelShaders;
+// Whether a receiver the enhancement cannot fully handle is described in the
+// log and written out as assembly. On by default: a shader family nobody has
+// disassembled can then be patched correctly from evidence instead of guessed
+// at, and the files sit next to the log a player already sends.
+inline bool dumpReceivers = true;
+
 inline std::wstring dumpDirectory;
 inline bool previewEnabled = false;
 inline bool previewKeyDown = false;
@@ -165,6 +171,7 @@ inline void Configure(const std::wstring& basePath)
     logPath = basePath + L"NativeShadowDiagnostics.log";
     dumpDirectory = basePath + L"NativeShadowShaders";
     previewEnabled = renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"PreviewEnabled", 1, ini.c_str()) != 0;
+    dumpReceivers = renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"DumpReceivers", 1, ini.c_str()) != 0;
     CreateDirectoryW(dumpDirectory.c_str(), nullptr);
     if (enabled)
     {
@@ -391,7 +398,7 @@ inline bool PatchStrengthLiteral(const std::vector<BYTE>& original,
     if (original.size() % 4 != 0 || original.size() < 24) return false;
     patched.assign(original.size() / 4, 0);
     std::memcpy(patched.data(), original.data(), original.size());
-    renderer::shadowreceiver::DefLiteral literals[8];
+    renderer::shadowreceiver::DefLiteral literals[64];
     renderer::shadowreceiver::Scan scan;
     if (!renderer::shadowreceiver::ScanBytecode(
             reinterpret_cast<const std::uint32_t*>(original.data()), original.size() / 4,
@@ -403,16 +410,84 @@ inline bool PatchStrengthLiteral(const std::vector<BYTE>& original,
         if (pair < 0) continue; // not the shadow curve: do not touch it
         std::memcpy(patched.data() + literal.dataWord + size_t(pair), &darkening, 4);
         std::memcpy(patched.data() + literal.dataWord + size_t(pair) + 1, &floor, 4);
+        // A replicated pair (a, b, a, b) is read twice; both copies move, or
+        // the shader would mix a scaled curve with the native one.
+        if (pair == 0 && renderer::shadowreceiver::ShadowReplicatedPair(literal.value))
+        {
+            std::memcpy(patched.data() + literal.dataWord + 2, &darkening, 4);
+            std::memcpy(patched.data() + literal.dataWord + 3, &floor, 4);
+        }
         if (patchedConstant) *patchedConstant = int(literal.constant);
         return true;
     }
     return false;
 }
 
+// One line in the log (the literals it declares and the constants it reads)
+// plus `<base>\NativeShadowShaders\ps_<hash>.asm` for the first handful of
+// such shaders in a session. Once per hash; bounded, because this is a
+// diagnostic and not a per-draw cost.
+inline void DescribeReceiver(uint64_t psHash, const std::vector<BYTE>& bytecode, const char* reason)
+{
+    static std::unordered_set<uint64_t> described;
+    if (!dumpReceivers || described.size() >= 16 || !described.insert(psHash).second) return;
+    renderer::shadowreceiver::Scan scan;
+    renderer::shadowreceiver::DefLiteral literals[64];
+    const bool scanned = renderer::shadowreceiver::ScanBytecode(
+        reinterpret_cast<const std::uint32_t*>(bytecode.data()), bytecode.size() / 4,
+        scan, literals, std::size(literals));
+    const auto list = [](std::ostringstream& out, const char* label, std::uint32_t mask) {
+        out << ' ' << label << '=';
+        bool any = false;
+        for (unsigned reg = 0; reg < 32; ++reg)
+            if (mask & (1u << reg)) { out << (any ? "," : "") << 'c' << reg; any = true; }
+        if (!any) out << "none";
+    };
+    std::ostringstream s;
+    s << "[SHADOW-DUMP] psHash=0x" << std::hex << psHash << std::dec << " (" << reason << ")";
+    if (scanned)
+    {
+        s << " ps_" << scan.major << '_' << scan.minor;
+        list(s, "samplers", scan.samplerStages);
+        list(s, "xyOnly", scan.xyConstants);
+        list(s, "any", scan.anyConstants);
+        for (const auto& literal : literals)
+            s << " def c" << literal.constant << "=(" << literal.value[0] << ',' << literal.value[1]
+              << ',' << literal.value[2] << ',' << literal.value[3] << ')';
+    }
+    else s << " (its instruction stream could not be walked)";
+    s << "\n";
+    Append(s.str());
+
+    ID3DBlob* disassembly = nullptr;
+    if (!dumpDirectory.empty() &&
+        SUCCEEDED(D3DDisassemble(bytecode.data(), bytecode.size(),
+                                 D3D_DISASM_ENABLE_INSTRUCTION_NUMBERING, nullptr, &disassembly)) &&
+        disassembly)
+    {
+        wchar_t name[96]{};
+        swprintf_s(name, L"\\ps_%016llx.asm", static_cast<unsigned long long>(psHash));
+        HANDLE file = CreateFileW((dumpDirectory + name).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+            WriteFile(file, disassembly->GetBufferPointer(),
+                      static_cast<DWORD>(disassembly->GetBufferSize()), &written, nullptr);
+            CloseHandle(file);
+        }
+        disassembly->Release();
+    }
+}
+
 struct PatchedStrengthShader
 {
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> shader;
     float builtForScale = -1.f;
+    // Answered once: a shader with no curve literal in it must not re-read its
+    // bytecode on every one of its draws.
+    bool attempted = false;
+    bool hasLiteral = false;
 };
 inline std::unordered_map<uint64_t, PatchedStrengthShader> patchedStrengthShaders;
 
@@ -425,6 +500,7 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
 {
     auto& entry = patchedStrengthShaders[hash];
     if (entry.shader && std::abs(entry.builtForScale - strengthScale) < .001f) return entry.shader.Get();
+    if (entry.attempted && !entry.hasLiteral) return nullptr;
 
     UINT size = 0;
     if (!original || FAILED(original->GetFunction(nullptr, &size)) || !size || size > 65536) return nullptr;
@@ -434,6 +510,7 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
     std::vector<DWORD> patched;
     int patchedConstant = -1;
+    entry.attempted = true;
     if (!PatchStrengthLiteral(bytecode, darkening, 1.f - darkening, patched, &patchedConstant))
     {
         static std::unordered_set<uint64_t> loggedNoCurve;
@@ -443,6 +520,7 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
             s << "[STRENGTH] psHash=0x" << std::hex << hash << std::dec
               << " declares no darkening/floor literal, so the strength slider cannot change its shadows\n";
             Append(s.str());
+            DescribeReceiver(hash, bytecode, "no darkening/floor literal");
         }
         return nullptr;
     }
@@ -451,6 +529,7 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     if (FAILED(d->CreatePixelShader(patched.data(), created.GetAddressOf()))) return nullptr;
 
     entry.shader = created;
+    entry.hasLiteral = true;
     entry.builtForScale = strengthScale;
     std::ostringstream s;
     s << "[STRENGTH] built patched shader for psHash=0x" << std::hex << hash << std::dec
@@ -755,14 +834,15 @@ public:
             if (windowed) ApplySoftnessWindow(psHash, startRegister, registerCount, oddRegistersOnly);
             else if (learned) ApplySoftnessMask(psHash, learned->xyConstants);
         }
-        if (needStrength && strengthEligible) ApplyStrength(psHash);
-        NoteShadowDraw(softnessActive, strengthShaderSwapped);
+        if (needStrength && strengthEligible && !ApplyStrength(psHash)) ApplyStrengthConstant(psHash);
+        NoteShadowDraw(softnessActive, strengthShaderSwapped || strengthConstantTouched);
     }
 
     ~SoftnessScope()
     {
         if (!device) return;
         if (softnessActive) device->SetPixelShaderConstantF(softnessStart, &softnessOriginal[0][0], softnessCount);
+        if (strengthConstantActive) device->SetPixelShaderConstantF(strengthConstantRegister, strengthConstantOriginal, 1);
         if (strengthShaderSwapped) device->SetPixelShader(originalShaderForRestore.Get());
     }
 
@@ -833,18 +913,77 @@ private:
         }
         if (!changed)
         {
+            // THE BYTECODE SAYS WHICH CONSTANTS ARE READ AS TWO-COMPONENT
+            // VALUES; IT CANNOT SAY WHICH OF THOSE ARE THE SHADOW KERNEL. A
+            // live log made the difference plain: on one receiver family the
+            // declared constants (c0, c1, c13, c14) were a matrix and a scale,
+            // nothing in them was a Poisson offset, and softness did nothing
+            // for the whole session - while another family's c0/c1/c4 were the
+            // real thing. So when the declared set holds no offset in THIS
+            // draw, the low constant file is searched instead, with the value
+            // test as the only gate: only values that look like a tiny
+            // two-component offset (and nothing in .z/.w) are ever scaled.
             static bool loggedMaskMiss = false;
             if (!loggedMaskMiss)
             {
                 loggedMaskMiss = true;
                 std::ostringstream s;
                 s << "[SOFTNESS] learned receiver psHash=0x" << std::hex << psHash << std::dec
-                  << " declared UV-offset constants but none of them held a tiny offset in this draw\n";
+                  << " declared UV-offset constants but none of them held a tiny offset in this draw - "
+                     "searching the low constant file instead\n";
                 Append(s.str());
             }
+            ApplySoftnessScan(psHash);
             return;
         }
         Commit(psHash, first, count, original, adjusted, "learned");
+    }
+
+    // The last resort, and the one that costs a driver read per draw: c0..c31,
+    // every register tested by value. A shadow kernel's offsets are the only
+    // constants in a receiver that are a few ten-thousandths of a UV with
+    // nothing behind them, so this finds them even in a family whose
+    // instruction stream reads them through a swizzle the bytecode walk cannot
+    // single out.
+    void ApplySoftnessScan(uint64_t psHash)
+    {
+        float original[32][4]{}, adjusted[32][4]{};
+        if (FAILED(device->GetPixelShaderConstantF(0, original[0], 32))) return;
+        std::copy(&original[0][0], &original[0][0] + 32 * 4, &adjusted[0][0]);
+        bool changed = false;
+        UINT first = 32, last = 0;
+        for (UINT r = 0; r < 32; ++r)
+        {
+            if (!LooksLikeUvOffset(adjusted[r])) continue;
+            adjusted[r][0] *= softnessScale;
+            adjusted[r][1] *= softnessScale;
+            changed = true;
+            first = std::min(first, r);
+            last = std::max(last, r);
+        }
+        if (!changed)
+        {
+            static std::unordered_set<uint64_t> described;
+            if (described.size() < 16 && described.insert(psHash).second)
+            {
+                std::ostringstream s;
+                s << "[SOFTNESS] psHash=0x" << std::hex << psHash << std::dec
+                  << " holds no constant that looks like a shadow-kernel offset in this draw - its "
+                     "softness cannot be changed by scaling constants\n";
+                Append(s.str());
+                IDirect3DPixelShader9* current = nullptr;
+                std::vector<BYTE> bytecode;
+                if (SUCCEEDED(device->GetPixelShader(&current)) && current)
+                {
+                    if (ReadShaderBytecode(current, bytecode)) DescribeReceiver(psHash, bytecode, "softness found no offset");
+                    current->Release();
+                }
+            }
+            return;
+        }
+        // Commit only the span that changed, as one call.
+        const UINT span = last - first + 1;
+        Commit(psHash, first, span, original + first, adjusted + first, "scanned");
     }
 
     void Commit(uint64_t psHash, UINT startRegister, UINT count, const float original[][4],
@@ -872,13 +1011,13 @@ private:
         }
     }
 
-    void ApplyStrength(uint64_t psHash)
+    bool ApplyStrength(uint64_t psHash)
     {
         IDirect3DPixelShader9* current = nullptr;
-        if (FAILED(device->GetPixelShader(&current)) || !current) return;
+        if (FAILED(device->GetPixelShader(&current)) || !current) return false;
 
         IDirect3DPixelShader9* patched = GetPatchedStrengthShader(device, psHash, current);
-        if (!patched) { current->Release(); return; }
+        if (!patched) { current->Release(); return false; }
 
         if (SUCCEEDED(device->SetPixelShader(patched)))
         {
@@ -896,7 +1035,110 @@ private:
         else
         {
             current->Release();
+            return false;
         }
+        return true;
+    }
+
+    // A RECEIVER WHOSE SHADOW CURVE IS A CONSTANT, NOT A `def`. The live log
+    // named the family: every receiver that could be darkened declared its
+    // curve in a literal, and the four-cascade receivers - the ones that shade
+    // the GROUND - declared none at all, which is why object shadows responded
+    // to the slider and the shadows they cast on the terrain did not. A client
+    // may keep that pair in a constant it uploads (it is per-material there,
+    // not per-shader), and the pair is recognisable by the same rule the
+    // literal is: two fractions that sum to one, with nothing behind them.
+    //
+    // Exactly one such register may match; if a receiver's constants hold two
+    // complementary pairs, nothing is touched and the log says so - a guess
+    // between them is a guess about somebody's fog.
+    // Where the curve was found, per shader: the 32-register search is a driver
+    // round trip and belongs once per hash, not once per draw.
+    struct StrengthCurveSite
+    {
+        bool searched = false;
+        bool found = false;
+        UINT registerIndex = 0;
+        UINT pair = 0;
+    };
+    static std::unordered_map<uint64_t, StrengthCurveSite>& CurveSites()
+    {
+        static std::unordered_map<uint64_t, StrengthCurveSite> sites;
+        return sites;
+    }
+
+    bool ApplyStrengthConstant(uint64_t psHash)
+    {
+        StrengthCurveSite& site = CurveSites()[psHash];
+        if (site.searched && !site.found) return false;
+
+        float constants[32][4]{};
+        int foundRegister = -1, foundPair = -1, matches = 0;
+        if (site.searched)
+        {
+            // Only the register that answered before is read again.
+            if (FAILED(device->GetPixelShaderConstantF(site.registerIndex, constants[site.registerIndex], 1)))
+                return false;
+            foundRegister = int(site.registerIndex);
+            foundPair = int(site.pair);
+            matches = 1;
+        }
+        else
+        {
+            if (FAILED(device->GetPixelShaderConstantF(0, constants[0], 32))) return false;
+            for (int r = 0; r < 32; ++r)
+            {
+                const int pair = renderer::shadowreceiver::ShadowDarkeningPair(constants[r]);
+                if (pair < 0) continue;
+                ++matches;
+                foundRegister = r;
+                foundPair = pair;
+            }
+            site.searched = true;
+            site.found = matches == 1;
+            if (site.found)
+            {
+                site.registerIndex = UINT(foundRegister);
+                site.pair = UINT(foundPair);
+            }
+        }
+        if (matches != 1)
+        {
+            static std::unordered_set<uint64_t> logged;
+            if (matches > 1 && logged.size() < 32 && logged.insert(psHash).second)
+            {
+                std::ostringstream s;
+                s << "[STRENGTH] psHash=0x" << std::hex << psHash << std::dec << " declares no curve literal and "
+                  << matches << " constants of its own look like one - left alone rather than guessed between\n";
+                Append(s.str());
+            }
+            return false;
+        }
+        // The darkening is the smaller of the pair by the client's own shape
+        // (0.3 darkening, 0.7 floor); scaling the larger would brighten shadows.
+        const float native[2] = { constants[foundRegister][foundPair], constants[foundRegister][foundPair + 1] };
+        const float darkeningRegister = std::min(native[0], native[1]);
+        float darkening = std::clamp(darkeningRegister * strengthScale, 0.f, 1.f);
+        float floorValue = 1.f - darkening;
+        float patched[4] = { constants[foundRegister][0], constants[foundRegister][1],
+                             constants[foundRegister][2], constants[foundRegister][3] };
+        if (native[0] <= native[1]) { patched[foundPair] = darkening; patched[foundPair + 1] = floorValue; }
+        else { patched[foundPair] = floorValue; patched[foundPair + 1] = darkening; }
+        if (FAILED(device->SetPixelShaderConstantF(UINT(foundRegister), patched, 1))) return false;
+        std::copy(constants[foundRegister], constants[foundRegister] + 4, strengthConstantOriginal);
+        strengthConstantRegister = UINT(foundRegister);
+        strengthConstantActive = true;
+        if (!loggedStrengthConstant.exchange(true))
+        {
+            std::ostringstream s;
+            s << "[STRENGTH] ACTIVE (constant c" << foundRegister << "): " << native[0] << ',' << native[1]
+              << " -> " << patched[foundPair] << ',' << patched[foundPair + 1]
+              << " for psHash=0x" << std::hex << psHash << std::dec
+              << " - this receiver keeps its shadow curve in a constant, not a def\n";
+            Append(s.str());
+        }
+        strengthConstantTouched = true;
+        return true;
     }
 
     IDirect3DDevice9* device = nullptr;
@@ -905,7 +1147,13 @@ private:
     UINT softnessCount = 0;
     float softnessOriginal[32][4]{};
     bool strengthShaderSwapped = false;
+    // The constant a receiver keeps its curve in, when it has no literal.
+    bool strengthConstantActive = false;
+    bool strengthConstantTouched = false;
+    UINT strengthConstantRegister = 0;
+    float strengthConstantOriginal[4]{};
     static inline std::atomic<bool> loggedActive{false};
+    static inline std::atomic<bool> loggedStrengthConstant{false};
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> originalShaderForRestore;
 };
 

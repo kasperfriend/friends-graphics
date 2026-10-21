@@ -84,8 +84,10 @@ struct DefLiteral
 struct Scan
 {
     bool valid = false;             // the stream ended at END, not mid-instruction
+    unsigned major = 0, minor = 0;  // from the function's version token, 0 when absent
     std::uint32_t xyConstants = 0;  // bit n: cN read with a swizzle that avoids .z and .w
-    std::uint32_t samplerStages = 0;// bit n: sN sampled
+    std::uint32_t anyConstants = 0; // bit n: cN read at all
+    std::uint32_t samplerStages = 0;// bit n: sN declared or sampled
 };
 
 namespace detail
@@ -132,7 +134,12 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
     if (!code || words < 2) return false;
     std::size_t literalCount = 0;
     std::size_t start = 0;
-    if ((code[0] & kVersionTokenMask) == kVersionTokenValue) start = 1;
+    if ((code[0] & kVersionTokenMask) == kVersionTokenValue)
+    {
+        out.major = (code[0] >> 8) & 0xFFu;
+        out.minor = code[0] & 0xFFu;
+        start = 1;
+    }
     for (std::size_t i = start; i < words;)
     {
         const std::uint32_t token = code[i];
@@ -146,10 +153,15 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
         if (i + size > words) return false;
         if (opcode != kOpcodeDef && opcode != kOpcodeComment && size >= 2)
         {
-            // `dcl_2d s4` declares a sampler in the DESTINATION slot: it is the
-            // only way a pixel shader's bytecode names a texture stage it does
-            // not sample through an instruction operand in the same word.
-            const std::uint32_t destination = code[i + 1];
+            // A pixel shader NAMES its texture stages in `dcl`, in the
+            // destination slot - and where that slot is depends on the
+            // version: `dcl s0` (ps_2_0) is [opcode][dest], while
+            // `dcl_2d s0` (ps_3_0) is [opcode][usage][dest], because the
+            // usage token sits between them. Reading i+1 for both (the first
+            // version of this scanner did) decodes a usage word as a register
+            // and invents sampler stages that are not there.
+            const std::size_t destOffset = size >= 3 && (out.major >= 3 || out.major == 0) ? 2 : 1;
+            const std::uint32_t destination = code[i + destOffset];
             if (detail::RegisterType(destination) == kRegisterSampler)
             {
                 const std::uint32_t index = detail::RegisterIndex(destination);
@@ -195,8 +207,11 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
             const std::uint32_t index = detail::RegisterIndex(word);
             if (index >= 32) continue;
             if (type == kRegisterSampler) out.samplerStages |= (1u << index);
-            else if (detail::IsConstantToken(word) && detail::ReadsOnlyXY(word))
-                out.xyConstants |= (1u << index);
+            else if (detail::IsConstantToken(word))
+            {
+                out.anyConstants |= (1u << index);
+                if (detail::ReadsOnlyXY(word)) out.xyConstants |= (1u << index);
+            }
         }
         i += size;
         // A stream whose last instruction ends exactly at the buffer's end is
@@ -228,6 +243,16 @@ inline unsigned CascadeStageCount(std::uint32_t samplerStages) noexcept
 // receiver declares two complementary fractions that sum to one, so this is a
 // shape test rather than a register guess - which is what lets the strength
 // slider work on a receiver whose register layout nobody has disassembled.
+// The third shape is the same pair written twice - (a, b, a, b) - which is what
+// a compiler emits when the receiver feeds the curve to a `mad` over a
+// two-component swizzle pair; the caller must then patch all four components,
+// or the shader would read one scaled pair and one not.
+inline bool ShadowReplicatedPair(const float value[4]) noexcept
+{
+    constexpr float epsilon = 1e-3f;
+    return std::abs(value[2] - value[0]) <= epsilon && std::abs(value[3] - value[1]) <= epsilon;
+}
+
 inline int ShadowDarkeningPair(const float value[4]) noexcept
 {
     constexpr float epsilon = 1e-3f;
@@ -238,6 +263,9 @@ inline int ShadowDarkeningPair(const float value[4]) noexcept
     if (value[3] == 0.f && fraction(value[1]) && fraction(value[2]) &&
         std::abs(value[1] + value[2] - 1.f) <= epsilon)
         return 1;
+    if (fraction(value[0]) && fraction(value[1]) &&
+        std::abs(value[0] + value[1] - 1.f) <= epsilon && ShadowReplicatedPair(value))
+        return 0;
     return -1;
 }
 } // namespace renderer::shadowreceiver

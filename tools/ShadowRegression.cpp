@@ -181,6 +181,26 @@ int main() try
         const auto psTwoScan = ScanOf(psTwo);
         Require(psTwoScan.valid && bc::CascadeStageCount(psTwoScan.samplerStages) == 4,
                 "a ps_2_0 version token is stepped over the same way");
+        Require(versionedScan.major == 3 && versionedScan.minor == 0 &&
+                    psTwoScan.major == 2 && psTwoScan.minor == 0,
+                "the version token is reported, because where a dcl keeps its register depends on it");
+
+        // ps_3_0 writes `dcl_2d s4` as [opcode][usage][dest]. Reading the
+        // usage word as the destination (the first version of this scanner
+        // did) invents a sampler stage out of a semantic name: live, that is
+        // "samples 5 cascade slots" for a shader that samples three.
+        std::vector<std::uint32_t> declOnly;
+        declOnly.push_back(0xFFFF0300u);
+        for (std::uint32_t stage = 0; stage < 4; ++stage)
+        {
+            declOnly.push_back(Inst(opDcl, 2));
+            declOnly.push_back(0x00000005u);              // D3DDECLUSAGE_TEXCOORD
+            declOnly.push_back(Dst(kSampler, stage));
+        }
+        declOnly.push_back(Inst(opEnd, 0));
+        const auto declScan = ScanOf(declOnly);
+        Require(declScan.samplerStages == 0xFu,
+                "a ps_3_0 dcl names its sampler in the word AFTER the usage token, or s0..s3 would read as s4..s7");
 
         // A shader that samples nothing but ordinary material textures is not a
         // receiver, even though it reads a constant the same way.
@@ -261,6 +281,14 @@ int main() try
         Require(bc::ShadowDarkeningPair(notCurve) == -1 && bc::ShadowDarkeningPair(opaque) == -1 &&
                     bc::ShadowDarkeningPair(unrelated) == -1,
                 "fractions that do not sum to one, a fully opaque curve, or a third component are not the curve");
+        // A pair written twice: what a compiler emits when the curve feeds a
+        // mad over a two-component swizzle pair. Both copies must move.
+        const float replicated[4] = { .3f, .7f, .3f, .7f };
+        Require(bc::ShadowDarkeningPair(replicated) == 0 && bc::ShadowReplicatedPair(replicated),
+                "a complementary pair written twice is still the curve");
+        const float notReplicated[4] = { .3f, .7f, .3f, .2f };
+        Require(bc::ShadowDarkeningPair(notReplicated) == -1,
+                "four non-zero components that are not two copies of one pair are not the curve");
     }
 
     std::printf("\n-- the renderer uses these rules, and only on proven receivers --\n");
@@ -311,7 +339,8 @@ int main() try
                     shadow.find("LogShadowDecline(\"caster\"") != std::string::npos,
                 "every gate the enhancement can stop at names itself, once per session");
         Require(shadow.find("inline void NoteShadowDraw(") != std::string::npos &&
-                    shadow.find("NoteShadowDraw(softnessActive, strengthShaderSwapped);") != std::string::npos,
+                    shadow.find("NoteShadowDraw(softnessActive, strengthShaderSwapped || strengthConstantTouched);")
+                        != std::string::npos,
                 "and every receiver draw is counted, so a log says whether anything was ever changed");
         Require(shadow.find("declares no darkening/floor literal") != std::string::npos,
                 "a strength slider that cannot patch its receiver says so");
@@ -320,12 +349,46 @@ int main() try
         // code as an instruction.
         const std::string scanner = Read("src/Effects/ShadowReceiverBytecode.h");
         Require(scanner.find("kVersionTokenMask") != std::string::npos &&
-                    scanner.find("if ((code[0] & kVersionTokenMask) == kVersionTokenValue) start = 1;")
-                        != std::string::npos,
+                    scanner.find("if ((code[0] & kVersionTokenMask) == kVersionTokenValue)") != std::string::npos &&
+                    scanner.find("start = 1;") != std::string::npos,
                 "the scanner steps over the function's version token before reading instructions");
         Require(shadow.find("fallback.xyConstants = 0xFFFFu;") != std::string::npos &&
                     shadow.find("without readable bytecode") != std::string::npos,
                 "a receiver whose bytecode cannot be read still gets the bounded window, with the value test as the guard");
+        // THE GROUND. The receivers that shade terrain declared no curve
+        // literal at all, so the strength slider could only darken the object
+        // shadows - the report this round answers. A receiver whose curve is a
+        // CONSTANT is found by the same complementary-pair rule, and only when
+        // exactly one of its constants matches.
+        Require(shadow.find("bool ApplyStrengthConstant(uint64_t psHash)") != std::string::npos &&
+                    shadow.find("renderer::shadowreceiver::ShadowDarkeningPair(constants[r])") != std::string::npos,
+                "a receiver that keeps its shadow curve in a constant is darkened too");
+        Require(shadow.find("if (matches != 1)") != std::string::npos &&
+                    shadow.find("left alone rather than guessed between") != std::string::npos,
+                "two complementary pairs in one receiver is not a choice this code makes");
+        Require(shadow.find("const float darkeningRegister = std::min(native[0], native[1]);") != std::string::npos,
+                "the darkening is the smaller half of the pair - scaling the floor would brighten shadows instead");
+        Require(shadow.find("if (strengthConstantActive) device->SetPixelShaderConstantF(strengthConstantRegister, strengthConstantOriginal, 1);")
+                    != std::string::npos,
+                "a constant that was changed for one draw is put back for the next");
+        // The literal buffer was 8: a terrain-family shader declares far more
+        // defs than that, so a curve late in the stream was never looked at.
+        Require(shadow.find("renderer::shadowreceiver::DefLiteral literals[64];") != std::string::npos,
+                "every def in a big shader is looked at, not the first eight");
+        // And a shader with no curve at all is answered once, not per draw.
+        Require(shadow.find("if (entry.attempted && !entry.hasLiteral) return nullptr;") != std::string::npos,
+                "a receiver with no curve literal is not re-read on every one of its draws");
+        // Softness, when the bytecode's mask holds no offset in this draw: the
+        // live log showed a whole session with "0 softened" for that reason.
+        Require(shadow.find("void ApplySoftnessScan(uint64_t psHash)") != std::string::npos &&
+                    shadow.find("searching the low constant file instead") != std::string::npos &&
+                    shadow.find("GetPixelShaderConstantF(0, original[0], 32)") != std::string::npos,
+                "when the declared constants hold no offset, the low constant file is searched by value instead");
+        // Evidence for the next family: the shader itself, in the log and on disk.
+        Require(shadow.find("[SHADOW-DUMP] psHash=0x") != std::string::npos &&
+                    shadow.find("D3DDisassemble(bytecode.data(), bytecode.size(),") != std::string::npos &&
+                    shadow.find("ps_%016llx.asm") != std::string::npos,
+                "a receiver neither slider can fully handle is described in the log and written out as assembly");
     }
 
     std::printf("\nALL SHADOW TESTS PASSED\n");
