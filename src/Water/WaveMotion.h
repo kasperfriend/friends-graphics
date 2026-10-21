@@ -21,14 +21,7 @@ public:
         speed = std::clamp(WindFinite(speed, 0.f), 0.f, 9.f);
         counter = std::clamp(WindFinite(counter, 0.f), 0.f, 1.f);
         pivotValid = pivotValid && std::isfinite(pivotX) && std::isfinite(pivotY);
-        const double length = std::hypot(double(wind.direction.x), double(wind.direction.y));
-        // Shaders sample sin(dot(p,d) + phase): increasing phase travels
-        // OPPOSITE d. Point row 0 upwind so actual crests travel downwind.
-        double target = wind.DrivesWaves() && std::isfinite(length) && length > .01 ?
-            std::atan2(-double(wind.direction.y), -double(wind.direction.x)) : double(kLatticeYaw);
-        // Calm air cannot steer the residual swell. Keep its last heading
-        // until wind returns; still seed a deterministic heading at startup.
-        if (wind.DrivesWaves() && m_primed && WindFinite(wind.strength, 0.f) <= .0001f) target = m_yaw;
+        const double target = TargetYaw(wind);
         if (!m_primed)
         {
             m_yaw = target;
@@ -81,6 +74,25 @@ public:
         m_uv[1] = WrapPeriod(m_uv[1] + travel * kUvDriftV, 1.0);
     }
 
+    // A camera jump - a teleport, a hearth, a portal, a zone change - is a change of
+    // PLACE, not a change of sea. Nothing of the old place is on screen in the new one,
+    // so the easing that exists to stop a crest sweeping past a player who is standing
+    // still has nothing left to protect: carried across the jump it does the opposite,
+    // and every crest in the new zone sweeps at several times the sea's own speed until
+    // the turn finishes (twelve seconds of it - the reported "the water races after I
+    // teleport"). Settle finishes the turn and the size change in the landing frame and
+    // applies NO pivot compensation, so the jump re-anchors the field once, invisibly,
+    // instead of dragging it there for the next ten seconds. Travel is not this call's
+    // business: the caller still integrates the frame's own step through Advance.
+    void Settle(const WindState& wind, float scalePercent) noexcept
+    {
+        scalePercent = std::clamp(WindFinite(scalePercent, 100.f), 25.f, 400.f);
+        m_yaw = TargetYaw(wind);
+        m_scale = scalePercent;
+        SetLattice();
+        m_primed = true;
+    }
+
     WaveField Build(float cameraX, float cameraY, bool cameraValid, bool animated) const noexcept
     {
         WaveField field;
@@ -100,8 +112,25 @@ public:
         return field;
     }
     float ScalePercent() const noexcept { return m_scale; }
+    // The lattice heading the sea is currently at, in degrees: the status line reports it
+    // so a settled jump and a still-easing turn are distinguishable in a player's log.
+    float YawDegrees() const noexcept { return float(m_yaw * 180.0 / kWindPi); }
 
 private:
+    // The heading the sea is aiming at, shared by Advance and Settle so a settled sea
+    // and an eased one can never aim at two different targets.
+    double TargetYaw(const WindState& wind) const noexcept
+    {
+        const double length = std::hypot(double(wind.direction.x), double(wind.direction.y));
+        // Shaders sample sin(dot(p,d) + phase): increasing phase travels
+        // OPPOSITE d. Point row 0 upwind so actual crests travel downwind.
+        double target = wind.DrivesWaves() && std::isfinite(length) && length > .01 ?
+            std::atan2(-double(wind.direction.y), -double(wind.direction.x)) : double(kLatticeYaw);
+        // Calm air cannot steer the residual swell. Keep its last heading
+        // until wind returns; still seed a deterministic heading at startup.
+        if (wind.DrivesWaves() && m_primed && WindFinite(wind.strength, 0.f) <= .0001f) target = m_yaw;
+        return target;
+    }
     void SetLattice() noexcept
     {
         const float inv = 1.f / (kRippleCellYards * m_scale * .01f);

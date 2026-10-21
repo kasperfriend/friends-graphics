@@ -91,3 +91,170 @@ sun-time changes before naming projection/light registers.
 
 The retired custom `ShadowDraw` replay and long screen-space directional march
 remain compile-time unreachable.
+
+## Round 7: the sliders reach a receiver nobody disassembled (2026-10-21)
+
+Reported after the water rounds: **"Native shadows don't work at all."** The
+session's `NativeShadowDiagnostics.log` answered it in two lines:
+
+```
+[SOFTNESS] ACTIVE: scaled registers c3..10 by 1.45x for psHash=0x449b66c5fb94fede cascadeStage=-1
+[SOFTNESS] cascades bound at stage 4 but psHash=0xbeec8ff97f375ed1 is not in the receiver whitelist
+```
+
+Read together, those two lines are the whole fault. The enhancement knew about
+seventeen pixel-shader **hashes** that somebody had disassembled by hand. The
+shader the client actually drew with the four cascades bound was not one of
+them, so every slider was inert; and the shader that *was* being scaled had no
+cascades bound at its draws at all (`cascadeStage=-1`), so what it scaled was
+not a Poisson kernel. A client update that recompiles its material shaders
+therefore turns both sliders off, permanently and silently - which is exactly
+what "don't work at all" means from the player's seat.
+
+### What replaced the hash list
+
+The shader can state both facts about itself, and the enhancement now asks it.
+`src/Effects/ShadowReceiverBytecode.h` walks the pixel shader's own SM2/SM3
+token stream (portable, exercised by `tools/ShadowRegression.cpp`):
+
+* **Is this a receiver?** Does it sample the native cascade window? The
+  register type in a D3D9 parameter token is five bits and not adjacent -
+  bits 30:28 plus bits 12:11 (`D3DSP_REGTYPE_MASK` / `D3DSP_REGTYPE_MASK2`) -
+  which is the only thing that separates a constant (type 2) from a sampler
+  (type 10) when their low three bits agree. Four sampled stages in s4..s8 (or
+  the runtime cascade probe finding the four cascade targets bound at that
+  draw) is a receiver. `dcl_2d sN` is read too: it is the only place a pixel
+  shader names a stage in the destination slot.
+* **Which constants may softness scale?** Only those read with a swizzle that
+  never touches .z or .w - the offsets added to a texture coordinate's x/y.
+  Each draw still has to hold a value that looks like a tiny 2-component
+  offset, so a register used differently in another branch of a material is
+  left alone.
+* **Which literal may strength patch?** The `def` whose floats are a
+  complementary pair summing to one - the client's own
+  `visibility * darkening + floor` curve, at either of the two component
+  positions the captured families use. That is a shape, not a register guess,
+  so a receiver nobody has disassembled can still have its shadows darkened.
+
+The hand-verified families stay as a fast path (a dozen in-memory comparisons
+before the driver is touched), a learned receiver is recorded once per session
+with the constants it declared (`[SOFTNESS] LEARNED receiver ...`), and the one
+whitelist entry the live log proved was *not* a receiver
+(`0x449b66c5fb94fede`, `cascadeStage=-1`) is gone. The cascade probe itself no
+longer demands one exact depth format: a square depth target of cascade size is
+what the question is about, and the client exposes its cascades through a
+driver FourCC on some drivers.
+
+Nothing about the client's caster pass, receiver placement or shadow matrices
+changes - this is still an enhancement of the client's own cascaded shadow
+maps, never a second shadow system.
+
+### Follow-up: the first version of this learned nothing
+
+The scanner's first release read a compiled function from its first word. A
+D3D9 function begins with its **version token** (`0xFFFF0300` for ps_3_0), which
+is not an instruction: its high half is all ones, so it was read as a
+fifteen-word instruction and the walk landed in the middle of the shader. Every
+receiver was then refused, once more, silently. The walk now steps over a
+leading version token (high half `0xFFFF`) and accepts a stream that ends exactly
+on an instruction boundary without an `END` token.
+
+Two safety nets were added with it, both because "the sliders do nothing" must
+never be a report a log cannot explain:
+
+* **A receiver whose bytecode cannot be read at all** (a wrapping driver, a
+  creation path that keeps no copy) is still recognised by the device: if the
+  four cascades are bound at that draw, a bounded window of c0..c15 is scanned
+  with the same value test every register must pass. Logged as
+  `[SOFTNESS] LEARNED receiver … without readable bytecode`.
+* **Every gate names itself once per session**: `[SHADOW] declined: …` for the
+  toggle being off, both sliders being neutral, the draw targeting a texture,
+  the tracked shader not being the bound one, and a caster pass (no colour
+  writes); `[STRENGTH] … declares no darkening/floor literal` when a receiver's
+  curve is not a `def`. A running counter writes
+  `[SHADOW] N shadow-receiver draw(s) so far: X softened, Y strengthened, softness …x strength …x`
+  every 3600 receiver draws, so a log from a session that shows nothing says
+  whether the pass runs at all.
+
+### Round 8: the ground is a different receiver (2026-10-21)
+
+Reported after the version-token fix: **"it works on shadows on the objects, but
+not on those that get cast on the ground."** The session log says exactly why,
+in three facts:
+
+1. Every receiver that could be **darkened** declares its curve in a `def`
+   literal (`[STRENGTH] built patched shader … (literal c13)`), and every one of
+   those samples **one** cascade slot - the object/creature receivers.
+2. Every receiver that samples **four** cascade slots - the family that shades
+   the terrain - logs `declares no darkening/floor literal`. Its curve is not in
+   its instruction stream at all.
+3. `[SHADOW] 3600 … 0 softened` for the first 23 000 receiver draws: softness
+   did nothing at all until an area whose cascades sat at **s5** produced
+   `[SOFTNESS] ACTIVE (learned): scaled registers c0..4`. The stage-4 family's
+   declared constants (`c0 c1 c13 c14`) hold a matrix and a scale, not a Poisson
+   kernel, so the value test correctly refused them - and nothing else was
+   tried.
+
+Three fixes, each from one of those facts:
+
+* **The curve may be a constant.** A receiver with no literal is searched for
+  the same complementary pair `(darkening, floor)` - summing to one, both strictly
+  inside 0..1, nothing behind them - in its own constants, and the pair is
+  scaled there and restored after the draw. Exactly one register may match; two
+  complementary pairs in one receiver is not a choice this code makes (it says
+  so in the log instead). The darkening is the *smaller* half, so a slider value
+  above 100 darkens and below it lightens. The search is once per shader, then
+  only the register that answered is read again.
+* **Softness falls back to values when the bytecode's mask misses.** When the
+  constants the scanner named hold no tiny two-component offset in the draw at
+  hand, c0..c31 is searched by value instead - which is what the stage-5 area
+  proved is the real discriminator (the kernel offsets are the only constants in
+  a receiver that are a few ten-thousandths of a UV with nothing behind them).
+* **A `dcl` keeps its sampler in the word after the usage token** in ps_3_0
+  (`[opcode][usage][dest]`), not in the word after the opcode; reading the usage
+  word as a register invented sampler stages (`samples 5 cascade slots` for a
+  shader that samples three). The literal buffer also went from 8 to 64: a
+  terrain-family shader declares more `def`s than that, so a curve late in the
+  stream was never looked at.
+
+And because the ground may still be a shape none of these rules catch, a receiver
+that neither slider can fully handle is now **described** - one `[SHADOW-DUMP]`
+line with its literals and the constants it reads, plus its disassembly under
+`NativeShadowShaders\ps_<hash>.asm` - so the next family is supported from its
+own code instead of from another log round trip. `[ShadowDiagnostics] DumpReceivers=0`
+turns it off.
+
+## Round 9: the terrain literal's fourth component (2026-10-21)
+
+The dump from the third session answered the question the previous round could
+not. Four-cascade (terrain) receivers declare their curve as the *verified*
+family-A shape with a fourth component in use:
+
+```
+[SHADOW-DUMP] psHash=0xa3d9e226a21a5739 (...) ps_3_0 samplers=c0,c4,c5,c6,c7
+  xyOnly=c0,c1,c13,c14 any=c0..c14 def c13=(1.2,0.3,0.7,2) def c14=(0,1,0.5,-0.2)
+```
+
+`def c13 = (1.2, .3, .7, 2)` is family A - `1.2 = 1/darkening`, then the
+complementary pair - but the rule demanded `.w == 0`, so the one literal that
+mattered was rejected and the strength slider logged
+`declares no darkening/floor literal` for exactly the receivers that shade the
+ground. One-cascade object receivers happened to carry `.w = 0` and patched
+fine, which is why the slider "worked on objects and not on the ground".
+
+* **Family A is recognised by its anchor, not its tail.** Component 0 within
+  `0.01` of `1.2`, components 1 and 2 fractions summing to one - component 3
+  is unconstrained and is preserved untouched when the pair is patched. Family
+  B (pair at components 0,1) still requires an empty or replicated tail,
+  because otherwise any literal with two complementary fractions would match.
+* **The dump prints only the literals that exist.** The first version printed
+  its whole 64-entry buffer, which produced fifty `def c0=(0,0,0,0)` lines that
+  read as evidence and were not. `Scan` now carries `literalCount`, the count of
+  every `def` in the stream (even past the buffer's capacity), and both the dump
+  and the patcher walk only those entries.
+
+Round 9 pins: `.w = 2` accepted at pair 1,2; the packed `.w` never deciding
+family A whatever it holds; a `0.9` first component still rejected; family B
+with a non-zero `.w` still rejected; `literalCount` correct when the buffer is
+exactly full and when it overflows; the dump's loop bounded by `literalCount`;
+the patcher writing the pair and nothing else.

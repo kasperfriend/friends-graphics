@@ -799,6 +799,130 @@ void TestTracker()
                 "ordinary swimming does not drop the state");
     }
     {
+        // THE BAND MAY NOT LIFT A DRY CAMERA. `waveBandYards` is how far a crest stands over
+        // the liquid tile's mean plane at the camera, and it is added to the depth so a swimmer
+        // just under the mean stays in the medium through a swell. Added to an ABOVE-surface
+        // reading it inverted the very thing it exists for: on a shore slope, a beach or the
+        // lip of a canal, an eye half a yard over the water plus a crest's reach read as
+        // "under water", and the hysteresis - a sixth of a yard - then kept it there. This is
+        // the reported "underwater shader on ground slopes" beside water.
+        Tracker slope;
+        const float onTheShore[3] = { 40.f, 40.f, 2.f };
+        for (int frame = 0; frame < 300; ++frame)
+        {
+            slope.BeginFrame();
+            slope.Observe(-0.5f);   // the camera, half a yard above the water it stands beside
+            slope.Advance(1.f / 60.f, onTheShore, true, true, 1.4f);
+        }
+        Require(!slope.submerged && slope.ramp == 0.f,
+                "a crest's reach cannot put a camera above the mean plane under water, however close to the surface it floats");
+        // ... and the reported sequence: swim out of one lake, land on a slope beside another.
+        // The state arrives submerged, and the shore's own readings are what must take it off.
+        Tracker landed;
+        const float inWater[3] = { 0.f, 0.f, -8.f };
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            landed.BeginFrame();
+            landed.Observe(8.f);
+            landed.Advance(1.f / 60.f, inWater, true);
+        }
+        Require(landed.submerged && landed.ramp == 1.f, "a swimmer starts submerged");
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            landed.BeginFrame();
+            landed.Observe(-1.2f);
+            landed.Advance(1.f / 60.f, onTheShore, true, true, 1.4f);
+        }
+        Require(!landed.submerged && landed.ramp == 0.f && landed.yards < 0.f,
+                "a swimmer who lands on a shore slope near other water is off the medium in under a second, not held by the waves' reach");
+        // A camera that IS under the mean plane keeps the reach, which is what it was added
+        // for, and the reach is at full strength by the depth the hysteresis calls submerged.
+        Tracker diver;
+        const float under[3] = { 0.f, 0.f, -0.2f };
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            diver.BeginFrame();
+            diver.Observe(0.22f);
+            diver.Advance(1.f / 60.f, under, true, true, 1.4f);
+        }
+        Require(diver.submerged && diver.ramp > 0.9f,
+                "a crest's reach is still worth a full ramp to a camera that is just under the mean plane");
+        // The gate is smooth: a camera bobbing right at the plane cannot strobe between a
+        // full band and none, because the band arrives in proportion to the depth.
+        Tracker bobbing;
+        float step = 0.f, previous = 0.f, top = 0.f;
+        for (int frame = 0; frame < 600; ++frame)
+        {
+            bobbing.BeginFrame();
+            bobbing.Observe(0.1f + 0.1f * std::sin(float(frame) * (6.2831853f / 90.f)));
+            bobbing.Advance(1.f / 60.f, under, true, true, 1.4f);
+            if (frame > 60) { step = std::max(step, std::fabs(bobbing.ramp - previous)); top = std::max(top, bobbing.ramp); }
+            previous = bobbing.ramp;
+        }
+        // A gate that switched the band on at zero would move the ramp by most of its range
+        // in the single frame the bobbing eye crossed the plane; a smooth one cannot.
+        Require(top < 1.f && step < .08f,
+                "a swimmer bobbing at the plane breathes with the swell instead of toggling the whole band");
+    }
+    {
+        // THE JUMP THE PUBLISHED POSE CANNOT SEE. The camera gate needs three agreeing
+        // candidates, so a teleport's first frames publish the eye the capture HELD from the
+        // place the player left - and the tracker's own camera test then compares the old
+        // place with itself. The draws cannot be wrong that way: their camera is read from the
+        // matrix each draw was transformed by, in the frame that is ending, so a place report
+        // hundreds of yards from the last one IS the teleport.
+        Tracker teleport;
+        const float lakeA[3] = { 100.f, 100.f, -8.f };
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            teleport.BeginFrame();
+            teleport.NoteDrawPlace(lakeA[0], lakeA[1], 100.0 + frame / 60.0);
+            teleport.Observe(8.f);
+            teleport.Advance(1.f / 60.f, lakeA, true);
+        }
+        Require(teleport.submerged && teleport.planeKnown && teleport.jumpSource == 0,
+                "a swim with the draws reporting their own place is not a jump");
+        // The landing frame: the frame still publishes the OLD eye (the held pose), and the
+        // draws have already moved.
+        const float lakeB[3] = { 3000.f, -2200.f, 14.f };
+        teleport.BeginFrame();
+        teleport.NoteDrawPlace(lakeB[0], lakeB[1], 101.0);
+        teleport.Advance(1.f / 60.f, lakeA, true);
+        Require(teleport.jumpSource == 2 && !teleport.submerged && teleport.ramp == 0.f
+                    && !teleport.planeKnown && teleport.yards < 0.f,
+                "a teleport the draws report drops the whole state on the landing frame, even while the frame still publishes the old zone's eye");
+        // And the control: with no draw evidence, the same held pose compares the old place
+        // with itself and the state is held - which is why the draws' place had to be asked.
+        Tracker noEvidence;
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            noEvidence.BeginFrame();
+            noEvidence.Observe(8.f);
+            noEvidence.Advance(1.f / 60.f, lakeA, true);
+        }
+        noEvidence.BeginFrame();
+        noEvidence.Advance(1.f / 60.f, lakeA, true);
+        Require(noEvidence.submerged && noEvidence.ramp == 1.f,
+                "without the draws' place a held pose is the old place compared with itself, and holds");
+        // Silence is not a jump: a loading screen, or a diver who spent ten seconds looking at
+        // the seabed, re-reports a place long after the last one and nothing is dropped.
+        Tracker quiet;
+        for (int frame = 0; frame < 60; ++frame)
+        {
+            quiet.BeginFrame();
+            quiet.NoteDrawPlace(lakeA[0], lakeA[1], 200.0 + frame / 60.0);
+            quiet.Observe(8.f);
+            quiet.Advance(1.f / 60.f, lakeA, true);
+        }
+        quiet.BeginFrame();
+        quiet.NoteDrawPlace(3000.f, -2200.f, 210.0);   // ten seconds later
+        quiet.Advance(1.f / 60.f, lakeA, true);
+        Require(quiet.jumpSource == 0 && quiet.submerged,
+                "a place report after a long silence is not a jump - the camera test owns the loading-screen case");
+        Require(Tracker::kDrawPlaceSeconds > .25 && Tracker::kDrawPlaceSeconds < 1.f,
+                "the place evidence stays recent for less than a second, so a walk never reads as a teleport");
+    }
+    {
         // Nearest wins. A frame can hold several liquid draws - a harbour with a dozen tiles,
         // or a mirrored reflection draw that slipped past the determinant test - and the
         // interface the camera is at is the nearest one, which is also the one a mirror cannot
@@ -2427,6 +2551,19 @@ void TestMirror()
                     != std::string::npos
                 && water.find("submersionTracker.BeginFrame();") != std::string::npos,
             "the frame's answer is settled at Present, after every liquid draw has reported");
+    // The jump has to be visible while the published pose is not. The draws' own camera is
+    // published per frame from a MAIN-TARGET, world-aligned draw (a reflection pass's camera
+    // is mirrored about the plane and a tile-local anchor is not a world place at all), the
+    // tracker is told before it advances, and the periodic line counts the jumps it made.
+    Require(water.find("if(mainTarget&&anchor.valid&&anchor.worldAligned&&mainDrawPlaceFrame!=waveFrame.frameIndex) {")
+                != std::string::npos
+                && water.find("submersionTracker.NoteDrawPlace(mainDrawPlaceX,mainDrawPlaceY,renderer::PerformanceSeconds());")
+                    != std::string::npos
+                && water.find("if(mainDrawPlaceValid&&mainDrawPlaceFrame==frame.frameIndex) {")
+                    != std::string::npos
+                && water.find("mainDrawPlaceValid=false;") != std::string::npos
+                && water.find("uwJumps=") != std::string::npos,
+            "the tracker is told where this frame's own draws came from, and only from draws aimed at the player's view");
     // The outside-evidence exit spends the client's own frustum: the tracker
     // may retire a remembered plane only while the covering region was in
     // view, the test itself is the tracker header's CoveringPlaneInView (the
@@ -2445,7 +2582,11 @@ void TestMirror()
     // evaluates the displaced trains' own phase at the swimmer (times the grouping
     // envelope's worst case, floored at zero and capped by the tracker), so the medium
     // is measured against the visible surface and still water is band zero.
-    Require(core.find("const float submergence = yards + band;") != std::string::npos
+    // The reach is admitted in proportion to how deep the eye already is, so a crest can
+    // never lift a camera that is above the mean plane into the medium (the ground-slope
+    // report) and still holds a swimmer through a swell.
+    Require(core.find("const float inWater = std::clamp(yards / kEnterYards, 0.f, 1.f);") != std::string::npos
+                && core.find("const float submergence = yards + band * inWater;") != std::string::npos
                 && core.find("kMaxWaveBandYards") != std::string::npos
                 && water.find("renderer::water::SwellTheta(train,0.f,0.f,field.swellPhase)")
                     != std::string::npos
@@ -2505,9 +2646,14 @@ void TestMirror()
                 && water.find("field.finePhase[0]=wave.ripplePhase[0]*2.f;") != std::string::npos
                 && water.find("field.finePhase[1]=wave.ripplePhase[1]*2.f;") != std::string::npos
                 && water.find("underwaterFrame.field") == std::string::npos
-                && water.find("const float pivotX=frame.cameraValid?frame.cameraPosition.x:lastWaveAnchor.camera[0];")
+                // Round 13: the sea's pivot is chosen by identity (this frame's own liquid
+                // draw, else a camera captured this frame) rather than by a clock, and a
+                // pivot that lands somewhere else settles the pending heading instead of
+                // easing it across the jump. The medium's own anchor rule above is unchanged.
+                && water.find("const bool pivotValid=SeaPivotForFrame(pivotX,pivotY,pivotSource);")
                     != std::string::npos
-                && water.find("const bool pivotValid=frame.cameraValid||anchorFresh;") != std::string::npos,
+                && water.find("lastWaveAnchorFrame==frame.frameIndex") != std::string::npos
+                && water.find("waveMotion.Settle(frame.wind,waveScalePercent);") != std::string::npos,
             "the field is built once, at composite, from the motion's own clock, anchored on the camera it is handed (or a fresh local draw anchor)");
     // World +Z in view space is ROW 2 of a row-vector matrix. That is what AnchorFromModelView
     // documents ("world axis i arrives in view space as row i") and what the renderer's
