@@ -167,6 +167,58 @@ namespace renderer
         bool m_primed[2]{};
     };
 
+    // ---- which body's direction a consumer inside the draw stream takes ----------
+    //
+    // `CelestialBody::visible` answers "did the client paint that billboard THIS
+    // frame", which is a frustum event and not a lighting fact: pitch the camera up
+    // past the horizon and a low sun leaves the bottom of the frame, its draw stops,
+    // and the flag drops while the sun itself has neither moved nor set. Water's
+    // per-draw light direction was gated on exactly that flag, so one frame of camera
+    // pitch handed every term that reads the light over to whatever the client's own
+    // constant carries that frame - the sun road, the reflected disc, the sky gradient
+    // and the in-scatter's elevation gate all went at once, which is the report "the
+    // water loses a lot of brightness when I look up above the horizon".
+    //
+    // A direction is a WORLD fact, so the choice below is made from the scene's own
+    // day/night state - view independent, the same dominance the compositor's glare
+    // origin uses - and a body that was confirmed once keeps supplying its direction
+    // while its billboard is culled, which is precisely the contract
+    // CelestialDirectionStabilizer gives the clouds, the god rays and the shadows.
+    struct CelestialTrack
+    {
+        bool drawn = false;  // the billboard was painted this frame
+        bool known = false;  // a disc has confirmed this body's world direction at some point
+        Vec3 world{ 0.0f, 0.0f, 1.0f };
+    };
+
+    // Returns 0 when nothing has ever been confirmed - the caller must then keep its
+    // own fallback source rather than invent a light - 1 for the sun, 2 for the moon.
+    inline int ChooseCelestialTrack(const CelestialTrack& sun, const CelestialTrack& moon,
+                                    float daylight, float moonlight) noexcept
+    {
+        const auto usable = [](const CelestialTrack& body) noexcept {
+            if (!body.known || !std::isfinite(body.world.x) || !std::isfinite(body.world.y) ||
+                !std::isfinite(body.world.z))
+                return false;
+            const float length = Length(body.world);
+            return std::isfinite(length) && length > 1e-4f;
+        };
+        // The body the scene's own lighting says is up, never the body the camera
+        // happens to see: a daytime moon inside the frustum must not take the light
+        // from the sun, which is the mistake the compositor's own glare choice made
+        // before it was given this dominance test.
+        const bool night = moonlight > daylight;
+        if (usable(night ? moon : sun))
+            return night ? 2 : 1;
+        // The dominant body has never been confirmed. A disc painted THIS frame is
+        // live evidence of a real direction and beats a client constant; a body that
+        // was never seen at all supplies nothing, and the caller keeps its own source.
+        const CelestialTrack& other = night ? sun : moon;
+        if (other.drawn && usable(other))
+            return night ? 1 : 2;
+        return 0;
+    }
+
     // Cloud shadows used to switch fully on/off at a fixed sun elevation,
     // so a disc hovering near the threshold (or a direction source that
     // changed by a degree) blinked the shadow of the whole deck across the
