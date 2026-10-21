@@ -1139,6 +1139,11 @@ private:
                              constants[foundRegister][2], constants[foundRegister][3] };
         if (native[0] <= native[1]) { patched[foundPair] = darkening; patched[foundPair + 1] = floorValue; }
         else { patched[foundPair] = floorValue; patched[foundPair + 1] = darkening; }
+        if (foundPair == 0 && renderer::shadowreceiver::ShadowReplicatedPair(constants[foundRegister]))
+        {
+            patched[2] = patched[0];
+            patched[3] = patched[1];
+        }
         if (FAILED(device->SetPixelShaderConstantF(UINT(foundRegister), patched, 1))) return false;
         std::copy(constants[foundRegister], constants[foundRegister] + 4, strengthConstantOriginal);
         strengthConstantRegister = UINT(foundRegister);

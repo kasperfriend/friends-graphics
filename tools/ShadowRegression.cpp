@@ -309,6 +309,10 @@ int main() try
         const float familyBTail[4] = { .3f, .7f, 0.f, 2.f };
         Require(bc::ShadowDarkeningPair(familyBTail) == -1,
                 "family B, whose pair sits at components 0 and 1, still requires an empty or replicated tail");
+        // Family C: (-11.1111, 11, darkening, floor).
+        const float familyC[4] = { -11.1111f, 11.f, .3f, .7f };
+        Require(bc::ShadowDarkeningPair(familyC) == 2,
+                "family C's (-11.1111, 11, .3, .7) declares its pair at components 2 and 3");
     }
 
     std::printf("\n-- a dump reports the literals that exist --\n");
