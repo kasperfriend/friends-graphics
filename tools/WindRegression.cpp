@@ -685,7 +685,7 @@ static void TestConfigurationAndWiring()
             "F7 Reset Defaults must restore the shipped INI value, not a contradictory preset");
     }
     const auto clouds = ini.substr(ini.find("[VolumetricClouds]"), ini.find("[LocalFog]") - ini.find("[VolumetricClouds]"));
-    Check(clouds.find("Quality=2\n") != clouds.npos && clouds.find("ResolutionPercent=25\n") != clouds.npos &&
+    Check(clouds.find("Quality=3\n") != clouds.npos && clouds.find("ResolutionPercent=75\n") != clouds.npos &&
           clouds.find("\nSampleCount=") == clouds.npos && clouds.find("\nLightSampleCount=") == clouds.npos &&
           clouds.find("\nBaseStep=") == clouds.npos && clouds.find("\nWindAngle=") == clouds.npos,
           "cloud quality and resolution have one owner; legacy wind angle is not shipped while linked");

@@ -88,8 +88,8 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"GroundShadowPercent","CLOUD SHADOWS",0,100,5,55},
  {KIND_TOGGLE,L"VolumetricClouds",L"SunRaysEnabled","CLOUD SUN RAYS",0,1,1,0},
  {KIND_SLIDER,L"VolumetricClouds",L"SunRayPercent","CLOUD RAY STRENGTH",0,200,5,80},
- {KIND_SLIDER,L"VolumetricClouds",L"ResolutionPercent","CLOUD RESOLUTION (%)",20,100,5,25},
- {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD MARCH QUALITY (0 LOW 3 ULTRA)",0,3,1,2},
+ {KIND_SLIDER,L"VolumetricClouds",L"ResolutionPercent","CLOUD RESOLUTION (%)",20,100,5,75},
+ {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD MARCH QUALITY (0 LOW 3 ULTRA)",0,3,1,3},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},

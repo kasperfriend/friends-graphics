@@ -689,12 +689,12 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  renderer::locationtuning::SettingsFingerprint fp;
  auto read=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"VolumetricClouds",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.enabled=read(L"Enabled",1)!=0;
- ApplyQualityPreset(static_cast<uint32_t>(std::clamp(read(L"Quality",2),0,3)));
+ ApplyQualityPreset(static_cast<uint32_t>(std::clamp(read(L"Quality",3),0,3)));
  // Older INIs shipped explicit SampleCount/LightSampleCount/BaseStep values
  // identical to quality 2. Reading them made the F7 quality slider a no-op
  // on existing installs. Quality is now the sole owner of these three
  // dependent march settings; resolution remains independently adjustable.
- m_settings.resolutionScale=std::clamp(read(L"ResolutionPercent",25),20,100)*.01f;
+ m_settings.resolutionScale=std::clamp(read(L"ResolutionPercent",75),20,100)*.01f;
 
  m_settings.coverage=std::clamp(read(L"CoveragePercent",50),0,100)*.01f;
  m_settings.density=std::clamp(read(L"DensityPercent",100),10,400)*.01f;
