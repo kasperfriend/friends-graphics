@@ -515,6 +515,33 @@ inline unsigned CascadeStageProbe(IDirect3DDevice9* device)
     return 0u;
 }
 
+// An enhancement that does nothing has to be able to say where it stopped, or
+// the next report is a guess again. Each reason is written once per session.
+inline void LogShadowDecline(const char* reason, const std::string& message)
+{
+    static std::unordered_set<std::string> logged;
+    if (logged.size() >= 32 || !logged.insert(reason).second) return;
+    Append("[SHADOW] declined: " + message + "\n");
+}
+
+// How many receiver draws the session has decided about, and how many it
+// actually changed. Written every 3600 of them - a minute at 60 fps with a
+// normal amount of terrain in view - so a log from a session that "does
+// nothing" says whether the scope runs at all.
+inline void NoteShadowDraw(bool softened, bool strengthened)
+{
+    static uint64_t draws = 0, soft = 0, strong = 0;
+    ++draws;
+    if (softened) ++soft;
+    if (strengthened) ++strong;
+    if (draws % 3600 != 0) return;
+    std::ostringstream s;
+    s << "[SHADOW] " << draws << " shadow-receiver draw(s) so far: " << soft
+      << " softened, " << strong << " strengthened, softness "
+      << softnessScale << "x strength " << strengthScale << "x\n";
+    Append(s.str());
+}
+
 inline bool ReadShaderBytecode(IDirect3DPixelShader9* shader, std::vector<BYTE>& bytes)
 {
     UINT size = 0;
@@ -628,33 +655,6 @@ inline const LearnedReceiver* LearnReceiver(IDirect3DDevice9* device, uint64_t p
     s << "\n";
     Append(s.str());
     return &inserted.first->second;
-}
-
-// An enhancement that does nothing has to be able to say where it stopped, or
-// the next report is a guess again. Each reason is written once per session.
-inline void LogShadowDecline(const char* reason, const std::string& message)
-{
-    static std::unordered_set<std::string> logged;
-    if (logged.size() >= 32 || !logged.insert(reason).second) return;
-    Append("[SHADOW] declined: " + message + "\n");
-}
-
-// How many receiver draws the session has decided about, and how many it
-// actually changed. Written every 3600 of them - a minute at 60 fps with a
-// normal amount of terrain in view - so a log from a session that "does
-// nothing" says whether the scope runs at all.
-inline void NoteShadowDraw(bool softened, bool strengthened)
-{
-    static uint64_t draws = 0, soft = 0, strong = 0;
-    ++draws;
-    if (softened) ++soft;
-    if (strengthened) ++strong;
-    if (draws % 3600 != 0) return;
-    std::ostringstream s;
-    s << "[SHADOW] " << draws << " shadow-receiver draw(s) so far: " << soft
-      << " softened, " << strong << " strengthened, softness "
-      << softnessScale << "x strength " << strengthScale << "x\n";
-    Append(s.str());
 }
 
 // The value test every softness path shares: a Poisson kernel's offsets are a
