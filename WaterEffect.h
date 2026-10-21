@@ -229,6 +229,17 @@ uint64_t lastWaveAnchorFrame=0;
 // 0 none (the lattice holds where it was), 1 this frame's own liquid draw, 2 the frame's
 // own captured camera. Reported in the status line.
 int seaPivotSource=0,seaPivotJumps=0;
+// The camera THIS frame's own liquid draws were rendered from, as the submersion tracker's
+// place evidence (renderer::underwater::Tracker::NoteDrawPlace). Main-target, world-aligned
+// draws only: the client's reflection pass draws the same water under a mirrored camera
+// whose answer is the player's own camera flipped about the plane - a place nobody is
+// standing - and a tile-local anchor is not a world place at all. Published per frame and
+// read once by AdvanceUnderwater, exactly like the sea's own anchor.
+float mainDrawPlaceX=0.f,mainDrawPlaceY=0.f;
+uint64_t mainDrawPlaceFrame=0;
+bool mainDrawPlaceValid=false;
+// Camera jumps the tracker reported from the draws' place, per status interval.
+int uwPlaceJumps=0;
 bool seaPivotLastValid=false;
 float seaPivotLast[2]{};
 // A camera jump - a teleport, a hearth, a portal, a zone change - moves further in one
@@ -485,6 +496,16 @@ void AdvanceUnderwater(float dt) {
     // (defined after the wave state it reads); still water, waves off or geometry off
     // give a zero band and the tracker behaves exactly as before.
     const float waveBandYards=UnderwaterWaveBandYards(frame);
+    // Where this frame's own draws were rendered from. The tracker's camera below is the
+    // frame's published pose, which after a teleport is the pose the capture HELD from the
+    // place the player left (the camera gate needs three agreeing candidates), so the jump
+    // it tests for is the old place against itself. A draw's own matrix cannot be wrong that
+    // way - it is the matrix that draw was transformed by, for the frame that is ending -
+    // and the draw stream carries the new eye in the very frame the player lands.
+    if(mainDrawPlaceValid&&mainDrawPlaceFrame==frame.frameIndex) {
+        submersionTracker.NoteDrawPlace(mainDrawPlaceX,mainDrawPlaceY,renderer::PerformanceSeconds());
+        if(submersionTracker.placeJump)++uwPlaceJumps;
+    }
     submersionTracker.Advance(dt,frame.cameraValid?camera:nullptr,frame.cameraValid,coveringPlaneInView,waveBandYards);
     submersionTracker.BeginFrame();
     // Keep the published frame current on a frame that drew no liquid at all - which, for a
@@ -2432,10 +2453,11 @@ void Present() {
             // the two ended up. A report of "the water races after a teleport" is now
             // readable from these: sweeps come from a pivot (0 says there was none),
             // settles come from a jump, and yaw/scale say whether anything moved at all.
+            <<" uwJumps="<<uwPlaceJumps
             <<" pivot="<<seaPivotSource<<" jumps="<<seaPivotJumps
             <<" yaw="<<waveMotion.YawDegrees()<<" scale="<<waveMotion.ScalePercent()<<'\n';
     frameMatches=frameCandidates=frameSceneMatches=frameNearMisses=frameBlendOverrides=0;
-    seaPivotJumps=0;
+    seaPivotJumps=uwPlaceJumps=0;
     uwPlaneValid=uwPlaneRigid=uwPlaneRot=uwPlaneRange=uwPlaneOffscreen=uwPlaneNoVertex=uwPlaneDetNeg=uwPlaneFar=uwPlaneOutside=0;
 }
 inline void Reset(IDirect3DDevice9* d) {
@@ -2453,6 +2475,8 @@ inline void Reset(IDirect3DDevice9* d) {
     lastWaveAnchor.valid=false;
     lastWaveAnchorSeconds=-1.0;
     lastWaveAnchorFrame=0;
+    mainDrawPlaceValid=false;
+    mainDrawPlaceFrame=0;
     // The pivot itself is remembered only so a jump can be told from a step. A device
     // reset is not a place: the next frame's pivot is adopted without settling.
     seaPivotLastValid=false;
@@ -3118,6 +3142,17 @@ struct Scope {
                         else if(!mainTargetSurface)mainTarget=true;
                     }
                 }
+            }
+            // The place the tracker's jump test spends: this draw's own camera, when the draw
+            // is aimed at the player's view and its anchor came from the live VIEW transform
+            // (a tile-local anchor is a point inside a water tile, not a world place). One
+            // report per frame is enough - every main-target tile of the frame shares it - so
+            // the first one wins and the rest are a compare and a store.
+            if(mainTarget&&anchor.valid&&anchor.worldAligned&&mainDrawPlaceFrame!=waveFrame.frameIndex) {
+                mainDrawPlaceX=anchor.camera[0];
+                mainDrawPlaceY=anchor.camera[1];
+                mainDrawPlaceFrame=waveFrame.frameIndex;
+                mainDrawPlaceValid=true;
             }
             LiquidVertexSamples vertexSamples;
             const bool haveVertices=mainTarget&&ReadLiquidVertices(d,vertexSamples);

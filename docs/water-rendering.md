@@ -1,5 +1,81 @@
 # Water rendering audit
 
+## Round 22: the medium cannot be started by the waves, or carried across a teleport (2026-10-21)
+
+Reported after round 13: **teleporting from a zone with water to one that has water nearby
+sometimes leaves the underwater medium on ground slopes.**
+
+### Two separate faults, both on the way in
+
+**1. The crest's reach was added on the wrong side of the plane.** Round 21 gave
+`Tracker::Advance` the caller's `waveBandYards` - how far a crest stands over the liquid tile's
+MEAN plane at the camera - so a swimmer just under the mean would not lose the medium at every
+trough. It was added to the depth unconditionally:
+
+```
+submergence = yards + band;
+```
+
+Above the surface that inverts the thing it was added for. An eye half a yard over the water,
+beside a lake the sheet still extends under, reads "half a yard of water over the eye, plus a
+crest's reach" and the ramp settles around two thirds on **dry ground**. The hysteresis
+(`kEnterYards = .22`, `kExitYards = .06`) then holds it there, and because the effect only
+exists where the camera is *near* the plane, a gentle shore slope turns into a strip of
+"underwater" terrain a few yards wide - which is exactly what was reported, and why "slopes"
+rather than "ground". Teleporting out of water made it stickier still: the state arrived with
+`submerged` already true.
+
+The reach is now admitted in proportion to how deep the eye already is:
+
+```
+inWater      = clamp(yards / kEnterYards, 0, 1);
+submergence  = yards + band * inWater;
+```
+
+A camera above the mean plane gets no band at all (a crest passing beside an eye is not water
+over the eye), a camera at `kEnterYards` and deeper gets all of it - so round 21's swell hold is
+untouched - and the ramp is continuous through the transition, so a swimmer bobbing with his
+eyes at the plane breathes with the swell instead of toggling the whole band in one frame.
+
+**2. The teleport could not be seen while the published pose was held.** `Tracker::Advance`
+detects a jump by comparing the incoming camera with the one it remembers. But
+`CameraContinuityGate` needs three agreeing candidates before it accepts a new camera, so for
+the first frames after a teleport the frame publishes the eye the capture **held** from the
+place the player left (`cameraPoseSource = PoseHeld`, `cameraValid` true). The tracker compared
+the old place with itself, held its answer, and the medium stayed on the new place's ground
+until a real capture finally latched.
+
+A liquid draw cannot be wrong that way - its camera is read out of the matrix the draw was
+transformed by, in the frame that is ending - so the tracker now also takes **the place this
+frame's own draws came from** (`NoteDrawPlace`, published by `WaterEffect.h` from a
+main-target, world-aligned draw only: a reflection pass draws the same water under a camera
+mirrored about the plane, and a tile-local anchor is a point inside a water tile rather than a
+world place). Two consecutive reports more than `kCameraJumpYards` (50) apart within
+`kDrawPlaceSeconds` (.5 s) are the jump itself, and the handler is the existing one: the
+remembered plane, the ramp, the settled depth and the hysteresis are dropped on that frame.
+The time gate is what keeps the evidence honest - a loading screen, or a diver who spent ten
+seconds looking at the seabed, silences the draws, and silence is not a jump; those cases were
+always the camera test's. The status line counts the jumps this evidence produced (`uwJumps=`).
+
+### What did not change
+
+The medium, its optics, the two media's crossfade, the plane reading, the locality and
+footprint gates and the round-21 swell hold are untouched. Water on a shoreline you are
+genuinely standing in still submerges the camera by the same rule it always did.
+
+### Verification
+
+UnderwaterRegression: a camera above the mean plane is never submerged by the reach at any
+distance from the surface (300 frames at half a yard over the water); the reported sequence
+(swim, then land on a shore slope beside other water) leaves the medium in under a second; a
+camera just under the mean still gets a full ramp from the reach; a camera bobbing at the plane
+never moves the ramp more than .08 in a frame; a swim with the draws reporting their own place
+is not a jump; a landing frame whose pose is still the old zone's is cleared by the draws'
+place with no observation from stale state; the same held pose without draw evidence holds
+(which is why the evidence was needed); a place report after ten seconds of silence is not a
+jump; and the published place is pinned to main-target, world-aligned draws, fed before
+`Advance`.
+
 ## Full rework round 21: the crossfade was measured against the mean plane (2026-10-20)
 
 The report, after round 20: the underwater shader is secured against the exit rule

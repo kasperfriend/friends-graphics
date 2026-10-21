@@ -560,6 +560,10 @@ struct Tracker
     // A zone change, a teleport or a hearth moves the camera further in one frame than
     // any swim can. The threshold is the atmosphere's own history-guard distance.
     static inline constexpr float kCameraJumpYards = 50.f;
+    // How recently the draws must have reported a place for two of those reports to be
+    // comparable. Draws of one place arrive every frame; a loading screen or a long look at
+    // the seabed silences them, and silence is not a jump.
+    static inline constexpr double kDrawPlaceSeconds = .5;
     // The remembered plane is forgotten once the camera is this far, horizontally,
     // from where it was observed. A swimmer never leaves his lake unobserved for
     // half a thousand yards without the surface drawing again first.
@@ -613,6 +617,27 @@ struct Tracker
     uint64_t heldFrames = 0;
     float camera[3] = { 0.f, 0.f, 0.f };
     bool cameraValid = false;
+    // THE PLACE THE DRAWS CAME FROM, which is not the same thing as the eye above. `camera`
+    // is the camera of the last frame that published one, and after a teleport that is the
+    // place the player LEFT: the camera gate keeps the previous pose until three draws
+    // agree on the new one, so for those frames the frame publishes the held eye and the
+    // jump test below - which compares the incoming camera with `camera` - compares the old
+    // place with itself. A liquid draw cannot be wrong that way: its camera is read out of
+    // the matrix the draw was transformed by, in the frame that is ending. Horizontal only,
+    // because every jump this client performs - a hearth, a portal, a summon, a zone
+    // transition - moves the player hundreds of yards across the map, while a swim, a fall,
+    // a boat ride and an elevator do not. `seconds` is the caller's clock (the same one the
+    // sea integrates on): two places seen more than kDrawPlaceSeconds apart are not a jump,
+    // they are two views of one walk, and a loading gap must not be read as one either.
+    float drawPlaceX = 0.f, drawPlaceY = 0.f;
+    double drawPlaceSeconds = -1.0;
+    bool drawPlaceKnown = false;
+    // A jump was seen by the draws since the last Advance. Consumed there, so the caller
+    // only has to say where the draws were rendered from, once per frame.
+    bool placeJump = false;
+    // How the jump was seen, for the caller's log: 1 the frame's own camera, 2 the draws'
+    // place.
+    int jumpSource = 0;
     // The liquid plane's own height in world yards, and whether one is known. This is the
     // state that survives a frame with no liquid draw: `raw` is re-derived from it against
     // the current camera instead of being held or dropped.
@@ -643,6 +668,36 @@ struct Tracker
         overheadRaw = -1.f;
         observedOverhead = false;
         sawOutside = false;
+        jumpSource = 0;
+    }
+
+    // This frame's own liquid draws were rendered from (x, y). Evidence about the PLACE,
+    // not about the water: it can only ever say that the camera is somewhere else than the
+    // state remembers, which is what a teleport is. Called once per frame by the caller
+    // (WaterEffect.h, from a main-target draw's own matrix); a reflection pass's mirrored
+    // camera is deliberately never reported.
+    //
+    // The comparison is against the last place the draws reported, not against `camera`,
+    // and only while that last report is still recent. A teleport within a zone - a mage
+    // portal, a summon, a hearth in the same instance - keeps the draw stream running
+    // across the jump, so one frame later the draws are hundreds of yards away and the jump
+    // is a fact. A walk is not: the same water keeps drawing the same place every frame.
+    // A gap longer than kDrawPlaceSeconds (a loading screen, a diver looking at the seabed
+    // for ten seconds) is not evidence of anything, and disarms the test - those are left
+    // to the camera test below, which is what the loading-screen case always used.
+    inline void NoteDrawPlace(float x, float y, double seconds) noexcept
+    {
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(seconds)) return;
+        if (drawPlaceKnown && seconds >= drawPlaceSeconds && seconds - drawPlaceSeconds <= kDrawPlaceSeconds)
+        {
+            const float dx = x - drawPlaceX;
+            const float dy = y - drawPlaceY;
+            if (dx * dx + dy * dy > kCameraJumpYards * kCameraJumpYards) placeJump = true;
+        }
+        drawPlaceX = x;
+        drawPlaceY = y;
+        drawPlaceSeconds = seconds;
+        drawPlaceKnown = true;
     }
 
     inline void Accept(float planeYards, bool overheadEvidence) noexcept
@@ -722,23 +777,39 @@ struct Tracker
         // liquid whose plane reads over his head must not have to wait for a frame
         // with no water in view before the medium lets go. (On an observed frame the
         // fresh local reading below then re-measures and re-remembers.)
+        const float jump = kCameraJumpYards * kCameraJumpYards;
+        bool jumped = false;
         if (haveCamera && cameraValid)
         {
             const float dx = cameraWorld[0] - camera[0];
             const float dy = cameraWorld[1] - camera[1];
             const float dz = cameraWorld[2] - camera[2];
-            const float jump = kCameraJumpYards * kCameraJumpYards;
             if (dx * dx + dy * dy + dz * dz > jump)
             {
-                if (!observed) raw = -1.f;
-                yards = -1.f;
-                ramp = 0.f;
-                submerged = false;
-                planeKnown = false;
-                overheadAge = 1e9f;
-                outsideSeconds = 0.f;
-                cleared = true;
+                jumped = true;
+                jumpSource = 1;
             }
+        }
+        // And the draws' own place, which stays right while the published pose does not: a
+        // teleport lands with the draw stream already carrying the new eye, frames before
+        // the camera gate confirms it and while the frame still publishes the eye of the
+        // zone the player left.
+        if (placeJump)
+        {
+            jumped = true;
+            if (!jumpSource) jumpSource = 2;
+        }
+        placeJump = false;
+        if (jumped)
+        {
+            if (!observed) raw = -1.f;
+            yards = -1.f;
+            ramp = 0.f;
+            submerged = false;
+            planeKnown = false;
+            overheadAge = 1e9f;
+            outsideSeconds = 0.f;
+            cleared = true;
         }
         if (observed)
         {
@@ -860,7 +931,22 @@ struct Tracker
         // still water (band zero) behaves exactly as before.
         const float band = std::isfinite(waveBandYards)
             ? std::clamp(waveBandYards, 0.f, kMaxWaveBandYards) : 0.f;
-        const float submergence = yards + band;
+        // THE CREST'S REACH REACHES ONLY A CAMERA THAT IS ALREADY IN THE WATER. `band` is how
+        // far a crest stands over the mean plane at the camera - a positive number, because a
+        // trough below the mean must not subtract water from a swimmer - and it used to be
+        // added to the depth whatever side of the plane the camera was on. Above the surface
+        // that inverts the very thing it was added for: a camera floating half a yard over a
+        // lake read as "half a yard of water over the eye, plus a crest's reach", and the
+        // medium settled onto dry ground - a shore slope, a beach, the lip of a canal, the
+        // bank beside a pond - where it then stayed, because the hysteresis needs only a
+        // sixth of a yard to keep what it has. That is the reported "underwater shader on
+        // ground slopes", and it is worst exactly where the camera is nearest the water, so a
+        // gentle slope turns into a strip of "underwater" shore. The gate is smooth rather
+        // than a step at zero, because a swimmer bobbing with his eyes at the plane would
+        // otherwise toggle the whole band on and off every swell; it is complete by the depth
+        // the hysteresis already calls submerged, so nothing about a real swim changes.
+        const float inWater = std::clamp(yards / kEnterYards, 0.f, 1.f);
+        const float submergence = yards + band * inWater;
         ramp = Smoothstep(kEnterYards, kRampYards, submergence);
         // Hysteresis: entering takes more water over the camera than leaving does, so a
         // camera parked exactly at the surface cannot toggle a whole frame's fog pipeline
