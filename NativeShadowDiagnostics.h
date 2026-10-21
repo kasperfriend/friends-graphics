@@ -434,7 +434,18 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
     std::vector<DWORD> patched;
     int patchedConstant = -1;
-    if (!PatchStrengthLiteral(bytecode, darkening, 1.f - darkening, patched, &patchedConstant)) return nullptr;
+    if (!PatchStrengthLiteral(bytecode, darkening, 1.f - darkening, patched, &patchedConstant))
+    {
+        static std::unordered_set<uint64_t> loggedNoCurve;
+        if (loggedNoCurve.size() < 64 && loggedNoCurve.insert(hash).second)
+        {
+            std::ostringstream s;
+            s << "[STRENGTH] psHash=0x" << std::hex << hash << std::dec
+              << " declares no darkening/floor literal, so the strength slider cannot change its shadows\n";
+            Append(s.str());
+        }
+        return nullptr;
+    }
 
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> created;
     if (FAILED(d->CreatePixelShader(patched.data(), created.GetAddressOf()))) return nullptr;
@@ -525,6 +536,10 @@ struct LearnedReceiver
     std::uint32_t xyConstants = 0;
     unsigned cascadeStages = 0;
     unsigned cascadeProbe = 0;
+    // Learned without readable bytecode: the device had the four cascades
+    // bound, so this draw is a receiver, but which of its constants are the
+    // kernel's offsets had to be left to the value test over a bounded window.
+    bool fallback = false;
 };
 
 inline std::unordered_map<uint64_t, LearnedReceiver>& LearnedReceivers()
@@ -550,16 +565,35 @@ inline const LearnedReceiver* LearnReceiver(IDirect3DDevice9* device, uint64_t p
 
     std::vector<BYTE> bytecode;
     renderer::shadowreceiver::Scan scan;
-    if (!ReadShaderBytecode(shader, bytecode) ||
-        !renderer::shadowreceiver::ScanBytecode(
-            reinterpret_cast<const std::uint32_t*>(bytecode.data()), bytecode.size() / 4, scan))
+    const bool scanned = ReadShaderBytecode(shader, bytecode) &&
+        renderer::shadowreceiver::ScanBytecode(
+            reinterpret_cast<const std::uint32_t*>(bytecode.data()), bytecode.size() / 4, scan);
+    if (!scanned)
     {
+        // No bytecode to read (a wrapped driver, a shader created by a path
+        // that does not keep it). The device still knows whether this draw has
+        // the four cascades bound, and that is the same evidence the hand-made
+        // whitelist was built from - so a bounded window is allowed to stand in
+        // for the bytecode, with every register still passing the value test.
+        const unsigned probe = CascadeStageProbe(device);
+        if (!probe)
+        {
+            LogShadowDecline("unreadable",
+                "a pixel shader's bytecode could not be read and no cascades were bound, so it is neither a "
+                "receiver nor a candidate");
+            return nullptr;
+        }
+        LearnedReceiver fallback;
+        fallback.xyConstants = 0xFFFFu; // c0..c15: the offsets live low
+        fallback.cascadeProbe = probe;
+        fallback.fallback = true;
+        auto placeholder = LearnedReceivers().emplace(psHash, fallback);
         std::ostringstream s;
-        s << "[SOFTNESS] psHash=0x" << std::hex << psHash << std::dec
-          << " is not in the receiver whitelist and its bytecode could not be read - "
-             "the sliders cannot reach it\n";
+        s << "[SOFTNESS] LEARNED receiver psHash=0x" << std::hex << psHash << std::dec
+          << " without readable bytecode (cascades bound at stage " << probe
+          << "): scanning c0..c15, each register still has to hold a tiny two-component offset\n";
         Append(s.str());
-        return nullptr;
+        return &placeholder.first->second;
     }
 
     const unsigned cascades = renderer::shadowreceiver::CascadeStageCount(scan.samplerStages);
@@ -596,6 +630,33 @@ inline const LearnedReceiver* LearnReceiver(IDirect3DDevice9* device, uint64_t p
     return &inserted.first->second;
 }
 
+// An enhancement that does nothing has to be able to say where it stopped, or
+// the next report is a guess again. Each reason is written once per session.
+inline void LogShadowDecline(const char* reason, const std::string& message)
+{
+    static std::unordered_set<std::string> logged;
+    if (logged.size() >= 32 || !logged.insert(reason).second) return;
+    Append("[SHADOW] declined: " + message + "\n");
+}
+
+// How many receiver draws the session has decided about, and how many it
+// actually changed. Written every 3600 of them - a minute at 60 fps with a
+// normal amount of terrain in view - so a log from a session that "does
+// nothing" says whether the scope runs at all.
+inline void NoteShadowDraw(bool softened, bool strengthened)
+{
+    static uint64_t draws = 0, soft = 0, strong = 0;
+    ++draws;
+    if (softened) ++soft;
+    if (strengthened) ++strong;
+    if (draws % 3600 != 0) return;
+    std::ostringstream s;
+    s << "[SHADOW] " << draws << " shadow-receiver draw(s) so far: " << soft
+      << " softened, " << strong << " strengthened, softness "
+      << softnessScale << "x strength " << strengthScale << "x\n";
+    Append(s.str());
+}
+
 // The value test every softness path shares: a Poisson kernel's offsets are a
 // few ten-thousandths of a UV, two components, with nothing in .z/.w. A
 // register that fails this in the draw at hand is left exactly as the client
@@ -615,6 +676,12 @@ public:
     {
         const bool needSoftness = std::abs(softnessScale - 1.f) > .001f;
         const bool needStrength = std::abs(strengthScale - 1.f) > .001f;
+        if (!enhancementEnabled)
+            LogShadowDecline("toggle", "the NATIVE SHADOWS toggle is off ([NativeShadows] Enabled=0)");
+        if (!needSoftness && !needStrength)
+            LogShadowDecline("neutral", "softness is 100% and strength is 100% - both sliders are at their native value");
+        if (currentRtTexture)
+            LogShadowDecline("offscreen", "this draw renders into a texture, not into the player's view");
         if (!enhancementEnabled || !device || (!needSoftness && !needStrength) || currentRtTexture)
             return;
 
@@ -644,6 +711,7 @@ public:
                 if (FAILED(device->GetPixelShader(&candidate)) || candidate != trackedShader)
                 {
                     if (candidate) candidate->Release();
+                    LogShadowDecline("bound", "the tracked pixel shader is not the one bound to the device");
                     return;
                 }
                 if (candidate) candidate->Release();
@@ -669,13 +737,18 @@ public:
             if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
             {
                 if (actualShader) actualShader->Release();
+                LogShadowDecline("bound", "the tracked pixel shader is not the one bound to the device");
                 return;
             }
             if (actualShader) actualShader->Release();
         }
 
         DWORD colorWrite = 0;
-        if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
+        if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0)
+        {
+            LogShadowDecline("caster", "colour writes are off - a shadow caster pass, not a receiver");
+            return;
+        }
 
         if (needSoftness)
         {
@@ -683,6 +756,7 @@ public:
             else if (learned) ApplySoftnessMask(psHash, learned->xyConstants);
         }
         if (needStrength && strengthEligible) ApplyStrength(psHash);
+        NoteShadowDraw(softnessActive, strengthShaderSwapped);
     }
 
     ~SoftnessScope()

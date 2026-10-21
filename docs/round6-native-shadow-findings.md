@@ -148,3 +148,30 @@ driver FourCC on some drivers.
 Nothing about the client's caster pass, receiver placement or shadow matrices
 changes - this is still an enhancement of the client's own cascaded shadow
 maps, never a second shadow system.
+
+### Follow-up: the first version of this learned nothing
+
+The scanner's first release read a compiled function from its first word. A
+D3D9 function begins with its **version token** (`0xFFFF0300` for ps_3_0), which
+is not an instruction: its high half is all ones, so it was read as a
+fifteen-word instruction and the walk landed in the middle of the shader. Every
+receiver was then refused, once more, silently. The walk now steps over a
+leading version token (high half `0xFFFF`) and accepts a stream that ends exactly
+on an instruction boundary without an `END` token.
+
+Two safety nets were added with it, both because "the sliders do nothing" must
+never be a report a log cannot explain:
+
+* **A receiver whose bytecode cannot be read at all** (a wrapping driver, a
+  creation path that keeps no copy) is still recognised by the device: if the
+  four cascades are bound at that draw, a bounded window of c0..c15 is scanned
+  with the same value test every register must pass. Logged as
+  `[SOFTNESS] LEARNED receiver … without readable bytecode`.
+* **Every gate names itself once per session**: `[SHADOW] declined: …` for the
+  toggle being off, both sliders being neutral, the draw targeting a texture,
+  the tracked shader not being the bound one, and a caster pass (no colour
+  writes); `[STRENGTH] … declares no darkening/floor literal` when a receiver's
+  curve is not a `def`. A running counter writes
+  `[SHADOW] N shadow-receiver draw(s) so far: X softened, Y strengthened, softness …x strength …x`
+  every 3600 receiver draws, so a log from a session that shows nothing says
+  whether the pass runs at all.

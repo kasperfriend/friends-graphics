@@ -40,6 +40,14 @@ inline constexpr std::uint32_t kOpcodeMask = 0xFFFFu;
 inline constexpr unsigned kLengthShift = 24;
 inline constexpr std::uint32_t kLengthMask = 0xFu;
 inline constexpr std::uint16_t kOpcodeEnd = 0xFFFFu;
+// A compiled function BEGINS with its version token - 0xFFFF0300 for ps_3_0,
+// 0xFFFF0200 for ps_2_0, 0xFFFF0101 for ps_1_1 - which is not an instruction:
+// its high half is all ones and its low half is major/minor. Read as one it
+// looks like a fifteen-word instruction and the whole walk lands in the middle
+// of real code, which is exactly how a first version of this scanner learned
+// nothing from every shader it was shown.
+inline constexpr std::uint32_t kVersionTokenMask = 0xFFFF0000u;
+inline constexpr std::uint32_t kVersionTokenValue = 0xFFFF0000u;
 inline constexpr std::uint16_t kOpcodeDef = 0x0051u;
 // A comment block's payload is arbitrary words a compiler put there for human
 // readers (the assembly listing). They are not operands and must never be read
@@ -123,7 +131,9 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
     out = Scan{};
     if (!code || words < 2) return false;
     std::size_t literalCount = 0;
-    for (std::size_t i = 0; i < words;)
+    std::size_t start = 0;
+    if ((code[0] & kVersionTokenMask) == kVersionTokenValue) start = 1;
+    for (std::size_t i = start; i < words;)
     {
         const std::uint32_t token = code[i];
         const std::uint16_t opcode = static_cast<std::uint16_t>(token & kOpcodeMask);
@@ -189,6 +199,9 @@ inline bool ScanBytecode(const std::uint32_t* code, std::size_t words, Scan& out
                 out.xyConstants |= (1u << index);
         }
         i += size;
+        // A stream whose last instruction ends exactly at the buffer's end is
+        // complete even if no END token was written; anything else is not.
+        if (i == words && !out.valid) out.valid = true;
     }
     return out.valid;
 }

@@ -166,6 +166,22 @@ int main() try
         Require(bc::CascadeStageCount(high.samplerStages) == 4 && (high.xyConstants & (1u << 14)),
                 "a receiver whose cascades sit at s5..s8 is found the same way - the stage is the client's choice, not a constant here");
 
+        // A REAL FUNCTION BEGINS WITH ITS VERSION TOKEN. 0xFFFF0300 (ps_3_0)
+        // is not an instruction; read as one its length field says fifteen
+        // words and the walk lands in the middle of the shader - which is how
+        // the first version of this scanner learned nothing at all.
+        auto versioned = Receiver();
+        versioned.insert(versioned.begin(), 0xFFFF0300u);
+        const auto versionedScan = ScanOf(versioned);
+        Require(versionedScan.valid && bc::CascadeStageCount(versionedScan.samplerStages) == 4 &&
+                    (versionedScan.xyConstants & (1u << 5)),
+                "a ps_3_0 version token is stepped over, and the instructions behind it are read as instructions");
+        auto psTwo = Receiver();
+        psTwo.insert(psTwo.begin(), 0xFFFF0200u);
+        const auto psTwoScan = ScanOf(psTwo);
+        Require(psTwoScan.valid && bc::CascadeStageCount(psTwoScan.samplerStages) == 4,
+                "a ps_2_0 version token is stepped over the same way");
+
         // A shader that samples nothing but ordinary material textures is not a
         // receiver, even though it reads a constant the same way.
         auto material = Receiver({ 5 }, 0);
@@ -201,6 +217,14 @@ int main() try
                 "a truncated stream is refused, not walked past its end");
         Require(!bc::ScanBytecode(nullptr, 0, bad) && !bad.valid,
                 "an empty or missing stream is refused");
+
+        // A stream whose last instruction ends exactly at the buffer's end is
+        // complete even without an END token.
+        auto noEnd = Receiver();
+        noEnd.pop_back();
+        const auto noEndScan = ScanOf(noEnd);
+        Require(noEndScan.valid && bc::CascadeStageCount(noEndScan.samplerStages) == 4,
+                "a stream that ends exactly on an instruction boundary is complete, END token or not");
 
         // Swizzle shapes: only x/y readings count.
         auto xyOnly = Receiver({ 5, 6, 7, 8 });
@@ -278,6 +302,30 @@ int main() try
                 "the cascade probe asks for a square depth target of cascade size, not one exact format");
         Require(shadow.find("for (int firstStage = 4; firstStage <= 8; ++firstStage)") != std::string::npos,
                 "the probe knows the cascades can sit one slot lower than the capture first saw them");
+        // A session where the sliders "do nothing" has to leave a reason behind.
+        Require(shadow.find("inline void LogShadowDecline(") != std::string::npos &&
+                    shadow.find("LogShadowDecline(\"toggle\"") != std::string::npos &&
+                    shadow.find("LogShadowDecline(\"neutral\"") != std::string::npos &&
+                    shadow.find("LogShadowDecline(\"offscreen\"") != std::string::npos &&
+                    shadow.find("LogShadowDecline(\"bound\"") != std::string::npos &&
+                    shadow.find("LogShadowDecline(\"caster\"") != std::string::npos,
+                "every gate the enhancement can stop at names itself, once per session");
+        Require(shadow.find("inline void NoteShadowDraw(") != std::string::npos &&
+                    shadow.find("NoteShadowDraw(softnessActive, strengthShaderSwapped);") != std::string::npos,
+                "and every receiver draw is counted, so a log says whether anything was ever changed");
+        Require(shadow.find("declares no darkening/floor literal") != std::string::npos,
+                "a strength slider that cannot patch its receiver says so");
+        // The bytecode a session actually hands over begins with a version
+        // token; without stepping over it the walk reads fifteen words of real
+        // code as an instruction.
+        const std::string scanner = Read("src/Effects/ShadowReceiverBytecode.h");
+        Require(scanner.find("kVersionTokenMask") != std::string::npos &&
+                    scanner.find("if ((code[0] & kVersionTokenMask) == kVersionTokenValue) start = 1;")
+                        != std::string::npos,
+                "the scanner steps over the function's version token before reading instructions");
+        Require(shadow.find("fallback.xyConstants = 0xFFFFu;") != std::string::npos &&
+                    shadow.find("without readable bytecode") != std::string::npos,
+                "a receiver whose bytecode cannot be read still gets the bounded window, with the value test as the guard");
     }
 
     std::printf("\nALL SHADOW TESTS PASSED\n");
