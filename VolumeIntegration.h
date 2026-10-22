@@ -1293,10 +1293,10 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudTexture = nullptr;
     frameCtx.cloudShadowTexture = nullptr;
     frameCtx.cloudRayStrength = 0.f;
-    if (!shaftDebug && cloudsEffectEnabled &&
-        renderer::CanRenderWorldClouds(frameCtx.worldScene.state,
-            frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame,
-            frameCtx.cameraValid&&!frameCtx.cameraPoseStale)) {
+    if (!shaftDebug && cloudsEffectEnabled) {
+        // Render owns the same menu/world/camera gate so it can log which gate
+        // suppressed clouds on an upward sky-only view; it exits before any GPU
+        // work unless current world evidence and a fresh camera are present.
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
         // Already resolved once at the frame boundary, alongside wind/water.
@@ -1375,12 +1375,11 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(3, D3DSAMP_SRGBTEXTURE, FALSE));
         float cloudMask[4] = {frameCtx.cloudTexture ? 1.f : 0.f, 0, 0, 0};
         check(d->SetPixelShaderConstantF(14, cloudMask, 1));
-        // Ray look (see rayLook in volumePixelSource): sunward glow spread,
-        // glow floor, and gain. Gain 0.35 is the calibrated level of the new
-        // whole-frame mask (equal to the GodRayPreview "0.45" over the old 1.28).
-        // Gain 0.6 is the look calibrated in tools/GodRayPreview (0.35 at full
-        // visibility) divided by the 0.6 clear-air floor applied in the composite.
-        float rayLook[4] = { 6.f, 0.f, 0.6f, 0.f };
+        // Ray look (see rayLook in volumePixelSource): compact sunward glow
+        // spread, no glow floor, and a restrained whole-frame-mask gain. The
+        // previous gain made clear-sky samples build a broad circular wash; the
+        // radial gather still carries visible, occlusion-shaped beams.
+        float rayLook[4] = { 28.f, 0.f, 0.4f, 0.f };
         check(d->SetPixelShaderConstantF(15, rayLook, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
         check(d->SetTexture(3, nullptr));

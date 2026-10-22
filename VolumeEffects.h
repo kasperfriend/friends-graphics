@@ -65,11 +65,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // band ended the mask abruptly enough that the radial blur below
         // smeared the cut into a visible ring around the disc.
         float discCutoff=1.0-smoothstep(0.08,0.22,sunDist);
-        // Whole-frame god-ray source (GodRayCore.h SourceWeight): a sunward
-        // sky glow reaches across the frame, so the gather below draws beams
-        // away from the source. Trees, walls, characters and ground have
-        // openness 0 and cut those beams; cloud alpha thins them. The disc
-        // core is kept inside the max, so the source itself stays brightest.
+        // Whole-frame god-ray source (GodRayCore.h SourceWeight): a compact
+        // sunward glow stays near the tracked disc, and the gather below carries
+        // its visibility away from the source. Trees, walls, characters and
+        // ground have openness 0 and cut those beams; cloud alpha thins them.
+        // The disc core is kept inside the max, so the source itself stays brightest.
         float glow=rayLook.y+(1-rayLook.y)*exp(-sunDist*sunDist*rayLook.x);
         float sunMask=(sun.x<-.5) ? 0.0 : max(discFalloff*discCutoff,glow)*rayLook.z;
         // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
@@ -331,12 +331,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         illumination*=radial.w;
     }
     light.rgb=light.rgb/max(weightSum,.001);
-    // Contrast lift: a plain weighted average reads as a soft, low-contrast
-    // glow (the "blob" look) because most of the sampled path is usually
-    // empty sky diluting the mean. A sub-1 power pulls dim/mid values up
-    // faster than bright ones, so partial-occlusion streaks (branches,
-    // rooflines) read as more defined beams instead of a uniform wash.
-    light.rgb=pow(saturate(light.rgb),0.72)*1.2;
+    // Keep the gather's contrast lift restrained: the wider sub-1 curve used
+    // to raise faint source-mask values into a broad circular wash around the
+    // disc. Compact falloff plus a near-linear lift preserves the beams and
+    // the shadows they pick up from branches and rooflines.
+    light.rgb=pow(saturate(light.rgb),0.9);
     // Half a level of dither into the 8-bit ray target: without it the
     // smooth radial falloff quantizes into concentric rings around the
     // source, and the 0.72-weighted temporal history toggles a level at a

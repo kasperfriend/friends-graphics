@@ -40,8 +40,17 @@ int main() try
     Require(text.find("std::thread([worker,cachePath]") != std::string::npos &&
             workerWait != std::string::npos && cacheRead != std::string::npos && workerWait < cacheRead,
             "cold-start cloud generation owns its async state and avoids per-frame cache I/O while the worker runs");
-    Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
+    Require(text.find("const float layer[4]={settings.baseAltitude,layerTop,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
+    Require(text.find("cameraLayer=") != std::string::npos &&
+            text.find("forwardZ=") != std::string::npos &&
+            text.find("top=\"<<layerTop") != std::string::npos,
+            "cloud diagnostics identify whether a pitched camera is above the fixed world-Z layer");
+    const auto cloudDynamicsUpdate=text.find("static_cast<CloudShape&>(settings)=m_dynamics.Update");
+    const auto layerRefresh=text.find("refreshLayerDiagnostic();",cloudDynamicsUpdate);
+    Require(cloudDynamicsUpdate!=std::string::npos && layerRefresh!=std::string::npos &&
+            layerRefresh>cloudDynamicsUpdate,
+            "the logged and rendered layer bounds follow the live cloud transition settings");
     Require(text.find("fade*=1-smoothstep(layer.w*.9,layer.w,entry);") != std::string::npos,
             "distance fade preserves cloud opacity until the final tenth of the march range");
     Require(text.find("if(maxDistance==26000)maxDistance=200000;") != std::string::npos,

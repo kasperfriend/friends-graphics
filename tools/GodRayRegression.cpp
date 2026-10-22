@@ -70,6 +70,13 @@ int main()
     //    at the frame corner opposite the sun.
     Require(SourceWeight(0.0f, 1.0f, sunU, sunV, aspect, true, look) < 0.02f, "far sky does not wash out");
 
+    // 9. The source mask itself is a compact corona; long beams come from the
+    //    visibility gather rather than a screen-sized circular glow.
+    Require(SourceWeight(sunU + 0.30f / aspect, sunV, sunU, sunV, aspect, true, look) < 0.1f,
+            "sun glow mask falls below ten percent at 0.3 screen-heights");
+    Require(LiftGather(0.05f) < 0.08f,
+            "faint radial samples are not lifted into a broad halo");
+
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

@@ -947,13 +947,38 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  m_shadowValid=false;
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
+ const bool diagnosticFrame=(++m_renderFrames%600)==0;
+ float thickness=std::max(settings.thickness,20.f);
+ float layerTop=settings.baseAltitude+thickness;
+ const char* cameraLayer=f.cameraPosition.z<settings.baseAltitude?"below":
+     (f.cameraPosition.z>layerTop?"above":"inside");
+ auto refreshLayerDiagnostic=[&]{
+  thickness=std::max(settings.thickness,20.f);
+  layerTop=settings.baseAltitude+thickness;
+  cameraLayer=f.cameraPosition.z<settings.baseAltitude?"below":
+      (f.cameraPosition.z>layerTop?"above":"inside");
+ };
+ const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
+ const bool knownWorldDraw=f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame;
+ auto logState=[&](const char* event){
+  if(!diagnosticFrame||m_logPath.empty())return;
+  std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
+  if(!out)return;
+  out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
+     <<" worldDraw="<<(knownWorldDraw?1:0)<<" freshCamera="<<(freshCameraPose?1:0)
+     <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
+     <<" base="<<settings.baseAltitude<<" top="<<layerTop
+     <<" cameraZ="<<f.cameraPosition.z<<"\n";
+ };
  // A corroborated camera and depth buffer also exist on some login/menu
  // scenes. Let a sky-only view through only when verified world IDs and a fresh
  // camera pose agree; unknown/menu contexts still need a current terrain/liquid draw.
- const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
- if(!CanRenderWorldClouds(f.worldScene.state,
-      f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame,freshCameraPose))return false;
- if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
+ if(!CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)){
+  logState("skip=world-gate");return false;
+ }
+ if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor){
+  logState("skip=frame-input");return false;
+ }
  // The deck is anchored in WORLD space at absolute heights, so it is only
  // correct from the camera that is actually being rendered. In a city the
  // terrain capture never latches while everything overhead is culled, and the
@@ -962,7 +987,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  // ("the clouds are dragged along with the camera"). The capture now says
  // plainly when it could not corroborate the pose; draw nothing rather than
  // draw the sky from a camera the player has already left.
- if(f.cameraPoseStale)return false;
+ if(f.cameraPoseStale){logState("skip=stale-camera");return false;}
 
  // Advance before the clear-sky early-out: an empty deck must still be
  // able to develop a storm. The clock bounds loading/focus gaps.
@@ -974,13 +999,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  static_cast<CloudShape&>(settings)=m_dynamics.Update(m_settings,f.environment,
      settings.zoneClouds,settings.weatherClouds?settings.weather:CloudWeather::Clear,
      settings.weatherClouds?settings.weatherStrength:0.f,settings.transitionSeconds,dt,f.wind);
- if(settings.coverage<=0.f||settings.density<=0.f)return false;
+ refreshLayerDiagnostic();
+ if(settings.coverage<=0.f||settings.density<=0.f){logState("skip=empty-cloud-field");return false;}
  const auto& motion=m_dynamics.Motion();
 
  D3DSURFACE_DESC desc{};
- if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)||!EnsureShaders(d)||!EnsureFields(d))return false;
+ if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)||!EnsureShaders(d)||!EnsureFields(d)){
+  logState("skip=resources");return false;
+ }
 
- const float thickness=std::max(settings.thickness,20.f);
  const float featureSize=std::max(settings.featureSize,1.f);
  const float detailSize=std::max(settings.detailSize,1.f);
  const float weatherSize=std::max(settings.weatherSize,1.f);
@@ -1058,13 +1085,18 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  m_shadowArea={m_shadowOrigin[0],m_shadowOrigin[1],1.f/shadowExtent,CloudShadowElevationFade(lightDir[2])};
  m_lightProjection={slopeX,slopeY,settings.baseAltitude,thickness};
 
- if((++m_renderFrames%600)==0&&!m_logPath.empty()){
+ if(diagnosticFrame&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   // `sun` is the world direction the deck is lit from and the direction the
   // ground shadow is projected along, and `stable` says where it came from
   // (1 = the tracked disc, 0 = the captured light constant). Panning the
   // camera must not move `sun`; if it does, this line is where to see it.
-  out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" coverage="<<settings.coverage
+  // An upward ray from above this fixed world-Z layer correctly misses it.
+  // Record the camera/layer relationship and forward pitch so a sky-only
+  // disappearance at a floating map can be distinguished from a render gate.
+  out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" top="<<layerTop
+     <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
+     <<" coverage="<<settings.coverage
      <<" type="<<settings.cloudType<<" feature="<<settings.featureSize
      <<" weather="<<int(settings.weather)<<" wet="<<m_dynamics.WeatherAmount()
      <<" evolution="<<settings.evolutionSpeed<<" phase="<<motion.shapeZ
@@ -1193,7 +1225,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(2,inv[0],3);
   d->SetPixelShaderConstantF(5,c5,1);d->SetPixelShaderConstantF(6,c6,1);
   // Absolute world heights: never recenter the visible layer on the viewer.
-  const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};
+  const float layer[4]={settings.baseAltitude,layerTop,1.f/thickness,settings.maxDistance};
   d->SetPixelShaderConstantF(7,layer,1);d->SetPixelShaderConstantF(8,c8,1);
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);

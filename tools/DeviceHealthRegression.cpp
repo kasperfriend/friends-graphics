@@ -310,16 +310,17 @@ int main() try
             const auto frameReset = Read("src/Core/FrameContext.cpp");
             const auto frameContext = Read("src/Core/FrameContext.h");
             const auto rendererHook = Read("ModernWoWRenderer.cpp");
-            Require(Contains(clouds, "if(f.cameraPoseStale)return false;") &&
+            Require(Contains(clouds, "if(f.cameraPoseStale){logState") &&
                     Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
-                    Contains(clouds, "f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame,freshCameraPose"),
+                    Contains(clouds, "knownWorldDraw,freshCameraPose") &&
+                    Contains(clouds, "skip=world-gate"),
                 "clouds accept a fresh verified camera when an upward view contains only sky");
             Require(Contains(composite, "ResolveWorldSceneForFrame();") &&
                     Contains(composite, "watereffect::ObserveWorldSceneForUnderwater(frame);") &&
-                    Contains(composite, "CanRenderWorldClouds(frameCtx.worldScene.state,") &&
-                    Contains(composite, "frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame,") &&
-                    Contains(composite, "frameCtx.cameraValid&&!frameCtx.cameraPoseStale"),
-                "the compositor keeps sky-only clouds active only with the current verified world camera");
+                    Contains(composite, "if (!shaftDebug && cloudsEffectEnabled)") &&
+                    Contains(composite, "if (clouds.Render(d, frameCtx, target.Get()))") &&
+                    Contains(clouds, "CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)"),
+                "the compositor delegates cloud world/camera gating to the pass so skipped sky views are diagnosable");
             Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
                     Contains(distanceFog, "frame.cameraValid&&!frame.cameraPoseStale") &&
                     Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&
