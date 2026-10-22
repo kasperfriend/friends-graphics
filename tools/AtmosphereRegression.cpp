@@ -54,21 +54,35 @@ int main() try {
  for(auto format:{D3DFMT_D16,D3DFMT_D32,D3DFMT_D24X8,D3DFMT_D24S8})
   Require(CanReplaceDepthFormat(format),"standard depth format policy");
  Require(!CanReplaceDepthFormat(D3DFMT_D16_LOCKABLE),"incompatible depth format rejected");
- // Exercise the production capture lifecycle on the two common 3.3.5a
- // formats, including the explicit rectangle used by affected clients.
- for(auto format:{D3DFMT_D16,D3DFMT_D24S8}){
-  ComPtr<IDirect3DSurface9> originalDepth,currentDepth;
-  Check(d->CreateDepthStencilSurface(128,128,format,D3DMULTISAMPLE_NONE,0,TRUE,originalDepth.GetAddressOf(),nullptr));
-  Check(d->SetDepthStencilSurface(originalDepth.Get()));
-  D3DRECT partial{0,0,64,64},full{0,0,128,128};
-  Require(!DepthCapture::Instance().BeforeClear(d.Get(),1,&partial,D3DCLEAR_ZBUFFER,1.f),"partial clear does not start depth capture");
-  Require(DepthCapture::Instance().BeforeClear(d.Get(),1,&full,D3DCLEAR_ZBUFFER,1.f),"explicit clear starts depth capture");
-  Require(DepthCapture::Instance().HasDepth(),"replacement INTZ depth is active");
-  Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==DepthCapture::Instance().GetDepthSurface(),"replacement depth is bound");
-  currentDepth.Reset();DepthCapture::Instance().OnFrameEnd(d.Get());
-  Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==originalDepth.Get(),"frame end restores original depth");
+ // INTZ is a vendor depth-texture format; a D3D9 HAL can create the device but
+ // still lack this extension (the GitHub Windows runner does). Skip only the
+ // lifecycle test in that case; the synthetic-depth atmosphere/cloud tests below
+ // do not depend on INTZ and should still run.
+ const auto intzFormat=static_cast<D3DFORMAT>(MAKEFOURCC('I','N','T','Z'));
+ ComPtr<IDirect3DTexture9> intzProbe;
+ const HRESULT intzProbeResult=d->CreateTexture(128,128,1,D3DUSAGE_DEPTHSTENCIL,intzFormat,
+     D3DPOOL_DEFAULT,intzProbe.GetAddressOf(),nullptr);
+ if(FAILED(intzProbeResult)) {
+  printf("SKIP INTZ depth-capture lifecycle: this D3D9 HAL does not support INTZ (HRESULT=%08lx)\n",
+      static_cast<unsigned long>(intzProbeResult));
+ } else {
+  intzProbe.Reset();
+  // Exercise the production capture lifecycle on the two common 3.3.5a
+  // formats, including the explicit rectangle used by affected clients.
+  for(auto format:{D3DFMT_D16,D3DFMT_D24S8}){
+   ComPtr<IDirect3DSurface9> originalDepth,currentDepth;
+   Check(d->CreateDepthStencilSurface(128,128,format,D3DMULTISAMPLE_NONE,0,TRUE,originalDepth.GetAddressOf(),nullptr));
+   Check(d->SetDepthStencilSurface(originalDepth.Get()));
+   D3DRECT partial{0,0,64,64},full{0,0,128,128};
+   Require(!DepthCapture::Instance().BeforeClear(d.Get(),1,&partial,D3DCLEAR_ZBUFFER,1.f),"partial clear does not start depth capture");
+   Require(DepthCapture::Instance().BeforeClear(d.Get(),1,&full,D3DCLEAR_ZBUFFER,1.f),"explicit clear starts depth capture");
+   Require(DepthCapture::Instance().HasDepth(),"replacement INTZ depth is active");
+   Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==DepthCapture::Instance().GetDepthSurface(),"replacement depth is bound");
+   currentDepth.Reset();DepthCapture::Instance().OnFrameEnd(d.Get());
+   Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==originalDepth.Get(),"frame end restores original depth");
+  }
+  Check(d->SetDepthStencilSurface(nullptr));
  }
- Check(d->SetDepthStencilSurface(nullptr));
  TestLocalFogField(d.Get());
  ComPtr<IDirect3DSurface9> back,read; Check(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,back.GetAddressOf()));
  Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,read.GetAddressOf(),nullptr));
