@@ -120,7 +120,7 @@ jobs:
           $text = ($output | Out-String).Trim()
           Write-Output $text
           if ($result -eq 77) {
-            Write-Output "::notice title=Atmosphere regressions skipped::D3D9 HAL is unavailable on this runner"
+            Write-Output "::notice title=Atmosphere regressions skipped::Hosted runner lacks a stable D3D9 HAL/software adapter for GPU tests"
             exit 0
           }
           $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
