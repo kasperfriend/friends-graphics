@@ -976,6 +976,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
      <<" skyCandidates="<<int(f.skyPoseCandidateCount)
      <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
+     <<" skyObserve="<<f.SkyObservationName()
      <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
      <<" base="<<settings.baseAltitude<<" top="<<layerTop
      <<" cameraZ="<<f.cameraPosition.z<<"\n";

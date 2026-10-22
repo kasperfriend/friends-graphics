@@ -194,8 +194,45 @@ namespace renderer
         // Sky-fallback diagnostics: a zero count means no eligible current-frame
         // candidate survived capture filters; a nonzero count with no fresh pose
         // means corroboration/continuity intentionally kept it out.
+        enum class SkyObservationResult : uint8_t
+        {
+            NotAttempted = 0,
+            CameraUnavailable,
+            ViewportUnavailable,
+            NotFullFrame,
+            TransformUnavailable,
+            NonFiniteTransform,
+            InvalidProjection,
+            ViewportMismatch,
+            NonRigidBasis,
+            EyeIncompatible,
+            D3DTransformCandidate,
+            RejectedShaderCandidate,
+            Captured
+        };
         uint8_t skyPoseCandidateCount = 0;
         bool skyPoseDiscEvidence = false;
+        SkyObservationResult skyObservationResult = SkyObservationResult::NotAttempted;
+
+        const char* SkyObservationName() const noexcept
+        {
+            switch (skyObservationResult)
+            {
+            case SkyObservationResult::CameraUnavailable: return "camera-unavailable";
+            case SkyObservationResult::ViewportUnavailable: return "viewport-unavailable";
+            case SkyObservationResult::NotFullFrame: return "not-full-frame";
+            case SkyObservationResult::TransformUnavailable: return "transform-unavailable";
+            case SkyObservationResult::NonFiniteTransform: return "non-finite-transform";
+            case SkyObservationResult::InvalidProjection: return "invalid-projection";
+            case SkyObservationResult::ViewportMismatch: return "viewport-mismatch";
+            case SkyObservationResult::NonRigidBasis: return "non-rigid-basis";
+            case SkyObservationResult::EyeIncompatible: return "eye-incompatible";
+            case SkyObservationResult::D3DTransformCandidate: return "d3d-transform-candidate";
+            case SkyObservationResult::RejectedShaderCandidate: return "shader-candidate";
+            case SkyObservationResult::Captured: return "captured";
+            case SkyObservationResult::NotAttempted: default: return "not-attempted";
+            }
+        }
 
         bool depthAvailable = false;
         bool cameraValid = false;

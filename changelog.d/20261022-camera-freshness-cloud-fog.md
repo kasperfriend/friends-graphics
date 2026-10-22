@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Clouds and fog stay in sync as you turn
 ---
-Sky fallback retains the moon's confirmed direction and accepts hard turns only from tightly anchored full-frame captures after corroboration. It keeps late camera candidates in crowded frames. Clouds, fog and weather fallback still require a fresh pose; menu/out-of-world suppression remains.
+Sky fallback retains the moon's direction and observes VIEW/PROJECTION changes before later passes replace them, logging candidate rejections. Full-frame, rigid-basis, viewport and eye checks remain; menu/out-of-world suppression is unchanged. Clouds, fog and weather still require a fresh pose.

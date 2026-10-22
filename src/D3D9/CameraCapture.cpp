@@ -104,6 +104,7 @@ namespace renderer
                 std::copy(rejectedEye, rejectedEye + 3, m_rejectedCaptureEye);
                 m_rejectedCaptureValid = true;
                 m_skyPose.Observe(rejectedBasis);
+                RecordSkyObservation(FrameContext::SkyObservationResult::RejectedShaderCandidate);
 
                 // Preserve the current draw's projection as the evidence space
                 // for the disc painted later in this frame.
@@ -347,6 +348,8 @@ namespace renderer
         m_skyPose.BeginFrame();
         m_skyPose.SetReference(capturedBasis);
         m_rejectedCaptureValid = false;
+        RecordSkyObservation(FrameContext::SkyObservationResult::Captured);
+        frameContext.skyObservationResult = m_skyObservationResult;
         m_lastEyeSeconds = PerformanceSeconds();
         frameContext.cameraPoseStale = false;
         frameContext.cameraEyeAgeMs = 0.f;
@@ -360,11 +363,17 @@ namespace renderer
     void CameraCapture::ObserveSkyFallback(IDirect3DDevice9* device)
     {
         if (!device || !m_valid || !m_cameraGate.Valid())
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::CameraUnavailable);
             return;
+        }
 
         D3DVIEWPORT9 vp{};
         if (FAILED(device->GetViewport(&vp)) || vp.MaxZ <= 0.0f)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::ViewportUnavailable);
             return;
+        }
 
         IDirect3DSurface9* renderTarget = nullptr;
         D3DSURFACE_DESC targetDesc{};
@@ -373,7 +382,10 @@ namespace renderer
             vp.X == 0 && vp.Y == 0 && vp.Width == targetDesc.Width && vp.Height == targetDesc.Height;
         if (renderTarget) renderTarget->Release();
         if (!fullFrame)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::NotFullFrame);
             return;
+        }
 
         // Record that a full-frame scene/sky draw occurred during this depth-captured frame.
         float m2Consts[6][4]{};
@@ -392,19 +404,31 @@ namespace renderer
         D3DMATRIX view{}, proj{};
         if (FAILED(device->GetTransform(D3DTS_VIEW, &view)) ||
             FAILED(device->GetTransform(D3DTS_PROJECTION, &proj)))
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::TransformUnavailable);
             return;
+        }
 
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 if (!std::isfinite(view.m[r][c]) || !std::isfinite(proj.m[r][c]))
+                {
+                    RecordSkyObservation(FrameContext::SkyObservationResult::NonFiniteTransform);
                     return;
+                }
 
         if (proj.m[0][0] <= 0.0f || proj.m[1][1] <= 0.0f || proj.m[2][2] <= 1.0f || proj.m[3][2] >= 0.0f ||
             fabsf(proj.m[2][3] - 1.0f) > 0.001f || fabsf(proj.m[3][3]) > 0.001f)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::InvalidProjection);
             return;
+        }
 
         if (!m_cameraGate.MatchesViewport(vp.Width, vp.Height))
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::ViewportMismatch);
             return;
+        }
 
         float basis[3][4]{};
         for (int r = 0; r < 3; ++r)
@@ -418,11 +442,17 @@ namespace renderer
             // the transform carries a scale (a scaled billboard's, above all) and
             // its rows are not this camera's axes.
             if (fabsf(lengthSquared - 1.0f) > 0.01f)
+            {
+                RecordSkyObservation(FrameContext::SkyObservationResult::NonRigidBasis);
                 return;
+            }
             for (int other = r + 1; other < 3; ++other)
                 if (fabsf(basis[r][0] * basis[other][0] + basis[r][1] * basis[other][1] +
                           basis[r][2] * basis[other][2]) > 0.02f)
+                {
+                    RecordSkyObservation(FrameContext::SkyObservationResult::NonRigidBasis);
                     return;
+                }
         }
 
         m_fallbackSawSceneDraw = true;
@@ -453,12 +483,16 @@ namespace renderer
             eyeCompatible = std::isfinite(distance) && distance <= kSkyEyeLeashYards;
         }
         if (!eyeCompatible)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::EyeIncompatible);
             return;
+        }
 
         // The frame's candidates are decided at the UI draw, when the frame's
         // own sun/moon disc has already been drawn and can testify about the
         // camera. Collect; do not publish.
         m_skyPose.Observe(basis);
+        RecordSkyObservation(FrameContext::SkyObservationResult::D3DTransformCandidate);
     }
 
     // What the frame's own celestial draw says about the camera: a world
@@ -523,6 +557,7 @@ namespace renderer
         frameContext.skyPoseCandidateCount = static_cast<uint8_t>(
             std::min(m_skyPose.CandidateCount(), 255u));
         frameContext.skyPoseDiscEvidence = disc.available;
+        frameContext.skyObservationResult = m_skyObservationResult;
         const bool havePose = m_skyPose.HasCandidate() &&
             m_skyPose.Resolve(disc, basis, corroborated);
 

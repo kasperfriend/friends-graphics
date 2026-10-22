@@ -413,6 +413,7 @@ int main() try
                     Contains(clouds, "knownWorldDraw,freshCameraPose") &&
                     Contains(clouds, "poseSource=") && Contains(clouds, "eyeAgeMs=") &&
                     Contains(clouds, "skyCandidates=") && Contains(clouds, "skyDisc=") &&
+                    Contains(clouds, "skyObserve=") &&
                     Contains(clouds, "lacksWorldContext?") &&
                     Contains(clouds, "skip=world-gate") && Contains(clouds, "skip=stale-camera"),
                 "clouds require a fresh camera for all world paths and log stale-pose skips distinctly");
@@ -463,6 +464,7 @@ int main() try
             Require(Contains(frameReset, "cameraPoseStale = true;") &&
                     Contains(frameReset, "skyPoseCandidateCount = 0;") &&
                     Contains(frameReset, "skyPoseDiscEvidence = false;") &&
+                    Contains(frameReset, "SkyObservationResult::NotAttempted") &&
                     Contains(frameReset, "ResetWorldSceneFrame();") &&
                     Contains(frameContext, "worldTerrainSeenThisFrame = false;") &&
                     Contains(frameContext, "worldWaterSeenThisFrame = false;") &&
@@ -477,6 +479,7 @@ int main() try
         {
             const auto capture = Read("src/D3D9/CameraCapture.cpp");
             const auto composite = Read("VolumeIntegration.h");
+            const auto rendererHooks = Read("ModernWoWRenderer.cpp");
             Require(Contains(capture, "m_skyPose.Observe(basis)") &&
                     Contains(capture, "m_skyPose.Observe(rejectedBasis)") &&
                     Contains(capture, "NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
@@ -485,6 +488,13 @@ int main() try
                     Contains(capture, "cameraEyeAgeMs = 0.0f;") &&
                     !Contains(capture, "m_fallbackCandidateValid"),
                 "the sky fallback corroborates bounded hard-turn captures and collects transforms instead of latching the first");
+            Require(Contains(capture, "RecordSkyObservation(FrameContext::SkyObservationResult::EyeIncompatible)") &&
+                    Contains(capture, "frameContext.skyObservationResult = m_skyObservationResult;") &&
+                    Contains(rendererHooks, "HookedSetTransform") &&
+                    Contains(rendererHooks, "state == D3DTS_VIEW || state == D3DTS_PROJECTION") &&
+                    Contains(rendererHooks, "ObserveSkyFallback(d)") &&
+                    Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
+                "camera transform updates feed the sky observer and logs expose the furthest fallback rejection stage");
             Require(Contains(capture, "fabsf(lengthSquared - 1.0f) > 0.01f"),
                 "a scaled or skewed sky transform is not a rigid camera basis");
             Require(Contains(capture, "const float* anchor = m_cameraGate.Position();") &&

@@ -44,6 +44,7 @@ namespace renderer
             m_skyPose.BeginFrame();
             m_fallbackSawSceneDraw = false;
             m_rejectedCaptureValid = false;
+            m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
         }
 
         // Observes D3DTS_VIEW / D3DTS_PROJECTION during the scene pass so that
@@ -80,6 +81,11 @@ namespace renderer
 
     private:
         CameraCapture() = default;
+        void RecordSkyObservation(FrameContext::SkyObservationResult result) noexcept
+        {
+            if (static_cast<uint8_t>(result) > static_cast<uint8_t>(m_skyObservationResult))
+                m_skyObservationResult = result;
+        }
         // Which camera the captured light belongs to. Frames that merely look
         // like scene draws (a target portrait's close-up camera) must not
         // re-light the world; see CameraContinuityGate.
@@ -108,6 +114,8 @@ namespace renderer
         // its eye is retained separately and used only if the selector later
         // corroborates that exact basis.
         bool m_rejectedCaptureValid = false;
+        FrameContext::SkyObservationResult m_skyObservationResult =
+            FrameContext::SkyObservationResult::NotAttempted;
         float m_rejectedCaptureEye[3]{};
         float m_rejectedCaptureBasis[3][4]{};
         D3DMATRIX m_fallbackProj{};

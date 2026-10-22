@@ -611,6 +611,7 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
     return originalClear(d,n,rect,flags,color,z,stencil);
 }
 using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+using SetTransformFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
 using SetRenderTargetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
 using SetVertexDeclarationFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
@@ -619,6 +620,7 @@ using SetVertexShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexSha
 using SetPixelShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
 
 SetRenderStateFn originalSetRenderState = nullptr;
+SetTransformFn originalSetTransform = nullptr;
 SetRenderTargetFn originalSetRenderTarget = nullptr;
 SetTextureFn originalSetTexture = nullptr;
 SetVertexDeclarationFn originalSetVertexDeclaration = nullptr;
@@ -644,6 +646,22 @@ HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
     {
         try { renderer::LocalLightManager::Instance().OnLightEnable(index, enabled); } catch (...) {}
+    }
+    return hr;
+}
+
+HRESULT WINAPI HookedSetTransform(IDirect3DDevice9* d, D3DTRANSFORMSTATETYPE state, const D3DMATRIX* matrix)
+{
+    const HRESULT hr = originalSetTransform(d, state, matrix);
+    if (SUCCEEDED(hr) && matrix && (state == D3DTS_VIEW || state == D3DTS_PROJECTION) &&
+        !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !volume::ready && ((volume::enabled && volume::active) || watereffect::NeedsScene()))
+    {
+        // The shader camera and fixed-function transforms are not synchronized
+        // on every draw. Observe immediately when VIEW/PROJECTION changes, before
+        // a later moon/UI pass can replace them; the same full-frame, projection,
+        // viewport, rigid-basis, eye-leash and selector checks still decide use.
+        try { renderer::CameraCapture::Instance().ObserveSkyFallback(d); } catch (...) {}
     }
     return hr;
 }
@@ -1007,6 +1025,7 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     if(!VirtualProtect(&table[16],95*sizeof(void*),PAGE_READWRITE,&oldProtect))return;
 
     InterlockedExchangePointer(&table[42],reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[44],reinterpret_cast<void*>(HookedSetTransform));
     InterlockedExchangePointer(&table[51],reinterpret_cast<void*>(HookedSetLight));
     InterlockedExchangePointer(&table[53],reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37],reinterpret_cast<void*>(HookedSetRenderTarget));
@@ -1073,6 +1092,7 @@ void HookDevice(IDirect3DDevice9* device)
     originalReset=reinterpret_cast<ResetFn>(table[16]);
     originalPresent=reinterpret_cast<PresentFn>(table[17]);
     originalSetRenderTarget=reinterpret_cast<SetRenderTargetFn>(table[37]);
+    originalSetTransform=reinterpret_cast<SetTransformFn>(table[44]);
     originalSetRenderState=reinterpret_cast<SetRenderStateFn>(table[57]);
     originalSetTexture=reinterpret_cast<SetTextureFn>(table[65]);
     originalDraw=reinterpret_cast<DrawFn>(table[81]);
@@ -1087,6 +1107,7 @@ void HookDevice(IDirect3DDevice9* device)
     originalLightEnable=reinterpret_cast<LightEnableFn>(table[53]);
 
     InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[44], reinterpret_cast<void*>(HookedSetTransform));
     InterlockedExchangePointer(&table[51], reinterpret_cast<void*>(HookedSetLight));
     InterlockedExchangePointer(&table[53], reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37], reinterpret_cast<void*>(HookedSetRenderTarget));

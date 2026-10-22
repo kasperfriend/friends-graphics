@@ -71,6 +71,7 @@ namespace renderer
         cameraPoseSource = PoseNone;
         skyPoseCandidateCount = 0;
         skyPoseDiscEvidence = false;
+        skyObservationResult = SkyObservationResult::NotAttempted;
 
         depthAvailable = false;
         cameraValid = false;
