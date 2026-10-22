@@ -1058,6 +1058,7 @@ int main() try
         const auto localLightingSource=ReadAlongside("src/Effects/LocalLightingRenderer.cpp");
         const auto cloudSource=ReadAlongside("src/Effects/VolumetricClouds.cpp");
         const auto underwaterSource=ReadAlongside("src/Effects/Underwater.h");
+        const auto waterDeviceBuild=ReadAlongside("Test-Water.cmd");
         Require(waterEffectSource.find("return active&&(!enabled||!effectEnabled)&&frame.waterMaskTexture&&waterTargetSurface&&")!=std::string::npos&&
                 waterEffectSource.find("bool CaptureNativeWaterCoverage(IDirect3DDevice9* d,")!=std::string::npos&&
                 waterEffectSource.find("nativeWaterMaskCaptured=true;")!=std::string::npos&&
@@ -1078,6 +1079,9 @@ int main() try
                 cloudSource.find("step(.35,max(waterData.r,waterData.g))")!=std::string::npos&&
                 underwaterSource.find("max(waterData.r,waterData.g)>.25")!=std::string::npos,
                 "AO, local lights, clouds and underwater passes recognize native coverage when the replacement is off");
+        Require(waterDeviceBuild.find("DepthCapture.cpp")!=std::string::npos&&
+                waterDeviceBuild.find("RendererDiagnostics.cpp")!=std::string::npos,
+                "the device regression links the state-scope depth-capture dependencies it exercises");
         Require(pixel.find("float ScreenUVInside(float2 uv)")!=std::string::npos&&
                 pixel.find("step(0.0,uv.x)*step(uv.x,1.0)*step(0.0,uv.y)*step(uv.y,1.0)")!=std::string::npos&&
                 pixel.find("if(captureValid>.5 && ScreenUVInside(uv)>.5)")!=std::string::npos,
