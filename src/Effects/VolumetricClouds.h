@@ -173,6 +173,7 @@ namespace renderer
         uint32_t m_shadowSize = 0;
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;
+        std::string m_lastDiagnosticState;
         uint64_t m_windSequence = 0;
         FrameClock m_clock;
         CloudDynamics m_dynamics;

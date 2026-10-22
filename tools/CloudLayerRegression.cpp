@@ -46,6 +46,10 @@ int main() try
             text.find("forwardZ=") != std::string::npos &&
             text.find("top=\"<<layerTop") != std::string::npos,
             "cloud diagnostics identify whether a pitched camera is above the fixed world-Z layer");
+    Require(text.find("++m_renderFrames==1||m_renderFrames%600==0") != std::string::npos &&
+            text.find("m_lastDiagnosticState!=event") != std::string::npos &&
+            text.find("logState(\"render=active\")") != std::string::npos,
+            "cloud diagnostics record immediately, on skip transitions, and when rendering recovers");
     const auto cloudDynamicsUpdate=text.find("static_cast<CloudShape&>(settings)=m_dynamics.Update");
     const auto layerRefresh=text.find("refreshLayerDiagnostic();",cloudDynamicsUpdate);
     Require(cloudDynamicsUpdate!=std::string::npos && layerRefresh!=std::string::npos &&

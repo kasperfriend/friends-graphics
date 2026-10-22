@@ -947,7 +947,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  m_shadowValid=false;
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
- const bool diagnosticFrame=(++m_renderFrames%600)==0;
+ const bool diagnosticFrame=(++m_renderFrames==1||m_renderFrames%600==0);
  float thickness=std::max(settings.thickness,20.f);
  float layerTop=settings.baseAltitude+thickness;
  const char* cameraLayer=f.cameraPosition.z<settings.baseAltitude?"below":
@@ -961,7 +961,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
  const bool knownWorldDraw=f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame;
  auto logState=[&](const char* event){
-  if(!diagnosticFrame||m_logPath.empty())return;
+  const bool stateChanged=m_lastDiagnosticState!=event;
+  if((!diagnosticFrame&&!stateChanged)||m_logPath.empty())return;
+  m_lastDiagnosticState=event;
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   if(!out)return;
   out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
@@ -1290,6 +1292,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   for(DWORD s=0;s<5;++s)d->SetTexture(s,nullptr);
  }
+ if(m_lastDiagnosticState.rfind("skip=",0)==0)logState("render=active");
+ else m_lastDiagnosticState="render=active";
  return true;
 }
 }
