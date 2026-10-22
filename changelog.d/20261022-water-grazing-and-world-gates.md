@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Water stays stable at grazing angles, and fog stays out of character select
 ---
-Water now uses safe fallbacks instead of clamped edge pixels when a side-on view sends a depth or refraction sample outside the screen. Underwater and atmospheric fog, plus world clouds, require playable-world evidence; they no longer carry stale scene state into login or character-select screens. When the replacement water shader is turned off, native water is coverage-marked so the full-screen atmosphere composite no longer fogs those water pixels away.
+Side-on water views now use safe fallbacks for off-screen depth and refraction samples. Fog, underwater effects, and clouds are gated to playable-world scenes, preventing menu leaks. Turning off replacement water now preserves native water against the atmosphere composite.
