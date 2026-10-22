@@ -196,14 +196,10 @@ namespace renderer
         bool cameraValid = false;
         bool composed = false;
 
-        // Is there a pose a screen-space pass may use THIS frame?
-        //
-        // A frame whose draws carried no fresh eye - the camera is pointed at the
-        // sky, at a wall, or the draw stream stumbled - still has the retained
-        // inverse view and eye in here, good for `kCameraEyeHoldMs`. Every pass
-        // must make that decision the same way, or one of them blinks while the
-        // others hold: the surface lighting keeps a held pose while the volumetric
-        // march around it refused, which reads to a player as a lamp that broke.
+        // Is there a numerically usable pose, including the short retained-pose
+        // window some screen/local-light passes deliberately support? This is not
+        // the world-effect safety gate: world-anchored clouds, fog and weather
+        // must also require `!cameraPoseStale` through HasPlayableWorldEvidence.
         bool PoseUsable() const
         {
             return cameraValid || (viewRawValid && cameraEyeAgeMs <= kCameraEyeHoldMs);

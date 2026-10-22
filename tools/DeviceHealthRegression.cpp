@@ -159,11 +159,40 @@ int main() try
             const float dot = world[0] * moonWorld.x + world[1] * moonWorld.y + world[2] * moonWorld.z;
             Require(dot > .9999f, "the moon's world direction is the same from every camera yaw");
         }
+
+        // FrameContext retains viewRaw between frames. When this frame's camera
+        // is stale, converting the visible moon through that retained matrix
+        // would make its world direction follow the previous camera turn.
+        const float staleYaw = 1.15f;
+        const float staleC = std::cos(staleYaw), staleS = std::sin(staleYaw);
+        const float staleView[4][4] = {
+            {staleC, -staleS, 0.f, 0.f}, {staleS, staleC, 0.f, 0.f},
+            {0.f, 0.f, 1.f, 0.f}, {0.f, 0.f, 0.f, 1.f}};
+        const Vec3 staleViewDirection = TransformDirectionRowVector(moonWorld, staleView);
+        Vec3 heldWorld{};
+        Require(ResolveCameraRelativeWorldDirection(staleViewDirection, staleView, false,
+                    moonWorld, true, heldWorld) && Dot(heldWorld, moonWorld) > .9999f,
+                "a stale camera retains the last independently confirmed moon world direction");
+        Vec3 currentWorld{};
+        Require(ResolveCameraRelativeWorldDirection(staleViewDirection, staleView, true,
+                    moonWorld, true, currentWorld) && Dot(currentWorld, moonWorld) > .9999f,
+                "a fresh camera reconverts the moon from its current view-space direction");
+        Vec3 unavailable{};
+        Require(!ResolveCameraRelativeWorldDirection(staleViewDirection, staleView, false,
+                    {}, false, unavailable) && Length(unavailable) == 0.f,
+                "without a fresh pose or prior track the moon supplies no false world direction");
+
+        const auto trackerSource = Read("src/D3D9/CelestialTracker.cpp");
+        Require(Contains(trackerSource, "frameCtx.viewRawValid && !frameCtx.cameraPoseStale") &&
+                Contains(trackerSource, "body.worldDirectionValid = worldDirectionValid;") &&
+                Contains(trackerSource, "m_moon.worldDirectionValid = true;"),
+            "the celestial tracker marks only fresh or retained directions as usable evidence");
         const auto composite = Read("VolumeIntegration.h");
         Require(Contains(composite, "renderer::ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0]") &&
+                Contains(composite, "frameCtx.viewRawValid && !frameCtx.cameraPoseStale") &&
                 Contains(composite, "moon.visible ? &moonDirectionWorld : nullptr") &&
                 !Contains(composite, "moon.visible ? &moon.worldSpaceDirection : nullptr"),
-            "the compositor converts celestial directions with the captured camera, not the billboard draw's");
+            "the compositor converts moon light only with a fresh camera, otherwise retaining the confirmed world direction");
         const auto capture = Read("src/D3D9/CameraCapture.cpp");
         Require(Contains(capture, "if (!fullFrame)") && Contains(capture, "m_cameraGate.Accept(v[3], v, vp.Width, vp.Height)"),
             "camera capture demands a full-frame, continuous camera before latching the frame's light");
@@ -171,6 +200,14 @@ int main() try
                 Contains(capture, "CameraCapture::ApplySkyFallback") &&
                 Contains(composite, "CaptureSkyFallback()"),
             "sky fallback camera capture keeps clouds alive when looking straight up and terrain is culled");
+        const auto noPoseStart = capture.find("if (!havePose)");
+        const auto posePublishStart = capture.find("float v[4][4]{};", noPoseStart);
+        const bool staleBranchLeavesCelestialTrackAlone = noPoseStart != std::string::npos &&
+            posePublishStart != std::string::npos &&
+            capture.substr(noPoseStart, posePublishStart - noPoseStart).find("RefreshWorldDirections") == std::string::npos;
+        Require(staleBranchLeavesCelestialTrackAlone &&
+                Contains(capture, "if (!body || !body->worldDirectionValid)"),
+            "an uncorroborated held view neither overwrites moon tracking nor becomes disc evidence");
 
         // ORGRIMMAR FROM STREET LEVEL: THE CLOUD DECK AND THE LAMPS FOLLOWING THE CAMERA.
         // Where no draw ever carries a full-frame rigid camera (a city seen from the street,
@@ -249,6 +286,22 @@ int main() try
             Require(BasisAgreement(chosen, identityBasis) > .9999f,
                 "the disc-consistent candidate is the one published");
 
+            // A bad/stale disc pair must not veto a camera that remains
+            // continuous with the accepted reference. A discontinuous basis
+            // still goes through the two-frame confirmation below.
+            DiscObservation conflictingDisc = disc;
+            conflictingDisc.screenX = .95f;
+            conflictingDisc.screenY = .05f;
+            SkyPoseSelector continuous;
+            continuous.SetReference(identityBasis);
+            float slightlyTurned[3][4];
+            yawBasis(.25f, slightlyTurned);
+            continuous.BeginFrame();
+            continuous.Observe(slightlyTurned);
+            Require(continuous.Resolve(conflictingDisc, chosen, corroborated) && corroborated &&
+                    BasisAgreement(chosen, slightlyTurned) > .9999f,
+                "contradictory disc evidence falls back to a continuous current camera");
+
             SkyPoseSelector empty;
             empty.SetReference(identityBasis);
             empty.BeginFrame();
@@ -257,27 +310,34 @@ int main() try
         }
 
         {
-            // No disc on screen (neutral pitch under the Orgrimmar sky): only
-            // continuity with the accepted camera may corroborate. A jump is
-            // held one frame, and a transform that changes every frame is never
-            // adopted, so a stray full-screen transform cannot take the frame.
+            // Without a usable disc observation, continuity corroborates a
+            // modest turn. A larger jump is held one frame, and a transform
+            // that changes every frame is never adopted, even if the visible
+            // disc pair is stale or contradictory.
             SkyPoseSelector selector;
             selector.SetReference(identityBasis);
             float jumped[3][4];
             yawBasis(1.0f, jumped);
-            const DiscObservation none;
+            DiscObservation conflictingDisc;
+            conflictingDisc.available = true;
+            conflictingDisc.projectionX = conflictingDisc.projectionY = 1.f;
+            conflictingDisc.world[0] = 0.f;
+            conflictingDisc.world[1] = 0.f;
+            conflictingDisc.world[2] = 1.f;
+            conflictingDisc.screenX = .95f;
+            conflictingDisc.screenY = .05f;
             float chosen[3][4];
             bool corroborated = true;
 
             selector.BeginFrame();
             selector.Observe(jumped);
-            Require(!selector.Resolve(none, chosen, corroborated) && !corroborated,
-                "a discontinuous pose is not believed on its first frame");
+            Require(!selector.Resolve(conflictingDisc, chosen, corroborated) && !corroborated,
+                "a discontinuous pose is not believed on its first frame when disc evidence conflicts");
             selector.BeginFrame();
             selector.Observe(jumped);
-            Require(selector.Resolve(none, chosen, corroborated) &&
+            Require(selector.Resolve(conflictingDisc, chosen, corroborated) &&
                     BasisAgreement(chosen, jumped) > .9999f,
-                "the same discontinuous pose twice is confirmed on the second frame");
+                "the same conflicting-disc camera twice is confirmed by bounded jump policy");
 
             for (int i = 0; i < 3; ++i)
             {
@@ -285,8 +345,8 @@ int main() try
                 yawBasis(3.0f + .9f * float(i), stray);
                 selector.BeginFrame();
                 selector.Observe(stray);
-                Require(!selector.Resolve(none, chosen, corroborated),
-                    "a transform that changes every frame is never adopted");
+                Require(!selector.Resolve(conflictingDisc, chosen, corroborated),
+                    "a transform that changes every frame is never adopted through bad disc evidence");
             }
         }
 
@@ -309,12 +369,14 @@ int main() try
             const auto torches = Read("src/Lighting/LocalLightManager.cpp");
             const auto frameReset = Read("src/Core/FrameContext.cpp");
             const auto frameContext = Read("src/Core/FrameContext.h");
+            const auto deviceHealth = Read("src/Core/DeviceHealth.h");
             const auto rendererHook = Read("ModernWoWRenderer.cpp");
-            Require(Contains(clouds, "if(f.cameraPoseStale){logState") &&
-                    Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
+            Require(Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
                     Contains(clouds, "knownWorldDraw,freshCameraPose") &&
-                    Contains(clouds, "skip=world-gate"),
-                "clouds accept a fresh verified camera when an upward view contains only sky");
+                    Contains(clouds, "poseSource=") && Contains(clouds, "eyeAgeMs=") &&
+                    Contains(clouds, "lacksWorldContext?") &&
+                    Contains(clouds, "skip=world-gate") && Contains(clouds, "skip=stale-camera"),
+                "clouds require a fresh camera for all world paths and log stale-pose skips distinctly");
             Require(Contains(composite, "ResolveWorldSceneForFrame();") &&
                     Contains(composite, "watereffect::ObserveWorldSceneForUnderwater(frame);") &&
                     Contains(composite, "if (!shaftDebug && cloudsEffectEnabled)") &&
@@ -343,8 +405,9 @@ int main() try
                     Contains(worldProvider, "ClassifyWorldScene(provider.Verified(),provider.Sampled()") &&
                     Contains(underwaterPass, "frameContext.worldScene.state!=WorldSceneState::InWorld") &&
                     Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
-                    Contains(water, "underwaterWorldContinuity.Observe(frame.worldScene)"),
-                "fog, atmosphere, and weather accept fresh verified sky-only cameras while menu/underwater safety remains");
+                    Contains(water, "underwaterWorldContinuity.Observe(frame.worldScene)") &&
+                    Contains(deviceHealth, "return freshCameraPose && (knownWorldDrawSeen || state == WorldSceneState::InWorld);"),
+                "fog, atmosphere and weather share a fresh-camera world gate while menu/underwater safety remains");
             const auto locationFogReload=rendererHook.find("distancefog::ReloadTuning();stage(tFog);");
             const auto locationVolumeReload=rendererHook.find("volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);",locationFogReload);
             Require(Contains(distanceFog, "void ApplyRuntimeState()") &&
@@ -794,12 +857,13 @@ int main() try
                     easternKingdoms.mapId == 0 && easternKingdoms.zoneId == 12,
                 "map zero remains a valid playable world when its zone IDs are populated");
         const auto login = ClassifyWorldScene(true, true, 0, 0, 0, true);
-        Require(login.state == WorldSceneState::OutOfWorld && !CanRenderWorldClouds(login.state, true),
+        Require(login.state == WorldSceneState::OutOfWorld && !CanRenderWorldClouds(login.state, true) &&
+                    !CanRenderWorldClouds(login.state, true, true),
                 "a verified all-zero login tuple beats a captured camera or incidental scene draw");
         Require(ClassifyWorldScene(true, false, 0, 0, 0, false).state == WorldSceneState::Unknown,
                 "an unreadable verified-client sample is unknown rather than fabricated as world or menu");
-        Require(CanRenderWorldClouds(ClassifyWorldScene(false, false, 0, 0, 0, true).state, true),
-                "unverified clients retain a known terrain/liquid draw fallback for clouds");
+        Require(CanRenderWorldClouds(ClassifyWorldScene(false, false, 0, 0, 0, true).state, true, true),
+                "unverified clients retain a known terrain/liquid draw fallback when the camera is fresh");
         Require(!CanRenderWorldClouds(easternKingdoms.state, false),
                 "a stale last-world location tuple alone cannot put clouds over a login/menu frame");
         Require(CanRenderWorldClouds(easternKingdoms.state, false, true),
@@ -812,14 +876,18 @@ int main() try
                 "stale cameras cannot keep fog or atmosphere active from remembered world IDs");
         Require(!HasPlayableWorldEvidence(WorldSceneState::Unknown, false, true),
                 "a fresh camera without verified location or terrain evidence cannot activate world fog");
-        Require(HasPlayableWorldEvidence(WorldSceneState::Unknown, true, false),
-                "current terrain/liquid evidence keeps fog active when location IDs are unavailable");
+        Require(!HasPlayableWorldEvidence(WorldSceneState::Unknown, true, false),
+                "a current world draw without a fresh camera cannot activate fog from a held pose");
+        Require(HasPlayableWorldEvidence(WorldSceneState::Unknown, true, true),
+                "current terrain/liquid evidence plus a fresh camera resolves unavailable location IDs");
         Require(!HasPlayableWorldEvidence(WorldSceneState::OutOfWorld, true, true),
                 "verified out-of-world state blocks fog despite draws and a fresh camera");
         Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false, true),
                 "a fresh camera without verified location or terrain evidence cannot render clouds");
-        Require(CanRenderWorldClouds(WorldSceneState::Unknown, true),
-                "same-frame terrain/liquid evidence can resolve an unavailable location sample");
+        Require(!CanRenderWorldClouds(WorldSceneState::Unknown, true),
+                "same-frame terrain/liquid evidence cannot bypass a missing fresh camera");
+        Require(CanRenderWorldClouds(WorldSceneState::Unknown, true, true),
+                "same-frame terrain/liquid evidence and a fresh camera can render clouds");
         Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false),
                 "clouds fail closed when neither verified IDs nor known world geometry exist");
         Require(!CanRenderWorldClouds(WorldSceneState::OutOfWorld, true, true),

@@ -300,15 +300,20 @@ public:
                 const float error = std::max(std::abs(x - disc.screenX), std::abs(y - disc.screenY));
                 if (best < 0 || error < bestError) { best = int(i); bestError = error; }
             }
-            if (best < 0)
-                return false; // every transform this frame offered contradicts its own disc
-            Copy(m_candidates[best], outBasis);
-            corroborated = true;
-            SetReference(outBasis);
-            return true;
+            if (best >= 0)
+            {
+                Copy(m_candidates[best], outBasis);
+                corroborated = true;
+                SetReference(outBasis);
+                return true;
+            }
+            // The observation may be stale or its independently tracked world
+            // direction may not be usable this frame. Do not let contradictory
+            // disc evidence veto an otherwise continuous camera; run the same
+            // bounded continuity/jump confirmation below as a no-disc frame.
         }
 
-        // No disc: fall back to continuity with the accepted camera.
+        // No usable disc evidence: fall back to continuity with the accepted camera.
         if (m_haveReference)
         {
             int best = -1;

@@ -1121,17 +1121,19 @@ bool Composite(IDirect3DDevice9* d) {
         // converting with the draw's own VIEW yields a direction expressed
         // against the camera, not the world. Fed into the cloud deck, that is
         // "look at the moon and the cloud lighting follows the camera". Convert
-        // the reported view-space direction with this frame's captured scene
-        // camera instead (CameraCapture gated it, so it is the real one); only
-        // when no camera was captured fall back to the tracker's derivation.
+        // the reported view-space direction with this frame's accepted scene
+        // camera instead. The raw matrix remains populated after a failed
+        // capture, so only use it when cameraPoseStale is false; otherwise the
+        // tracker supplies its last confirmed direction rather than rotating the
+        // light with a held view.
         auto celestialWorldDirection = [&frameCtx](const renderer::CelestialBody& celestial) {
-            if (frameCtx.viewRawValid) {
+            if (frameCtx.viewRawValid && !frameCtx.cameraPoseStale) {
                 const renderer::Vec3& view = celestial.viewSpaceDirection;
                 float world[3];
                 renderer::ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &view.x, world);
                 return renderer::Vec3{world[0], world[1], world[2]};
             }
-            return celestial.worldSpaceDirection;
+            return celestial.worldDirectionValid ? celestial.worldSpaceDirection : renderer::Vec3{};
         };
         if (body) {
             frameCtx.sunScreenX = body->screenX;

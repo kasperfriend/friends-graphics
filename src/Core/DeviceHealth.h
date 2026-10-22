@@ -159,19 +159,21 @@ namespace renderer
         return out;
     }
 
-    // Shared render-safety policy for effects that belong to the playable world.
-    // Current terrain/liquid geometry is enough when location IDs are unavailable;
-    // otherwise a fresh camera is accepted only alongside a verified in-world state.
-    // Stale IDs alone cannot enable an effect, and a verified menu always wins.
+    // Shared render-safety policy for world effects that reconstruct or place
+    // anything through the camera. A current terrain/liquid draw can identify an
+    // unverified playable scene, and verified IDs can identify a sky-only view,
+    // but neither makes a held camera basis safe: every path also needs a pose
+    // accepted for this frame. A verified menu always wins.
     constexpr bool HasPlayableWorldEvidence(WorldSceneState state, bool knownWorldDrawSeen,
                                             bool freshCameraPose = false) noexcept
     {
         if (state == WorldSceneState::OutOfWorld) return false;
-        return knownWorldDrawSeen || (state == WorldSceneState::InWorld && freshCameraPose);
+        return freshCameraPose && (knownWorldDrawSeen || state == WorldSceneState::InWorld);
     }
 
-    // Sky-only views have no terrain/liquid draw, but the shared policy lets their
-    // verified world IDs and fresh camera pose keep world-anchored clouds alive.
+    // Sky-only views have no terrain/liquid draw, but verified world IDs plus a
+    // fresh camera pose keep world-anchored clouds alive. World draws do not
+    // bypass the freshness requirement either.
     constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen,
                                         bool freshCameraPose = false) noexcept
     {

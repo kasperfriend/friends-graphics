@@ -22,6 +22,7 @@ namespace renderer
         Vec3 viewSpacePosition{};    // billboard origin, camera/view space
         Vec3 viewSpaceDirection{};   // normalized, view space
         Vec3 worldSpaceDirection{};  // normalized, world space
+        bool worldDirectionValid = false; // independent of a stale/held camera pose
         float screenX = -1.0f;
         float screenY = -1.0f;
         uint64_t lastSeenFrame = 0;

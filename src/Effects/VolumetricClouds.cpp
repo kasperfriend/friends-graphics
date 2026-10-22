@@ -973,6 +973,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   if(!out)return;
   out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
      <<" worldDraw="<<(knownWorldDraw?1:0)<<" freshCamera="<<(freshCameraPose?1:0)
+     <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
      <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
      <<" base="<<settings.baseAltitude<<" top="<<layerTop
      <<" cameraZ="<<f.cameraPosition.z<<"\n";
@@ -981,20 +982,13 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  // scenes. Let a sky-only view through only when verified world IDs and a fresh
  // camera pose agree; unknown/menu contexts still need a current terrain/liquid draw.
  if(!CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)){
-  logState("skip=world-gate");return false;
+  const bool lacksWorldContext=f.worldScene.state==WorldSceneState::OutOfWorld||
+      (!knownWorldDraw&&f.worldScene.state!=WorldSceneState::InWorld);
+  logState(lacksWorldContext?"skip=world-gate":"skip=stale-camera");return false;
  }
  if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor){
   logState("skip=frame-input");return false;
  }
- // The deck is anchored in WORLD space at absolute heights, so it is only
- // correct from the camera that is actually being rendered. In a city the
- // terrain capture never latches while everything overhead is culled, and the
- // frame used to fall back to whatever fixed-function transform it found
- // first - the deck then rotated with the mouse instead of with the world
- // ("the clouds are dragged along with the camera"). The capture now says
- // plainly when it could not corroborate the pose; draw nothing rather than
- // draw the sky from a camera the player has already left.
- if(f.cameraPoseStale){logState("skip=stale-camera");return false;}
 
  // Advance before the clear-sky early-out: an empty deck must still be
  // able to develop a storm. The clock bounds loading/focus gaps.

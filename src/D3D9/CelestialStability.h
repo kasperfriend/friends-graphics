@@ -38,6 +38,43 @@ namespace renderer
         });
     }
 
+    inline bool IsUsableCelestialDirection(const Vec3& direction) noexcept
+    {
+        const float length = Length(direction);
+        return std::isfinite(direction.x) && std::isfinite(direction.y) && std::isfinite(direction.z) &&
+            std::isfinite(length) && length > 0.25f;
+    }
+
+    // The moon is a camera-relative billboard. Its world direction may only be
+    // recomputed with a camera pose accepted for THIS frame; FrameContext keeps
+    // the last raw view matrix around while the current pose is stale. In that
+    // case the last independently confirmed celestial direction is better
+    // evidence than multiplying the billboard by yesterday's camera rotation.
+    // With no confirmed direction yet, fail closed so sky-pose selection falls
+    // back to camera continuity instead of comparing a pose with stale data.
+    inline bool ResolveCameraRelativeWorldDirection(
+        const Vec3& viewDirection, const float view[4][4], bool cameraPoseFresh,
+        const Vec3& retainedWorldDirection, bool retainedDirectionValid,
+        Vec3& worldDirection) noexcept
+    {
+        if (cameraPoseFresh && view)
+        {
+            const Vec3 current = ViewDirectionToWorld(viewDirection, view);
+            if (IsUsableCelestialDirection(current))
+            {
+                worldDirection = current;
+                return true;
+            }
+        }
+        if (retainedDirectionValid && IsUsableCelestialDirection(retainedWorldDirection))
+        {
+            worldDirection = Normalize(retainedWorldDirection);
+            return true;
+        }
+        worldDirection = {};
+        return false;
+    }
+
     struct CelestialLightInput
     {
         // Deliberately no disc visibility/kind: those depend on the camera,

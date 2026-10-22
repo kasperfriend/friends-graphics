@@ -420,10 +420,11 @@ namespace renderer
         m_skyPose.Observe(basis);
     }
 
-    // What the frame's own celestial draw says about the camera: the stabilized
-    // world direction towards the body, and where the client painted it. Both
-    // are independent of the pose being tested, which is what makes agreement
-    // evidence rather than a pose compared with itself.
+    // What the frame's own celestial draw says about the camera: a world
+    // direction confirmed independently of the pose being tested, plus where
+    // the client painted that same body. Never synthesize moon evidence from a
+    // held camera or from the opposite body's light vector; a mismatched pair
+    // can reject the correct sky basis on a camera turn.
     static DiscObservation DiscEvidence(const FrameContext& frameContext, const D3DMATRIX& proj)
     {
         DiscObservation disc;
@@ -434,27 +435,16 @@ namespace renderer
         const CelestialBody* body = lightIsMoon ? &moon : &sun;
         if (!body->visible)
             body = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
-        if (!body)
+        if (!body || !body->worldDirectionValid)
             return disc;
         // A disc at the very edge of the frame is half outside it, and its
         // painted position is then the least reliable thing in the frame.
         if (!(body->screenX > .03f && body->screenX < .97f && body->screenY > .03f && body->screenY < .97f))
             return disc;
-        // The direction the tracker derived for the SAME billboard is the one
-        // paired with screenX/Y; only fall back to the captured light when the
-        // tracker's own direction is unusable. (The light direction is a
-        // stabilized, possibly held value - good for shading, less direct as
-        // evidence about this draw.)
-        Vec3 world = body->worldSpaceDirection;
-        float lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
+        const Vec3 world = body->worldSpaceDirection;
+        const float lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
         if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
-        {
-            world = frameContext.directLightValid ? frameContext.directLightDirectionWorld
-                                                  : frameContext.sunDirectionWorld;
-            lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
-            if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
-                return disc;
-        }
+            return disc;
         const float inverseLength = 1.0f / std::sqrt(lengthSquared);
         disc.world[0] = world.x * inverseLength;
         disc.world[1] = world.y * inverseLength;
@@ -503,7 +493,8 @@ namespace renderer
                 return false;
             outConstants[9][0] = float(std::fmod(PerformanceSeconds(), 1200.0));
             frameContext.cameraValid = true;
-            CelestialTracker::Instance().RefreshWorldDirections(&frameContext.viewRaw.m[0][0]);
+            // Do not refresh camera-relative celestial directions from this
+            // held viewRaw: no candidate corroborated it for this frame.
             ++m_capturedFrames;
             return true;
         }

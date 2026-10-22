@@ -21,19 +21,23 @@ namespace renderer
 
             Vec3 viewDir{ cx / len, cy / len, cz / len };
 
-            // World-space direction: VIEW is a row-vector world->view
-            // transform, so invert its rotation by multiplying with the
-            // transpose. For the camera-relative moon billboard, the draw's
-            // own D3DTS_VIEW has an identity 3x3 rotation and carries only the
-            // view-space translation, so invert against the captured scene
-            // camera (FrameContext::viewRaw) whenever available.
-            Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            // The sun's billboard carries the camera rotation in its own
+            // D3DTS_VIEW, so it can be converted directly. The moon is a
+            // camera-relative billboard: its world direction must use a pose
+            // accepted for THIS frame, or retain the last confirmed world
+            // direction. FrameContext::viewRaw remains populated while stale;
+            // using it here would pair today's screen position with yesterday's
+            // basis and make DiscEvidence reject the real sky camera at some
+            // camera angles.
             const FrameContext& frameCtx = FrameContext::Current();
-            if (cameraRelative && frameCtx.viewRawValid)
+            Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            bool worldDirectionValid = IsUsableCelestialDirection(worldDir);
+            if (cameraRelative)
             {
-                float worldOut[3]{ worldDir.x, worldDir.y, worldDir.z };
-                ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &viewDir.x, worldOut);
-                worldDir = { worldOut[0], worldOut[1], worldOut[2] };
+                const float (*viewRaw)[4] = frameCtx.viewRawValid ? frameCtx.viewRaw.m : nullptr;
+                worldDirectionValid = ResolveCameraRelativeWorldDirection(
+                    viewDir, viewRaw, frameCtx.viewRawValid && !frameCtx.cameraPoseStale,
+                    body.worldSpaceDirection, body.worldDirectionValid, worldDir);
             }
 
             if (!(proj.m[0][0] > 0.0f) || !(proj.m[1][1] > 0.0f))
@@ -45,7 +49,8 @@ namespace renderer
             body.visible = true;
             body.viewSpacePosition = { cx, cy, cz };
             body.viewSpaceDirection = viewDir;
-            body.worldSpaceDirection = worldDir;
+            body.worldSpaceDirection = worldDirectionValid ? worldDir : Vec3{};
+            body.worldDirectionValid = worldDirectionValid;
             body.screenX = screenX;
             body.screenY = screenY;
             body.lastSeenFrame = frameIndex;
@@ -69,9 +74,13 @@ namespace renderer
     {
         if (!viewRaw || !m_moon.visible)
             return;
-        float worldOut[3]{ m_moon.worldSpaceDirection.x, m_moon.worldSpaceDirection.y, m_moon.worldSpaceDirection.z };
+        float worldOut[3]{};
         ViewDirectionToWorld(viewRaw, &m_moon.viewSpaceDirection.x, worldOut);
-        m_moon.worldSpaceDirection = { worldOut[0], worldOut[1], worldOut[2] };
+        const Vec3 world{ worldOut[0], worldOut[1], worldOut[2] };
+        if (!IsUsableCelestialDirection(world))
+            return;
+        m_moon.worldSpaceDirection = world;
+        m_moon.worldDirectionValid = true;
     }
 
     void CelestialTracker::Observe(IDirect3DDevice9* device, UINT primitiveCount)
