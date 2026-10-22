@@ -965,8 +965,10 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 bool Composite(IDirect3DDevice9* d) {
     ResolveWorldSceneForFrame();
     const auto& sceneFrame=renderer::FrameContext::Current();
+    const bool freshCameraPose=sceneFrame.cameraValid&&!sceneFrame.cameraPoseStale;
     const bool playableWorldEvidence=renderer::HasPlayableWorldEvidence(
-        sceneFrame.worldScene.state,sceneFrame.worldTerrainSeenThisFrame||sceneFrame.worldWaterSeenThisFrame);
+        sceneFrame.worldScene.state,sceneFrame.worldTerrainSeenThisFrame||sceneFrame.worldWaterSeenThisFrame,
+        freshCameraPose);
     if(!playableWorldEvidence) renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
     // Every branch below samples or writes the scene copy the clear hook publishes.
     // A camera captured without a depth capture (which is now possible, and is the

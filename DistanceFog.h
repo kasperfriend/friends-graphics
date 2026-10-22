@@ -58,11 +58,12 @@ struct Scope {
     IDirect3DDevice9* device=nullptr;UINT reg=0;float original[4]{};
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         const auto& frame=renderer::FrameContext::Current();
-        // Terrain is observed before this scope in each draw hook. Requiring
-        // current scene evidence prevents stale character-select IDs alone from
-        // applying world distance fog to the menu's model/camera.
+        // Terrain is observed before this scope in each draw hook. In a sky-only
+        // view, a fresh camera can stand in for that draw only when location IDs
+        // verify the playable world; stale character-select IDs cannot fog the menu.
+        const bool freshCameraPose=frame.cameraValid&&!frame.cameraPoseStale;
         if(!renderer::HasPlayableWorldEvidence(frame.worldScene.state,
-            frame.worldTerrainSeenThisFrame||frame.worldWaterSeenThisFrame))return;
+            frame.worldTerrainSeenThisFrame||frame.worldWaterSeenThisFrame,freshCameraPose))return;
         // The depth compositor now owns the same edge controls for every world
         // shader, including families absent from the legacy hash table.
         if(renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled&&renderer::DirectionalVolumetricLighting::Instance().Settings().enabled)return;

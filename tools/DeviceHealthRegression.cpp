@@ -304,6 +304,7 @@ int main() try
             const auto atmosphereHeader = Read("src/Effects/DirectionalVolumetricLighting.h");
             const auto underwaterPass = Read("src/Effects/Underwater.h");
             const auto water = Read("WaterEffect.h");
+            const auto weather = Read("WeatherVisuals.h");
             const auto localLighting = Read("src/Effects/LocalLightingRenderer.cpp");
             const auto torches = Read("src/Lighting/LocalLightManager.cpp");
             const auto frameReset = Read("src/Core/FrameContext.cpp");
@@ -320,8 +321,13 @@ int main() try
                     Contains(composite, "frameCtx.cameraValid&&!frameCtx.cameraPoseStale"),
                 "the compositor keeps sky-only clouds active only with the current verified world camera");
             Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
+                    Contains(distanceFog, "frame.cameraValid&&!frame.cameraPoseStale") &&
                     Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&
+                    Contains(atmosphere, "f.cameraValid&&!f.cameraPoseStale") &&
+                    Contains(weather, "HasPlayableWorldEvidence(") &&
+                    Contains(weather, "frame.cameraValid&&!frame.cameraPoseStale") &&
                     Contains(atmosphereHeader, "m_groundHeightIssued[0] = m_groundHeightIssued[1] = false;") &&
+                    Contains(composite, "sceneFrame.cameraValid&&!sceneFrame.cameraPoseStale") &&
                     Contains(composite, "if (!shaftDebug && playableWorldEvidence &&") &&
                     Contains(composite, "if(!playableWorldEvidence) renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();") &&
                     Contains(worldProvider, "if(!worldContext)") &&
@@ -329,7 +335,7 @@ int main() try
                     Contains(underwaterPass, "frameContext.worldScene.state!=WorldSceneState::InWorld") &&
                     Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
                     Contains(water, "underwaterWorldContinuity.Observe(frame.worldScene)"),
-                "verified menu/world IDs close the underwater pass and reset its remembered plane");
+                "fog, atmosphere, and weather accept fresh verified sky-only cameras while menu/underwater safety remains");
             const auto locationFogReload=rendererHook.find("distancefog::ReloadTuning();stage(tFog);");
             const auto locationVolumeReload=rendererHook.find("volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);",locationFogReload);
             Require(Contains(distanceFog, "void ApplyRuntimeState()") &&
@@ -791,6 +797,16 @@ int main() try
                 "a fresh verified camera keeps clouds visible when an upward view contains only sky");
         Require(!CanRenderWorldClouds(easternKingdoms.state, false, false),
                 "an in-world ID tuple without a current camera pose cannot render sky-only clouds");
+        Require(HasPlayableWorldEvidence(easternKingdoms.state, false, true),
+                "fresh verified sky-only cameras keep fog and atmospheric passes active");
+        Require(!HasPlayableWorldEvidence(easternKingdoms.state, false, false),
+                "stale cameras cannot keep fog or atmosphere active from remembered world IDs");
+        Require(!HasPlayableWorldEvidence(WorldSceneState::Unknown, false, true),
+                "a fresh camera without verified location or terrain evidence cannot activate world fog");
+        Require(HasPlayableWorldEvidence(WorldSceneState::Unknown, true, false),
+                "current terrain/liquid evidence keeps fog active when location IDs are unavailable");
+        Require(!HasPlayableWorldEvidence(WorldSceneState::OutOfWorld, true, true),
+                "verified out-of-world state blocks fog despite draws and a fresh camera");
         Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false, true),
                 "a fresh camera without verified location or terrain evidence cannot render clouds");
         Require(CanRenderWorldClouds(WorldSceneState::Unknown, true),

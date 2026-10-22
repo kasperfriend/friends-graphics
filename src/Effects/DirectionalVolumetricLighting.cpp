@@ -742,8 +742,9 @@ bool DirectionalVolumetricLighting::ValidateHistory(const FrameContext& f)
 
 bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3DSurface9* target,bool globalFogEnabled)
 {
+ const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
  if(!HasPlayableWorldEvidence(f.worldScene.state,
-     f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame)){
+     f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame,freshCameraPose)){
   InvalidateHistory();
   return false;
  }

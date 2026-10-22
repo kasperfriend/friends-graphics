@@ -1173,11 +1173,18 @@ inline void UpdateWeatherObservation(DWORD now, bool focused, bool preserveDetec
 
 // Called after the rest of the world effects, before Present resets the frame.
 // The normal pre-UI path is preferred; this is only for frames with no UI
-// trigger (or a late native weather batch).
+// trigger (or a late native weather batch). A fresh verified world camera can
+// stand in for terrain when an upward view culls every geometry draw.
 inline bool NeedsPresentFallback() noexcept
 {
+    const auto& frame=renderer::FrameContext::Current();
+    const bool knownWorldDraw=worldGeometrySeenThisFrame||nativeWeatherSeenThisFrame!=0||
+        frame.worldTerrainSeenThisFrame||frame.worldWaterSeenThisFrame;
+    const bool freshCameraPose=frame.cameraValid&&!frame.cameraPoseStale;
+    const bool playableWorld=renderer::HasPlayableWorldEvidence(
+        frame.worldScene.state,knownWorldDraw,freshCameraPose);
     return !composedThisFrame && enabled && effectEnabled && active && nativeWeatherMode != 0 &&
-        (worldGeometrySeenThisFrame || nativeWeatherSeenThisFrame != 0);
+        playableWorld;
 }
 
 inline void Present(IDirect3DDevice9*, bool preserveDetection = false)

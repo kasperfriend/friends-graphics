@@ -259,13 +259,34 @@ int main() try {
     Check(d->GetSamplerState(3,D3DSAMP_SRGBTEXTURE,&state));Require(state==TRUE,"mist sampler color space restored");
     float c[4]{};Check(d->GetPixelShaderConstantF(5,c,1));Require(memcmp(c,sentinel,sizeof(c))==0,"depth-range constants restored");
     Require(renderer::g_trackedState.vsHash==tracked.vsHash&&renderer::g_trackedState.currentPS==tracked.currentPS,"tracked game pipeline preserved");
-    // A frame with no matching UI draw gets one late world-frame composite,
-    // not a duplicate pass or an invisible rain frame.
+    // A sky-only frame with no matching UI draw gets one late world-frame
+    // composite: its fresh verified camera replaces the terrain evidence that
+    // pointing upward has culled, while the confirmed menu state still rejects it.
+    auto& skyOnlyFrame=renderer::FrameContext::Current();
+    const auto savedWorldScene=skyOnlyFrame.worldScene;
+    const bool savedWorldSceneResolved=skyOnlyFrame.worldSceneResolved;
+    const bool savedTerrainSeen=skyOnlyFrame.worldTerrainSeenThisFrame;
+    const bool savedWaterSeen=skyOnlyFrame.worldWaterSeenThisFrame;
+    const bool savedCameraValid=skyOnlyFrame.cameraValid;
+    const bool savedCameraPoseStale=skyOnlyFrame.cameraPoseStale;
+    skyOnlyFrame.worldScene.state=renderer::WorldSceneState::InWorld;
+    skyOnlyFrame.worldSceneResolved=true;
+    skyOnlyFrame.worldTerrainSeenThisFrame=false;
+    skyOnlyFrame.worldWaterSeenThisFrame=false;
+    skyOnlyFrame.cameraValid=true;
+    skyOnlyFrame.cameraPoseStale=false;
     weathervisuals::composedThisFrame=false;
-    weathervisuals::worldGeometrySeenThisFrame=true;
+    weathervisuals::worldGeometrySeenThisFrame=false;
+    weathervisuals::nativeWeatherSeenThisFrame=0;
     renderer::g_trackedState.vsHash=0;renderer::g_trackedState.psHash=0;
     weathervisuals::rainDebugView=1;
-    Require(weathervisuals::NeedsPresentFallback(),"missing UI draw requests one weather fallback");
+    Require(weathervisuals::NeedsPresentFallback(),
+        "fresh verified sky-only camera requests weather fallback without geometry or native particles");
+    skyOnlyFrame.worldScene.state=renderer::WorldSceneState::OutOfWorld;
+    Require(!weathervisuals::NeedsPresentFallback(),
+        "confirmed out-of-world state blocks the sky-only weather fallback");
+    skyOnlyFrame.worldScene.state=renderer::WorldSceneState::InWorld;
+    Require(weathervisuals::NeedsPresentFallback(),"returning to verified world state re-enables one fallback");
     Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0));
     Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get(),true);Check(d->EndScene());
     Require(weathervisuals::composedThisFrame&&weathervisuals::rainCompositeReady&&
@@ -273,6 +294,12 @@ int main() try {
         "fallback renders detected rain once without a UI trigger");
     weathervisuals::rainDebugView=0;
     weathervisuals::worldGeometrySeenThisFrame=false;
+    skyOnlyFrame.worldScene=savedWorldScene;
+    skyOnlyFrame.worldSceneResolved=savedWorldSceneResolved;
+    skyOnlyFrame.worldTerrainSeenThisFrame=savedTerrainSeen;
+    skyOnlyFrame.worldWaterSeenThisFrame=savedWaterSeen;
+    skyOnlyFrame.cameraValid=savedCameraValid;
+    skyOnlyFrame.cameraPoseStale=savedCameraPoseStale;
     renderer::g_trackedState=tracked;
     weathervisuals::nativeWeatherMode=0;weathervisuals::composedThisFrame=false;
     Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());

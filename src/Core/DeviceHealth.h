@@ -159,24 +159,23 @@ namespace renderer
         return out;
     }
 
-    // Cloud decks are world-space geometry and have no safe placement on a
-    // menu/loading frame. A missing location sample needs a current draw signal.
-    constexpr bool HasPlayableWorldEvidence(WorldSceneState state, bool knownWorldDrawSeen) noexcept
-    {
-        // IDs can remain at the last playable location while the login UI draws.
-        // Current terrain/liquid geometry is required as corroboration. A verified
-        // out-of-world reading always wins; Unknown may use only that fresh evidence.
-        return state != WorldSceneState::OutOfWorld && knownWorldDrawSeen;
-    }
-
-    // A sky-only camera submits no terrain/liquid draw, but its verified world
-    // IDs and fresh camera pose are still enough to keep world-anchored clouds
-    // alive. Unknown locations remain draw-gated, and a verified menu always wins.
-    constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen,
-                                        bool freshCameraPose = false) noexcept
+    // Shared render-safety policy for effects that belong to the playable world.
+    // Current terrain/liquid geometry is enough when location IDs are unavailable;
+    // otherwise a fresh camera is accepted only alongside a verified in-world state.
+    // Stale IDs alone cannot enable an effect, and a verified menu always wins.
+    constexpr bool HasPlayableWorldEvidence(WorldSceneState state, bool knownWorldDrawSeen,
+                                            bool freshCameraPose = false) noexcept
     {
         if (state == WorldSceneState::OutOfWorld) return false;
         return knownWorldDrawSeen || (state == WorldSceneState::InWorld && freshCameraPose);
+    }
+
+    // Sky-only views have no terrain/liquid draw, but the shared policy lets their
+    // verified world IDs and fresh camera pose keep world-anchored clouds alive.
+    constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen,
+                                        bool freshCameraPose = false) noexcept
+    {
+        return HasPlayableWorldEvidence(state, knownWorldDrawSeen, freshCameraPose);
     }
 
     // Remembered submersion must not survive leaving the client world, or a

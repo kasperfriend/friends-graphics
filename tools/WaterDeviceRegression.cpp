@@ -375,9 +375,25 @@ int main() try {
     Require(memcmp(currentFog,badFog,sizeof(badFog))==0,
         "malformed native c4 is restored exactly after the water draw");
     Check(d->SetVertexShaderConstantF(4,savedFog,1));
+    // A camera looking only at the sky submits no terrain/liquid draw before
+    // this point. Water replacement is deliberately draw-local: an actual
+    // visible liquid draw must still install its shader without that frame gate.
+    auto& skyOnlyFrame=renderer::FrameContext::Current();
+    const auto savedWorldScene=skyOnlyFrame.worldScene;
+    const bool savedWorldSceneResolved=skyOnlyFrame.worldSceneResolved;
+    const bool savedTerrainSeen=skyOnlyFrame.worldTerrainSeenThisFrame;
+    const bool savedWaterSeen=skyOnlyFrame.worldWaterSeenThisFrame;
+    const bool savedCameraValid=skyOnlyFrame.cameraValid;
+    const bool savedCameraPoseStale=skyOnlyFrame.cameraPoseStale;
+    skyOnlyFrame.worldScene.state=renderer::WorldSceneState::InWorld;
+    skyOnlyFrame.worldSceneResolved=true;
+    skyOnlyFrame.worldTerrainSeenThisFrame=false;
+    skyOnlyFrame.worldWaterSeenThisFrame=false;
+    skyOnlyFrame.cameraValid=true;
+    skyOnlyFrame.cameraPoseStale=false;
     {
         watereffect::Scope scope(d.Get());
-        Require(scope.device==d.Get(),"replacement installs without scene/depth capture");
+        Require(scope.device==d.Get(),"water replacement remains active for a visible liquid draw in a sky-only frame");
         float c[36];Check(d->GetPixelShaderConstantF(200,c,9));
         Require(c[23]==0&&c[13]<0&&c[19]>0,"missing capture has valid depth unpack constants");
         // c197/c198 are the client's and stay untouched; c199 is WATER OPACITY, which the
@@ -391,6 +407,12 @@ int main() try {
             "the same upload writes the WATER OPACITY floor on c199");
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
     }
+    skyOnlyFrame.worldScene=savedWorldScene;
+    skyOnlyFrame.worldSceneResolved=savedWorldSceneResolved;
+    skyOnlyFrame.worldTerrainSeenThisFrame=savedTerrainSeen;
+    skyOnlyFrame.worldWaterSeenThisFrame=savedWaterSeen;
+    skyOnlyFrame.cameraValid=savedCameraValid;
+    skyOnlyFrame.cameraPoseStale=savedCameraPoseStale;
     restored();
     {
         TextureFailure failure(d.Get());
