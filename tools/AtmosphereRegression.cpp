@@ -680,11 +680,11 @@ int main() try {
  }
  fill(scene.Get(),0xff202020);
  // Resolution is independent of march quality and reallocates live.
- const auto marchSamples=cloud.sampleCount;
+ const auto selectedMarchSamples=cloud.sampleCount;
  cloud.resolutionScale=.5f;
  Check(d->BeginScene());Require(clouds.Render(d.Get(),f,back.Get()),"half-resolution cloud pass renders");Check(d->EndScene());
  D3DSURFACE_DESC cloudDesc{};Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));
- Require(cloudDesc.Width==64&&cloudDesc.Height==64&&cloud.sampleCount==marchSamples,
+ Require(cloudDesc.Width==64&&cloudDesc.Height==64&&cloud.sampleCount==selectedMarchSamples,
          "cloud resolution changes without changing march quality");
  cloud.resolutionScale=.25f;
  // Clearing to a colour the scene never uses proves the composite really
