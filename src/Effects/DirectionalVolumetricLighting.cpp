@@ -729,6 +729,11 @@ bool DirectionalVolumetricLighting::ValidateHistory(const FrameContext& f)
 
 bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3DSurface9* target,bool globalFogEnabled)
 {
+ if(!HasPlayableWorldEvidence(f.worldScene.state,
+     f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame)){
+  InvalidateHistory();
+  return false;
+ }
  auto settings=m_settings;
  settings.densityScale*=f.environment[FogDensity];
  settings.localFogDensity*=f.environment[LocalFog];

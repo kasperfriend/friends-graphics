@@ -12,6 +12,7 @@ namespace renderer
     {
         frameIndex = newFrameIndex;
         device = dev;
+        ResetWorldSceneFrame();
 
         // Keep the last accepted camera pose/projection as a fallback when a
         // frame contains only a skybox and no terrain draw can recapture it.

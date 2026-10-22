@@ -297,19 +297,53 @@ int main() try
         // player instead of the world.
         {
             const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
+            const auto composite = Read("VolumeIntegration.h");
+            const auto worldProvider = Read("src/Environment/EnvironmentProfileManager.cpp");
+            const auto distanceFog = Read("DistanceFog.h");
+            const auto atmosphere = Read("src/Effects/DirectionalVolumetricLighting.cpp");
+            const auto atmosphereHeader = Read("src/Effects/DirectionalVolumetricLighting.h");
+            const auto underwaterPass = Read("src/Effects/Underwater.h");
+            const auto water = Read("WaterEffect.h");
             const auto localLighting = Read("src/Effects/LocalLightingRenderer.cpp");
             const auto torches = Read("src/Lighting/LocalLightManager.cpp");
             const auto frameReset = Read("src/Core/FrameContext.cpp");
-            Require(Contains(clouds, "if(f.cameraPoseStale)return false;"),
-                "the cloud deck refuses to draw from a stale camera pose");
+            const auto frameContext = Read("src/Core/FrameContext.h");
+            const auto rendererHook = Read("ModernWoWRenderer.cpp");
+            Require(Contains(clouds, "if(f.cameraPoseStale)return false;") &&
+                    Contains(clouds, "if(!CanRenderWorldClouds(f.worldScene.state,f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame))return false;"),
+                "the cloud deck requires both a fresh camera and a confirmed playable-world scene");
+            Require(Contains(composite, "ResolveWorldSceneForFrame();") &&
+                    Contains(composite, "watereffect::ObserveWorldSceneForUnderwater(frame);") &&
+                    Contains(composite, "CanRenderWorldClouds(frameCtx.worldScene.state,") &&
+                    Contains(composite, "frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame"),
+                "the compositor resolves live scene context before scheduling world-anchored clouds");
+            Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
+                    Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&
+                    Contains(atmosphereHeader, "m_groundHeightIssued[0] = m_groundHeightIssued[1] = false;") &&
+                    Contains(composite, "if (!shaftDebug && playableWorldEvidence &&") &&
+                    Contains(composite, "if(!playableWorldEvidence) renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();") &&
+                    Contains(worldProvider, "if(!worldContext)") &&
+                    Contains(worldProvider, "ClassifyWorldScene(provider.Verified(),provider.Sampled()") &&
+                    Contains(underwaterPass, "frameContext.worldScene.state!=WorldSceneState::InWorld") &&
+                    Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
+                    Contains(water, "underwaterWorldContinuity.Observe(frame.worldScene)"),
+                "verified menu/world IDs close the underwater pass and reset its remembered plane");
             Require(Contains(localLighting, "f.cameraPoseStale") &&
                     Contains(localLighting, "FrameContext::kCameraEyeHoldMs"),
                 "local lighting refuses a stale pose or an eye no draw carried");
             Require(Contains(torches, "f.cameraPoseStale") &&
                     Contains(torches, "FrameContext::kCameraEyeHoldMs"),
                 "torch emitters are not placed through a stale pose");
-            Require(Contains(frameReset, "cameraPoseStale = true;"),
-                "a new frame starts with the previous pose marked unusable");
+            Require(Contains(frameReset, "cameraPoseStale = true;") &&
+                    Contains(frameReset, "ResetWorldSceneFrame();") &&
+                    Contains(frameContext, "worldTerrainSeenThisFrame = false;") &&
+                    Contains(frameContext, "worldWaterSeenThisFrame = false;") &&
+                    Contains(frameContext, "worldSceneResolved = false;") &&
+                    Contains(rendererHook, "renderer::FrameContext::Current().ResetWorldSceneFrame();"),
+                "a new frame starts with the previous pose and scene evidence marked unusable");
+            Require(Contains(rendererHook, "weathervisuals::ObserveWorldDraw();") &&
+                    Contains(rendererHook, "volume::ResolveWorldSceneForFrame();"),
+                "draw hooks publish terrain evidence before per-draw fog and resolve no-depth world frames");
         }
 
         {
@@ -708,6 +742,38 @@ int main() try
     Require(ShouldHoldLocation(HasWorldContext(false, false), true), "no-depth frame without terrain holds a confirmed location");
     Require(!ShouldHoldLocation(HasWorldContext(false, false), false), "no-depth frame with nothing confirmed still polls, so a first location can arrive");
     Require(!ShouldHoldLocation(HasWorldContext(false, true), true), "terrain-only world frame permits location sampling");
+
+    {
+        const auto easternKingdoms = ClassifyWorldScene(true, true, 0, 12, 12, false);
+        Require(easternKingdoms.state == WorldSceneState::InWorld && easternKingdoms.locationIdsValid &&
+                    easternKingdoms.mapId == 0 && easternKingdoms.zoneId == 12,
+                "map zero remains a valid playable world when its zone IDs are populated");
+        const auto login = ClassifyWorldScene(true, true, 0, 0, 0, true);
+        Require(login.state == WorldSceneState::OutOfWorld && !CanRenderWorldClouds(login.state, true),
+                "a verified all-zero login tuple beats a captured camera or incidental scene draw");
+        Require(ClassifyWorldScene(true, false, 0, 0, 0, false).state == WorldSceneState::Unknown,
+                "an unreadable verified-client sample is unknown rather than fabricated as world or menu");
+        Require(CanRenderWorldClouds(ClassifyWorldScene(false, false, 0, 0, 0, true).state, true),
+                "unverified clients retain a known terrain/liquid draw fallback for clouds");
+        Require(!CanRenderWorldClouds(easternKingdoms.state, false),
+                "a stale last-world location tuple alone cannot put clouds over a login/menu frame");
+        Require(CanRenderWorldClouds(WorldSceneState::Unknown, true),
+                "same-frame terrain/liquid evidence can resolve an unavailable location sample");
+        Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false),
+                "clouds fail closed when neither verified IDs nor known world geometry exist");
+        Require(!CanRenderWorldClouds(WorldSceneState::OutOfWorld, true),
+                "verified out-of-world state overrides even terrain-like menu draws");
+        Require(ClassifyWorldScene(true, true, 0, 0, 1000001, false).state == WorldSceneState::Unknown,
+                "implausible location IDs do not activate world-anchored effects");
+
+        WorldSceneContinuity continuity;
+        Require(!continuity.Observe(easternKingdoms), "first verified zone establishes water continuity");
+        Require(!continuity.Observe(easternKingdoms), "camera motion inside one zone preserves remembered water");
+        const auto kalimdor = ClassifyWorldScene(true, true, 1, 14, 14, false);
+        Require(continuity.Observe(kalimdor), "a map/zone transition retires the old underwater plane");
+        Require(continuity.Observe(login), "leaving the playable world clears underwater continuity immediately");
+        Require(!continuity.Observe(kalimdor), "returning from login starts a fresh continuity anchor");
+    }
 
     // Cached D3DSBT_ALL blocks retain texture bindings, including DEFAULT-pool
     // render targets. The reset hook must invalidate this cache before it

@@ -603,6 +603,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
             if (!IsActive()) { NoteIdle(1, "the pass is not active (Enabled, configuration or shader)"); return false; }
             if (!device || !targetSurface) { NoteIdle(1, "no device or target surface"); return false; }
             if (!depthTexture) { NoteIdle(1, "no captured depth texture - depth capture is off (MSAA refuses INTZ, or the capture never latched)"); return false; }
+            if(frameContext.worldScene.state!=WorldSceneState::InWorld)
+            {
+                NoteIdle(2, "no playable world scene was confirmed for this frame");
+                return false;
+            }
             const float ramp = std::clamp(frameContext.underwaterRamp, 0.f, 1.f);
             // Not submerged: the pass would return the frame it was handed, pixel for pixel,
             // so it does not run at all. This is the identity the whole underwater path is

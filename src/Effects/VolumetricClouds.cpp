@@ -927,6 +927,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  m_shadowValid=false;
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
+ // A corroborated camera and depth buffer also exist on some login/menu
+ // scenes. The cloud deck is world-space geometry, so require the independent
+ // playable-world context instead of painting a menu background.
+ if(!CanRenderWorldClouds(f.worldScene.state,f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame))return false;
  if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
  // The deck is anchored in WORLD space at absolute heights, so it is only
  // correct from the camera that is actually being rendered. In a city the

@@ -95,6 +95,7 @@ bool scopedWaterColour=false,scopedDeepColour=false,scopedAbsorptionColour=false
 // medium: the full-screen pass and the ramp the air passes fade out on, both gated on
 // renderer::Underwater::IsActive() where the ramp is published (VolumeIntegration.h).
 renderer::underwater::Tracker submersionTracker;
+renderer::WorldSceneContinuity underwaterWorldContinuity;
 float underwaterSeconds=0.f;
 
 // What the water draws resolved for the medium this frame. Published per draw because the
@@ -458,6 +459,14 @@ inline void ClearLiquidVertexZCache() noexcept {
 // qualityPlan, the sea state); declared here because AdvanceUnderwater above spends it.
 float UnderwaterWaveBandYards(const renderer::FrameContext& frame);
 
+bool ObserveWorldSceneForUnderwater(const renderer::FrameContext& frame) {
+    if(!underwaterWorldContinuity.Observe(frame.worldScene)) return false;
+    submersionTracker=renderer::underwater::Tracker{};
+    mainDrawPlaceValid=false;
+    underwaterFrame.published=false;
+    return true;
+}
+
 void AdvanceUnderwater(float dt) {
     // Wrapped here rather than only in the consumer, because a clock that grows without bound
     // loses its fraction bits: renderer::underwater::Wobble wraps its own argument into the
@@ -479,10 +488,15 @@ void AdvanceUnderwater(float dt) {
         // No water means no interface to be on either side of: no held submersion, no ramp,
         // and nothing left over from a swim that ended before the effect was turned back on.
         submersionTracker=renderer::underwater::Tracker{};
+        underwaterWorldContinuity.Reset();
         underwaterFrame.published=false;
         return;
     }
     const auto& frame=renderer::FrameContext::Current();
+    // A retained plane belongs to the playable world that reported it. The
+    // verified client IDs close it immediately on login/menu frames and on a
+    // map/zone transition, even if the camera pose itself is still usable.
+    if(ObserveWorldSceneForUnderwater(frame)) return;
     const float camera[3]={frame.cameraPosition.x,frame.cameraPosition.y,frame.cameraPosition.z};
     // Whether the client could have been looking at the sheet that would cover the camera.
     // The tracker's outside-evidence exit (local footprints, none over the camera) is only
@@ -999,6 +1013,21 @@ sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
 sampler2D sceneDepth:register(s3);
+// Grazing projections and wave refraction can walk beyond the captured viewport.
+// D3D's clamp sampler then returns an unrelated edge pixel/depth, which can turn
+// one screen edge into a false seabed, foam slope, or reflection hit. Treat those
+// taps as the far plane and never fetch scene colour outside the capture.
+float ScreenUVInside(float2 uv) {
+    return step(0.0,uv.x)*step(uv.x,1.0)*step(0.0,uv.y)*step(uv.y,1.0);
+}
+float ReadSceneDepth(float2 uv,float captureValid) {
+    [branch] if(captureValid>.5 && ScreenUVInside(uv)>.5) return tex2Dlod(sceneDepth,float4(uv,0,0)).r;
+    return 1.0;
+}
+float3 ReadSceneColor(float2 uv,float3 fallback,float captureValid) {
+    [branch] if(captureValid>.5 && ScreenUVInside(uv)>.5) return tex2Dlod(sceneTexture,float4(uv,0,0)).rgb;
+    return fallback;
+}
 float4 fogColor:register(c4);
 // x=sigma, the Gerstner pinch coefficient the vertex stage displaced with (its lateral
 // slide over one lattice cell): it is what turns the shading slope into the slope of the
@@ -1469,12 +1498,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float depthScale=1/max(viewPos.z,.05);
     float2 screenUV=float2(.5+.5*viewPos.x*reflectionProjection.z*depthScale,
                            .5-.5*viewPos.y*reflectionProjection.w*depthScale);
-    float behindRaw=tex2Dlod(sceneDepth,float4(screenUV,0,0)).r;
+    float sceneSampleValid=captureValid*ScreenUVInside(screenUV);
+    float behindRaw=ReadSceneDepth(screenUV,captureValid);
     float behindZ=behindRaw>=.9999?100000:reflectionProjection.y/(behindRaw-reflectionProjection.x);
     // Foreground geometry is not a deep seabed. Never turn negative
     // separation into absorption/foam on the wrong side of a shoreline.
     float waterDepth=max(behindZ-viewPos.z,0);
-    float depthValid=captureValid*step(behindZ,99999)*step(viewPos.z,behindZ);
+    float depthValid=sceneSampleValid*step(behindZ,99999)*step(viewPos.z,behindZ);
     // Keep the optical column and contact refraction in view-depth units below. Foam
     // coverage is different: it belongs to the world, not to the camera ray or pixel grid.
     float openOcean=step(99999,behindZ);
@@ -1521,11 +1551,13 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // world point under this water fragment. Projecting the point-to-point vector onto
     // world up yields vertical water depth; unlike view-Z separation it does not change
     // when the camera pitches or moves.
-    float3 bottomView=float3((2*screenUV.x-1)*behindZ/max(reflectionProjection.z,1e-6),
-                             (1-2*screenUV.y)*behindZ/max(reflectionProjection.w,1e-6),behindZ);
-    float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);
+    float bedReferenceZ=(sceneSampleValid>.5 && behindZ<99999)?behindZ:viewPos.z;
+    float3 bottomView=float3((2*screenUV.x-1)*bedReferenceZ/max(reflectionProjection.z,1e-6),
+                             (1-2*screenUV.y)*bedReferenceZ/max(reflectionProjection.w,1e-6),bedReferenceZ);
+    float foamDepthSigned=sceneSampleValid>.5 && behindZ<99999
+        ?dot(viewPos-bottomView,upWind.xyz):-1.0;
     float foamDepth=max(foamDepthSigned,0);
-    float foamDepthValid=captureValid*step(behindZ,99999)*step(0,foamDepthSigned);
+    float foamDepthValid=sceneSampleValid*step(behindZ,99999)*step(0,foamDepthSigned);
     // Recover the seabed's plane normal from reconstructed bed points, then measure its
     // inclination to world-up. The points stand a fixed WORLD distance apart -
     // kBedSlopeSpanYards either side of this pixel, along its own screen axes - and not
@@ -1556,10 +1588,10 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float bedTap=clamp(kBedSlopeSpanYards/max(bedPixelYards,1e-4),1.0,16.0);
     float2 bedUvE=screenUV+bedTap*bedStepX,bedUvW=screenUV-bedTap*bedStepX;
     float2 bedUvS=screenUV+bedTap*bedStepY,bedUvN=screenUV-bedTap*bedStepY;
-    float bedRawE=tex2Dlod(sceneDepth,float4(bedUvE,0,0)).r;
-    float bedRawW=tex2Dlod(sceneDepth,float4(bedUvW,0,0)).r;
-    float bedRawS=tex2Dlod(sceneDepth,float4(bedUvS,0,0)).r;
-    float bedRawN=tex2Dlod(sceneDepth,float4(bedUvN,0,0)).r;
+    float bedRawE=ReadSceneDepth(bedUvE,captureValid);
+    float bedRawW=ReadSceneDepth(bedUvW,captureValid);
+    float bedRawS=ReadSceneDepth(bedUvS,captureValid);
+    float bedRawN=ReadSceneDepth(bedUvN,captureValid);
     float bedZE=bedRawE>=.9999?100000:reflectionProjection.y/(bedRawE-reflectionProjection.x);
     float bedZW=bedRawW>=.9999?100000:reflectionProjection.y/(bedRawW-reflectionProjection.x);
     float bedZS=bedRawS>=.9999?100000:reflectionProjection.y/(bedRawS-reflectionProjection.x);
@@ -1614,17 +1646,19 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     float contact=lerp(1,saturate(effectiveDepth*.9),step(9.5,qualityLevel));
     float bend=waterStyle.x*saturate(column*.05+.25)*contact;
     float2 refractUV=screenUV+(depthValid?slopes*flowControl.yz*bend:float2(0,0));
+    refractUV=lerp(screenUV,refractUV,ScreenUVInside(refractUV));
     // Reject distortion across foreground silhouettes, rather than pulling
     // a bridge/character into the water. Missing depth keeps the native body.
-    float refractRaw=tex2Dlod(sceneDepth,float4(refractUV,0,0)).r;
+    float refractRaw=ReadSceneDepth(refractUV,captureValid);
     refractUV=lerp(screenUV,refractUV,step(reflectionProjection.x+reflectionProjection.y*depthScale,refractRaw));
-    float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
+    float3 refracted=rgb;
+    [branch] if(sceneSampleValid>.5) refracted=ReadSceneColor(refractUV,rgb,captureValid);
     // Beer-Lambert per channel, with the authored deep colour as the asymptote:
     // "clear mountain lake" and "murky swamp" are then one number apart (Clarity)
     // instead of a re-tune of every term. Red dies first, which is why a deep pool
     // reads teal rather than as a darker grey.
     float3 transmittance=exp(-bodyStyle.x*waterStyle.y*column*absorbTint.rgb);
-    float absorption=captureValid*(1-transmittance.g);
+    float absorption=sceneSampleValid*(1-transmittance.g);
     // Light scattering back out of the column is what makes a crest glow when the
     // source is behind it. Without it water is a surface pasted onto the world;
     // a Henyey-Greenstein lobe forwards that glow into the sun, which is where the
@@ -1869,7 +1903,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                    .5-.5*samplePosition.y*reflectionProjection.w*invSampleZ);
             float inside=step(.05,samplePosition.z)*saturate(min(min(sampleUV.x,sampleUV.y),
                                       min(1-sampleUV.x,1-sampleUV.y))*8);
-            float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
+            float raw=ReadSceneDepth(sampleUV,captureValid);
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
             float thickness=reflectionStyle.z+traceDistance*.05;
@@ -1885,7 +1919,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
             // every later contribution exactly zero, so stop the march there.
             [branch] if(confidence>0) {
                 if(hit<=0)hitDistance=traceDistance;
-                hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,
+                hitColor=lerp(hitColor,ReadSceneColor(sampleUV,environment,captureValid),
                               confidence*(1-hit));
                 hit=max(hit,confidence);
             }
@@ -1946,7 +1980,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
                                   .5-.5*lightSample.y*reflectionProjection.w*invLightZ);
             float inside=step(.05,lightSample.z)*saturate(min(min(lightUV.x,lightUV.y),
                                     min(1-lightUV.x,1-lightUV.y))*8);
-            float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
+            float lightRaw=ReadSceneDepth(lightUV,captureValid);
             float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw-reflectionProjection.x);
             // Anything nearer than the sample point occludes the source: a single
             // sided band where the old version tested a thickness window on top of
@@ -2155,7 +2189,7 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
     // reasoning as open water, taken to its limit. This is the safety net behind the
     // report "the whole sea is still a sheet of glass out there": without it, a missing
     // copy silently turned every water pixel into baseAlpha over an empty background.
-    float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);
+    float openOceanCoverage=max(openOcean*(1-underwater),1-sceneSampleValid);
     surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));
     // The far side of this fragment's own wave, in its fifteen degrees of fade before the
     // discard at the top of the stage removes it entirely: what survives the fade is the
@@ -2514,6 +2548,7 @@ inline void Reset(IDirect3DDevice9* d) {
     lastWaveAnchorFrame=0;
     mainDrawPlaceValid=false;
     mainDrawPlaceFrame=0;
+    underwaterWorldContinuity.Reset();
     // The pivot itself is remembered only so a jump can be told from a step. A device
     // reset is not a place: the next frame's pivot is adopted without settling.
     seaPivotLastValid=false;
@@ -3143,7 +3178,7 @@ struct Scope {
             // both reduced in double and wrapped into a period so the shader
             // never evaluates a coordinate large enough to lose the fraction
             // bits that keep noise from collapsing into squares.
-            const auto& waveFrame=renderer::FrameContext::Current();
+            auto& waveFrame=renderer::FrameContext::Current();
             // The anchor comes from THIS draw's own model->view matrix, read back from the
             // vertex constants the shader is about to use. A frame-captured camera cannot
             // serve here: it is captured on the first draw of the frame that carries the
@@ -3196,6 +3231,7 @@ struct Scope {
                     }
                 }
             }
+            if(mainTarget) waveFrame.worldWaterSeenThisFrame=true;
             // The place the tracker's jump test spends: this draw's own camera, when the draw
             // is aimed at the player's view and its anchor came from the live VIEW transform
             // (a tile-local anchor is a point inside a water tile, not a world place). One

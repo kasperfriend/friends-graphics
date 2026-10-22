@@ -2407,12 +2407,20 @@ void TestMirror()
     Require(frameContext.find("float underwaterRamp = 0.f;") != std::string::npos
                 && frameContext.find("float underwaterYards = -1.f;") != std::string::npos,
             "the camera's medium is one published number in the frame context, not three opinions");
-    Require(composite.find("frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;")
+    Require(composite.find("frameCtx.underwaterRamp = underwaterActive && confirmedPlayableWorld")
                 != std::string::npos
+                && composite.find("const bool confirmedPlayableWorld = frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;")
+                    != std::string::npos
+                && composite.find("frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;")
+                    == std::string::npos
                 && composite.find("frameCtx.underwaterYards = watereffect::submersionTracker.yards;") != std::string::npos
                 && composite.find("const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();")
                     != std::string::npos,
-            "the compositor publishes the water stage's settled answer, gated on the medium's own switch");
+            "the compositor publishes the water stage's settled answer only inside the playable world");
+    Require(pass.find("if(frameContext.worldScene.state!=WorldSceneState::InWorld)") != std::string::npos
+                && water.find("underwaterWorldContinuity.Observe(frame.worldScene)") != std::string::npos
+                && water.find("submersionTracker=renderer::underwater::Tracker{};") != std::string::npos,
+            "the underwater pass fails closed off-world and its retained plane resets on verified location transitions");
     // The precipitation stage composites during the client's draw stream, before the composite
     // that settles this frame's medium, so the same answer is published for it one frame ahead:
     // rain (and snow/sand) fades out below the surface instead of drawing over a diver.

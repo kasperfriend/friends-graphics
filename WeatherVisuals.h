@@ -701,8 +701,10 @@ inline bool IsTerrainShader(uint64_t psHash)
 
 inline void ObserveWorldDraw()
 {
-    if (IsTerrainShader(renderer::g_trackedState.psHash))
+    if (IsTerrainShader(renderer::g_trackedState.psHash)) {
         worldGeometrySeenThisFrame = true;
+        renderer::FrameContext::Current().worldTerrainSeenThisFrame = true;
+    }
 }
 
 // Texture identity plus the captured weather shader pair is the type signal.

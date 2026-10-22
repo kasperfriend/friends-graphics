@@ -112,4 +112,100 @@ namespace renderer
     {
         return !worldFrame && haveConfirmedLocation;
     }
+
+    // A valid camera pose is not proof that the client is in a playable world:
+    // the login scene can also contain a full-frame sky/camera. On verified
+    // clients, coherent map/zone IDs distinguish those states. Unknown clients
+    // retain a conservative render-evidence fallback for effects that need it.
+    enum class WorldSceneState : uint8_t
+    {
+        Unknown,
+        InWorld,
+        OutOfWorld,
+    };
+
+    struct WorldSceneObservation
+    {
+        WorldSceneState state = WorldSceneState::Unknown;
+        uint32_t mapId = 0;
+        uint32_t zoneId = 0;
+        uint32_t areaId = 0;
+        bool locationIdsValid = false;
+    };
+
+    constexpr WorldSceneObservation ClassifyWorldScene(
+        bool verifiedProvider, bool coherentIds, uint32_t mapId, uint32_t zoneId,
+        uint32_t areaId, bool knownWorldDrawSeen) noexcept
+    {
+        WorldSceneObservation out;
+        constexpr uint32_t kLargestPlausibleWorldId = 1000000u;
+        const bool plausible = mapId <= kLargestPlausibleWorldId &&
+            zoneId <= kLargestPlausibleWorldId && areaId <= kLargestPlausibleWorldId;
+        if (verifiedProvider && coherentIds && plausible)
+        {
+            if (zoneId == 0 && areaId == 0)
+            {
+                out.state = WorldSceneState::OutOfWorld;
+                return out;
+            }
+            out.state = WorldSceneState::InWorld;
+            out.mapId = mapId; // map 0 is a real WoW map; zone/area carry presence
+            out.zoneId = zoneId;
+            out.areaId = areaId;
+            out.locationIdsValid = true;
+            return out;
+        }
+        if (knownWorldDrawSeen) out.state = WorldSceneState::InWorld;
+        return out;
+    }
+
+    // Cloud decks are world-space geometry and have no safe placement on a
+    // menu/loading frame. A missing location sample needs a current draw signal.
+    constexpr bool HasPlayableWorldEvidence(WorldSceneState state, bool knownWorldDrawSeen) noexcept
+    {
+        // IDs can remain at the last playable location while the login UI draws.
+        // Current terrain/liquid geometry is required as corroboration. A verified
+        // out-of-world reading always wins; Unknown may use only that fresh evidence.
+        return state != WorldSceneState::OutOfWorld && knownWorldDrawSeen;
+    }
+
+    constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen) noexcept
+    {
+        return HasPlayableWorldEvidence(state, knownWorldDrawSeen);
+    }
+
+    // Remembered submersion must not survive leaving the client world, or a
+    // confirmed map/zone transition. The first frame in the new location starts
+    // clean, while ordinary camera turns inside one zone preserve the medium.
+    class WorldSceneContinuity
+    {
+    public:
+        bool Observe(const WorldSceneObservation& observation) noexcept
+        {
+            if (observation.state == WorldSceneState::OutOfWorld)
+            {
+                m_haveLocation = false;
+                return true;
+            }
+            if (observation.state != WorldSceneState::InWorld || !observation.locationIdsValid)
+                return false;
+            const bool changed = m_haveLocation &&
+                (observation.mapId != m_mapId || observation.zoneId != m_zoneId);
+            m_mapId = observation.mapId;
+            m_zoneId = observation.zoneId;
+            m_haveLocation = true;
+            return changed;
+        }
+
+        void Reset() noexcept
+        {
+            m_mapId = m_zoneId = 0;
+            m_haveLocation = false;
+        }
+
+    private:
+        uint32_t m_mapId = 0;
+        uint32_t m_zoneId = 0;
+        bool m_haveLocation = false;
+    };
 }

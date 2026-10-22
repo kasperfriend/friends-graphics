@@ -1044,6 +1044,36 @@ int main() try
         const std::string mirror = ReadAlongside("WaterPreview.cpp");
         Require(header.size()>4096,"the wave field header both stages mirror is readable");
         Require(vertex.size()>1024&&pixel.size()>8192,"both water stages are readable as text");
+        const auto countText=[](const std::string& text,const std::string& needle) {
+            size_t count=0,at=0;
+            while((at=text.find(needle,at))!=std::string::npos){++count;at+=needle.size();}
+            return count;
+        };
+        Require(pixel.find("float ScreenUVInside(float2 uv)")!=std::string::npos&&
+                pixel.find("step(0.0,uv.x)*step(uv.x,1.0)*step(0.0,uv.y)*step(uv.y,1.0)")!=std::string::npos&&
+                pixel.find("if(captureValid>.5 && ScreenUVInside(uv)>.5)")!=std::string::npos,
+                "water screen-space taps are checked against the captured viewport before sampling");
+        Require(countText(pixel,"tex2Dlod(sceneDepth,float4(")==1&&
+                countText(pixel,"tex2Dlod(sceneTexture,float4(")==1&&
+                pixel.find("float ReadSceneDepth(float2 uv,float captureValid)")!=std::string::npos&&
+                pixel.find("float3 ReadSceneColor(float2 uv,float3 fallback,float captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(screenUV,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(bedUvE,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(bedUvW,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(bedUvS,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(bedUvN,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(refractUV,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(sampleUV,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneDepth(lightUV,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneColor(refractUV,rgb,captureValid)")!=std::string::npos&&
+                pixel.find("ReadSceneColor(sampleUV,environment,captureValid)")!=std::string::npos,
+                "base, bed, refraction, SSR and sun-occlusion reads share the two bounds/capture-checked fetch helpers");
+        Require(pixel.find("float sceneSampleValid=captureValid*ScreenUVInside(screenUV);")!=std::string::npos&&
+                pixel.find("float depthValid=sceneSampleValid*step(behindZ,99999)*step(viewPos.z,behindZ);")!=std::string::npos&&
+                pixel.find("float foamDepthValid=sceneSampleValid*step(behindZ,99999)*step(0,foamDepthSigned);")!=std::string::npos&&
+                pixel.find("refractUV=lerp(screenUV,refractUV,ScreenUVInside(refractUV));")!=std::string::npos&&
+                pixel.find("float openOceanCoverage=max(openOcean*(1-underwater),1-sceneSampleValid);")!=std::string::npos,
+                "an out-of-viewport base or refraction ray falls back to native water instead of edge-clamped scene pixels");
         // (0) The sea's re-anchoring pivot must be THIS place's camera. WaveMotion::Advance
         // compensates every heading and WAVE SIZE edit about the pivot it is handed, which
         // keeps the field still at the player and nowhere else: a point d away from the pivot
@@ -1438,7 +1468,7 @@ int main() try
             // same `behindZ` is the sky through Snell's window, so the term is above-water only.
             {
                 const auto openTerm=pixel.find(
-                    "float openOceanCoverage=max(openOcean*(1-underwater),1-captureValid);");
+                    "float openOceanCoverage=max(openOcean*(1-underwater),1-sceneSampleValid);");
                 const auto openRule=pixel.find(
                     "surfaceAlpha=max(surfaceAlpha,lerp(opacityControl.x,1.0,openOceanCoverage));");
                 Require(openTerm!=std::string::npos&&openRule!=std::string::npos&&
@@ -1448,8 +1478,8 @@ int main() try
                 // "behind" a partial alpha would blend is whatever the client left in the
                 // target, which over water is the clear colour. Nothing captured is not
                 // something to see through.
-                Require(pixel.find("1-captureValid)")!=std::string::npos,
-                        "a missing scene capture covers the sheet instead of blending the clear colour through it");
+                Require(pixel.find("1-sceneSampleValid)")!=std::string::npos,
+                        "a missing or offscreen scene sample covers the sheet instead of blending the clear colour through it");
                 const std::string mirror=ReadAlongside("WaterPreview.cpp");
                 Require(mirror.find("alpha = std::max(alpha, Mix(.85f, 1.f, openOcean));")!=std::string::npos,
                         "the CPU preview carries the same open-ocean coverage rule");
@@ -1525,8 +1555,9 @@ int main() try
         // shoal/beach foam as quad-scale ticks on shallow beds (modeled numerically above).
         // Every depth-gated foam source carries foamDepthValid, backwash included: a pixel
         // with sky behind it clamps its foam depth to zero and would read as ankle-deep swash.
-        Require(pixel.find("float3 bottomView=float3((2*screenUV.x-1)*behindZ/max(reflectionProjection.z,1e-6),")!=std::string::npos&&
-                pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")!=std::string::npos&&
+        Require(pixel.find("float bedReferenceZ=(sceneSampleValid>.5 && behindZ<99999)?behindZ:viewPos.z;")!=std::string::npos&&
+                pixel.find("float3 bottomView=float3((2*screenUV.x-1)*bedReferenceZ/max(reflectionProjection.z,1e-6),")!=std::string::npos&&
+                pixel.find("float foamDepthSigned=sceneSampleValid>.5 && behindZ<99999")!=std::string::npos&&
                 pixel.find("static const float kBedSlopeSpanYards=1.5;")!=std::string::npos&&
                 pixel.find("float bedTap=clamp(kBedSlopeSpanYards/max(bedPixelYards,1e-4),1.0,16.0);")!=std::string::npos&&
                 pixel.find("float3 bedNormal=cross(bedE-bedW,bedS-bedN);")!=std::string::npos&&
@@ -1556,7 +1587,7 @@ int main() try
         Require(countOf(pixel,"step(0,dot(bed")==4&&
                 pixel.find("bedE=lerp(bedE,bottomView,step(0,dot(bedE-viewPos,upWind.xyz)));")!=std::string::npos&&
                 pixel.find("bedN=lerp(bedN,bottomView,step(0,dot(bedN-viewPos,upWind.xyz)));")!=std::string::npos&&
-                pixel.find("float foamDepthSigned=dot(viewPos-bottomView,upWind.xyz);")
+                pixel.find("float foamDepthSigned=sceneSampleValid>.5 && behindZ<99999")
                     < pixel.find("bedE=lerp(bedE,bottomView,step(0,")&&
                 pixel.find("bedE=lerp(bedE,bottomView,step(0,")
                     < pixel.find("float3 bedNormal=cross(bedE-bedW,bedS-bedN);"),

@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <cstdint>
 #include "MathTypes.h"
+#include "DeviceHealth.h"
 #include "../Environment/EnvironmentProfile.h"
 #include "../Environment/WindSystem.h"
 
@@ -18,6 +19,15 @@ namespace renderer
         WindState wind;
         uint64_t frameIndex = 0;
         IDirect3DDevice9* device = nullptr;
+
+        // Current-frame scene evidence is separate from camera validity: sky
+        // fallbacks can publish a perfectly usable camera on a login/menu scene.
+        // The direct terrain/liquid flags are filled by their draw observers;
+        // the observation is resolved from those flags and verified client IDs.
+        bool worldTerrainSeenThisFrame = false;
+        bool worldWaterSeenThisFrame = false;
+        bool worldSceneResolved = false;
+        WorldSceneObservation worldScene;
 
         uint32_t width = 0;
         uint32_t height = 0;
@@ -198,6 +208,14 @@ namespace renderer
         // GetForegroundWindow for both).
         bool wowFocused = false;
         HWND wowForeground = nullptr;
+
+        void ResetWorldSceneFrame() noexcept
+        {
+            worldTerrainSeenThisFrame = false;
+            worldWaterSeenThisFrame = false;
+            worldSceneResolved = false;
+            worldScene = {};
+        }
 
         void ResetForNewFrame(uint64_t newFrameIndex, IDirect3DDevice9* dev);
     };

@@ -88,6 +88,17 @@ void EnvironmentProfileManager::Update(uint64_t now,bool world,bool hold) {
     progress=std::clamp(float(now-blendStart)/(config.transitionSeconds*1000),0.f,1.f);
     current=BlendEnvironment(from,target,progress);
 }
+WorldSceneObservation EnvironmentProfileManager::ObserveWorldScene(bool worldContext,bool knownWorldDrawSeen) const {
+    // Unlike the debounced profile location, this is a render-safety sample: a
+    // coherent all-zero tuple must close world-anchored effects immediately on
+    // the login screen, not after the profile's user-facing debounce interval.
+    if(!worldContext)
+        return ClassifyWorldScene(provider.Verified(),false,0,0,0,knownWorldDrawSeen);
+    provider.Sample(database,true);
+    const auto& raw=provider.RawSample();
+    return ClassifyWorldScene(provider.Verified(),provider.Sampled(),
+        raw.mapId,raw.zoneId,raw.areaId,knownWorldDrawSeen);
+}
 std::vector<std::string> EnvironmentProfileManager::DebugLines() const {
     std::vector<std::string> lines={"LOCATION / ENVIRONMENT",provider.Status()};
     if(location.valid) {

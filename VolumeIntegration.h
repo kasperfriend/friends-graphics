@@ -28,6 +28,7 @@
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/CelestialStability.h"
 #include "src/D3D9/CameraContinuity.h"
+#include "src/Environment/EnvironmentProfileManager.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -157,6 +158,26 @@ unsigned celestialProbeLogCounter = 0;
 unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws = 0, shadowFrameDraws = 0;
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
+
+renderer::WorldSceneObservation ResolveWorldSceneForFrame() {
+    auto& frame=renderer::FrameContext::Current();
+    const bool knownWorldDraw=frame.worldTerrainSeenThisFrame||frame.worldWaterSeenThisFrame;
+    // An early depth-clear probe catches a verified login/menu transition before
+    // the first UI composite. If the provider is unverified, leave Unknown open
+    // to be upgraded once a terrain/liquid draw supplies independent evidence.
+    if(!frame.worldSceneResolved||
+       (frame.worldScene.state==renderer::WorldSceneState::Unknown&&knownWorldDraw)) {
+        const bool renderContext=renderer::HasWorldContext(
+            renderer::DepthCapture::Instance().HasDepth(),knownWorldDraw);
+        frame.worldScene=renderer::EnvironmentProfileManager::Instance().ObserveWorldScene(
+            renderContext,knownWorldDraw);
+        frame.worldSceneResolved=true;
+    }
+    watereffect::ObserveWorldSceneForUnderwater(frame);
+    if(frame.worldScene.state!=renderer::WorldSceneState::InWorld)
+        renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
+    return frame.worldScene;
+}
 
 // This file is NOT on the shared sink, even though it is written on a crossing:
 // PerformanceProfiler is handed the same path below and appends to it directly
@@ -506,6 +527,7 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     if (renderer::DepthCapture::Instance().HasDepth()) {
         auto& frameCtx = renderer::FrameContext::Current();
         frameCtx.ResetForNewFrame(frameCtx.frameIndex + 1, d);
+        ResolveWorldSceneForFrame();
         // Precipitation composites itself over the scene during the client's draw stream, which
         // starts now and ends before this frame's water draws settle the medium at Present. So it
         // cannot read underwaterRamp (cleared just above) or wait for the composite: publish the
@@ -941,6 +963,11 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
+    ResolveWorldSceneForFrame();
+    const auto& sceneFrame=renderer::FrameContext::Current();
+    const bool playableWorldEvidence=renderer::HasPlayableWorldEvidence(
+        sceneFrame.worldScene.state,sceneFrame.worldTerrainSeenThisFrame||sceneFrame.worldWaterSeenThisFrame);
+    if(!playableWorldEvidence) renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
     // Every branch below samples or writes the scene copy the clear hook publishes.
     // A camera captured without a depth capture (which is now possible, and is the
     // point) must not reach them: there is nothing to composite onto.
@@ -1161,7 +1188,9 @@ bool Composite(IDirect3DDevice9* d) {
     // they were: the tracker still settles (the water pixel stage classifies from it, and
     // that classification is a bug fix rather than a feature), but nothing fades on it.
     const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();
-    frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;
+    const bool confirmedPlayableWorld = frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;
+    frameCtx.underwaterRamp = underwaterActive && confirmedPlayableWorld
+        ? watereffect::submersionTracker.ramp : 0.f;
     frameCtx.underwaterYards = watereffect::submersionTracker.yards;
 
     // One Capture on the shared D3DSBT_ALL stack replaces the ~170-call
@@ -1250,7 +1279,9 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudTexture = nullptr;
     frameCtx.cloudShadowTexture = nullptr;
     frameCtx.cloudRayStrength = 0.f;
-    if (!shaftDebug && cloudsEffectEnabled) {
+    if (!shaftDebug && cloudsEffectEnabled &&
+        renderer::CanRenderWorldClouds(frameCtx.worldScene.state,
+            frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame)) {
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
         // Already resolved once at the frame boundary, alongside wind/water.
@@ -1289,10 +1320,11 @@ bool Composite(IDirect3DDevice9* d) {
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
     bool atmosphereRendered = false;
     const auto& atmosphereSettings = renderer::DirectionalVolumetricLighting::Instance().Settings();
-    if (!shaftDebug && (fogEffectEnabled || atmosphereSettings.localFogEnabled ||
-        atmosphereSettings.edgeFogEnabled || atmosphereSettings.debugMode == renderer::VolumetricDebugMode::LocalLightScattering))
+    if (!shaftDebug && playableWorldEvidence &&
+        (fogEffectEnabled || atmosphereSettings.localFogEnabled ||
+         atmosphereSettings.edgeFogEnabled || atmosphereSettings.debugMode == renderer::VolumetricDebugMode::LocalLightScattering))
         atmosphereRendered = renderer::DirectionalVolumetricLighting::Instance().Render(
-            d, renderer::FrameContext::Current(), target.Get(), fogEffectEnabled);
+            d, frameCtx, target.Get(), fogEffectEnabled);
     if (localLightingRendered && !atmosphereRendered)
         check(d->StretchRect(frameCtx.sceneSurface, nullptr,
                              target.Get(), nullptr, D3DTEXF_NONE));

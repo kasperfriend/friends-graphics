@@ -334,6 +334,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             waterreflection::Finish();
             volume::Finish(d);
             weathervisuals::Present(d, true);
+            renderer::FrameContext::Current().ResetWorldSceneFrame();
             FlushLog();
             return originalPresent(d, a, b, w, r);
         }
@@ -355,6 +356,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             renderer::ShouldHoldLocation(worldFrame, environment.Location().valid));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
+    volume::ResolveWorldSceneForFrame();
     {
         // A confirmed zone change is also a weather discontinuity. The detected
         // precipitation (and the deck coverage it forces) described the place the
@@ -538,6 +540,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         try { waterreflection::Finish(); } catch (...) {}
         try { volume::Finish(d); } catch (...) {}
     }
+    renderer::FrameContext::Current().ResetWorldSceneFrame();
     const HRESULT presentResult = originalPresent(d,a,b,w,r);
     // One write per frame for every line the frame produced: see Log.
     FlushLog();
@@ -769,7 +772,9 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
-    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
@@ -824,7 +829,9 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
-    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
@@ -880,6 +887,8 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
@@ -903,7 +912,6 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
-    weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawUP(d,t,n,v,stride);
     gameDrawRan=true;
@@ -936,6 +944,8 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
@@ -959,7 +969,6 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
-    weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     gameDrawRan=true;
