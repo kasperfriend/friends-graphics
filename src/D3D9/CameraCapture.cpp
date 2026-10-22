@@ -75,11 +75,50 @@ namespace renderer
 
         // Even at full frame, the first qualifying draw is not automatically
         // this frame's camera - the gate holds the last accepted one and asks
-        // whether this candidate can be it. A rejection is not an overwrite:
-        // nothing below runs, the previous camera's factors stay in place, and
-        // the real scene draw that follows in the same frame still latches.
+        // whether this candidate can be it. A hard mouse-look turn can make a
+        // genuine current camera fail the orientation continuity test, though.
+        // In that one case, feed only its rotation to the sky selector: require
+        // the same full-frame viewport and an eye within five yards of the
+        // accepted anchor, then let the celestial disc/continuity selector
+        // corroborate it. Never promote a distant/teleported eye from this path.
         if (!m_cameraGate.Accept(v[3], v, vp.Width, vp.Height))
+        {
+            const float rejectedEye[3] = {
+                -(v[3][0] * v[0][0] + v[3][1] * v[0][1] + v[3][2] * v[0][2]),
+                -(v[3][0] * v[1][0] + v[3][1] * v[1][1] + v[3][2] * v[1][2]),
+                -(v[3][0] * v[2][0] + v[3][1] * v[2][1] + v[3][2] * v[2][2]) };
+            if (m_cameraGate.MatchesViewport(vp.Width, vp.Height) &&
+                m_cameraGate.NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards))
+            {
+                float rejectedBasis[3][4]{};
+                for (int row = 0; row < 3; ++row)
+                {
+                    for (int col = 0; col < 3; ++col)
+                        rejectedBasis[row][col] = v[row][col];
+                    rejectedBasis[row][3] = 0.0f;
+                    m_rejectedCaptureBasis[row][0] = v[row][0];
+                    m_rejectedCaptureBasis[row][1] = v[row][1];
+                    m_rejectedCaptureBasis[row][2] = v[row][2];
+                    m_rejectedCaptureBasis[row][3] = 0.0f;
+                }
+                std::copy(rejectedEye, rejectedEye + 3, m_rejectedCaptureEye);
+                m_rejectedCaptureValid = true;
+                m_skyPose.Observe(rejectedBasis);
+
+                // Preserve the current draw's projection as the evidence space
+                // for the disc painted later in this frame.
+                m_fallbackProj = {};
+                m_fallbackProj.m[0][0] = v[4][0];
+                m_fallbackProj.m[1][1] = v[5][1];
+                m_fallbackProj.m[2][2] = v[6][2];
+                m_fallbackProj.m[2][3] = v[6][3];
+                m_fallbackProj.m[3][2] = v[7][2];
+                m_fallbackProj.m[3][3] = v[7][3];
+                m_fallbackVp = vp;
+                m_fallbackSawSceneDraw = true;
+            }
             return false;
+        }
 
         // Swap BEFORE overwriting: whatever viewRaw held (last successful
         // capture's forward view) becomes previousViewRaw for this frame's
@@ -305,7 +344,9 @@ namespace renderer
                 capturedBasis[r][c] = v[r][c];
             capturedBasis[r][3] = 0.f;
         }
+        m_skyPose.BeginFrame();
         m_skyPose.SetReference(capturedBasis);
+        m_rejectedCaptureValid = false;
         m_lastEyeSeconds = PerformanceSeconds();
         frameContext.cameraPoseStale = false;
         frameContext.cameraEyeAgeMs = 0.f;
@@ -478,8 +519,12 @@ namespace renderer
 
         float basis[3][4]{};
         bool corroborated = false;
+        const DiscObservation disc = DiscEvidence(frameContext, m_fallbackProj);
+        frameContext.skyPoseCandidateCount = static_cast<uint8_t>(
+            std::min(m_skyPose.CandidateCount(), 255u));
+        frameContext.skyPoseDiscEvidence = disc.available;
         const bool havePose = m_skyPose.HasCandidate() &&
-            m_skyPose.Resolve(DiscEvidence(frameContext, m_fallbackProj), basis, corroborated);
+            m_skyPose.Resolve(disc, basis, corroborated);
 
         if (!havePose)
         {
@@ -508,12 +553,31 @@ namespace renderer
         }
 
         // The corroborated rotation is what the gate should expect a real
-        // capture to continue from. Teaching it the basis (never the position -
-        // the position is only ever accepted from a draw that carried it) means
-        // that when terrain draws appear again on higher ground, the first one
-        // is accepted immediately instead of taking three frames to escape the
-        // teleport guard.
-        m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
+        // capture to continue from. A candidate originating in a rejected
+        // full-frame shader capture also carries a current eye; once the same
+        // candidate wins corroboration, refresh that tightly bounded eye too.
+        // Sky-only transforms never move the anchor.
+        const bool selectedRejectedCapture = m_rejectedCaptureValid &&
+            BasisAgreement(m_rejectedCaptureBasis, basis) > .9999f;
+        bool refreshedEye = false;
+        if (selectedRejectedCapture)
+        {
+            float eyeTranslation[4]{};
+            for (int col = 0; col < 3; ++col)
+                eyeTranslation[col] = -(m_rejectedCaptureEye[0] * basis[0][col] +
+                                        m_rejectedCaptureEye[1] * basis[1][col] +
+                                        m_rejectedCaptureEye[2] * basis[2][col]);
+            eyeTranslation[3] = 1.0f;
+            refreshedEye = m_cameraGate.AcceptFallback(
+                eyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
+        }
+        if (!refreshedEye)
+            m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
+        else
+        {
+            m_lastEyeSeconds = PerformanceSeconds();
+            frameContext.cameraEyeAgeMs = 0.0f;
+        }
 
         // The eye stays the one a draw carried. Deliberately NOT the sky
         // transform's translation: for a camera-relative billboard that

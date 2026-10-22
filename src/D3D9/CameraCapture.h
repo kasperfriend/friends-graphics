@@ -43,6 +43,7 @@ namespace renderer
         {
             m_skyPose.BeginFrame();
             m_fallbackSawSceneDraw = false;
+            m_rejectedCaptureValid = false;
         }
 
         // Observes D3DTS_VIEW / D3DTS_PROJECTION during the scene pass so that
@@ -103,6 +104,12 @@ namespace renderer
         // their rows or their translation as the camera is exactly the
         // reported "clouds and lights dragged along with the camera".
         bool m_fallbackSawSceneDraw = false;
+        // The last full-frame shader pose refused only by orientation continuity;
+        // its eye is retained separately and used only if the selector later
+        // corroborates that exact basis.
+        bool m_rejectedCaptureValid = false;
+        float m_rejectedCaptureEye[3]{};
+        float m_rejectedCaptureBasis[3][4]{};
         D3DMATRIX m_fallbackProj{};
         D3DVIEWPORT9 m_fallbackVp{};
         // Performance-clock seconds when a draw last carried the camera's eye.
@@ -110,5 +117,8 @@ namespace renderer
         // within a few yards of the camera refuse an older one.
         double m_lastEyeSeconds = -1.0;
         static constexpr float kSkyEyeLeashYards = 40.0f;
+        // Rejected shader captures carry a trustworthy eye, so keep this path
+        // much tighter than the looser D3DTS_VIEW sky-transform leash.
+        static constexpr float kRejectedCaptureEyeLeashYards = 5.0f;
     };
 }

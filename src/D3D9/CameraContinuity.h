@@ -34,6 +34,16 @@ public:
         return valid && viewportWidth == width && viewportHeight == height;
     }
 
+    // A full-frame shader capture can have a valid current orientation that the
+    // continuity gate rejects after a hard camera turn. It is safe to offer that
+    // orientation to sky-pose corroboration only when its independently decoded
+    // eye still agrees with the accepted world anchor.
+    bool NearAcceptedEye(const float position[3], float maxDistance) const {
+        return valid && std::isfinite(maxDistance) && maxDistance >= 0.f &&
+            std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2]) &&
+            Distance(position, camera) <= maxDistance;
+    }
+
     bool MatchesBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) const {
         return MatchesViewport(viewportWidth, viewportHeight) && BasisDot(viewBasis, basis) > .7f;
     }
@@ -231,7 +241,10 @@ public:
     // consecutive frames say the same thing: long enough to outlive a stray
     // full-screen transform, short enough that a real snap is followed at once.
     static constexpr int kJumpConfirmationFrames = 2;
-    static constexpr unsigned kMaxCandidates = 4;
+    // A frame may expose several full-frame transforms before the actual sky
+    // camera. Keep enough alternatives that early model/reflection draws do not
+    // crowd it out before the celestial pass arrives.
+    static constexpr unsigned kMaxCandidates = 16;
 
     void Reset() noexcept
     {
@@ -245,6 +258,7 @@ public:
     void BeginFrame() noexcept { m_candidateCount = 0; }
 
     bool HasCandidate() const noexcept { return m_candidateCount != 0; }
+    unsigned CandidateCount() const noexcept { return m_candidateCount; }
     bool HasReference() const noexcept { return m_haveReference; }
 
     // A real capture re-synchronises the selector: the next sky candidate is

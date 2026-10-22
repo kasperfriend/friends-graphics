@@ -191,6 +191,11 @@ namespace renderer
         // tools. 0 none, 1 captured, 2 sky fallback, 3 held previous frame.
         uint8_t cameraPoseSource = 0;
         enum CameraPoseSource : uint8_t { PoseNone = 0, PoseCaptured = 1, PoseSky = 2, PoseHeld = 3 };
+        // Sky-fallback diagnostics: a zero count means no eligible current-frame
+        // candidate survived capture filters; a nonzero count with no fresh pose
+        // means corroboration/continuity intentionally kept it out.
+        uint8_t skyPoseCandidateCount = 0;
+        bool skyPoseDiscEvidence = false;
 
         bool depthAvailable = false;
         bool cameraValid = false;

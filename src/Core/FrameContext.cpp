@@ -69,6 +69,8 @@ namespace renderer
         // how old the eye is must not read "just now".
         cameraEyeAgeMs = 1.0e6f;
         cameraPoseSource = PoseNone;
+        skyPoseCandidateCount = 0;
+        skyPoseDiscEvidence = false;
 
         depthAvailable = false;
         cameraValid = false;

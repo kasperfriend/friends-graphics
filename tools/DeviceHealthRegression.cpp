@@ -92,6 +92,24 @@ int main() try
         CameraContinuityGate gate;
         viewFor(5100.f, -3200.f, 110.f, .4f, t, basis);
         Require(gate.Accept(t, basis, 1920, 1080), "the first full-frame camera anchors the gate");
+
+        CameraContinuityGate hardTurnGate;
+        viewFor(100.f, 200.f, 30.f, 0.f, t, basis);
+        Require(hardTurnGate.Accept(t, basis, 1920, 1080), "the hard-turn regression camera anchors");
+        viewFor(100.f, 200.f, 30.f, 1.1f, t, basis);
+        Require(!hardTurnGate.Accept(t, basis, 1920, 1080),
+                "the normal camera gate still refuses an uncorroborated hard turn");
+        const float sameEye[3] = {100.f, 200.f, 30.f};
+        const float movedEye[3] = {106.f, 200.f, 30.f};
+        Require(hardTurnGate.NearAcceptedEye(sameEye, 5.f) &&
+                !hardTurnGate.NearAcceptedEye(movedEye, 5.f),
+                "only a rejected orientation at the same eye is eligible for sky corroboration");
+        Require(hardTurnGate.AcceptFallback(t, basis, 1920, 1080) &&
+                std::fabs(hardTurnGate.Position()[0] - 100.f) < 1e-3f &&
+                std::fabs(hardTurnGate.Position()[1] - 200.f) < 1e-3f &&
+                std::fabs(hardTurnGate.Position()[2] - 30.f) < 1e-3f,
+                "a subsequently corroborated hard turn retains its current world eye");
+
         // A portrait camera: close-up, differently aimed, small viewport.
         viewFor(5102.f, -3198.f, 112.f, 2.6f, t, basis);
         Require(!gate.Accept(t, basis, 256, 256), "a portrait-viewport camera cannot take over the frame's light");
@@ -286,6 +304,26 @@ int main() try
             Require(BasisAgreement(chosen, identityBasis) > .9999f,
                 "the disc-consistent candidate is the one published");
 
+            // Many full-frame passes can precede the sky draw. The live camera
+            // must not disappear merely because several distinct but
+            // contradictory transforms arrived first in this frame.
+            SkyPoseSelector crowded;
+            crowded.SetReference(identityBasis);
+            for (int i = 0; i < 12; ++i)
+            {
+                float decoy[3][4];
+                yawBasis(2.2f + .05f * float(i), decoy);
+                Require(ContradictsDisc(decoy, disc),
+                        "the crowded-frame decoy disagrees with the painted disc");
+                crowded.Observe(decoy);
+            }
+            crowded.Observe(identityBasis);
+            Require(crowded.CandidateCount() == 13,
+                    "sky selector retains the late camera after a dozen distinct candidates");
+            Require(crowded.Resolve(disc, chosen, corroborated) && corroborated &&
+                    BasisAgreement(chosen, identityBasis) > .9999f,
+                    "disc corroboration selects the late real camera from a crowded frame");
+
             // A bad/stale disc pair must not veto a camera that remains
             // continuous with the accepted reference. A discontinuous basis
             // still goes through the two-frame confirmation below.
@@ -374,6 +412,7 @@ int main() try
             Require(Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
                     Contains(clouds, "knownWorldDraw,freshCameraPose") &&
                     Contains(clouds, "poseSource=") && Contains(clouds, "eyeAgeMs=") &&
+                    Contains(clouds, "skyCandidates=") && Contains(clouds, "skyDisc=") &&
                     Contains(clouds, "lacksWorldContext?") &&
                     Contains(clouds, "skip=world-gate") && Contains(clouds, "skip=stale-camera"),
                 "clouds require a fresh camera for all world paths and log stale-pose skips distinctly");
@@ -422,6 +461,8 @@ int main() try
                     Contains(torches, "FrameContext::kCameraEyeHoldMs"),
                 "torch emitters are not placed through a stale pose");
             Require(Contains(frameReset, "cameraPoseStale = true;") &&
+                    Contains(frameReset, "skyPoseCandidateCount = 0;") &&
+                    Contains(frameReset, "skyPoseDiscEvidence = false;") &&
                     Contains(frameReset, "ResetWorldSceneFrame();") &&
                     Contains(frameContext, "worldTerrainSeenThisFrame = false;") &&
                     Contains(frameContext, "worldWaterSeenThisFrame = false;") &&
@@ -437,8 +478,13 @@ int main() try
             const auto capture = Read("src/D3D9/CameraCapture.cpp");
             const auto composite = Read("VolumeIntegration.h");
             Require(Contains(capture, "m_skyPose.Observe(basis)") &&
+                    Contains(capture, "m_skyPose.Observe(rejectedBasis)") &&
+                    Contains(capture, "NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
+                    Contains(capture, "selectedRejectedCapture") &&
+                    Contains(capture, "m_cameraGate.AcceptFallback(") &&
+                    Contains(capture, "cameraEyeAgeMs = 0.0f;") &&
                     !Contains(capture, "m_fallbackCandidateValid"),
-                "the sky fallback collects candidates instead of latching the first transform");
+                "the sky fallback corroborates bounded hard-turn captures and collects transforms instead of latching the first");
             Require(Contains(capture, "fabsf(lengthSquared - 1.0f) > 0.01f"),
                 "a scaled or skewed sky transform is not a rigid camera basis");
             Require(Contains(capture, "const float* anchor = m_cameraGate.Position();") &&
