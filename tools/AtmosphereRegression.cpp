@@ -26,7 +26,7 @@
 using Microsoft::WRL::ComPtr;
 using namespace renderer;
 void Check(HRESULT h) { if (FAILED(h)) { printf("HRESULT=%08lx\n", h); throw std::runtime_error("D3D call"); } }
-void Require(bool value, const char* name) { if (!value) throw std::runtime_error(name); printf("PASS %s\n", name); }
+void Require(bool value, const char* name) { if (!value) throw std::runtime_error(name); printf("PASS %s\n", name); fflush(stdout); }
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) { return d->SetDepthStencilSurface(s); }
 HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** s) { return d->GetDepthStencilSurface(s); }
 #include "LocalFogFieldRegression.h"
@@ -64,6 +64,7 @@ int main() try {
      static_cast<DWORD>(sizeof(intzTestFlag)/sizeof(intzTestFlag[0])));
  if(intzTestFlagLength==0||intzTestFlag[0]!=L'1') {
   printf("SKIP INTZ depth-capture lifecycle: set FRIENDS_TEST_INTZ_LIFECYCLE=1 on a known-safe INTZ driver\n");
+  fflush(stdout);
  } else {
   // Exercise the production capture lifecycle on the two common 3.3.5a
   // formats, including the explicit rectangle used by affected clients.

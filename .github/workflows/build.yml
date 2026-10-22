@@ -125,7 +125,9 @@ jobs:
           }
           $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
           if ($result -ne 0) {
+            $progress = ($output | Where-Object { "$_" -match '^PASS ' } | Select-Object -Last 20) -join "`n"
             $diagnostics = ($output | Where-Object { "$_" -match '(?i)(error C[0-9]+|fatal error|LINK :|FAIL |SKIP:|HRESULT=|INTZ|Running atmosphere|process exited with code)' }) -join "`n"
+            if (![string]::IsNullOrWhiteSpace($progress)) { $diagnostics = "$progress`n$diagnostics" }
             if ([string]::IsNullOrWhiteSpace($diagnostics)) { $diagnostics = $tail }
             $flat = ($diagnostics -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
             Write-Output "::error title=Atmosphere regression failed::$flat"
