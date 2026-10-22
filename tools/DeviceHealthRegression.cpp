@@ -328,6 +328,13 @@ int main() try
                     Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
                     Contains(water, "underwaterWorldContinuity.Observe(frame.worldScene)"),
                 "verified menu/world IDs close the underwater pass and reset its remembered plane");
+            const auto locationFogReload=rendererHook.find("distancefog::ReloadTuning();stage(tFog);");
+            const auto locationVolumeReload=rendererHook.find("volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);",locationFogReload);
+            Require(Contains(distanceFog, "void ApplyRuntimeState()") &&
+                    Contains(distanceFog, "Settings().edgeFogEnabled=active&&effectEnabled;") &&
+                    locationFogReload!=std::string::npos&&locationVolumeReload!=std::string::npos&&
+                    Contains(rendererHook, "distancefog::ReloadTuning();volume::ReloadTuning();distancefog::ApplyRuntimeState();"),
+                "F7, F12 and settled-location reloads preserve the distance-fog OFF state");
             Require(Contains(localLighting, "f.cameraPoseStale") &&
                     Contains(localLighting, "FrameContext::kCameraEyeHoldMs"),
                 "local lighting refuses a stale pose or an eye no draw carried");

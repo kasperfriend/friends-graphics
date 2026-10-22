@@ -18,8 +18,15 @@ std::wstring mainIni,tuningIni;
 // and this fallback for clients without a usable atmosphere pass. The old
 // startup-file Enabled gate silently disagreed with the live F7 switch.
 int ReadTuning(const wchar_t* key,int fallback){return int(renderer::locationtuning::ReadInt(L"DistanceFog",key,fallback,tuningIni.c_str()));}
+void ApplyRuntimeState(){
+    // The atmosphere loader also reads DistanceFog.Enabled. Keep its copy in
+    // sync with the live F11 switch and per-location F7 value after every
+    // reload, or an F12/zone reload can silently turn edge fog back on.
+    renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;
+}
 void ReloadTuning(){
     effectEnabled=ReadTuning(L"Enabled",1)!=0;
+    ApplyRuntimeState();
     distanceScale=std::clamp(ReadTuning(L"DistancePercent",100),10,300)*.01f;
     powerScale=std::clamp(ReadTuning(L"PowerPercent",100),10,300)*.01f;
     // One line per CHANGE, not one per reload: the reload chain runs on every
@@ -41,7 +48,10 @@ void Configure(const std::wstring& base) {
 }
 void Present() {
     bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;
-    if(hotkey&&down&&!keyDown&&renderer::FrameContext::Current().wowFocused){active=!active;renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
+    if(hotkey&&down&&!keyDown&&renderer::FrameContext::Current().wowFocused){active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
+    // Also apply changes made by the unified F11 handler, which runs earlier
+    // in the frame and owns active when its separate hotkey is disabled.
+    ApplyRuntimeState();
     keyDown=down;matches=0;
 }
 struct Scope {

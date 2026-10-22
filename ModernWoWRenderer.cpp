@@ -458,7 +458,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         ReloadWindTuning();stage(tWind);
         watereffect::ReloadTuning();stage(tWater);
         distancefog::ReloadTuning();stage(tFog);
-        volume::ReloadTuning();stage(tVolume);
+        volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);
         celestialhighlight::ReloadTuning(g_basePath);stage(tCelestial);
         nativeshadowdiag::ReloadEnhancement();stage(tShadow);
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
@@ -497,7 +497,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;
-        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();distancefog::ApplyRuntimeState();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
