@@ -10,6 +10,7 @@
 #include "../Core/DeviceHealth.h"
 #include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
+#include "../Environment/ManualColor.h"
 
 namespace renderer
 {
@@ -78,6 +79,7 @@ namespace renderer
         // or near and far clouds read as the same contrast and the deck
         // looks like a backdrop painting.
         float aerialPerspective = .60f;
+        manualcolor::Override manualCloudColor{};
 
         // Cloud shadows and rays share a small map on a fixed world plane.
         // It stores the unitless cloud amount of the column between each

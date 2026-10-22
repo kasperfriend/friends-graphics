@@ -4,6 +4,7 @@
 #define CLOUD_PREVIEW_NO_MAIN
 #include "CloudPreview.cpp"
 #include "../src/Environment/EnvironmentDatabase.h"
+#include "../src/Environment/ManualColor.h"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -60,6 +61,22 @@ int main() try
 {
     EnvironmentConfiguration config;
     std::string error;
+    {
+        const std::array<float,3> zone={.2f,.4f,.6f};
+        const auto disabled=manualcolor::Override::FromPercent(255,0,0,0,200);
+        const auto unchanged=manualcolor::Apply(zone,disabled);
+        Require(Near(unchanged[0],zone[0])&&Near(unchanged[1],zone[1])&&Near(unchanged[2],zone[2]),
+                "manual color alpha zero preserves the inherited zone palette");
+        const auto half=manualcolor::Override::FromPercent(255,0,0,50,100);
+        const auto blended=manualcolor::Apply(zone,half);
+        const auto cloudTint=manualcolor::Multiplier(half);
+        Require(Near(blended[0],.6f)&&Near(blended[1],.2f)&&Near(blended[2],.3f)&&
+                Near(cloudTint[0],1.f)&&Near(cloudTint[1],.5f)&&Near(cloudTint[2],.5f),
+                "manual color alpha blends water/fog and cloud tints predictably");
+        const auto bright=manualcolor::Multiplier(manualcolor::Override::FromPercent(255,255,255,100,200));
+        Require(Near(bright[0],2.f)&&Near(bright[1],2.f)&&Near(bright[2],2.f),
+                "manual color brightness scales cloud radiance independently of alpha");
+    }
     Require(ParseEnvironmentConfiguration(Read("EnvironmentProfiles.ini"),config,error),
             "shipped cloud climate configuration parses");
     EnvironmentDatabase db;
@@ -411,6 +428,20 @@ int main() try
                 waterEffect.find("HasScopedValue(L\"Water\",L\"DeepColour\")")!=std::string::npos&&
                 waterEffect.find("HasScopedValue(L\"Water\",L\"AbsorptionColour\")")!=std::string::npos,
                 "zone water colours replace the global ones unless the location overrides them");
+        Require(waterEffect.find("ManualColorAlphaPercent")!=std::string::npos&&
+                waterEffect.find("manualcolor::Apply(baseTint,manualWaterColor)")!=std::string::npos&&
+                waterEffect.find("manualcolor::Apply(baseDeep,manualWaterColor)")!=std::string::npos,
+                "manual water color is applied after inherited zone water colors");
+        const auto atmosphere=Read("src/Effects/DirectionalVolumetricLighting.cpp");
+        Require(atmosphere.find("ManualColorAlphaPercent")!=std::string::npos&&
+                atmosphere.find("manualcolor::Apply(std::array<float,3>{ambR,ambG,ambB},settings.manualFogColor)")!=std::string::npos,
+                "manual fog color tints the captured/profile fog baseline");
+        const auto clouds=Read("src/Effects/VolumetricClouds.cpp");
+        Require(clouds.find("ManualColorAlphaPercent")!=std::string::npos&&
+                clouds.find("manualcolor::Multiplier(settings.manualCloudColor)")!=std::string::npos&&
+                clouds.find("cloudColourMultiplier[2],settings.silverLining")!=std::string::npos&&
+                clouds.find("cloudColourMultiplier[2],\n                      1.f/std::max(settings.maxDistance*.5f,1.f)}")!=std::string::npos,
+                "manual cloud color tints direct, ambient and aerial radiance without changing shadows");
     }
     return 0;
 }

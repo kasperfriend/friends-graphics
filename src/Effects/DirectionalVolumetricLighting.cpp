@@ -643,6 +643,9 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // defaulting off until that narrower version is confirmed safe across
  // more zones. The toggle in the overlay still works for testing it.
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
+ m_settings.manualFogColor=manualcolor::Override::FromPercent(
+     read(L"ManualColorRed",255),read(L"ManualColorGreen",255),read(L"ManualColorBlue",255),
+     read(L"ManualColorAlphaPercent",0),read(L"ManualColorBrightnessPercent",100));
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,13));
  const auto readLocal=[&](const wchar_t* key,int fallback)->int{const int v=static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));renderer::locationtuning::MixInt(fp,v);return v;};
  m_settings.localFogEnabled=readLocal(L"Enabled",0)!=0;
@@ -815,6 +818,10 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  float ambR=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[0]:.36f;
  float ambG=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[1]:.46f;
  float ambB=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[2]:.58f;
+ // Apply the optional manual tint after the zone baseline is resolved, so it
+ // is a true override of inherited fog colour rather than another baseline.
+ const auto fogColour=manualcolor::Apply(std::array<float,3>{ambR,ambG,ambB},settings.manualFogColor);
+ ambR=fogColour[0];ambG=fogColour[1];ambB=fogColour[2];
  // Performance counter, not GetTickCount64: the millisecond clock only
  // advances in ~15.6 ms steps, which made every flow/wake term below
  // advance in lurches (frozen frames, then a double step) - a faint
@@ -885,7 +892,12 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
   float intensity=directIntensity*(directIsMoon?settings.moonStrength:1.f);float c1[4]={directView.x,directView.y,directView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
   // Upload gamma-linearized RGB so the pixel shader avoids three pow calls.
-  float c2[4]={LinearizeAtmosphereColor(ambR),LinearizeAtmosphereColor(ambG),LinearizeAtmosphereColor(ambB),settings.aerialDensity*settings.densityScale};float c3[4]={LinearizeAtmosphereColor(std::clamp(ambR*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambG*1.5f,.12f,1.f)),LinearizeAtmosphereColor(std::clamp(ambB*1.5f,.12f,1.f)),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
+  float c2[4]={LinearizeAtmosphereColor(ambR),LinearizeAtmosphereColor(ambG),LinearizeAtmosphereColor(ambB),settings.aerialDensity*settings.densityScale};
+  const float minFogColor=settings.manualFogColor.alpha>0.f?0.f:.12f;
+  float c3[4]={LinearizeAtmosphereColor(std::clamp(ambR*1.5f,minFogColor,1.f)),
+               LinearizeAtmosphereColor(std::clamp(ambG*1.5f,minFogColor,1.f)),
+               LinearizeAtmosphereColor(std::clamp(ambB*1.5f,minFogColor,1.f)),settings.extinction};
+  d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   // The integration shader uses the persistent GPU ground reference.
   float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};// A stale pose cannot say where the disc is on screen: the halo would sit

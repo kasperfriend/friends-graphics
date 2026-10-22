@@ -741,6 +741,9 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.horizonFade=std::clamp(read(L"HorizonFadePermille",18),1,400)*.001f;
  m_settings.maxDistance=float(std::clamp(read(L"MaxDistance",26000),2000,200000));
  m_settings.aerialPerspective=std::clamp(read(L"AerialPerspectivePercent",60),0,100)*.01f;
+ m_settings.manualCloudColor=manualcolor::Override::FromPercent(
+     read(L"ManualColorRed",255),read(L"ManualColorGreen",255),read(L"ManualColorBlue",255),
+     read(L"ManualColorAlphaPercent",0),read(L"ManualColorBrightnessPercent",100));
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",24000),2000,80000));
@@ -1000,6 +1003,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float skyR=envFog.colorValid?envFog.ambientFogColor[0]:.42f;
  const float skyG=envFog.colorValid?envFog.ambientFogColor[1]:.56f;
  const float skyB=envFog.colorValid?envFog.ambientFogColor[2]:.80f;
+ const auto cloudColourMultiplier=manualcolor::Multiplier(settings.manualCloudColor);
  const float daylight=std::clamp(f.daylightFactor,0.f,1.f);
  const float moonlight=std::clamp(f.moonlightFactor,0.f,1.f);
  const float ambientLevel=std::clamp(std::max(daylight,moonlight*.5f),.2f,1.f);
@@ -1164,11 +1168,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c6[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,
                      float(std::clamp(settings.sampleCount,8u,160u))};
   const float c13[4]={std::max(settings.baseStep,1.f),settings.stepGrowth,settings.coarseScale,settings.jitter};
-  const float c15[4]={sunR,sunG,sunB,settings.powder};
-  const float c16[4]={skyR*ambientLevel,skyG*ambientLevel,skyB*ambientLevel,settings.silverLining};
+  const float c15[4]={sunR*cloudColourMultiplier[0],sunG*cloudColourMultiplier[1],
+                      sunB*cloudColourMultiplier[2],settings.powder};
+  const float c16[4]={skyR*ambientLevel*cloudColourMultiplier[0],
+                      skyG*ambientLevel*cloudColourMultiplier[1],
+                      skyB*ambientLevel*cloudColourMultiplier[2],settings.silverLining};
   // Ground bounce keeps the tuned relationship with whatever palette the
   // zone pushed: cooler, much darker, never a flat grey.
-  const float c17[4]={skyR*ambientLevel*.62f,skyG*ambientLevel*.52f,skyB*ambientLevel*.45f,settings.horizonFade};
+  const float c17[4]={skyR*ambientLevel*.62f*cloudColourMultiplier[0],
+                      skyG*ambientLevel*.52f*cloudColourMultiplier[1],
+                      skyB*ambientLevel*.45f*cloudColourMultiplier[2],settings.horizonFade};
   const float c18[4]={settings.forwardScatter,settings.backwardScatter,settings.multiScatterEccentricity,
                       float(uint32_t(settings.debugMode))};
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;
@@ -1191,9 +1200,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   // Aerial perspective colour: the zone's own sky, lifted toward white,
   // so the haze belongs to the palette the atmosphere pass is already
   // using instead of being a second opinion about what distance looks like.
-  const float c22[4]={(skyR+(1.f-skyR)*.28f)*ambientLevel,
-                      (skyG+(1.f-skyG)*.28f)*ambientLevel,
-                      (skyB+(1.f-skyB)*.28f)*ambientLevel,
+  const float c22[4]={(skyR+(1.f-skyR)*.28f)*ambientLevel*cloudColourMultiplier[0],
+                      (skyG+(1.f-skyG)*.28f)*ambientLevel*cloudColourMultiplier[1],
+                      (skyB+(1.f-skyB)*.28f)*ambientLevel*cloudColourMultiplier[2],
                       1.f/std::max(settings.maxDistance*.5f,1.f)};
   d->SetPixelShaderConstantF(19,c19,1);d->SetPixelShaderConstantF(20,c20,1);
   d->SetPixelShaderConstantF(22,c22,1);

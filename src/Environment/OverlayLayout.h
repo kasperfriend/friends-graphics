@@ -79,6 +79,7 @@ struct OverlayLayout {
         const float width=(panel.w-174)/3;
         return {panel.x+150+scope*(width+8),panel.y+132,width,26};
     }
+    Box AllToGlobalButton() const {return {panel.x+panel.w-184,panel.y+164,172,28};}
     Box TabButton(int tab) const {
         // Ten categories must still fit at the minimum window height; the
         // new Wind tab must not push Image & Color underneath the footer.

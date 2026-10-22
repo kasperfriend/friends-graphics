@@ -60,7 +60,7 @@ static void Require(bool ok, const std::string& message)
 }
 
 // ---------------------------------------------------------------------------
-// The workload. GraphicsEffects.ini ships 13 sections and 206 keys; a full
+// The workload. GraphicsEffects.ini ships 13 sections and 219 keys; a full
 // re-apply reads them through three different doors - the runtime read
 // (ReadInt/ReadString), the F7 editor read (ReadEditorInt, which walks the
 // location levels) and the presence probe the water colours use
@@ -82,9 +82,9 @@ static const std::vector<std::pair<const wchar_t*, int>>& ShippedSections()
 {
     // Section name and key count, as shipped in GraphicsEffects.ini.
     static const std::vector<std::pair<const wchar_t*, int>> sections = {
-        {L"Atmosphere", 47}, {L"Water", 46}, {L"VolumetricClouds", 44}, {L"Wind", 12},
+        {L"Atmosphere", 48}, {L"Water", 52}, {L"VolumetricClouds", 49}, {L"Wind", 12},
         {L"WeatherVisuals", 15}, {L"LocalFog", 7}, {L"DynamicLighting", 5},
-        {L"ShadowDiagnostics", 5}, {L"PostProcess", 6},
+        {L"ShadowDiagnostics", 6}, {L"PostProcess", 6},
         {L"AmbientOcclusion", 5}, {L"NativeShadows", 3},
         {L"DistanceFog", 3}, {L"Underwater", 8},
     };
@@ -147,6 +147,59 @@ static void BuildScopedIni(const fs::path& dir, int zones, int areasPerZone,
     }
     std::ofstream out(dir / "LocationGraphics.ini", std::ios::binary | std::ios::trunc);
     out << ini.str();
+}
+
+static void TestAllToGlobal(const std::wstring& base,const std::wstring& graphics,
+                            const std::wstring& scoped)
+{
+    const LocationContext place{39,273,3911,true};
+    WritePrivateProfileStringW(L"Atmosphere",L"DensityPermille",L"5",graphics.c_str());
+    WritePrivateProfileStringW(L"Atmosphere",L"AtmosphereMaxDistance",L"520",graphics.c_str());
+    WritePrivateProfileStringW(L"Global.Atmosphere",L"DensityPermille",L"2",scoped.c_str());
+    WritePrivateProfileStringW(L"Map.39.Zone.273.Area.3911.Atmosphere",L"DensityPermille",L"9",scoped.c_str());
+    WritePrivateProfileStringW(L"Map.39.Zone.273.Area.3911.Atmosphere",L"AtmosphereMaxDistance",L"750",scoped.c_str());
+    lt::InvalidateScopedKeys();
+    lt::Sync(base,place,true);
+    lt::editGlobal=false;lt::editZone=false;
+
+    const auto density=[&]{return static_cast<int>(lt::ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str()));};
+    const auto distance=[&]{return static_cast<int>(lt::ReadInt(L"Atmosphere",L"AtmosphereMaxDistance",0,graphics.c_str()));};
+    Require(!lt::AllToGlobalEnabled()&&density()==9&&distance()==750,
+            "all-to-global starts off and the saved area values are active");
+    const uint64_t locationFingerprint=lt::ScopedFingerprint(place);
+    lt::MarkTuningApplied(place,true);
+
+    Require(lt::SetAllToGlobal(true)&&lt::AllToGlobalEnabled(),
+            "enable the persistent all-to-global mask");
+    const uint64_t globalFingerprint=lt::ScopedFingerprint(place);
+    Require(globalFingerprint!=locationFingerprint,
+            "the applied tuning fingerprint includes the all-to-global mode");
+    Require(!lt::AppliedTuningStillInForce(place,true),
+            "changing all-to-global forces the active settings to be re-applied");
+    Require(density()==2&&distance()==520&&
+            static_cast<int>(lt::ReadEditorInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str()))==2,
+            "the mask uses explicit Global values and the shared baseline, not area values");
+    Require(lt::HasScopedValue(L"Atmosphere",L"DensityPermille")&&
+            !lt::HasScopedValue(L"Atmosphere",L"AtmosphereMaxDistance"),
+            "scoped-presence checks report only effective Global values while masked");
+
+    lt::editZone=true;
+    Require(lt::Save(L"Atmosphere",L"DensityPermille",4)&&
+            static_cast<int>(lt::ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str()))==4&&
+            GetPrivateProfileIntW(L"Global.Atmosphere",L"DensityPermille",0,scoped.c_str())==4&&
+            GetPrivateProfileIntW(L"Map.39.Zone.273.Area.3911.Atmosphere",L"DensityPermille",0,scoped.c_str())==9,
+            "editing any scope while masked writes Global without modifying the area section");
+    lt::editZone=false;
+    Require(lt::SetAllToGlobal(false)&&!lt::AllToGlobalEnabled(),
+            "disable all-to-global without deleting the mask setting");
+    Require(density()==9&&distance()==750&&
+            static_cast<int>(lt::ReadEditorInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str()))==9,
+            "turning the mask off restores the exact saved area values");
+    Require(lt::SetInheritGlobal(L"Atmosphere",L"DensityPermille",true)&&density()==4,
+            "normal per-key Global inheritance still works after the mask is disabled");
+    Require(lt::SetInheritGlobal(L"Atmosphere",L"DensityPermille",false)&&density()==9,
+            "disabling per-key inheritance reveals the untouched area value again");
+    lt::editZone=false;lt::editGlobal=false;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +471,8 @@ int main()
     std::this_thread::sleep_for(std::chrono::milliseconds(12));
     Require(!lt::AppliedTuningStillInForce({2, 2 * 7, 2 * 100 + 5, true}, true),
             "a genuinely different place is not skipped");
+
+    TestAllToGlobal(base,graphics,scoped.wstring());
 
     // ---- the measurement: how a crossing scales with authored settings ----
     const Scale scales[] = {

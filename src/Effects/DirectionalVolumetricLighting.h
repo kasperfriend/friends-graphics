@@ -5,6 +5,7 @@
 #include "../Core/DeviceHealth.h"
 #include "../Core/FrameClock.h"
 #include "../Core/FrameContext.h"
+#include "../Environment/ManualColor.h"
 
 namespace renderer
 {
@@ -84,6 +85,7 @@ namespace renderer
         // not a replacement for it. Off falls back to the old fixed
         // profile, e.g. to A/B compare or if a zone's capture looks wrong.
         bool useEnvironmentBaseline = true;
+        manualcolor::Override manualFogColor{};
         VolumetricDebugMode debugMode = VolumetricDebugMode::None;
     };
 

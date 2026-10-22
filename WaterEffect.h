@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 #include "src/Environment/LocationTuning.h"
+#include "src/Environment/ManualColor.h"
 #include <unordered_set>
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
@@ -71,6 +72,7 @@ float clarityPercent=100.f,windStrengthPercent=100.f,roughnessPercent=100.f;
 float sheenPercent=50.f,shoalFoamPercent=100.f,sunDiscPercent=40.f,foamBrightPercent=100.f;
 float sparklePercent=100.f;
 unsigned waterColourTint=0x808080u,deepColour=0x0e2a28u,absorptionColour=0xff8c6bu;
+renderer::manualcolor::Override manualWaterColor{};
 // Whether the current location has an explicit player-authored colour override.
 // Resolve these once on tuning/location reload: asking the Windows profile API
 // up to nine times for EVERY harbour tile was avoidable render-thread I/O.
@@ -161,6 +163,17 @@ WaterColourSet ResolveWaterColourSet(const renderer::ResolvedWaterColours& zoneW
         if(!scopedAbsorptionColour)
             {out.absorb[0]=zoneWater.absorption[0];out.absorb[1]=zoneWater.absorption[1];
              out.absorb[2]=zoneWater.absorption[2];}
+    }
+    // Manual colour is the final layer, so it can override the zone-authored
+    // palette (and the global/default colours) without changing those sources.
+    const std::array<float,3> baseTint={out.tint[0],out.tint[1],out.tint[2]};
+    const std::array<float,3> baseDeep={out.deep[0],out.deep[1],out.deep[2]};
+    const std::array<float,3> baseAbsorb={out.absorb[0],out.absorb[1],out.absorb[2]};
+    const auto tint=renderer::manualcolor::Apply(baseTint,manualWaterColor);
+    const auto deep=renderer::manualcolor::Apply(baseDeep,manualWaterColor);
+    const auto absorb=renderer::manualcolor::Blend(baseAbsorb,std::array<float,3>{1.f,1.f,1.f},manualWaterColor.alpha);
+    for(int channel=0;channel<3;++channel){
+        out.tint[channel]=tint[channel];out.deep[channel]=deep[channel];out.absorb[channel]=absorb[channel];
     }
     return out;
 }
@@ -2393,6 +2406,10 @@ void ReloadTuning(){
     waterColourTint=ReadTuningColour(L"WaterColour",0x808080u);
     deepColour=ReadTuningColour(L"DeepColour",0x0e2a28u);
     absorptionColour=ReadTuningColour(L"AbsorptionColour",0xff8c6bu);
+    manualWaterColor=renderer::manualcolor::Override::FromPercent(
+        ReadTuning(L"ManualColorRed",255),ReadTuning(L"ManualColorGreen",255),
+        ReadTuning(L"ManualColorBlue",255),ReadTuning(L"ManualColorAlphaPercent",0),
+        ReadTuning(L"ManualColorBrightnessPercent",100));
     // Profile-file queries belong on reload, never in the draw loop. Sync()
     // invokes this function whenever the verified location/scope changes.
     scopedWaterColour=renderer::locationtuning::HasScopedValue(L"Water",L"WaterColour");
