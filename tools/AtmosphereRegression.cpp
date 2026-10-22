@@ -1046,7 +1046,7 @@ int main() try {
   for(int dy=-6;dy<=6;++dy)for(int dx=-6;dx<=6;++dx)
    if(dx*dx+dy*dy<=36)
     reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+(64+dy)*r.Pitch)[64+dx]=rawMoonBits;
-  Check(depth->UnlockRect());
+  Check(depth->UnlockRect(0));
  }
  constexpr DWORD atmosphereMoonColor=0xffe05090;
  for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)
