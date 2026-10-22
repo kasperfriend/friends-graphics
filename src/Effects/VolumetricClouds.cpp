@@ -499,7 +499,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // own camera column, and a cloud painted over it afterwards is a full-brightness cloud ten
  // yards under water. The ramp gates it, so above water this is an exact identity and the
  // sea keeps the deck it has always had.
- float submergedWater=step(.35,tex2D(waterMask,uv).r)*saturate(mediumControl.x);
+ float4 waterData=tex2D(waterMask,uv);
+ float submergedWater=step(.35,max(waterData.r,waterData.g))*saturate(mediumControl.x);
  cloud.rgb*=1-submergedWater;
  cloud.a=lerp(cloud.a,1,submergedWater);
  // Reconstruct where this pixel is in the world and read the deck's

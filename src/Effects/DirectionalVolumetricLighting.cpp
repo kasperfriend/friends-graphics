@@ -32,7 +32,7 @@ float LinearizeAtmosphereColor(float value)
 // bilateral upsample, temporal reprojection - would see straight through
 // to the seabed and integrate air fog all the way down to it, producing a
 // cyan/bright wash over underwater terrain that has nothing to do with
-// air. watereffect::Scope writes water's own view-space depth (viewPos.z)
+// air. The replacement-water path writes its own view-space depth (viewPos.z)
 // into a second render target during the real water draws; re-encode it
 // into the same raw hyperbolic depth convention as the real depth buffer
 // (raw = A + B/z, the inverse of the z = B/(raw-A) reconstruction used
@@ -252,8 +252,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // clear depth. Classify sky from the original depth buffer instead: D3D's
  // clear value stays 1 while geometry is bounded by viewport MaxZ.
  float sceneRaw=tex2D(sceneDepth,uv).r;
- float water=tex2D(waterCoverage,uv).r;
- float sky=step((depthInfo.x+1)*.5,sceneRaw)*(1-step(.35,water));
+ float4 waterData=tex2D(waterCoverage,uv);
+ float water=waterData.r; // replacement water has the paired surface-depth MRT
+ float nativeWater=waterData.g;
+ float sky=step((depthInfo.x+1)*.5,sceneRaw)*(1-step(.35,max(water,nativeWater)));
  float z=raw>=.9999?distanceTuning.y:projection.y/(raw-projection.x);
  z=clamp(z,0,distanceTuning.y);
  float3 view=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1);
@@ -424,7 +426,8 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float raw=tex2D(currentDepth,uv).r;
  // Boundary depth is normalized for reconstruction and can put far geometry
  // at one. Use the original clear marker (and exclude water) for sky tests.
- float sky=step((depthInfo.x+1)*.5,tex2D(sceneDepth,uv).r)*(1-step(.35,tex2D(waterCoverage,uv).r));
+ float4 waterData=tex2D(waterCoverage,uv);
+ float sky=step((depthInfo.x+1)*.5,tex2D(sceneDepth,uv).r)*(1-step(.35,max(waterData.r,waterData.g)));
  float2 prevUv;
  if(sky>.5) {
    float3 vr=normalize(float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1));
@@ -505,6 +508,9 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 const char* kCompositeSource = R"HLSL(
 sampler2D sceneMap:register(s0); sampler2D atmosphereMap:register(s1); sampler2D depthMap:register(s2);
 sampler2D waterMask:register(s3); sampler2D sceneDepth:register(s4);
+// When the replacement water shader is off, a native-water coverage prepass
+// keeps its original pixels out of this later atmosphere composite.
+float4 nativeWaterControl:register(c8); // x=preserve native water coverage
 // Global wash is applied in integration, before combining ground banks.
 // x=debug passthrough, y=1, z=extinction scale, w=scatter scale.
 float4 tuning:register(c0); float4 sourceScreen:register(c1);
@@ -516,6 +522,11 @@ float Linear(float raw){return raw>=.9999?projection.z:projection.y/(raw-project
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 a=tex2D(atmosphereMap,uv); if(tuning.x>.5)return float4(a.rgb,1);
  float4 scene=tex2D(sceneMap,uv);
+ float4 waterData=tex2D(waterMask,uv);
+ float water=waterData.r; // only replacement water has a valid surface-depth MRT
+ // The native mask uses a separate green channel, so a mixed warm-up frame
+ // preserves only pixels actually drawn by the game's shader.
+ if(nativeWaterControl.x>.5 && waterData.g>.35) return scene;
  // Proper radiative form: T is the fraction of the scene that survives
  // extinction through the medium, not "how much fog to paint over the
  // screen". a.a is stored as (1-T) by the integrate pass.
@@ -530,7 +541,6 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float3 headroom=max(1-transmitted,.02);
  float3 result=transmitted+headroom*(1-exp(-scattering/headroom));
  float depth=tex2D(depthMap,uv).r;
- float water=tex2D(waterMask,uv).r;
  // Depth in the boundary texture is normalized for reconstruction; only the
  // original buffer preserves the distinction between clear sky and far
  // geometry. Keep the water surface out of the sky-only edge/disc masks.
@@ -945,7 +955,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetTexture(4,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(3,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,FALSE);d->SetSamplerState(4,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,FALSE);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),(f.celestialIntensity>0.f&&!f.cameraPoseStale)?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);float depthInfo[4]={f.depthMaxZ,0,0,0};d->SetPixelShaderConstantF(7,depthInfo,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);d->SetTexture(4,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetTexture(4,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(3,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(3,D3DSAMP_SRGBTEXTURE,FALSE);d->SetSamplerState(4,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(4,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,FALSE);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),(f.celestialIntensity>0.f&&!f.cameraPoseStale)?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float nativeWater[4]={f.nativeWaterMaskCaptured?1.f:0.f,0,0,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);d->SetPixelShaderConstantF(8,nativeWater,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);float depthInfo[4]={f.depthMaxZ,0,0,0};d->SetPixelShaderConstantF(7,depthInfo,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);d->SetTexture(4,nullptr);
  }
  m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;
  return true;

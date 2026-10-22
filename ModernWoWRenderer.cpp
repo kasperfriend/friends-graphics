@@ -758,7 +758,8 @@ struct WaterDrawObservation {
 };
 WaterDrawObservation ObserveWaterForDraw(IDirect3DDevice9* d,bool requested) {
     const bool effectNeedsMaterial=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled;
-    if(g_drawingOverlay||(!requested&&!effectNeedsMaterial))return {};
+    const bool nativeCoverageNeedsMaterial=watereffect::NeedsNativeWaterCoverage();
+    if(g_drawingOverlay||(!requested&&!effectNeedsMaterial&&!nativeCoverageNeedsMaterial))return {};
     return {renderer::water::Observe(d),true};
 }
 
@@ -779,8 +780,10 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDraw(d,t,start,n);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDraw(d,t,start,n);});
@@ -836,8 +839,10 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
@@ -893,8 +898,10 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawUP(d,t,n,v,stride);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawUP(d,t,n,v,stride);});
@@ -950,8 +957,10 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});

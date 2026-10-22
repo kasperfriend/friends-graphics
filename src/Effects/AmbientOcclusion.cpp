@@ -60,7 +60,8 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     if(raw>=.9999) return float4(1,1,1,1);
     // Water owns its own shading; its animated depth would only sparkle.
-    if(tex2D(waterMask,uv).r>.25) return float4(1,1,1,1);
+    float4 waterData=tex2D(waterMask,uv);
+    if(max(waterData.r,waterData.g)>.25) return float4(1,1,1,1);
     float z=ViewZ(raw);
     if(z<=0) return float4(1,1,1,1);
     // Distance fade: reconstruction noise grows with range long before a

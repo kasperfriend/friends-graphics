@@ -302,9 +302,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(ramp<=0.0) return scene;
     // The liquid owns its own pixels: the water stage marched that column with this same
     // coefficient and added this same in-scatter, so shading them here would apply the
-    // medium twice. The mask's red channel is "a water tile was drawn here", which is the
-    // same test the occlusion and atmosphere passes use.
-    if(tex2D(waterMask,sampleUv).r>.25) return scene;
+    // medium twice. The mask's red/green channels mark replacement/native water respectively,
+    // matching the combined coverage test used by occlusion and lighting passes.
+    float4 waterData=tex2D(waterMask,sampleUv);
+    if(max(waterData.r,waterData.g)>.25) return scene;
 
     float raw=tex2D(sceneDepth,sampleUv).r;
     float strength=saturate(deepColour.w)*ramp;

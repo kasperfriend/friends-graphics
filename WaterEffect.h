@@ -735,8 +735,11 @@ inline bool SupportsWaterMrt(IDirect3DDevice9* device) {
     waterMrtInfo.supported=true;
     return true;
 }
-std::vector<DWORD> code,vertexCode;
+std::vector<DWORD> code,vertexCode,nativeWaterCoverageCode;
 std::wstring shaderCacheDir;
+inline ComPtr<IDirect3DPixelShader9> cachedNativeWaterCoveragePS;
+inline IDirect3DDevice9* nativeWaterCoverageDevice=nullptr;
+inline std::uint64_t nativeWaterCoverageRetryAt=0;
 // True when the published bytecode came from the on-disk cache: if the
 // driver then refuses it, the consumer recompiles once before giving up
 // (the fallback for a stale/corrupt cache entry, see the Create site).
@@ -772,6 +775,104 @@ inline void ReportFailure(const char* operation,HRESULT hr) {
         std::ofstream(std::filesystem::path(logPath),std::ios::app)
             <<operation<<" failed hr="<<std::hex<<hr<<std::dec<<"; native water retained if replacement cannot be installed\n";
 }
+inline bool NeedsNativeWaterCoverage() noexcept {
+    const auto& frame=renderer::FrameContext::Current();
+    // This is about which pixels the water pass actually produced: while the
+    // replacement is warming up or explicitly OFF, the native shader remains
+    // visible and needs the same protection from downstream full-screen effects.
+    return active&&(!enabled||!effectEnabled)&&frame.waterMaskTexture&&waterTargetSurface&&
+        waterMaskSurface&&waterTargetDescValid;
+}
+
+inline bool EnsureNativeWaterCoverageShader(IDirect3DDevice9* d) noexcept {
+    if(!d)return false;
+    if(nativeWaterCoverageDevice!=d) {
+        cachedNativeWaterCoveragePS.Reset();
+        nativeWaterCoverageDevice=d;
+        nativeWaterCoverageRetryAt=0;
+    }
+    if(cachedNativeWaterCoveragePS)return true;
+    if(GetTickCount64()<nativeWaterCoverageRetryAt)return false;
+    try {
+        std::lock_guard lk(waterCompileMutex);
+        if(nativeWaterCoverageCode.empty())return false; // startup compile is still in flight
+        cachedNativeWaterCoveragePS.Reset();
+        const HRESULT hr=d->CreatePixelShader(nativeWaterCoverageCode.data(),
+                                               cachedNativeWaterCoveragePS.GetAddressOf());
+        if(FAILED(hr)) {
+            nativeWaterCoverageRetryAt=GetTickCount64()+renderer::kOptionalPassRetryMs;
+            ReportFailure("native water coverage shader",hr);
+            return false;
+        }
+        return true;
+    } catch(...) { return false; }
+}
+
+// When the visible water replacement is disabled, the native liquid draw is
+// still marked in the volume renderer's coverage texture. A tiny mask-only
+// replay leaves the original draw and shader untouched, while letting the
+// later full-screen atmosphere pass recognize and preserve native water.
+struct NativeWaterCoverageTargets {
+    IDirect3DDevice9* device=nullptr;
+    ComPtr<IDirect3DSurface9> rt1,rt2;
+    bool bound1=false,bound2=false,valid=true,changed1=false,changed2=false;
+    explicit NativeWaterCoverageTargets(IDirect3DDevice9* d) noexcept : device(d) {
+        HRESULT hr=d->GetRenderTarget(1,rt1.GetAddressOf());
+        if(SUCCEEDED(hr))bound1=true;else if(hr!=D3DERR_NOTFOUND)valid=false;
+        hr=d->GetRenderTarget(2,rt2.GetAddressOf());
+        if(SUCCEEDED(hr))bound2=true;else if(hr!=D3DERR_NOTFOUND)valid=false;
+    }
+    bool Unbind() noexcept {
+        if(!valid)return false;
+        if(bound2){if(FAILED(device->SetRenderTarget(2,nullptr)))return false;changed2=true;}
+        if(bound1){if(FAILED(device->SetRenderTarget(1,nullptr)))return false;changed1=true;}
+        return true;
+    }
+    ~NativeWaterCoverageTargets() {
+        // The enclosing ScopedPassState restores RT0/depth first; restore the
+        // extra MRT slots afterwards, in increasing order as D3D9 expects.
+        if(changed1)device->SetRenderTarget(1,rt1.Get());
+        if(changed2)device->SetRenderTarget(2,rt2.Get());
+    }
+};
+
+template<class DrawCall>
+bool CaptureNativeWaterCoverage(IDirect3DDevice9* d,
+    const renderer::water::Observation& observation,DrawCall&& draw) noexcept {
+    if(!d||!observation.liquid||!NeedsNativeWaterCoverage())return false;
+    try {
+        ComPtr<IDirect3DSurface9> current;
+        if(FAILED(d->GetRenderTarget(0,current.GetAddressOf()))||current.Get()!=waterTargetSurface)
+            return false; // never mark a reflection or auxiliary target
+        D3DSURFACE_DESC maskDesc{};
+        if(FAILED(waterMaskSurface->GetDesc(&maskDesc))||
+           maskDesc.Width!=waterTargetDesc.Width||maskDesc.Height!=waterTargetDesc.Height||
+           maskDesc.MultiSampleType!=waterTargetDesc.MultiSampleType)
+            return false;
+        if(!EnsureNativeWaterCoverageShader(d))return false;
+
+        NativeWaterCoverageTargets extraTargets(d);
+        if(!extraTargets.Unbind())return false;
+        renderer::ScopedPassState state(d);
+        if(FAILED(d->SetRenderTarget(0,waterMaskSurface))||
+           FAILED(d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE))||
+           FAILED(d->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE))||
+           FAILED(d->SetRenderState(D3DRS_ZWRITEENABLE,FALSE))||
+           FAILED(d->SetRenderState(D3DRS_STENCILENABLE,FALSE))||
+           FAILED(d->SetRenderState(D3DRS_FOGENABLE,FALSE))||
+           FAILED(d->SetRenderState(D3DRS_COLORWRITEENABLE,0x0f))||
+           FAILED(d->SetPixelShader(cachedNativeWaterCoveragePS.Get()))) {
+            state.Restore();
+            return false;
+        }
+        const HRESULT drawResult=draw();
+        state.Restore();
+        if(FAILED(drawResult))return false;
+        renderer::FrameContext::Current().nativeWaterMaskCaptured=true;
+        return true;
+    } catch(...) { return false; }
+}
+
 const char* vertexSource=R"HLSL(
 float4 projection[4]:register(c0);
 float4 fogParams:register(c4);
@@ -1201,13 +1302,11 @@ static const float kGroupDepth=0.62;
 // authored bed over, so the shoal and beach foam read the number the look was tuned
 // against at any resolution, distance or depth-buffer precision.
 static const float kBedSlopeSpanYards=1.5;
-// Second output (COLOR1): marks this pixel as water, so the atmosphere
-// pass knows where the water surface actually is (not the seabed depth
-// already sitting in the main depth buffer - water doesn't write that).
-// Written as white with the final water alpha; the GPU's alpha blend (the same one
-// used for the colour output) turns it into a real per-pixel "how much of
-// this ended up as water" fraction, not a flat 0/1, so partially-blended
-// shore edges are partial too.
+// Second output (COLOR1): red marks replacement-water coverage, so the
+// atmosphere pass knows where its surface-depth MRT is valid. Red/blue carry
+// the final water alpha through the same blend as colour; green is reserved
+// for native-water pixels captured while this replacement is OFF, keeping the
+// two states distinguishable even if different tiles render in one frame.
 // Third output (COLOR2): the water surface's own view-space depth
 // (viewPos.z), for the atmosphere to march air only from the camera to
 // THIS point, not through the water down to the seabed.
@@ -1215,7 +1314,7 @@ struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDept
 WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3,float4 worldRel:TEXCOORD4,float3 waveTangent:TEXCOORD5,float3 waveBitangent:TEXCOORD6,float4 waveWarp:TEXCOORD7) {
     WaterOutput result_;
     result_.surfaceDepth=float4(viewPos.z,0,0,1);
-    result_.mask=float4(1,1,1,1);
+    result_.mask=float4(1,0,1,1);
     // One world-anchored lattice carries every scale. The swell is analytic - rounded
     // forms, exact slopes for free, and the same waves the vertex stage displaces, so a
     // crest and the light on it cannot drift apart - and only the chop on top of it is
@@ -2228,6 +2327,9 @@ WaterOutput main(float4 color:COLOR0,float4 uv0:TEXCOORD0,float4 uv1:TEXCOORD1,f
 }
 
 )HLSL";
+const char* nativeWaterCoverageSource=R"HLSL(
+float4 main():COLOR0 { return float4(0,1,0,1); }
+)HLSL";
 // 0xRRGGBB or decimal, per-area scoped like every other water key. Colours are the
 // only values that need text rather than an integer, so they parse here rather than
 // growing a colour type in the shared tuning reader.
@@ -2326,9 +2428,10 @@ void Configure(const std::wstring& base) {
     logPath=base+L"WaterEffect.log";
     shaderCacheDir=renderer::shaderbytecode::Dir(base);
     enabled=false;
-    code.clear();vertexCode.clear();codeFromCache=false;
-    cachedReplacementPS.Reset();cachedReplacementVS.Reset();
-    cachedShaderDevice=nullptr;shaderCreationFailed=false;
+    code.clear();vertexCode.clear();nativeWaterCoverageCode.clear();codeFromCache=false;
+    cachedReplacementPS.Reset();cachedReplacementVS.Reset();cachedNativeWaterCoveragePS.Reset();
+    cachedShaderDevice=nullptr;nativeWaterCoverageDevice=nullptr;nativeWaterCoverageRetryAt=0;
+    shaderCreationFailed=false;
     // The replacement shaders (a ~540-slot pixel stage) are the largest fxc
     // cost at load. Compile them on a worker thread: the game is still
     // loading, the first water frame is the earliest possible consumer, and
@@ -2341,6 +2444,25 @@ void Configure(const std::wstring& base) {
     // a saved size/direction or calm wind must not flash the old default sea.
     AdvanceSea(0.f);
     showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
+    // The full replacement pair stays asynchronous, but this one-instruction
+    // mask shader is tiny and must be ready before the first native water draw;
+    // otherwise an early frame could still be hidden by a fullscreen fog pass.
+    try {
+        ComPtr<ID3DBlob> coverageBlob,coverageError;
+        const HRESULT coverageHr=D3DCompile(nativeWaterCoverageSource,strlen(nativeWaterCoverageSource),
+            nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,
+            coverageBlob.GetAddressOf(),coverageError.GetAddressOf());
+        if(SUCCEEDED(coverageHr)) {
+            std::vector<DWORD> coverageCode(coverageBlob->GetBufferSize()/sizeof(DWORD));
+            memcpy(coverageCode.data(),coverageBlob->GetBufferPointer(),coverageBlob->GetBufferSize());
+            std::lock_guard lk(waterCompileMutex);
+            nativeWaterCoverageCode=std::move(coverageCode);
+        } else {
+            std::ofstream log(std::filesystem::path(logPath),std::ios::app);
+            log<<"native water coverage compile="<<coverageHr<<'\n';
+            if(coverageError)log<<static_cast<const char*>(coverageError->GetBufferPointer());
+        }
+    } catch(...) { nativeWaterCoverageCode.clear(); }
     compiling=true;
     std::thread([cacheDir=renderer::shaderbytecode::Dir(base),logPath=logPath,strength=strength,normalStrength=normalStrength,specularStrength=specularStrength,effectEnabled=effectEnabled]{
         try {
@@ -2558,7 +2680,10 @@ inline void Reset(IDirect3DDevice9* d) {
     // singleton-owned COM references must not survive that transition.
     cachedReplacementPS.Reset();
     cachedReplacementVS.Reset();
+    cachedNativeWaterCoveragePS.Reset();
     cachedShaderDevice = nullptr;
+    nativeWaterCoverageDevice = nullptr;
+    nativeWaterCoverageRetryAt = 0;
     shaderCreationFailed=false;
     shaderFailureRetryAt=0;
 }

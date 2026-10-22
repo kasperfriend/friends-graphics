@@ -28,6 +28,10 @@ namespace renderer
         bool worldWaterSeenThisFrame = false;
         bool worldSceneResolved = false;
         WorldSceneObservation worldScene;
+        // True when native water (because replacement is OFF or not ready)
+        // wrote this frame's coverage mask. Atmosphere must preserve those
+        // pixels instead of fogging the original water out at range.
+        bool nativeWaterMaskCaptured = false;
 
         uint32_t width = 0;
         uint32_t height = 0;

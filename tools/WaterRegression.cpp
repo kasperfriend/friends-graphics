@@ -1049,6 +1049,35 @@ int main() try
             while((at=text.find(needle,at))!=std::string::npos){++count;at+=needle.size();}
             return count;
         };
+        const auto waterEffectSource=ReadAlongside("WaterEffect.h");
+        const auto frameContextSource=ReadAlongside("src/Core/FrameContext.h");
+        const auto frameResetSource=ReadAlongside("src/Core/FrameContext.cpp");
+        const auto drawHooks=ReadAlongside("ModernWoWRenderer.cpp");
+        const auto atmosphereSource=ReadAlongside("src/Effects/DirectionalVolumetricLighting.cpp");
+        const auto aoSource=ReadAlongside("src/Effects/AmbientOcclusion.cpp");
+        const auto localLightingSource=ReadAlongside("src/Effects/LocalLightingRenderer.cpp");
+        const auto cloudSource=ReadAlongside("src/Effects/VolumetricClouds.cpp");
+        const auto underwaterSource=ReadAlongside("src/Effects/Underwater.h");
+        Require(waterEffectSource.find("return active&&(!enabled||!effectEnabled)&&frame.waterMaskTexture&&waterTargetSurface&&")!=std::string::npos&&
+                waterEffectSource.find("bool CaptureNativeWaterCoverage(IDirect3DDevice9* d,")!=std::string::npos&&
+                waterEffectSource.find("nativeWaterMaskCaptured=true;")!=std::string::npos&&
+                waterEffectSource.find("result_.mask=float4(1,0,1,1);")!=std::string::npos&&
+                waterEffectSource.find("return float4(0,1,0,1);")!=std::string::npos&&
+                frameContextSource.find("bool nativeWaterMaskCaptured = false;")!=std::string::npos&&
+                frameResetSource.find("nativeWaterMaskCaptured = false;")!=std::string::npos&&
+                countText(drawHooks,"watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,")==4,
+                "native water gets a per-pixel green tag while replacement-water coverage remains separate");
+        Require(atmosphereSource.find("float4 nativeWaterControl:register(c8);")!=std::string::npos&&
+                atmosphereSource.find("if(nativeWaterControl.x>.5 && waterData.g>.35) return scene;")!=std::string::npos&&
+                atmosphereSource.find("float coverage=tex2D(waterCoverage,uv).r;")!=std::string::npos&&
+                atmosphereSource.find("float water=waterData.r; // replacement water has the paired surface-depth MRT")!=std::string::npos&&
+                atmosphereSource.find("SetPixelShaderConstantF(8,nativeWater,1)")!=std::string::npos,
+                "the atmosphere preserves native pixels without treating them as replacement water with a depth MRT");
+        Require(aoSource.find("max(waterData.r,waterData.g)>.25")!=std::string::npos&&
+                countText(localLightingSource,"max(waterData.r,waterData.g)>.25")==2&&
+                cloudSource.find("step(.35,max(waterData.r,waterData.g))")!=std::string::npos&&
+                underwaterSource.find("max(waterData.r,waterData.g)>.25")!=std::string::npos,
+                "AO, local lights, clouds and underwater passes recognize native coverage when the replacement is off");
         Require(pixel.find("float ScreenUVInside(float2 uv)")!=std::string::npos&&
                 pixel.find("step(0.0,uv.x)*step(uv.x,1.0)*step(0.0,uv.y)*step(uv.y,1.0)")!=std::string::npos&&
                 pixel.find("if(captureValid>.5 && ScreenUVInside(uv)>.5)")!=std::string::npos,

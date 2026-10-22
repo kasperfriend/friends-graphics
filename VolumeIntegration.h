@@ -549,14 +549,14 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         cameraCaptureShaderHash = 0;
 
         // Per-frame water mask: watereffect::Scope binds this as a second
-        // render target during every actual water draw (see WaterEffect.h)
-        // and marks its pixels, blended by the GPU exactly like water's own
-        // colour output. The atmosphere composite reads it back to exclude
-        // fog from water entirely - the low-res, depth-aware fog upsample
-        // was producing a flat, wrong, hard-edged patch of fog colour on
-        // open water (confirmed via AtmosphereDebugMode=9), because water's
-        // constantly animated/refracting/reflecting surface makes that
-        // depth-based reconstruction unreliable right at the water plane.
+        // render target during replacement-water draws; when that shader is
+        // switched off, the draw hooks replay native liquid geometry through
+        // a mask-only pixel shader instead. Replacement coverage stays in red;
+        // the native-only green tag lets the final pass preserve only those pixels.
+        // The replacement path also supplies a surface-depth MRT. Native
+        // water has no matching MRT, so the final atmosphere composite uses
+        // this frame's capture flag to pass those marked pixels through rather
+        // than reconstructing fog to the seabed and painting over the sheet.
         // Sized to the real render target, cleared fresh every frame before
         // any water draws happen.
         watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;

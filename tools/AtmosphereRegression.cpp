@@ -84,10 +84,11 @@ int main() try {
  auto& fog=DirectionalVolumetricLighting::Instance();auto& settings=fog.Settings();
  settings.temporalEnabled=false;settings.localFogEnabled=false;settings.useEnvironmentBaseline=false;
  {
-  FrameContext stale=f;stale.ResetForNewFrame(1,d.Get());
+  FrameContext stale=f;stale.nativeWaterMaskCaptured=true;stale.ResetForNewFrame(1,d.Get());
   Require(!stale.cameraValid&&!stale.depthAvailable&&stale.viewRawValid&&
-          stale.cameraPosition.x==f.cameraPosition.x&&stale.sceneColor==nullptr,
-          "new frame clears fog validity/resources but keeps the last camera pose only as a fallback");
+          stale.cameraPosition.x==f.cameraPosition.x&&stale.sceneColor==nullptr&&
+          !stale.nativeWaterMaskCaptured,
+          "new frame clears fog validity/resources and native-water coverage but keeps the last camera pose only as a fallback");
   Require(!fog.Render(d.Get(),stale,back.Get()),
           "local atmosphere refuses to render from a stale pre-reset camera pose");
  }
@@ -158,7 +159,7 @@ int main() try {
  printf("resized first=%08lx second=%08lx\n",resized,resizedAgain);
  Require(diff(resized,0xff202020)>8 && diff(resized,resizedAgain)<=1,"quality resize preserves first-frame fog");
  settings.debugMode=VolumetricDebugMode::BoundaryDepth;encode(120,.94f);DWORD boundary=render(true);
- fill(mask.Get(),0xffffffff);DWORD water=render(true);Require((boundary&255)>(water&255)+30,"water stops atmosphere at surface, not seabed");
+ fill(mask.Get(),0xffff00ff);DWORD water=render(true);Require((boundary&255)>(water&255)+30,"water stops atmosphere at surface, not seabed");
  // Equal linear depths must produce equal normalized boundary values, even
  // when WoW compresses the viewport depth range to .94.
  fill(mask.Get(),0);encode(20,.94f);DWORD sameDepthWithoutWater=render(true);
@@ -174,8 +175,12 @@ int main() try {
  encode(120,.94f);render(false);DWORD dryBank=pixel(64,100);
  D3DLOCKED_RECT wr{};Check(waterDepth->LockRect(0,&wr,nullptr,0));
  for(int y=0;y<128;++y)for(int x=0;x<128;++x){float v=1-2*(y+.5f)/128;reinterpret_cast<float*>(static_cast<BYTE*>(wr.pBits)+y*wr.Pitch)[x]=v<0?std::min(120.f,-5/v):120.f;}
- Check(waterDepth->UnlockRect(0));fill(mask.Get(),0xffffffff);render(false);
+ Check(waterDepth->UnlockRect(0));fill(mask.Get(),0xffff00ff);render(false);
  Require(diff(dryBank,pixel(64,100))<=2&&diff(pixel(64,100),0xff202020)>20,"nearby water retains air fog above its surface");
+ fill(mask.Get(),0xff00ff00); // native-water mask is distinguished in green
+ f.nativeWaterMaskCaptured=true;
+ Require(render(false)==0xff202020,"native water coverage bypasses the atmosphere composite when the water shader is off");
+ f.nativeWaterMaskCaptured=false;
  fill(mask.Get(),0);settings.localFogEnabled=false;
  // Read back only in this regression executable; production state stays on GPU.
  auto interaction=[&](){std::array<float,8> result{};ComPtr<IDirect3DSurface9> src,staging;
