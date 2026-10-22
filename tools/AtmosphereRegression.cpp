@@ -748,10 +748,10 @@ int main() try {
  Require(pixel(64,110)==0xff202020,"cloud composite leaves solid geometry byte-identical");
  Require((overcastSky&255)>((overcastSky>>16)&255),"deck takes the environment ambient tint instead of a fixed white");
  // WoW's moon billboard writes a near view-space depth into only its own
- // pixels. Those pixels must not clip the cloud march or leave a black disk,
- // while an ordinary foreground surface at the same depth must still occlude
- // the deck. Search the deterministic clear-sky image for an off-disc cloud
- // pixel so the occluder assertion measures real cloud contribution.
+ // pixels. It must neither clip the cloud march nor be fogged over by the
+ // cloud composite; an ordinary foreground surface at the same depth must
+ // still occlude the deck. Search the deterministic clear-sky image away from
+ // the disc so the occluder assertion measures real cloud contribution.
  const auto clearCloudImage=readCloudImage();
  constexpr int moonX=64,moonY=20;const float moonU=float(moonX)/128.f,moonV=float(moonY)/128.f;
  const Vec3 moonRay=Normalize({(moonU*2-1)/f.projUnpack[2],(1-moonV*2)/f.projUnpack[3],1});
@@ -763,8 +763,8 @@ int main() try {
   const float contribution=float(diff(clearCloudImage[y*128+x],0xff202020));
   if(contribution>strongestForeground){strongestForeground=contribution;foregroundX=x;foregroundY=y;}
  }
- Require(diff(clearCloudImage[moonY*128+moonX],0xff202020)>12&&strongestForeground>12,
-         "cloud pixels are available both at the tracked moon and outside its disc");
+ Require(strongestForeground>12,
+         "cloud pixels remain available outside the tracked moon disc");
  {
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
   for(int dy=-6;dy<=6;++dy)for(int dx=-6;dx<=6;++dx)
@@ -777,16 +777,20 @@ int main() try {
       .94f*(f.projUnpack[0]+f.projUnpack[1]/12.f);
   Check(depth->UnlockRect(0));
  }
+ constexpr DWORD moonSpriteColor=0xffe05090;
+ for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)
+  setPixel(scene.Get(),moonX+dx,moonY+dy,moonSpriteColor);
  f.moonDiscScreenX=moonU;f.moonDiscScreenY=moonV;
  f.moonDiscViewDepth=12.f;f.moonDiscValid=true;
  Require(renderClouds(),"tracked moon depth cloud fixture renders");
  const auto trackedMoonImage=readCloudImage();
- Require(diff(trackedMoonImage[moonY*128+moonX],0xff202020)>12&&
-         diff(trackedMoonImage[moonY*128+moonX],clearCloudImage[moonY*128+moonX])<8,
-         "clouds remain visible through the tracked moon-disc depth instead of a black disk");
+ Require(trackedMoonImage[moonY*128+moonX]==moonSpriteColor,
+         "cloud compositing restores the original tracked moon sprite pixel");
  Require(diff(trackedMoonImage[foregroundY*128+foregroundX],0xff202020)<=2,
          "ordinary foreground geometry still occludes clouds outside the tracked moon cone");
  f.moonDiscValid=false;f.moonDiscViewDepth=0.f;
+ for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)
+  setPixel(scene.Get(),moonX+dx,moonY+dy,0xff202020);
  {
   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
   for(int y=0;y<128;++y)for(int x=0;x<128;++x)
@@ -1009,6 +1013,63 @@ int main() try {
  f.celestialIntensity=1.f;
  render(true);const DWORD skyWithMoon=pixel(74,64);
  Require(diff(skyWithMoon,skyWithoutMoon)>1,"moon halo remains visible through open-sky fog");
+
+ // Hold the physical direct light fixed and move only its vanilla disc from
+ // outside the view to screen centre. Entering the view may add the synthetic
+ // halo, but it must not dim the physical forward-scattering term around it.
+ f.directLightIsMoon=false;f.directLightDirectionView={0,0,1};f.directLightIntensity=1.f;
+ f.sunDiscValid=false;f.moonDiscValid=false;
+ f.sunScreenX=f.sunScreenY=-1.f;f.celestialIntensity=0.f;
+ const DWORD lightOffscreen=render(true);
+ f.sunScreenX=f.sunScreenY=.5f;f.celestialIntensity=1.f;
+ const DWORD lightOnscreen=render(true);
+ auto rgbSum=[](DWORD p){return int((p>>16)&255)+int((p>>8)&255)+int(p&255);};
+ printf("atmosphere source in-view offscreen=%d onscreen=%d\n",rgbSum(lightOffscreen),rgbSum(lightOnscreen));
+ Require(rgbSum(lightOnscreen)+6>=rgbSum(lightOffscreen),
+         "showing the sun in camera cannot dim physical atmospheric scattering");
+
+ // A billboard is a verified near-flat depth sprite, not scene geometry for
+ // the atmosphere to paint over. Make the surrounding sky strongly hazy and
+ // compare the same distinctive source pixel with the tracker disabled/enabled.
+ f.directLightValid=false;f.celestialIntensity=0.f;f.sunScreenX=f.sunScreenY=-1.f;
+ f.sunDiscValid=false;f.moonDiscValid=false;
+ f.moonDiscScreenX=.5f;f.moonDiscScreenY=.5f;f.moonDiscViewDepth=500.f;
+ settings.aerialDensity=.02f;settings.fogWash=.8f;
+ fill(scene.Get(),0xff202020);fillFloat(depth.Get(),1.f);
+ const DWORD rawMoonBits=[&]{
+  const float raw=f.viewport.MinZ+(f.depthMaxZ-f.viewport.MinZ)*
+      (f.projUnpack[0]+f.projUnpack[1]/f.moonDiscViewDepth);
+  DWORD bits{};memcpy(&bits,&raw,sizeof(bits));return bits;
+ }();
+ {
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int dy=-6;dy<=6;++dy)for(int dx=-6;dx<=6;++dx)
+   if(dx*dx+dy*dy<=36)
+    reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+(64+dy)*r.Pitch)[64+dx]=rawMoonBits;
+  Check(depth->UnlockRect());
+ }
+ constexpr DWORD atmosphereMoonColor=0xffe05090;
+ for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)
+  setPixel(scene.Get(),64+dx,64+dy,atmosphereMoonColor);
+ const DWORD atmosphereMoonUnprotected=render(true);
+ f.moonDiscValid=true;
+ const DWORD atmosphereMoonProtected=render(true);
+ Require(diff(atmosphereMoonUnprotected,atmosphereMoonColor)>8,
+         "the atmosphere fixture visibly alters an unprotected billboard pixel");
+ Require(diff(atmosphereMoonProtected,atmosphereMoonColor)<=2,
+         "the atmosphere composite restores the original depth-verified moon pixel");
+
+ f.moonDiscValid=false;f.sunDiscScreenX=.5f;f.sunDiscScreenY=.5f;f.sunDiscViewDepth=500.f;
+ constexpr DWORD atmosphereSunColor=0xff40c070;
+ for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)
+  setPixel(scene.Get(),64+dx,64+dy,atmosphereSunColor);
+ const DWORD atmosphereSunUnprotected=render(true);
+ f.sunDiscValid=true;
+ const DWORD atmosphereSunProtected=render(true);
+ Require(diff(atmosphereSunUnprotected,atmosphereSunColor)>8,
+         "the atmosphere fixture visibly alters an unprotected sun-disc pixel");
+ Require(diff(atmosphereSunProtected,atmosphereSunColor)<=2,
+         "the atmosphere composite restores the original tracked sun-disc pixel");
 
  f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;

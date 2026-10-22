@@ -488,6 +488,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float sprite=withinDisc>.5?SpriteVerified(moonDisc.xy):0;
  float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);
+ // The client's camera-relative moon is part of the original scene, not a
+ // surface for the cloud layer to fog over. Its near depth is ignored by the
+ // march so clouds do not form a black hole, then its actual sprite pixel is
+ // restored here just like the tracked vanilla sun.
+ if(moonCentre>.5)return scene;
  float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x,sprite),MoonDiscPixel(tapUv1,taps.y,tapZ.y,sprite),
                         MoonDiscPixel(tapUv2,taps.z,tapZ.z,sprite),MoonDiscPixel(tapUv3,taps.w,tapZ.w,sprite));
  // The moon's near billboard depth is a sprite, not a foreground surface.

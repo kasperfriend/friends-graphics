@@ -321,6 +321,14 @@ int main() try
                     Contains(composite, "if (clouds.Render(d, frameCtx, target.Get()))") &&
                     Contains(clouds, "CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)"),
                 "the compositor delegates cloud world/camera gating to the pass so skipped sky views are diagnosable");
+            Require(Contains(atmosphere, "screenPhase*.12*discProtection+directionalLean*.25;") &&
+                    !Contains(atmosphere, "screenPhase*.12+directionalLean*.25)*discProtection;"),
+                "the on-screen disc mask suppresses only synthetic halo, never physical cloud illumination");
+            Require(Contains(atmosphere, "float sunPixel=SunDiscPixel(uv,sceneRaw,skyThreshold);") &&
+                    Contains(atmosphere, "MoonDiscPixel(uv,sceneRaw,skyThreshold,moonSprite)") &&
+                    Contains(atmosphere, "SetPixelShaderConstantF(9,sunDisc,1)") &&
+                    Contains(atmosphere, "SetPixelShaderConstantF(11,moonDisc,1)"),
+                "the atmosphere composite restores the tracked sun and depth-verified moon billboards");
             Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
                     Contains(distanceFog, "frame.cameraValid&&!frame.cameraPoseStale") &&
                     Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&

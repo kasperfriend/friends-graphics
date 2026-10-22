@@ -23,6 +23,9 @@ int main() try
     const std::string text((std::istreambuf_iterator<char>(source)), {});
     Require(text.find("float HeightFraction(float3 p) { return saturate((p.z-layer.x)*layer.z); }") != std::string::npos,
             "production height profile uses world Z, not camera-relative curvature");
+    Require(text.find("if(SunDiscPixel(uv,linearRaw)>.5) return scene;") != std::string::npos &&
+            text.find("if(moonCentre>.5)return scene;") != std::string::npos,
+            "cloud compositing preserves verified vanilla sun and moon sprite pixels");
     Require(text.find("m_fieldsDevice=d;") != std::string::npos &&
             text.find("device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device)") != std::string::npos,
             "cloud noise textures are recreated when the D3D device implementation changes");
