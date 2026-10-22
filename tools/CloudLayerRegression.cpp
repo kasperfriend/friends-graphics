@@ -42,6 +42,10 @@ int main() try
             "cold-start cloud generation owns its async state and avoids per-frame cache I/O while the worker runs");
     Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
+    Require(text.find("fade*=1-smoothstep(layer.w*.9,layer.w,entry);") != std::string::npos,
+            "distance fade preserves cloud opacity until the final tenth of the march range");
+    Require(text.find("if(maxDistance==26000)maxDistance=200000;") != std::string::npos,
+            "existing installs migrate the former 26,000-unit default to the wider sky reach");
 
     CloudConfig c;
     c.bottom = 900; c.top = 2300; c.windSpeed = 0;
@@ -106,6 +110,18 @@ int main() try
 
     c.coverage=1.f;
     float transmittance, depth;
+    Marcher upward(c,resources,{0,0,0});
+    unsigned visibleElevations=0;
+    for(float pitchDegrees : {.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f}) {
+        const float pitch=pitchDegrees*3.14159265358979323846f/180.f;
+        const V3 ray=Normalize({0,std::cos(pitch),std::sin(pitch)});
+        upward.March({0,0,0},ray,{0,0,1},.5f,transmittance,depth);
+        if(transmittance>=.99f)
+            throw std::runtime_error("cloud deck disappeared during the upward camera-elevation sweep");
+        ++visibleElevations;
+    }
+    Require(visibleElevations==9,
+            "cloud opacity survives shallow-above-horizon through near-zenith views");
     const V3 light{0,0,1};
     flying.March({0,0,3000}, {0,0,1}, light, 0, transmittance, depth);
     Require(transmittance==1.f, "above the deck, the view march leaves overhead sky clear");

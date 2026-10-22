@@ -169,9 +169,14 @@ namespace renderer
         return state != WorldSceneState::OutOfWorld && knownWorldDrawSeen;
     }
 
-    constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen) noexcept
+    // A sky-only camera submits no terrain/liquid draw, but its verified world
+    // IDs and fresh camera pose are still enough to keep world-anchored clouds
+    // alive. Unknown locations remain draw-gated, and a verified menu always wins.
+    constexpr bool CanRenderWorldClouds(WorldSceneState state, bool knownWorldDrawSeen,
+                                        bool freshCameraPose = false) noexcept
     {
-        return HasPlayableWorldEvidence(state, knownWorldDrawSeen);
+        if (state == WorldSceneState::OutOfWorld) return false;
+        return knownWorldDrawSeen || (state == WorldSceneState::InWorld && freshCameraPose);
     }
 
     // Remembered submersion must not survive leaving the client world, or a

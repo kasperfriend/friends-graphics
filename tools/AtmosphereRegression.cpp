@@ -33,12 +33,16 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** s) { return d->
 int main() try {
  wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path,L"\\d3d9.dll");
  auto dll=LoadLibraryW(path);
+ if(!dll){printf("SKIP: system D3D9 runtime is unavailable\n");return 77;}
  auto create=reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(dll,"Direct3DCreate9"));
+ if(!create){printf("SKIP: Direct3DCreate9 is unavailable\n");return 77;}
  ComPtr<IDirect3D9> api; api.Attach(create(D3D_SDK_VERSION));
+ if(!api){printf("SKIP: D3D9 could not create an API object\n");return 77;}
  HWND window=CreateWindowW(L"STATIC",L"Atmosphere regression",WS_OVERLAPPEDWINDOW,0,0,128,128,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
  D3DPRESENT_PARAMETERS pp{}; pp.Windowed=TRUE; pp.SwapEffect=D3DSWAPEFFECT_DISCARD;
  pp.hDeviceWindow=window; pp.BackBufferWidth=128; pp.BackBufferHeight=128; pp.BackBufferFormat=D3DFMT_A8R8G8B8;
- ComPtr<IDirect3DDevice9> d; Check(api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,d.GetAddressOf()));
+ ComPtr<IDirect3DDevice9> d;const HRESULT deviceResult=api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,d.GetAddressOf());
+ if(FAILED(deviceResult)){printf("SKIP: D3D9 HAL unavailable (HRESULT=%08lx)\n",static_cast<unsigned long>(deviceResult));return 77;}
  DepthCapture::Instance().SetFunctions(SetDepth,GetDepth);
  // A full explicit clear is equivalent to Clear(0,nullptr), while a partial
  // clear cannot safely initialize an otherwise undefined replacement buffer.
@@ -76,6 +80,7 @@ int main() try {
  fill(scene.Get(),0xff202020);fill(noise.Get(),0xffb0b0b0);fill(mask.Get(),0);fillFloat(waterDepth.Get(),20.f);
  ComPtr<IDirect3DSurface9> sceneSurface;Check(scene->GetSurfaceLevel(0,sceneSurface.GetAddressOf()));
  FrameContext f; f.cameraValid=f.depthAvailable=true;f.viewRaw.SetIdentity();f.viewRawValid=true;
+ f.worldScene.state=WorldSceneState::InWorld;f.worldScene.locationIdsValid=true;f.worldTerrainSeenThisFrame=true;
  f.sceneColor=scene.Get();f.sceneSurface=sceneSurface.Get();
  f.depthTexture=depth.Get();f.atmosphereNoise=noise.Get();f.waterMaskTexture=mask.Get();f.waterDepthTexture=waterDepth.Get();
  f.projUnpack[0]=1000.f/999.9f;f.projUnpack[1]=-100.f/999.9f;f.projUnpack[2]=f.projUnpack[3]=1;
@@ -659,7 +664,10 @@ int main() try {
  cloud.debugMode=CloudDebugMode::None;cloud.cloudType=0;
  cloud.planetRadius=42000;cloud.baseAltitude=900;cloud.thickness=1400;
  cloud.featureSize=5200;cloud.detailSize=380;cloud.weatherSize=34000;
- cloud.windSpeed=0;cloud.maxDistance=26000;cloud.horizonFade=.018f;
+ cloud.windSpeed=0;cloud.maxDistance=200000;cloud.horizonFade=.018f;
+ // The playable location is verified, but this fixture deliberately has no
+ // terrain/liquid draw: the camera is looking into an all-sky view.
+ f.worldTerrainSeenThisFrame=false;f.worldWaterSeenThisFrame=false;
  cloud.groundShadows=false;cloud.groundShadowStrength=.55f;cloud.groundShadowExtent=14000;
  f.cameraPosition={0,0,0};f.sunDirectionWorld={0,0,1};f.directionalLightColor={0,0,0};
  f.celestialIntensity=1;f.celestialIsMoon=false;f.daylightFactor=1;f.moonlightFactor=0;
@@ -692,6 +700,9 @@ int main() try {
   Check(read->UnlockRect());return pixels;};
  auto skyMean=[&]{const auto image=readCloudImage();double sum=0;int n=0;
   for(int y=6;y<58;++y)for(int x=6;x<122;++x){sum+=double(image[y*128+x]&255);++n;}
+  return sum/double(n?n:1);};
+ auto centreCloudContribution=[&]{const auto image=readCloudImage();double sum=0;int n=0;
+  for(int y=58;y<70;++y)for(int x=58;x<70;++x){sum+=diff(image[y*128+x],0xff202020);++n;}
   return sum/double(n?n:1);};
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
@@ -795,6 +806,33 @@ int main() try {
  f.cameraPosition={0,0,9000};
  Require(renderClouds()&&pixel(64,20)==0xff202020,"above the deck the sky overhead is genuinely empty");
  f.cameraPosition={0,0,0};
+ // Looking above the horizon can leave no terrain or liquid draw in the
+ // frame. A verified in-world camera must still render the fixed deck, from
+ // a shallow upward angle through a near-zenith view, while foreground depth
+ // clipping remains covered by the assertions above.
+ {
+  const Matrix4 horizontalView=f.inverseView;
+  auto setCameraPitch=[&](float degrees){
+   const float pitch=degrees*.01745329252f,s=std::sin(pitch),c=std::cos(pitch);
+   f.inverseView.SetZero();f.inverseView.m[0][0]=1;
+   f.inverseView.m[1][1]=-s;f.inverseView.m[1][2]=c;
+   f.inverseView.m[2][1]=c;f.inverseView.m[2][2]=s;f.inverseView.m[3][3]=1;
+  };
+  fillFloat(depth.Get(),1.f);
+  for(float pitch:{.5f,1.f,2.f,5.f,15.f,45.f,80.f}){
+   setCameraPitch(pitch);
+   Require(renderClouds(),"sky-only upward camera renders the cloud deck");
+   const double contribution=centreCloudContribution();
+   printf("cloud upward pitch=%.1f contribution=%.2f\n",pitch,contribution);
+   Require(contribution>2.0,"cloud coverage persists above the horizon at every camera pitch");
+  }
+  f.inverseView=horizontalView;
+  D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+  for(int y=0;y<128;++y)for(int x=0;x<128;++x)
+   reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=
+     y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
+  Check(depth->UnlockRect(0));
+ }
  // Cloud shadows: the sun is straight up and the sky is solid, so the
  // ground thirty units away has to lose light - and only when asked.
  Require(renderClouds()&&pixel(64,110)==0xff202020,"ground stays untouched while cloud shadows are off");
@@ -898,6 +936,8 @@ int main() try {
  Require(renderClouds()&&clouds.GetCloudTexture()!=nullptr,"the deck rebuilds itself after a device reset");
  Require(clouds.FieldsReady(),"a device reset does not throw the generated fields away");
  clouds.Reset(d.Get());
+ // The remaining atmosphere fixtures model a world scene with terrain again.
+ f.worldTerrainSeenThisFrame=true;
  // Synthetic transmittance isolates cloud-filtered shafts from cloud colour.
  auto transmittance=texture(D3DFMT_A8R8G8B8);
  f.cloudShadowTexture=transmittance.Get();f.cloudShadowArea={-7000,-7000,1.f/14000,1};

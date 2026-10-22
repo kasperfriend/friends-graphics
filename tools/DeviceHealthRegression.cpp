@@ -310,13 +310,15 @@ int main() try
             const auto frameContext = Read("src/Core/FrameContext.h");
             const auto rendererHook = Read("ModernWoWRenderer.cpp");
             Require(Contains(clouds, "if(f.cameraPoseStale)return false;") &&
-                    Contains(clouds, "if(!CanRenderWorldClouds(f.worldScene.state,f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame))return false;"),
-                "the cloud deck requires both a fresh camera and a confirmed playable-world scene");
+                    Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
+                    Contains(clouds, "f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame,freshCameraPose"),
+                "clouds accept a fresh verified camera when an upward view contains only sky");
             Require(Contains(composite, "ResolveWorldSceneForFrame();") &&
                     Contains(composite, "watereffect::ObserveWorldSceneForUnderwater(frame);") &&
                     Contains(composite, "CanRenderWorldClouds(frameCtx.worldScene.state,") &&
-                    Contains(composite, "frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame"),
-                "the compositor resolves live scene context before scheduling world-anchored clouds");
+                    Contains(composite, "frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame,") &&
+                    Contains(composite, "frameCtx.cameraValid&&!frameCtx.cameraPoseStale"),
+                "the compositor keeps sky-only clouds active only with the current verified world camera");
             Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
                     Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&
                     Contains(atmosphereHeader, "m_groundHeightIssued[0] = m_groundHeightIssued[1] = false;") &&
@@ -785,12 +787,18 @@ int main() try
                 "unverified clients retain a known terrain/liquid draw fallback for clouds");
         Require(!CanRenderWorldClouds(easternKingdoms.state, false),
                 "a stale last-world location tuple alone cannot put clouds over a login/menu frame");
+        Require(CanRenderWorldClouds(easternKingdoms.state, false, true),
+                "a fresh verified camera keeps clouds visible when an upward view contains only sky");
+        Require(!CanRenderWorldClouds(easternKingdoms.state, false, false),
+                "an in-world ID tuple without a current camera pose cannot render sky-only clouds");
+        Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false, true),
+                "a fresh camera without verified location or terrain evidence cannot render clouds");
         Require(CanRenderWorldClouds(WorldSceneState::Unknown, true),
                 "same-frame terrain/liquid evidence can resolve an unavailable location sample");
         Require(!CanRenderWorldClouds(WorldSceneState::Unknown, false),
                 "clouds fail closed when neither verified IDs nor known world geometry exist");
-        Require(!CanRenderWorldClouds(WorldSceneState::OutOfWorld, true),
-                "verified out-of-world state overrides even terrain-like menu draws");
+        Require(!CanRenderWorldClouds(WorldSceneState::OutOfWorld, true, true),
+                "verified out-of-world state overrides terrain draws and a current camera pose");
         Require(ClassifyWorldScene(true, true, 0, 0, 1000001, false).state == WorldSceneState::Unknown,
                 "implausible location IDs do not activate world-anchored effects");
 

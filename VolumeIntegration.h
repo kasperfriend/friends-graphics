@@ -1293,7 +1293,8 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudRayStrength = 0.f;
     if (!shaftDebug && cloudsEffectEnabled &&
         renderer::CanRenderWorldClouds(frameCtx.worldScene.state,
-            frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame)) {
+            frameCtx.worldTerrainSeenThisFrame||frameCtx.worldWaterSeenThisFrame,
+            frameCtx.cameraValid&&!frameCtx.cameraPoseStale)) {
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
         // Already resolved once at the frame boundary, alongside wind/water.

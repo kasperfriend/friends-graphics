@@ -65,14 +65,14 @@ namespace renderer
         float multiScatterEccentricity = .55f;
 
         // March shape: the step grows with distance because a 1400-unit-thick
-        // layer seen edge-on is 25000 units long, and the width of the fade
-        // band that hides the layer's edge at the horizon.
+        // layer can stretch to the 200000-unit march limit at the horizon; the
+        // fade hides the final edge without erasing shallow upward views.
         float baseStep = 70.f;
         float stepGrowth = .010f;
         float coarseScale = 3.f;
         float jitter = .25f;
         float horizonFade = .018f;
-        float maxDistance = 26000.f;
+        float maxDistance = 200000.f;
 
         // Aerial perspective: how much of the sky's own haze colour a cloud
         // picks up over the draw distance. Distance has to wash a cloud out,

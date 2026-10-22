@@ -58,7 +58,7 @@ The march itself:
 3. Jitter the first step with an interleaved-gradient offset derived from `VPOS` - fixed in screen space, never a
    frame counter, so the bilinear upsample averages neighbouring phases instead of flickering.
 4. March with a **step tied to world length that grows with distance**, never the span divided by a step count: the
-   layer is 2150 units thick but 25000 units long near the horizon, and dividing the span is what turns detail into
+   layer is 2150 units thick and the default ray limit is 200000 units; dividing the span is what turns detail into
    putty. Empty space is crossed with strides three times longer; the march steps back and integrates properly as
    soon as it hits density, and returns to striding after seven empty samples.
 5. At each sample with density: a six-step Beer march toward the sun or moon whose last step is a long reach sample
@@ -163,7 +163,7 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `PowderPercent` | 70 | Dark edge where a cloud faces the light. |
 | `StepGrowthPermille` / `CoarseStepScale` / `JitterPercent` | 10 / 3 / 25 | March shape. |
 | `HorizonFadePermille` | 18 | How quickly grazing rays fade out. |
-| `MaxDistance` | 26000 | March limit; the deck fades out before it. |
+| `MaxDistance` | 200000 | March limit; the deck fades only in its final 10% so near-horizon clouds remain visible. The former shipped default of 26000 is upgraded automatically. |
 | `AerialPerspectivePercent` | 60 | How much of the sky's haze a cloud picks up with distance. 0 makes near and far clouds equally contrasty. |
 | `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 24000 | Cloud shadows cast on the world below. |
 | `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only, 4 = shadow map. |

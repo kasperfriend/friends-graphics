@@ -111,6 +111,28 @@ jobs:
         shell: pwsh
         run: ./tools/ValidateShaders.ps1
 
+      - name: Atmosphere and cloud device regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Atmosphere.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          if ($result -eq 77) {
+            Write-Output "::notice title=Atmosphere regressions skipped::D3D9 HAL is unavailable on this runner"
+            exit 0
+          }
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          $flat = ($tail -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+          if ($result -ne 0) {
+            Write-Output "::error title=Atmosphere regression failed::$flat"
+            exit $result
+          }
+          $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '
+          $passed = $passed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Atmosphere regressions::$passed"
+
       - name: Water device regressions
         if: matrix.configuration == 'Release'
         shell: pwsh

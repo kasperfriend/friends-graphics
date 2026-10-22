@@ -201,7 +201,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float fade=(region.w>.5&&region.w<1.5)?smoothstep(0,max(groundColor.w,.001),ray.z):1;
  // The march stops at its own limit long before the layer does: fade there
  // too or the cut shows up as a straight edge across the sky.
- fade*=1-smoothstep(layer.w*.55,layer.w,entry);
+ fade*=1-smoothstep(layer.w*.9,layer.w,entry);
  if(fade<=.002) return float4(0,0,0,1);
 
  // Phase depends only on the angle between the ray and the light, so all
@@ -217,9 +217,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float3 phase=float3(single,lerp(1,single,lobe.z),lerp(1,single,lobe.z*lobe.z));
 
  // A step tied to world length, never to the span divided by the step
- // count: the layer is 1400 units thick but 25000 long near the horizon,
- // and dividing the span is what turns detail into putty. It grows with
- // distance because far clouds cover fewer pixels.
+ // count: the layer is 1400 units thick but can stretch 200000 units along
+ // shallow rays. Distance growth preserves detail while keeping that far field affordable.
  float baseStep=max(stepping.x,(exitDistance-entry)/max(depthRange.w*3,1));
  float jitter=.5+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)*stepping.w;
  float t=entry+jitter*baseStep;
@@ -739,7 +738,11 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.coarseScale=float(std::clamp(read(L"CoarseStepScale",3),1,12));
  m_settings.jitter=std::clamp(read(L"JitterPercent",25),0,100)*.01f;
  m_settings.horizonFade=std::clamp(read(L"HorizonFadePermille",18),1,400)*.001f;
- m_settings.maxDistance=float(std::clamp(read(L"MaxDistance",26000),2000,200000));
+ int maxDistance=read(L"MaxDistance",200000);
+ // 26,000 was the shipped pre-sky-view default. Upgrade that legacy value
+ // so existing installs gain the near-horizon reach as well as fresh installs.
+ if(maxDistance==26000)maxDistance=200000;
+ m_settings.maxDistance=float(std::clamp(maxDistance,2000,200000));
  m_settings.aerialPerspective=std::clamp(read(L"AerialPerspectivePercent",60),0,100)*.01f;
  m_settings.manualCloudColor=manualcolor::Override::FromPercent(
      read(L"ManualColorRed",255),read(L"ManualColorGreen",255),read(L"ManualColorBlue",255),
@@ -945,9 +948,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
  // A corroborated camera and depth buffer also exist on some login/menu
- // scenes. The cloud deck is world-space geometry, so require the independent
- // playable-world context instead of painting a menu background.
- if(!CanRenderWorldClouds(f.worldScene.state,f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame))return false;
+ // scenes. Let a sky-only view through only when verified world IDs and a fresh
+ // camera pose agree; unknown/menu contexts still need a current terrain/liquid draw.
+ const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
+ if(!CanRenderWorldClouds(f.worldScene.state,
+      f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame,freshCameraPose))return false;
  if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
  // The deck is anchored in WORLD space at absolute heights, so it is only
  // correct from the camera that is actually being rendered. In a city the
