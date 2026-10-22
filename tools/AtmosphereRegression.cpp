@@ -55,18 +55,20 @@ int main() try {
   Require(CanReplaceDepthFormat(format),"standard depth format policy");
  Require(!CanReplaceDepthFormat(D3DFMT_D16_LOCKABLE),"incompatible depth format rejected");
  // INTZ is a vendor depth-texture format; a D3D9 HAL can create the device but
- // still lack this extension (the GitHub Windows runner does). Skip only the
- // lifecycle test in that case; the synthetic-depth atmosphere/cloud tests below
- // do not depend on INTZ and should still run.
+ // still lack this extension. Check the advertised capability first rather than
+ // probing CreateTexture, which can destabilize software D3D9 drivers. Skip only
+ // the lifecycle test when unsupported; synthetic-depth atmosphere/cloud tests
+ // below do not depend on INTZ and should still run.
  const auto intzFormat=static_cast<D3DFORMAT>(MAKEFOURCC('I','N','T','Z'));
- ComPtr<IDirect3DTexture9> intzProbe;
- const HRESULT intzProbeResult=d->CreateTexture(128,128,1,D3DUSAGE_DEPTHSTENCIL,intzFormat,
-     D3DPOOL_DEFAULT,intzProbe.GetAddressOf(),nullptr);
- if(FAILED(intzProbeResult)) {
-  printf("SKIP INTZ depth-capture lifecycle: this D3D9 HAL does not support INTZ (HRESULT=%08lx)\n",
-      static_cast<unsigned long>(intzProbeResult));
+ D3DDISPLAYMODE adapterMode{};
+ HRESULT intzSupport=api->GetAdapterDisplayMode(0,&adapterMode);
+ if(SUCCEEDED(intzSupport))
+  intzSupport=api->CheckDeviceFormat(0,D3DDEVTYPE_HAL,adapterMode.Format,
+      D3DUSAGE_DEPTHSTENCIL,D3DRTYPE_TEXTURE,intzFormat);
+ if(FAILED(intzSupport)) {
+  printf("SKIP INTZ depth-capture lifecycle: this D3D9 HAL does not advertise INTZ (HRESULT=%08lx)\n",
+      static_cast<unsigned long>(intzSupport));
  } else {
-  intzProbe.Reset();
   // Exercise the production capture lifecycle on the two common 3.3.5a
   // formats, including the explicit rectangle used by affected clients.
   for(auto format:{D3DFMT_D16,D3DFMT_D24S8}){
