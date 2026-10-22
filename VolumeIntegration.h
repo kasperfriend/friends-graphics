@@ -1037,6 +1037,34 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
+        // Stabilize the scene's dominant light before selecting a screen-space
+        // halo source. Tint-only daylight/moonlight ratios can call a bright
+        // blue noon "moonlit" and place a second glow at the moon instead of
+        // over the visible sun.
+        const float lightDt = celestialLightClock.Observe(
+            renderer::PerformanceCounter(), renderer::PerformanceFrequency());
+        renderer::CelestialLightInput lightInput;
+        lightInput.daylight = frameCtx.daylightFactor;
+        lightInput.moonlight = frameCtx.moonlightFactor;
+        lightInput.directionalLuminance =
+            frameCtx.directionalLightColor.x * .2126f +
+            frameCtx.directionalLightColor.y * .7152f +
+            frameCtx.directionalLightColor.z * .0722f;
+        lightInput.deltaSeconds = lightDt;
+        const auto stable = celestialLightStabilizer.Update(lightInput);
+        frameCtx.directLightIntensity = stable.intensity;
+        frameCtx.directLightIsMoon = stable.isMoon;
+        frameCtx.directLightValid = true;
+
+        // The sun disc is independent of the chosen glare source: clouds can
+        // preserve the client's original sun even when the moon is dominant.
+        frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&
+            !frameCtx.cameraPoseStale;
+        if (frameCtx.sunDiscValid) {
+            frameCtx.sunDiscScreenX = sun.screenX;
+            frameCtx.sunDiscScreenY = sun.screenY;
+            frameCtx.sunDiscViewDepth = sun.viewSpacePosition.z;
+        }
         // A stale pose means the disc position/depth were measured against a
         // camera this frame is not using: the atmosphere, the cloud deck and the
         // water treat that signal as "the moon is here", so a stale one would
@@ -1049,16 +1077,14 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.moonDiscScreenY = moon.screenY;
             frameCtx.moonDiscViewDepth = moon.viewSpacePosition.z;
         }
-        // Both discs can be rendered in the same frame.  "Sun wins whenever
-        // visible" consequently kept the radial pass attached to the bright
-        // sun candidate even in a moon-lit sky, producing an oversized halo
-        // while the actual moon had no shafts. CameraCapture already supplies
-        // the authoritative day/night blend: prefer the tracked moon when
-        // moonlight dominates and the sun when daylight dominates. There is
-        // still exactly one directional source, matching the scene lighting.
-        const bool nightDominant = frameCtx.moonlightFactor > frameCtx.daylightFactor;
-        bool useMoon = moon.visible && (nightDominant || !sun.visible);
-        bool useSun = sun.visible && !useMoon;
+        // Both discs can be rendered in the same frame. Choose the visible
+        // screen-space source using the same stabilized body that drives world
+        // lighting and cloud shadows, not the tint-only factors that can label
+        // a cool, bright noon as night.
+        const auto source = renderer::ChooseVisibleCelestialSource(
+            sun.visible, moon.visible, stable.isMoon);
+        const bool useMoon = source == renderer::VisibleCelestialSource::Moon;
+        const bool useSun = source == renderer::VisibleCelestialSource::Sun;
         // The tracked screen position belongs to the camera that was captured
         // when the sprite was drawn. With a stale pose it points somewhere the
         // current view does not, and every consumer of it - the glare, the
@@ -1131,20 +1157,6 @@ bool Composite(IDirect3DDevice9* d) {
         // selects the dominant body and strength. Track each disc direction
         // independently, even when it is not the selected glare/light source.
         {
-            const float lightDt = celestialLightClock.Observe(
-                renderer::PerformanceCounter(), renderer::PerformanceFrequency());
-            renderer::CelestialLightInput lightInput;
-            lightInput.daylight = frameCtx.daylightFactor;
-            lightInput.moonlight = frameCtx.moonlightFactor;
-            lightInput.directionalLuminance =
-                frameCtx.directionalLightColor.x * .2126f +
-                frameCtx.directionalLightColor.y * .7152f +
-                frameCtx.directionalLightColor.z * .0722f;
-            lightInput.deltaSeconds = lightDt;
-            const auto stable = celestialLightStabilizer.Update(lightInput);
-            frameCtx.directLightIntensity = stable.intensity;
-            frameCtx.directLightIsMoon = stable.isMoon;
-            frameCtx.directLightValid = true;
             // Directions enter the stabilizer already in world space, converted
             // above: stabilizing the tracker's camera-relative moon vector here
             // only made the camera tracking smoother, not smaller.

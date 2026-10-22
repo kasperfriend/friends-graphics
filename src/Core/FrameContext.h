@@ -63,6 +63,14 @@ namespace renderer
         float moonDiscScreenY = -1.0f;
         float moonDiscViewDepth = 0.0f;
         bool moonDiscValid = false;
+        // The vanilla sun is a far world-space billboard. Keep its own tracked
+        // position separate from the selected glare source so a moon chosen at
+        // night can never move the sun's protection mask. The cloud composite
+        // preserves only original scene pixels at this confirmed disc.
+        float sunDiscScreenX = -1.0f;
+        float sunDiscScreenY = -1.0f;
+        float sunDiscViewDepth = 0.0f;
+        bool sunDiscValid = false;
         // Confirmed CelestialTracker source used by the atmosphere path.
         // celestialIsMoon is deliberately explicit: colour is never used to
         // guess which body is active.

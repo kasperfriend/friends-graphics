@@ -10,6 +10,8 @@ Rechecked offline on 2026-10-03: executable fingerprint and location getter/sett
 instructions still match. This is the installed client version, not a claim
 that every launcher channel uses the same executable or tables.
 
-Unknown executables do not opt into the bundled offsets. New builds require
-independent location and table verification before adding support. Custom
-client installations can export and supply their own authoritative database.
+The runtime also recognizes the supplied ArdenWoW SHA-256 as a 3.3.5a client
+and uses the shared location RVAs. `areas.txt` remains Ascension-derived; if an
+Arden server has custom AreaTable/Map IDs, export and supply its own authoritative
+database before relying on zone-specific presets. Other unknown executables do
+not opt into the bundled offsets and require independent location verification.

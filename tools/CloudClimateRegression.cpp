@@ -375,6 +375,12 @@ int main() try
         const auto vale=ResolveEnvironment(config,{530,33,0,true}).state;
         Require(vale.water.authored&&Near(vale.water.deep[2],0x4D/255.f)&&vale.water.tint[2]<booty.water.tint[2],
                 "Stranglethorn keeps its own teal under the Booty Bay override");
+        const auto eversong=ResolveEnvironment(config,{530,3430,0,true}).state;
+        const auto quelThalas=ResolveEnvironment(config,{530,2037,0,true}).state;
+        Require(eversong.water.authored&&Near(eversong.water.tint[2],0xB8/128.f)&&
+                Near(eversong.water.deep[2],0x4A/255.f)&&Near(eversong.water.absorption[2],0x78/128.f)&&
+                eversong.water.tint[2]<quelThalas.water.tint[2]&&eversong.water.deep[2]<quelThalas.water.deep[2],
+                "Eversong's water profile is less blue than the shared Quel'thalas tint");
         // A zone that authors nothing keeps the shipped global base, unauthored,
         // so WaterEffect leaves GraphicsEffects.ini in charge there.
         const auto plain=ResolveEnvironment(config,{0,46,0,true}).state;

@@ -197,6 +197,23 @@ int main() try
             "one axis drifting is enough to reject a surface");
         Require(!IsFlatSprite(centre, flat, 2, 0.f, 1.f),
             "a non-positive tolerance can never verify a sprite");
+
+        const float discX=.50f,discY=.25f,radius=.02f,aspect=1.8f;
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   1.f,.9985f,.001f,1.f,true),
+            "the tracked vanilla sun is preserved over clear sky");
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   .9988f,.9985f,.001f,1.f,true),
+            "a depth-writing sun billboard is preserved at its tracked depth");
+        Require(!IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                    .8f,.9985f,.001f,1.f,true),
+            "nearer foreground geometry still occludes the tracked sun");
+        Require(!IsTrackedDiscPixel(.505f,.28f,discX,discY,radius,aspect,
+                                    1.f,.9985f,.001f,1.f,true),
+            "the sun mask does not clear sky outside the disc radius");
+        Require(!IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                    1.f,.9985f,.001f,1.f,false),
+            "an untracked or stale sun position cannot protect an arbitrary pixel");
     }
 
     // ------------------------------------------------------------ light pool ---
@@ -263,6 +280,7 @@ int main() try
             "a stale pose publishes no celestial position to the halo");
 
         const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
+        const auto composite = Read("VolumeIntegration.h");
         Require(Contains(clouds, "float SpriteVerified(float2 centre)") &&
                 Contains(clouds, "SpriteVerified(moonDisc.xy)") &&
                 Contains(clouds, "renderer::discgate::RawTolerance") &&
@@ -270,7 +288,12 @@ int main() try
             "the moon sprite is depth-verified before any pass treats geometry as the moon");
         Require(Contains(clouds, "float4 moonSprite:register(c26);") &&
                 Contains(clouds, "float4 moonSprite:register(c12);"),
-            "both cloud shaders receive the sprite's depth contract");
+            "both cloud shaders receive the moon sprite's depth contract");
+        Require(Contains(clouds, "float SunDiscPixel(float2 pixelUv,float rawDepth)") &&
+                Contains(clouds, "if(SunDiscPixel(uv,linearRaw)>.5) return scene;") &&
+                Contains(clouds, "renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)") &&
+                Contains(composite, "frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&"),
+            "clouds preserve only the original tracked sun pixels, with a fresh pose and sky/depth check");
         // Both copies of the helper must stay in the same units the host
         // uploads (raw viewport depth) and with the same arity as their calls:
         // only one of them compiling is invisible until runtime.
@@ -287,11 +310,14 @@ int main() try
                 Count(clouds, "withinDisc>.5?SpriteVerified(moonDisc.xy):0") == 2,
             "both shaders spread the rim tap with the disc's aspect and verify it only near the disc");
 
-        const auto composite = Read("VolumeIntegration.h");
         Require(Contains(composite, "frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f &&") &&
                 Contains(composite, "frameCtx.cameraPoseStale") &&
                 Contains(composite, "frameCtx.cameraPoseStale\n            ? nullptr : (useSun"),
             "a stale pose publishes neither a moon disc nor a celestial source");
+        Require(Contains(composite, "ChooseVisibleCelestialSource(") &&
+                Contains(composite, "sun.visible, moon.visible, stable.isMoon") &&
+                !Contains(composite, "moonlightFactor > frameCtx.daylightFactor"),
+            "the screen-space halo follows stabilized day/night light instead of tint-only factors");
 
         const auto manager = Read("src/Lighting/LocalLightManager.cpp");
         Require(Contains(manager, "local_light_detail::StablePool(candidates, m_selected, limit, byPriority)") &&

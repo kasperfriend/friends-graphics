@@ -74,4 +74,32 @@ namespace renderer::discgate
         }
         return true;
     }
+
+    // The sun is a world-space sky billboard, not the moon's near camera-facing
+    // sprite. Preserve the original scene pixel at its independently tracked
+    // screen centre when depth says either clear sky or that billboard's own
+    // far depth; a nearer wall/roof remains an occluder. The cloud compositor
+    // mirrors this predicate so it never paints a second disc or clouds over
+    // the vanilla sun.
+    inline bool IsTrackedDiscPixel(float pixelX, float pixelY, float centreX, float centreY,
+                                   float verticalRadius, float horizontalScale,
+                                   float rawDepth, float expectedRawDepth,
+                                   float rawTolerance, float skyDepthThreshold,
+                                   bool tracked) noexcept
+    {
+        if (!tracked || !std::isfinite(pixelX) || !std::isfinite(pixelY) ||
+            !std::isfinite(centreX) || !std::isfinite(centreY) ||
+            !std::isfinite(verticalRadius) || verticalRadius <= 0.f ||
+            !std::isfinite(horizontalScale) || horizontalScale <= 0.f ||
+            !std::isfinite(rawDepth) || !std::isfinite(skyDepthThreshold))
+            return false;
+        const float dx = (pixelX - centreX) * horizontalScale;
+        const float dy = pixelY - centreY;
+        if (dx * dx + dy * dy >= verticalRadius * verticalRadius)
+            return false;
+        if (rawDepth >= skyDepthThreshold)
+            return true;
+        return std::isfinite(expectedRawDepth) && std::isfinite(rawTolerance) && rawTolerance > 0.f &&
+            std::fabs(rawDepth - expectedRawDepth) <= rawTolerance;
+    }
 }

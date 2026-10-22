@@ -482,7 +482,14 @@ int main() try
         Require(night.intensity == 1.0f && night.isMoon, "moonlight period selects the moon for direct light");
         frame.moonlight = 0.9f;
         frame.directionalLuminance = 1.0f;
-        Require(!light.Update(frame).isMoon, "bright cool-tinted noon selects sunlight regardless of past discs");
+        const auto coolNoon = light.Update(frame);
+        Require(!coolNoon.isMoon, "bright cool-tinted noon selects sunlight regardless of past discs");
+        Require(ChooseVisibleCelestialSource(true,true,coolNoon.isMoon)==VisibleCelestialSource::Sun,
+                "a visible moon cannot drag the screen-space halo away from bright noon sun");
+        Require(ChooseVisibleCelestialSource(false,true,coolNoon.isMoon)==VisibleCelestialSource::Moon &&
+                ChooseVisibleCelestialSource(true,false,coolNoon.isMoon)==VisibleCelestialSource::Sun &&
+                ChooseVisibleCelestialSource(false,false,coolNoon.isMoon)==VisibleCelestialSource::None,
+                "glare source selection handles either disc or neither without inventing one");
         frame.moonlight = 0.0f;
         Require(light.Update(frame).intensity == 1.0f, "bright untinted light survives zero day/night factors");
         frame.directionalLuminance = 0.3f;
@@ -497,6 +504,19 @@ int main() try
         light.Reset();
         frame = {};
         Require(!light.Primed() && light.Update(frame).intensity == 0.0f, "reset clears direct-light history");
+    }
+
+    {
+        float projection[4][4]{};
+        projection[0][0]=2.f;projection[1][1]=3.f;projection[2][0]=.1f;
+        projection[2][1]=-.2f;projection[2][3]=1.f;projection[3][0]=.05f;projection[3][1]=.03f;
+        float screenX=-1.f,screenY=-1.f;
+        Require(ProjectViewPosition({4.f,2.f,10.f},projection,screenX,screenY) &&
+                std::fabs(screenX-.9525f)<1e-5f && std::fabs(screenY-.2985f)<1e-5f,
+                "tracked celestial position uses the full D3D projection, including off-centre terms");
+        projection[2][3]=-1.f;
+        Require(!ProjectViewPosition({0.f,0.f,1.f},projection,screenX,screenY),
+                "a celestial point behind the projection cannot publish a screen source");
     }
 
     {
@@ -524,8 +544,9 @@ int main() try
                 {
                     const bool sunVisible = (visible & 1) != 0;
                     const bool moonVisible = (visible & 2) != 0;
-                    const bool glareIsMoon = moonVisible && (night || !sunVisible);
                     const auto stable = light.Update(scene);
+                    const auto glareSource = ChooseVisibleCelestialSource(sunVisible,moonVisible,stable.isMoon);
+                    const bool glareIsMoon = glareSource==VisibleCelestialSource::Moon;
                     const auto sunWorld = direction.Update(sunVisible ? &sun : nullptr, false, scene.deltaSeconds);
                     const auto moonWorld = direction.Update(moonVisible ? &moon : nullptr, true, scene.deltaSeconds);
                     const auto world = stable.isMoon ? moonWorld : sunWorld;

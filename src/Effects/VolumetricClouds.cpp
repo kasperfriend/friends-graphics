@@ -423,6 +423,15 @@ float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z
 // Same contract as the march's c26 (see CelestialDiscGate.h).
 float4 moonSprite:register(c12);
 float4 mediumControl:register(c11); // x=how far the camera is under water (0 air, 1 submerged)
+float4 sunDisc:register(c13); // xy=tracked vanilla sun centre, z=vertical radius, w=valid
+float4 sunDepth:register(c14); // x=horizontal scale, y=expected raw depth, z=raw tolerance
+float SunDiscPixel(float2 pixelUv,float rawDepth) {
+ float2 delta=float2((pixelUv.x-sunDisc.x)*sunDepth.x,pixelUv.y-sunDisc.y);
+ float disc=1-step(sunDisc.z*sunDisc.z,dot(delta,delta));
+ float sky=step((depthRange.z+1)*.5,rawDepth);
+ float depthMatch=1-step(max(sunDepth.z,1e-5),abs(rawDepth-sunDepth.y));
+ return disc*sunDisc.w*max(sky,depthMatch);
+}
 float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth,float sprite) {
  float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
  float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
@@ -446,6 +455,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
  float linearRaw=tex2D(depthMap,uv).r;
+ // The sampled scene is the client's original frame, before this cloud pass.
+ // Keep only the actual tracked vanilla sun pixels from the cloud overlay;
+ // nearby geometry still wins because the depth predicate rejects it.
+ if(SunDiscPixel(uv,linearRaw)>.5) return scene;
 
  // Depth-aware upsample of the quarter-resolution march. The deck is no
  // longer sky-only - it is clipped by the scene, so a cloud in front of a
@@ -1213,11 +1226,21 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,inv[0],3);
   d->SetPixelShaderConstantF(6,c6c,1);d->SetPixelShaderConstantF(7,c7c,1);
   const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
+  const float sunViewDepth=f.sunDiscValid?f.sunDiscViewDepth:1.f;
+  const float sunDepthScale=std::max(f.depthMaxZ-f.viewport.MinZ,0.f);
+  const float expectedSunDepth=f.viewport.MinZ+
+      renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)*sunDepthScale;
+  const float sunDepthTolerance=renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
+      sunViewDepth,std::max(.75f,sunViewDepth*.04f))*sunDepthScale;
+  const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,.022f,f.sunDiscValid?1.f:0.f};
+  const float sunDepth[4]={f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f),
+                           expectedSunDepth,sunDepthTolerance,0.f};
   d->SetPixelShaderConstantF(8,c8c,1);
   d->SetPixelShaderConstantF(9,moonDisc,1);d->SetPixelShaderConstantF(10,moonControl,1);
   d->SetPixelShaderConstantF(12,moonSprite,1);
   const float c11[4]={std::clamp(f.underwaterRamp,0.f,1.f),0,0,0};
   d->SetPixelShaderConstantF(11,c11,1);
+  d->SetPixelShaderConstantF(13,sunDisc,1);d->SetPixelShaderConstantF(14,sunDepth,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   for(DWORD s=0;s<5;++s)d->SetTexture(s,nullptr);
  }

@@ -36,16 +36,18 @@ namespace renderer
                 worldDir = { worldOut[0], worldOut[1], worldOut[2] };
             }
 
-            float p00 = proj.m[0][0], p11 = proj.m[1][1];
-            if (!(p00 > 0.0f) || !(p11 > 0.0f))
+            if (!(proj.m[0][0] > 0.0f) || !(proj.m[1][1] > 0.0f))
+                return;
+            float screenX = -1.f, screenY = -1.f;
+            if (!ProjectViewPosition({cx, cy, cz}, proj.m, screenX, screenY))
                 return;
 
             body.visible = true;
             body.viewSpacePosition = { cx, cy, cz };
             body.viewSpaceDirection = viewDir;
             body.worldSpaceDirection = worldDir;
-            body.screenX = 0.5f + 0.5f * (cx / cz) * p00;
-            body.screenY = 0.5f - 0.5f * (cy / cz) * p11;
+            body.screenX = screenX;
+            body.screenY = screenY;
             body.lastSeenFrame = frameIndex;
         }
     }

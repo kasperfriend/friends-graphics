@@ -10,6 +10,9 @@ import capstone
 KNOWN_SHA256 = {
     'f4b9f6fce448194638c5b1c751483090a48c597c6272237f31b3d151b50d3114',
     'e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6',
+    # User-supplied ArdenWoW 3.3.5a fingerprint; inspect_client verifies the
+    # same 12340 location getter signatures before reporting candidate RVAs.
+    'ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d',
 }
 
 

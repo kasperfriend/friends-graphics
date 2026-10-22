@@ -25,6 +25,10 @@ namespace renderer
         moonDiscScreenY = -1.0f;
         moonDiscViewDepth = 0.0f;
         moonDiscValid = false;
+        sunDiscScreenX = -1.0f;
+        sunDiscScreenY = -1.0f;
+        sunDiscViewDepth = 0.0f;
+        sunDiscValid = false;
         celestialIntensity = 0.0f;
         celestialIsMoon = false;
         directLightIntensity = 0.0f;

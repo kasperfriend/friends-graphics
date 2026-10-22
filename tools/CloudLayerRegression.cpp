@@ -78,6 +78,31 @@ int main() try
                 Near((camera+view*entry).z,c.bottom) && Near((camera+view*exit).z,c.top),
                 "changing view direction does not move the cloud base or top");
     }
+    {
+        constexpr float pi=3.14159265358979323846f;
+        const float heights[]={0.f,899.f,900.f,1600.f,2300.f,2301.f,8000.f};
+        unsigned checked=0;
+        for (float height : heights) for (int yawDeg=0;yawDeg<360;yawDeg+=15)
+            for (int pitchDeg=-88;pitchDeg<=88;pitchDeg+=4) {
+                const float yaw=float(yawDeg)*pi/180.f,pitch=float(pitchDeg)*pi/180.f;
+                const V3 ray=Normalize({std::cos(yaw)*std::cos(pitch),
+                                        std::sin(yaw)*std::cos(pitch),std::sin(pitch)});
+                const V3 camera{7000,-4000,height};
+                bool expected=false;
+                if (std::fabs(ray.z)<1e-6f) {
+                    expected=height>=c.bottom&&height<=c.top;
+                } else {
+                    const float a=(c.bottom-height)/ray.z,b=(c.top-height)/ray.z;
+                    const float first=std::max(0.f,std::min(a,b)),last=std::max(a,b);
+                    expected=last>first&&first<c.maxDistance;
+                }
+                const bool hit=ground.LayerRange(camera,ray,entry,exit);
+                if (hit!=expected) throw std::runtime_error("cloud intersection changed across camera height/view sweep");
+                if (hit && exit<=entry) throw std::runtime_error("cloud layer sweep produced an empty interval");
+                ++checked;
+            }
+        Require(checked>4000,"absolute cloud-layer intersections survive a dense yaw/pitch/height sweep");
+    }
 
     c.coverage=1.f;
     float transmittance, depth;
