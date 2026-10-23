@@ -30,6 +30,17 @@ float4 groundMist:register(c13);
 // God-ray look (src/Effects/GodRayCore.h): x=sunward glow spread (per screen-height^2),
 // y=glow floor in open sky, z=gain on the whole-frame mask, w=unused
 float4 rayLook:register(c15);
+// The depth-writing vanilla sun disc is itself the ray source, not an occluder.
+// It is opened only at the tracked centre and at sky/far depth or its own depth.
+float4 trackedSunDisc:register(c16); // xy=tracked centre, z=vertical UV radius, w=valid
+float4 trackedSunDepth:register(c17); // x=horizontal scale, y=expected raw depth, z=tolerance
+float TrackedSunDiscOpen(float2 uv,float raw) {
+    float2 delta=float2((uv.x-trackedSunDisc.x)*trackedSunDepth.x,uv.y-trackedSunDisc.y);
+    float disc=1-step(trackedSunDisc.z*trackedSunDisc.z,dot(delta,delta));
+    float sky=step((sun.w+1)*.5,raw);
+    float depthMatch=1-step(max(trackedSunDepth.z,1e-5),abs(raw-trackedSunDepth.y));
+    return disc*trackedSunDisc.w*max(sky,depthMatch);
+}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     // INTZ contains viewport-mapped depth. Normalize for the projection
@@ -45,7 +56,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // enters the emission term below. Geometry maps to <=MaxZ while the
         // midpoint between those values rejects every occluder and keeps the
         // clear sky open, including when MaxZ itself is nearly one.
-        float openness=step((sun.w+1)*.5,raw);
+        float skyOpen=step((sun.w+1)*.5,raw);
+        // The original sun billboard writes a far depth slightly nearer than
+        // the clear value, so raw sky-only openness cut a dark hole exactly at
+        // the source while the surrounding halo/rays were added. Admit only
+        // its independently tracked circle at the sun's own depth; a nearer
+        // roof, wall, or character still blocks the ray source.
+        float openness=max(skyOpen,TrackedSunDiscOpen(uv,raw));
         // Aspect-ratio-correct distance to the real, CelestialTracker-
         // confirmed disc position (sun.xy). Raw UV-space distance is
         // squashed on non-square screens - a 0.1 horizontal delta covers

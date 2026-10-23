@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Reduce broad sun glare and diagnose cloud height
 ---
-Sun glare now falls off closer to the tracked disc; faint ray samples are no longer boosted into a broad halo, while occlusion-shaped beams remain. Cloud diagnostics now report whether the camera is below, within, or above the fixed layer.
+The radial glare mask now treats the depth-matched tracked sun disc as its light source instead of an occluder, while nearer geometry still blocks rays. Compact halo falloff and cloud transmission remain. Cloud diagnostics report the camera's position relative to the fixed layer.

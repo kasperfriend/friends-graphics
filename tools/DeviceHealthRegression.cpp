@@ -491,6 +491,8 @@ int main() try
             const auto rendererHooks = Read("ModernWoWRenderer.cpp");
             const auto frameReset = Read("src/Core/FrameContext.cpp");
             const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
+            const auto volumeSource = Read("VolumeEffects.h");
+            const auto volumeIntegration = Read("VolumeIntegration.h");
             Require(Contains(capture, "m_skyPose.Observe(basis)") &&
                     Contains(capture, "m_skyPose.Observe(rejectedBasis)") &&
                     Contains(capture, "NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
@@ -510,6 +512,13 @@ int main() try
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
+            Require(Contains(volumeSource, "float4 trackedSunDisc:register(c16)") &&
+                    Contains(volumeSource, "float4 trackedSunDepth:register(c17)") &&
+                    Contains(volumeSource, "TrackedSunDiscOpen(uv,raw)") &&
+                    Contains(volumeSource, "float openness=max(skyOpen,TrackedSunDiscOpen(uv,raw));") &&
+                    Contains(volumeIntegration, "SetPixelShaderConstantF(16,trackedSunDisc,1)") &&
+                    Contains(volumeIntegration, "SetPixelShaderConstantF(17,trackedSunDepth,1)"),
+                "the depth-matched vanilla sun disc feeds radial rays while foreground depth still blocks them");
             Require(Contains(capture, "fabsf(lengthSquared - 1.0f) > 0.01f"),
                 "a scaled or skewed sky transform is not a rigid camera basis");
             Require(Contains(capture, "const float* anchor = m_cameraGate.Position();") &&

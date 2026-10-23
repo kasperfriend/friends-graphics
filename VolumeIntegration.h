@@ -1368,6 +1368,23 @@ bool Composite(IDirect3DDevice9* d) {
         const int glowPercent = renderer::FrameContext::Current().celestialIsMoon ? moonGlowPercent : sunGlowPercent;
         float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(glowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
+        // The source mask normally treats every depth-writing object as an
+        // occluder. Pass the actual tracked sun's depth so its own billboard
+        // is open to rays without opening foreground geometry at that pixel.
+        const bool trackedSunRaySourceValid = frameCtx.sunDiscValid && !frameCtx.celestialIsMoon;
+        const float trackedSunViewDepth = trackedSunRaySourceValid ? frameCtx.sunDiscViewDepth : 1.f;
+        const float trackedSunRawScale = std::max(frameCtx.depthMaxZ-frameCtx.viewport.MinZ,0.f);
+        const float expectedTrackedSunRaw = frameCtx.viewport.MinZ + renderer::discgate::RawDepth(
+            frameCtx.projUnpack[0],frameCtx.projUnpack[1],trackedSunViewDepth)*trackedSunRawScale;
+        const float trackedSunRawTolerance = renderer::discgate::RawTolerance(
+            frameCtx.projUnpack[0],frameCtx.projUnpack[1],trackedSunViewDepth,
+            std::max(.75f,trackedSunViewDepth*.04f))*trackedSunRawScale;
+        const float trackedSunDisc[4]={frameCtx.sunDiscScreenX,frameCtx.sunDiscScreenY,.022f,
+                                       trackedSunRaySourceValid?1.f:0.f};
+        const float trackedSunDepth[4]={frameCtx.projUnpack[3]/std::max(frameCtx.projUnpack[2],1e-4f),
+                                        expectedTrackedSunRaw,trackedSunRawTolerance,0.f};
+        check(d->SetPixelShaderConstantF(16,trackedSunDisc,1));
+        check(d->SetPixelShaderConstantF(17,trackedSunDepth,1));
         check(d->SetTexture(3, frameCtx.cloudTexture));
         check(d->SetSamplerState(3, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(3, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
