@@ -531,6 +531,7 @@ int main() try
                     Contains(volumeSource, "float4 markerDepth:register(c3)") &&
                     Contains(volumeSource, "depthOpen=max(sky,depthMatch);") &&
                     Contains(volumeIntegration, "markerFrame.sunDiscScreenX") &&
+                    Contains(volumeIntegration, "const bool moonDominant = renderer::FrameContext::Current().celestialIsMoon;") &&
                     Contains(volumeIntegration, "renderer::discgate::RawDepth(") &&
                     Contains(volumeIntegration, "markerFrame.sunDiscValid, 1.f, .15f, 1.f, true"),
                 "sky-only camera fallback reuses only a matched projection, rejects stale eyes, and logs/distinguishes tracked sun and glare positions");

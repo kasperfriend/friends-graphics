@@ -1636,7 +1636,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (celestialMemoryProbeDebug) {
             drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .15f, .15f);
         } else {
-            bool moonDominant = celestialMoonlight > celestialDaylight;
+            const bool moonDominant = renderer::FrameContext::Current().celestialIsMoon;
             if (moonDominant) drawMarker(constants[2][0], constants[2][1], legacyValid, .55f, .70f, 1.f);
             else drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .85f, .25f);
         }
