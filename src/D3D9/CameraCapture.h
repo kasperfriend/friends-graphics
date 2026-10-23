@@ -45,6 +45,7 @@ namespace renderer
             m_fallbackSawSceneDraw = false;
             m_rejectedCaptureValid = false;
             m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
+            m_skyProjectionAvailable = false;
         }
 
         // Observes D3DTS_VIEW / D3DTS_PROJECTION during the scene pass so that
@@ -116,6 +117,8 @@ namespace renderer
         bool m_rejectedCaptureValid = false;
         FrameContext::SkyObservationResult m_skyObservationResult =
             FrameContext::SkyObservationResult::NotAttempted;
+        float m_skyProjection[6]{}; // P00, P11, P22, P23, P32, P33 from the last finite observation
+        bool m_skyProjectionAvailable = false;
         float m_rejectedCaptureEye[3]{};
         float m_rejectedCaptureBasis[3][4]{};
         D3DMATRIX m_fallbackProj{};

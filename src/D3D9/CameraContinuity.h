@@ -5,6 +5,19 @@
 
 namespace renderer {
 
+// Standard D3D row-vector perspective projection, including the valid
+// infinite-far-plane form where P22 is exactly 1 (or rounds to 1 in float).
+// Orthographic, reversed-depth, and otherwise unrelated projection matrices
+// remain ineligible as camera evidence.
+inline bool IsStandardD3DPerspectiveProjection(float p00, float p11, float p22,
+                                               float p23, float p32, float p33) noexcept
+{
+    return std::isfinite(p00) && std::isfinite(p11) && std::isfinite(p22) &&
+           std::isfinite(p23) && std::isfinite(p32) && std::isfinite(p33) &&
+           p00 > 0.0f && p11 > 0.0f && p22 >= 1.0f - 1.0e-6f && p32 < 0.0f &&
+           std::fabs(p23 - 1.0f) <= 0.001f && std::fabs(p33) <= 0.001f;
+}
+
 // Decides whether a candidate view matrix is the frame's real camera.
 //
 // CameraCapture reads the projection, the light direction and the daylight

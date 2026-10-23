@@ -213,6 +213,10 @@ namespace renderer
         uint8_t skyPoseCandidateCount = 0;
         bool skyPoseDiscEvidence = false;
         SkyObservationResult skyObservationResult = SkyObservationResult::NotAttempted;
+        // Last finite D3D projection seen by the sky observer, ordered as
+        // P00, P11, P22, P23, P32, P33 for rejection diagnostics.
+        float skyProjection[6]{};
+        bool skyProjectionAvailable = false;
 
         const char* SkyObservationName() const noexcept
         {

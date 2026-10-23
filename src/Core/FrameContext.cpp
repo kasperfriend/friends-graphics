@@ -72,6 +72,9 @@ namespace renderer
         skyPoseCandidateCount = 0;
         skyPoseDiscEvidence = false;
         skyObservationResult = SkyObservationResult::NotAttempted;
+        skyProjection[0] = skyProjection[1] = skyProjection[2] =
+            skyProjection[3] = skyProjection[4] = skyProjection[5] = 0.0f;
+        skyProjectionAvailable = false;
 
         depthAvailable = false;
         cameraValid = false;

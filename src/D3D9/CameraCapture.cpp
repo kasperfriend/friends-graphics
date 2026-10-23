@@ -55,9 +55,10 @@ namespace renderer
         if (!fullFrame)
             return false;
 
-        // Verify standard WoW perspective projection and rigid world-view
-        if (v[4][0] <= 0.0f || v[5][1] <= 0.0f || v[6][2] <= 1.0f || v[7][2] >= 0.0f ||
-            fabsf(v[6][3] - 1.0f) > 0.001f || fabsf(v[7][3]) > 0.001f)
+        // Verify standard WoW perspective projection and rigid world-view.
+        // P22 == 1 is the valid infinite-far-plane form, not an invalid camera.
+        if (!IsStandardD3DPerspectiveProjection(
+                v[4][0], v[5][1], v[6][2], v[6][3], v[7][2], v[7][3]))
             return false;
 
         // Verify orthogonality of rotation sub-matrix (v[0..2])
@@ -417,8 +418,19 @@ namespace renderer
                     return;
                 }
 
-        if (proj.m[0][0] <= 0.0f || proj.m[1][1] <= 0.0f || proj.m[2][2] <= 1.0f || proj.m[3][2] >= 0.0f ||
-            fabsf(proj.m[2][3] - 1.0f) > 0.001f || fabsf(proj.m[3][3]) > 0.001f)
+        // Keep the coefficients on rejected observations so the player log can
+        // distinguish an infinite-far perspective matrix (P22 == 1) from an
+        // unrelated orthographic/UI projection if this gate still refuses one.
+        m_skyProjection[0] = proj.m[0][0];
+        m_skyProjection[1] = proj.m[1][1];
+        m_skyProjection[2] = proj.m[2][2];
+        m_skyProjection[3] = proj.m[2][3];
+        m_skyProjection[4] = proj.m[3][2];
+        m_skyProjection[5] = proj.m[3][3];
+        m_skyProjectionAvailable = true;
+        if (!IsStandardD3DPerspectiveProjection(
+                proj.m[0][0], proj.m[1][1], proj.m[2][2],
+                proj.m[2][3], proj.m[3][2], proj.m[3][3]))
         {
             RecordSkyObservation(FrameContext::SkyObservationResult::InvalidProjection);
             return;
@@ -558,6 +570,9 @@ namespace renderer
             std::min(m_skyPose.CandidateCount(), 255u));
         frameContext.skyPoseDiscEvidence = disc.available;
         frameContext.skyObservationResult = m_skyObservationResult;
+        frameContext.skyProjectionAvailable = m_skyProjectionAvailable;
+        if (m_skyProjectionAvailable)
+            std::copy(m_skyProjection, m_skyProjection + 6, frameContext.skyProjection);
         const bool havePose = m_skyPose.HasCandidate() &&
             m_skyPose.Resolve(disc, basis, corroborated);
 

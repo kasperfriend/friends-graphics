@@ -42,6 +42,15 @@ int main() try
     Require(kD3DErrDeviceLost == static_cast<long>(0x88760868u), "device-lost code matches SDK");
     Require(kD3DErrDeviceNotReset == static_cast<long>(0x88760869u), "device-not-reset code matches SDK");
 
+    Require(IsStandardD3DPerspectiveProjection(1.4f, 1.7f, 1.0001f, 1.0f, -0.1f, 0.0f),
+            "a conventional finite-far D3D perspective is recognized");
+    Require(IsStandardD3DPerspectiveProjection(1.4f, 1.7f, 1.0f, 1.0f, -0.1f, 0.0f),
+            "an infinite-far D3D perspective with P22 equal to one remains valid");
+    Require(!IsStandardD3DPerspectiveProjection(1.4f, 1.7f, 0.9f, 1.0f, -0.1f, 0.0f),
+            "a reversed-depth projection is not accepted as the camera");
+    Require(!IsStandardD3DPerspectiveProjection(1.4f, 1.7f, 1.0f, 0.0f, -0.1f, 0.0f),
+            "an orthographic projection is not accepted as the camera");
+
     Require(ClassifyDeviceResult(0) == DeviceAvailability::Operational, "S_OK keeps effects running");
     Require(ClassifyDeviceResult(kD3DErrDeviceLost) == DeviceAvailability::Lost, "device lost pauses effects");
     Require(ClassifyDeviceResult(kD3DErrDeviceNotReset) == DeviceAvailability::Lost, "device awaiting reset pauses effects");
@@ -480,6 +489,8 @@ int main() try
             const auto capture = Read("src/D3D9/CameraCapture.cpp");
             const auto composite = Read("VolumeIntegration.h");
             const auto rendererHooks = Read("ModernWoWRenderer.cpp");
+            const auto frameReset = Read("src/Core/FrameContext.cpp");
+            const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
             Require(Contains(capture, "m_skyPose.Observe(basis)") &&
                     Contains(capture, "m_skyPose.Observe(rejectedBasis)") &&
                     Contains(capture, "NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
@@ -490,11 +501,15 @@ int main() try
                 "the sky fallback corroborates bounded hard-turn captures and collects transforms instead of latching the first");
             Require(Contains(capture, "RecordSkyObservation(FrameContext::SkyObservationResult::EyeIncompatible)") &&
                     Contains(capture, "frameContext.skyObservationResult = m_skyObservationResult;") &&
+                    Contains(capture, "IsStandardD3DPerspectiveProjection(") &&
+                    Contains(capture, "m_skyProjectionAvailable = true;") &&
+                    Contains(frameReset, "skyProjectionAvailable = false;") &&
+                    Contains(clouds, "skyProj=") &&
                     Contains(rendererHooks, "HookedSetTransform") &&
                     Contains(rendererHooks, "state == D3DTS_VIEW || state == D3DTS_PROJECTION") &&
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
-                "camera transform updates feed the sky observer and logs expose the furthest fallback rejection stage");
+                "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
             Require(Contains(capture, "fabsf(lengthSquared - 1.0f) > 0.01f"),
                 "a scaled or skewed sky transform is not a rigid camera basis");
             Require(Contains(capture, "const float* anchor = m_cameraGate.Position();") &&
