@@ -30,6 +30,7 @@
 //    use of them is checked in the source.
 #include "../src/Effects/GroundReference.h"
 #include "../src/Effects/CelestialDiscGate.h"
+#include "../src/D3D9/SkyProjectionGate.h"
 #include "../src/Lighting/LocalLightSelection.h"
 
 #include <algorithm>
@@ -100,6 +101,17 @@ namespace
 
 int main() try
 {
+    // --------------------------------------------------------- sky projection ---
+    {
+        using namespace renderer::skyprojection;
+        Require(MatchesPerspectiveScale(2.16816f, 5.17949f, 2.16816f, 5.17949f),
+            "an unrelated depth mapping may borrow the cached camera projection when both FOV scales match");
+        Require(!MatchesPerspectiveScale(2.35f, 5.17949f, 2.16816f, 5.17949f),
+            "a changed horizontal FOV cannot borrow the cached camera projection");
+        Require(!MatchesPerspectiveScale(std::nanf(""), 5.17949f, 2.16816f, 5.17949f),
+            "non-finite projection scales never corroborate a sky transform");
+    }
+
     // ---------------------------------------------------------------- floor ---
     {
         using namespace renderer::groundref;

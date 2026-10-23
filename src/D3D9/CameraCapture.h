@@ -46,6 +46,10 @@ namespace renderer
             m_rejectedCaptureValid = false;
             m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
             m_skyProjectionAvailable = false;
+            m_skyProjectionFallbackUsed = false;
+            m_skyEyeCandidateValid = false;
+            m_skyEyeCandidateObserved = false;
+            m_skyEyeCandidateDistanceYards = 1e30f;
         }
 
         // Observes D3DTS_VIEW / D3DTS_PROJECTION during the scene pass so that
@@ -74,6 +78,9 @@ namespace renderer
             m_smoothedSunY = -1.0f;
             m_cameraGate.Reset();
             m_skyPose.Reset();
+            m_fallbackProjectionValid = false;
+            m_skyProjectionFallbackUsed = false;
+            m_skyEyeCandidateValid = false;
             // No draw has carried an eye on the new device yet, so nothing may
             // claim a fresh one until one does.
             m_lastEyeSeconds = -1.0;
@@ -119,6 +126,16 @@ namespace renderer
             FrameContext::SkyObservationResult::NotAttempted;
         float m_skyProjection[6]{}; // P00, P11, P22, P23, P32, P33 from the last finite observation
         bool m_skyProjectionAvailable = false;
+        bool m_skyProjectionFallbackUsed = false;
+        bool m_fallbackProjectionValid = false;
+        // A current non-zero VIEW translation may carry the actual camera eye.
+        // Keep it only when it is within five yards of the accepted anchor, and
+        // refresh the anchor only if this exact basis wins sky-pose selection.
+        bool m_skyEyeCandidateValid = false;
+        bool m_skyEyeCandidateObserved = false;
+        float m_skyEyeCandidateDistanceYards = 1e30f;
+        float m_skyEyeTranslation[4]{};
+        float m_skyEyeBasis[3][4]{};
         float m_rejectedCaptureEye[3]{};
         float m_rejectedCaptureBasis[3][4]{};
         D3DMATRIX m_fallbackProj{};

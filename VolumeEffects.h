@@ -364,14 +364,18 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 )HLSL";
 
 // Debug-only crosshair drawn at the exact screen position rays/glare use for
-// the celestial source. If this ring does not sit on the real sun/moon disc
-// at any yaw/pitch, the source projection is still wrong - this is the check.
+// the celestial source. The vanilla-sun marker also colors its centre dot by
+// the same sky-or-depth predicate used by the restoration masks: green means
+// the sampled source depth is accepted, red means the tracked depth disagrees.
 inline const char* celestialMarkerPixelSource=R"HLSL(
-// xy=target uv, z=valid, w=unused
+sampler2D sceneDepth:register(s0);
+// xy=target uv, z=valid, w=enable the depth-match centre probe
 float4 markerTarget:register(c0);
 float4 markerColor:register(c1);
 // xy=1/render size (pixels -> uv)
 float4 markerSize:register(c2);
+// x=expected raw sun depth, y=tolerance, z=clear-sky threshold, w=valid
+float4 markerDepth:register(c3);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float valid=markerTarget.z;
     float2 d=(uv-markerTarget.xy)/markerSize.xy;
@@ -380,8 +384,19 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float ringMask=1-smoothstep(1.2,2.6,ring);
     float onXAxis=(1-smoothstep(1.2,2.2,abs(d.y)))*step(6.0,dist)*step(dist,26.0);
     float onYAxis=(1-smoothstep(1.2,2.2,abs(d.x)))*step(6.0,dist)*step(dist,26.0);
-    float mask=saturate(ringMask+onXAxis+onYAxis)*valid;
-    return float4(markerColor.rgb*mask,mask);
+    float depthOpen=0;
+    if(markerTarget.w>.5 && markerDepth.w>.5) {
+        // Uniform debug-only branch; ordinary source markers do not fetch depth.
+        float raw=tex2D(sceneDepth,uv).r;
+        float sky=step(markerDepth.z,raw);
+        float depthMatch=1-step(max(markerDepth.y,1e-5),abs(raw-markerDepth.x));
+        depthOpen=max(sky,depthMatch);
+    }
+    float depthDot=(1-smoothstep(2.5,3.5,dist))*markerTarget.w*markerDepth.w;
+    float3 depthColor=lerp(float3(1,.08,.04),float3(.08,1,.2),depthOpen);
+    float3 color=lerp(markerColor.rgb,depthColor,depthDot);
+    float mask=saturate(ringMask+onXAxis+onYAxis+depthDot)*valid;
+    return float4(color*mask,mask);
 }
 )HLSL";
 

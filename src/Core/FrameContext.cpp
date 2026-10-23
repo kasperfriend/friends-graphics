@@ -29,6 +29,8 @@ namespace renderer
         sunDiscScreenY = -1.0f;
         sunDiscViewDepth = 0.0f;
         sunDiscValid = false;
+        sunDiscExpectedRawDepth = -1.0f;
+        sunDiscRawDepthTolerance = 0.0f;
         celestialIntensity = 0.0f;
         celestialIsMoon = false;
         directLightIntensity = 0.0f;
@@ -68,13 +70,17 @@ namespace renderer
         // No draw has carried an eye into THIS frame yet: a consumer that asks
         // how old the eye is must not read "just now".
         cameraEyeAgeMs = 1.0e6f;
+        cameraEyeObservedThisFrame = false;
         cameraPoseSource = PoseNone;
         skyPoseCandidateCount = 0;
         skyPoseDiscEvidence = false;
+        skyEyeCandidateObserved = false;
+        skyEyeCandidateDistanceYards = -1.f;
         skyObservationResult = SkyObservationResult::NotAttempted;
         skyProjection[0] = skyProjection[1] = skyProjection[2] =
             skyProjection[3] = skyProjection[4] = skyProjection[5] = 0.0f;
         skyProjectionAvailable = false;
+        skyProjectionFallbackUsed = false;
 
         depthAvailable = false;
         cameraValid = false;

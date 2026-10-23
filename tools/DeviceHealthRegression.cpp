@@ -512,6 +512,28 @@ int main() try
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
+            Require(Contains(capture, "skyprojection::MatchesPerspectiveScale(") &&
+                    Contains(capture, "m_fallbackProjectionValid") &&
+                    Contains(capture, "m_skyProjectionFallbackUsed = true;") &&
+                    Contains(capture, "m_skyEyeCandidateObserved = true;") &&
+                    Contains(capture, "m_skyEyeCandidateValid = true;") &&
+                    Contains(capture, "frameContext.skyEyeCandidateObserved = m_skyEyeCandidateObserved;") &&
+                    Contains(capture, "frameContext.cameraEyeObservedThisFrame = true;") &&
+                    Contains(capture, "frameContext.cameraPoseStale = !corroborated || !eyeFresh;") &&
+                    Contains(frameReset, "skyProjectionFallbackUsed = false;") &&
+                    Contains(frameReset, "cameraEyeObservedThisFrame = false;") &&
+                    Contains(frameReset, "skyEyeCandidateObserved = false;") &&
+                    Contains(frameReset, "sunDiscExpectedRawDepth = -1.0f;") &&
+                    Contains(clouds, "eyeCurrent=") && Contains(clouds, "skyProjCached=") &&
+                    Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
+                    Contains(clouds, "glareSource=") && Contains(clouds, "sunDisc=") &&
+                    Contains(clouds, "moonDisc=") &&
+                    Contains(volumeSource, "float4 markerDepth:register(c3)") &&
+                    Contains(volumeSource, "depthOpen=max(sky,depthMatch);") &&
+                    Contains(volumeIntegration, "markerFrame.sunDiscScreenX") &&
+                    Contains(volumeIntegration, "renderer::discgate::RawDepth(") &&
+                    Contains(volumeIntegration, "markerFrame.sunDiscValid, 1.f, .15f, 1.f, true"),
+                "sky-only camera fallback reuses only a matched projection, rejects stale eyes, and logs/distinguishes tracked sun and glare positions");
             Require(Contains(volumeSource, "float4 trackedSunDisc:register(c16)") &&
                     Contains(volumeSource, "float4 trackedSunDepth:register(c17)") &&
                     Contains(volumeSource, "TrackedSunDiscOpen(uv,raw)") &&

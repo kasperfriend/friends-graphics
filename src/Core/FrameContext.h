@@ -71,6 +71,10 @@ namespace renderer
         float sunDiscScreenY = -1.0f;
         float sunDiscViewDepth = 0.0f;
         bool sunDiscValid = false;
+        // Projection-derived raw depth used by the cloud/atmosphere/ray masks.
+        // The debug marker samples actual depth at the tracked centre against it.
+        float sunDiscExpectedRawDepth = -1.0f;
+        float sunDiscRawDepthTolerance = 0.0f;
         // Confirmed CelestialTracker source used by the atmosphere path.
         // celestialIsMoon is deliberately explicit: colour is never used to
         // guess which body is active.
@@ -187,6 +191,9 @@ namespace renderer
         // second ago: at running speed that is a dozen yards.
         static constexpr float kCameraEyeHoldMs = 1000.f;
         float cameraEyeAgeMs = 0.f;
+        // True only when this frame accepted a draw/transform that carried the
+        // camera eye, rather than inheriting the previous eye's age.
+        bool cameraEyeObservedThisFrame = false;
         // How the pose was obtained, for diagnostics and the regression
         // tools. 0 none, 1 captured, 2 sky fallback, 3 held previous frame.
         uint8_t cameraPoseSource = 0;
@@ -212,11 +219,18 @@ namespace renderer
         };
         uint8_t skyPoseCandidateCount = 0;
         bool skyPoseDiscEvidence = false;
+        bool skyEyeCandidateObserved = false;
+        // Distance in yards from a current non-zero D3D VIEW eye candidate to
+        // the last accepted eye; -1 means this frame offered none.
+        float skyEyeCandidateDistanceYards = -1.f;
         SkyObservationResult skyObservationResult = SkyObservationResult::NotAttempted;
         // Last finite D3D projection seen by the sky observer, ordered as
         // P00, P11, P22, P23, P32, P33 for rejection diagnostics.
         float skyProjection[6]{};
         bool skyProjectionAvailable = false;
+        // True when the current D3D view was corroborated using this frame's
+        // lateral projection scale and the cached, validated camera depth terms.
+        bool skyProjectionFallbackUsed = false;
 
         const char* SkyObservationName() const noexcept
         {

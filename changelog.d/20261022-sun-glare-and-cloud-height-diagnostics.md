@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Reduce broad sun glare and diagnose cloud height
 ---
-The radial glare mask now treats the depth-matched tracked sun disc as its light source instead of an occluder, while nearer geometry still blocks rays. Compact halo falloff and cloud transmission remain. Cloud diagnostics report the camera's position relative to the fixed layer.
+Radial rays open the tracked sun at matched depth. Sky-only cloud tracking reuses perspective only when viewport/FOV match and rejects expired eyes. Logs expose eye/projection evidence; the debug marker compares glare with the vanilla sun and colors the sun-depth match.

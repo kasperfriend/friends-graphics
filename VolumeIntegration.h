@@ -1063,10 +1063,20 @@ bool Composite(IDirect3DDevice9* d) {
         // preserve the client's original sun even when the moon is dominant.
         frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&
             !frameCtx.cameraPoseStale;
+        frameCtx.sunDiscExpectedRawDepth = -1.f;
+        frameCtx.sunDiscRawDepthTolerance = 0.f;
         if (frameCtx.sunDiscValid) {
             frameCtx.sunDiscScreenX = sun.screenX;
             frameCtx.sunDiscScreenY = sun.screenY;
             frameCtx.sunDiscViewDepth = sun.viewSpacePosition.z;
+            const float rawScale = std::max(
+                frameCtx.depthMaxZ - frameCtx.viewport.MinZ, 0.f);
+            frameCtx.sunDiscExpectedRawDepth = frameCtx.viewport.MinZ +
+                renderer::discgate::RawDepth(frameCtx.projUnpack[0], frameCtx.projUnpack[1],
+                                             frameCtx.sunDiscViewDepth) * rawScale;
+            frameCtx.sunDiscRawDepthTolerance = renderer::discgate::RawTolerance(
+                frameCtx.projUnpack[0], frameCtx.projUnpack[1], frameCtx.sunDiscViewDepth,
+                std::max(.75f, frameCtx.sunDiscViewDepth * .04f)) * rawScale;
         }
         // A stale pose means the disc position/depth were measured against a
         // camera this frame is not using: the atmosphere, the cloud deck and the
@@ -1597,15 +1607,23 @@ bool Composite(IDirect3DDevice9* d) {
     if ((celestialMarkerDebug || celestialMemoryProbeDebug) && legacyShaders.celestialMarker) {
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.celestialMarker.Get()));
-        check(d->SetTexture(0, nullptr));
+        check(d->SetTexture(0, depth.Get()));
+        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+        check(d->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+        check(d->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE));
+        check(d->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+        check(d->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
         float markerSize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
         check(d->SetPixelShaderConstantF(2, markerSize, 1));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
 
-        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b) {
-            float markerTarget[4] = { x, y, valid ? 1.f : 0.f, 0 };
+        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b,
+                              bool depthProbe = false) {
+            float markerTarget[4] = { x, y, valid ? 1.f : 0.f,
+                                      depthProbe && valid ? 1.f : 0.f };
             float markerColor[4] = { r, g, b, 1.f };
             check(d->SetPixelShaderConstantF(0, markerTarget, 1));
             check(d->SetPixelShaderConstantF(1, markerColor, 1));
@@ -1613,7 +1631,7 @@ bool Composite(IDirect3DDevice9* d) {
         };
 
         // RED (or the original yellow/blue when the memory probe overlay is
-        // off): the current v[24]-projection marker used by rays/glare.
+        // off): the selected screen-space source used by rays and glare.
         bool legacyValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
         if (celestialMemoryProbeDebug) {
             drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .15f, .15f);
@@ -1621,6 +1639,21 @@ bool Composite(IDirect3DDevice9* d) {
             bool moonDominant = celestialMoonlight > celestialDaylight;
             if (moonDominant) drawMarker(constants[2][0], constants[2][1], legacyValid, .55f, .70f, 1.f);
             else drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .85f, .25f);
+        }
+
+        // With DebugCelestialMarker on, MAGENTA marks the independently
+        // tracked vanilla sun disc. Its centre dot is GREEN when the shared
+        // sky/depth predicate accepts that pixel, RED when neither sky nor the
+        // expected sun depth matches. Yellow/blue separation identifies a different halo source.
+        if (celestialMarkerDebug) {
+            const auto& markerFrame = renderer::FrameContext::Current();
+            const float sunMaskDepth[4] = {
+                markerFrame.sunDiscExpectedRawDepth, markerFrame.sunDiscRawDepthTolerance,
+                (markerFrame.depthMaxZ + 1.f) * .5f,
+                markerFrame.sunDiscValid ? 1.f : 0.f };
+            check(d->SetPixelShaderConstantF(3, sunMaskDepth, 1));
+            drawMarker(markerFrame.sunDiscScreenX, markerFrame.sunDiscScreenY,
+                       markerFrame.sunDiscValid, 1.f, .15f, 1.f, true);
         }
 
         // GREEN / CYAN: candidates read from CelestialMemoryProbe (see that

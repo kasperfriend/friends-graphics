@@ -973,9 +973,12 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   if(!out)return;
   out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
      <<" worldDraw="<<(knownWorldDraw?1:0)<<" freshCamera="<<(freshCameraPose?1:0)
+     <<" cameraStale="<<(f.cameraPoseStale?1:0)<<" eyeCurrent="<<(f.cameraEyeObservedThisFrame?1:0)
      <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
      <<" skyCandidates="<<int(f.skyPoseCandidateCount)
      <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
+     <<" skyEyeCandidate="<<(f.skyEyeCandidateObserved?1:0)
+     <<'('<<f.skyEyeCandidateDistanceYards<<"yd)"
      <<" skyObserve="<<f.SkyObservationName();
   if(f.skyProjectionAvailable)
    out<<" skyProj="<<f.skyProjection[0]<<','<<f.skyProjection[1]<<','
@@ -983,9 +986,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
       <<f.skyProjection[4]<<','<<f.skyProjection[5];
   else
    out<<" skyProj=none";
-  out<<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
+  out<<" skyProjCached="<<(f.skyProjectionFallbackUsed?1:0)
+     <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
      <<" base="<<settings.baseAltitude<<" top="<<layerTop
-     <<" cameraZ="<<f.cameraPosition.z<<"\n";
+     <<" cameraZ="<<f.cameraPosition.z
+     <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
+     <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
+     <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
+     <<" sunRaw=("<<f.sunDiscExpectedRawDepth<<','<<f.sunDiscRawDepthTolerance<<')'
+     <<" moonDisc="<<(f.moonDiscValid?1:0)<<'('<<f.moonDiscScreenX<<','<<f.moonDiscScreenY<<','<<f.moonDiscViewDepth<<')'
+     <<"\n";
  };
  // A corroborated camera and depth buffer also exist on some login/menu
  // scenes. Let a sky-only view through only when verified world IDs and a fresh
@@ -1114,6 +1124,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" moon="<<(moon?1:0)<<" intensity="<<directIntensity<<" shadows="<<(shadowsOn?1:0)
      <<" sun=("<<lightDir[0]<<','<<lightDir[1]<<','<<lightDir[2]<<") stable="<<(f.directLightValid?1:0)
      <<" shade="<<shadowStrength
+     <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
+     <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
+     <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
+     <<" sunRaw=("<<f.sunDiscExpectedRawDepth<<','<<f.sunDiscRawDepthTolerance<<')'
+     <<" moonDisc="<<(f.moonDiscValid?1:0)<<'('<<f.moonDiscScreenX<<','<<f.moonDiscScreenY<<','<<f.moonDiscViewDepth<<')'
      <<" camera=("<<f.cameraPosition.x<<','<<f.cameraPosition.y<<','<<f.cameraPosition.z<<")\n";
  }
 
