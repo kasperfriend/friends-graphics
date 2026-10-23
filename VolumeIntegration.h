@@ -23,6 +23,7 @@
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Effects/LocalLightingCore.h"
 #include "src/Effects/LocalLightingRenderer.h"
+#include "src/Effects/CelestialDiscGate.h"
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
