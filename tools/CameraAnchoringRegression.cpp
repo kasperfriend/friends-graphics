@@ -105,7 +105,7 @@ int main() try
     {
         using namespace renderer::skyprojection;
         Require(CanReuseValidatedPerspective(true, true, 250.f, 1000.f),
-            "a recent validated camera projection may corroborate a same-viewport sky transform");
+            "a recent validated camera projection may corroborate a same-screen-viewport sky transform even when its per-draw depth remap differs");
         Require(!CanReuseValidatedPerspective(false, true, 250.f, 1000.f),
             "an unvalidated projection is never borrowed for sky evidence");
         Require(!CanReuseValidatedPerspective(true, false, 250.f, 1000.f),

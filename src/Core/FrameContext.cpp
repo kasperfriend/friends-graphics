@@ -29,6 +29,12 @@ namespace renderer
         sunDiscScreenY = -1.0f;
         sunDiscViewDepth = 0.0f;
         sunDiscValid = false;
+        sunBillboardObserved = false;
+        moonBillboardObserved = false;
+        sunBillboardScreenX = sunBillboardScreenY = -1.f;
+        sunBillboardViewDepth = 0.f;
+        moonBillboardScreenX = moonBillboardScreenY = -1.f;
+        moonBillboardViewDepth = 0.f;
         sunDiscExpectedRawDepth = -1.0f;
         sunDiscRawDepthTolerance = 0.0f;
         celestialIntensity = 0.0f;
@@ -83,6 +89,8 @@ namespace renderer
         skyProjectionCacheUsable = false;
         skyProjectionCacheAgeMs = -1.f;
         skyProjectionCacheScaleX = skyProjectionCacheScaleY = 0.f;
+        skyProjectionCacheMinZ = skyProjectionCacheMaxZ = -1.f;
+        skyProjectionObservedMinZ = skyProjectionObservedMaxZ = -1.f;
         skyProjectionFallbackUsed = false;
 
         depthAvailable = false;

@@ -464,11 +464,19 @@ namespace renderer
                 ? PerformanceSeconds() - m_fallbackProjectionSeconds : -1.0;
             const float cacheAgeMs = std::isfinite(cacheAgeSeconds) && cacheAgeSeconds >= 0.0
                 ? static_cast<float>(cacheAgeSeconds * 1000.0) : -1.0f;
-            const bool sameViewport = m_fallbackVp.X == vp.X && m_fallbackVp.Y == vp.Y &&
-                m_fallbackVp.Width == vp.Width && m_fallbackVp.Height == vp.Height &&
-                m_fallbackVp.MinZ == vp.MinZ && m_fallbackVp.MaxZ == vp.MaxZ;
+            // The matrix's projection is independent of D3D's viewport depth
+            // remap. The camera capture cache owns the scene depth range; the
+            // sky draw can temporarily change MinZ/MaxZ while retaining the same
+            // full-screen rectangle. Requiring depth-range equality rejected the
+            // real camera projection on this client (fresh cache, zero candidates).
+            const bool sameScreenViewport = m_fallbackVp.X == vp.X && m_fallbackVp.Y == vp.Y &&
+                m_fallbackVp.Width == vp.Width && m_fallbackVp.Height == vp.Height;
+            m_skyProjectionCacheMinZ = m_fallbackVp.MinZ;
+            m_skyProjectionCacheMaxZ = m_fallbackVp.MaxZ;
+            m_skyProjectionObservedMinZ = vp.MinZ;
+            m_skyProjectionObservedMaxZ = vp.MaxZ;
             const bool cachedProjectionUsable = skyprojection::CanReuseValidatedPerspective(
-                m_fallbackProjectionValid, sameViewport, cacheAgeMs,
+                m_fallbackProjectionValid, sameScreenViewport, cacheAgeMs,
                 FrameContext::kCameraEyeHoldMs);
             m_skyProjectionCacheUsable = cachedProjectionUsable;
             if (!cachedProjectionUsable)
@@ -541,6 +549,14 @@ namespace renderer
             eyeDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
             eyeCompatible = std::isfinite(eyeDistance) && eyeDistance <= kSkyEyeLeashYards;
         }
+        if (!zeroTranslation && (!m_skyEyeCandidateObserved ||
+                                 eyeDistance < m_skyEyeCandidateDistanceYards))
+        {
+            // Keep rejected distances too: they distinguish a camera-eye
+            // convention mismatch from a billboard/reflection far from the anchor.
+            m_skyEyeCandidateObserved = true;
+            m_skyEyeCandidateDistanceYards = eyeDistance;
+        }
         if (!eyeCompatible)
         {
             RecordSkyObservation(FrameContext::SkyObservationResult::EyeIncompatible);
@@ -553,16 +569,9 @@ namespace renderer
         if (projectionFallbackUsed)
             m_skyProjectionFallbackUsed = true;
         m_skyPose.Observe(basis);
-        // Keep diagnostic evidence for any plausible current eye, but refresh
-        // the retained position only under the much tighter five-yard leash
-        // also used for rejected shader captures. The selected basis has to
-        // match before that position refreshes the world anchor.
-        if (!zeroTranslation && (!m_skyEyeCandidateObserved ||
-                                 eyeDistance < m_skyEyeCandidateDistanceYards))
-        {
-            m_skyEyeCandidateObserved = true;
-            m_skyEyeCandidateDistanceYards = eyeDistance;
-        }
+        // Refresh the retained position only under the much tighter five-yard
+        // leash also used for rejected shader captures. The selected basis has
+        // to match before that position refreshes the world anchor.
         if (!zeroTranslation && eyeDistance <= kRejectedCaptureEyeLeashYards)
         {
             std::copy(view.m[3], view.m[3] + 4, m_skyEyeTranslation);
@@ -647,6 +656,10 @@ namespace renderer
             ? m_fallbackProj.m[0][0] : 0.f;
         frameContext.skyProjectionCacheScaleY = m_fallbackProjectionValid
             ? m_fallbackProj.m[1][1] : 0.f;
+        frameContext.skyProjectionCacheMinZ = m_skyProjectionCacheMinZ;
+        frameContext.skyProjectionCacheMaxZ = m_skyProjectionCacheMaxZ;
+        frameContext.skyProjectionObservedMinZ = m_skyProjectionObservedMinZ;
+        frameContext.skyProjectionObservedMaxZ = m_skyProjectionObservedMaxZ;
         frameContext.skyProjectionFallbackUsed = m_skyProjectionFallbackUsed;
         frameContext.skyEyeCandidateObserved = m_skyEyeCandidateObserved;
         frameContext.skyEyeCandidateDistanceYards = m_skyEyeCandidateObserved

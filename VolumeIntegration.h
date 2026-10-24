@@ -1040,6 +1040,14 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
+        frameCtx.sunBillboardObserved = sun.visible;
+        frameCtx.moonBillboardObserved = moon.visible;
+        frameCtx.sunBillboardScreenX = sun.visible ? sun.screenX : -1.f;
+        frameCtx.sunBillboardScreenY = sun.visible ? sun.screenY : -1.f;
+        frameCtx.sunBillboardViewDepth = sun.visible ? sun.viewSpacePosition.z : 0.f;
+        frameCtx.moonBillboardScreenX = moon.visible ? moon.screenX : -1.f;
+        frameCtx.moonBillboardScreenY = moon.visible ? moon.screenY : -1.f;
+        frameCtx.moonBillboardViewDepth = moon.visible ? moon.viewSpacePosition.z : 0.f;
         // Stabilize the scene's dominant light before selecting a screen-space
         // halo source. Tint-only daylight/moonlight ratios can call a bright
         // blue noon "moonlit" and place a second glow at the moon instead of

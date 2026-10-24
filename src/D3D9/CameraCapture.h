@@ -47,6 +47,8 @@ namespace renderer
             m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
             m_skyProjectionAvailable = false;
             m_skyProjectionCacheUsable = false;
+            m_skyProjectionCacheMinZ = m_skyProjectionCacheMaxZ = -1.f;
+            m_skyProjectionObservedMinZ = m_skyProjectionObservedMaxZ = -1.f;
             m_skyProjectionFallbackUsed = false;
             m_skyEyeCandidateValid = false;
             m_skyEyeCandidateObserved = false;
@@ -129,6 +131,10 @@ namespace renderer
         float m_skyProjection[6]{}; // P00, P11, P22, P23, P32, P33 from the last finite observation
         bool m_skyProjectionAvailable = false;
         bool m_skyProjectionCacheUsable = false;
+        float m_skyProjectionCacheMinZ = -1.f;
+        float m_skyProjectionCacheMaxZ = -1.f;
+        float m_skyProjectionObservedMinZ = -1.f;
+        float m_skyProjectionObservedMaxZ = -1.f;
         bool m_skyProjectionFallbackUsed = false;
         bool m_fallbackProjectionValid = false;
         // Performance-clock seconds of the last validated full-frame projection.

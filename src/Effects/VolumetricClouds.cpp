@@ -989,10 +989,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   out<<" skyProjCacheOk="<<(f.skyProjectionCacheUsable?1:0)
      <<" skyProjCache=("<<f.skyProjectionCacheAgeMs<<','
      <<f.skyProjectionCacheScaleX<<','<<f.skyProjectionCacheScaleY<<')'
+     <<" skyProjVp=("<<f.skyProjectionCacheMinZ<<','<<f.skyProjectionCacheMaxZ<<';'
+     <<f.skyProjectionObservedMinZ<<','<<f.skyProjectionObservedMaxZ<<')'
      <<" skyProjCached="<<(f.skyProjectionFallbackUsed?1:0)
      <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
      <<" base="<<settings.baseAltitude<<" top="<<layerTop
      <<" cameraZ="<<f.cameraPosition.z
+     <<" trackedSun="<<(f.sunBillboardObserved?1:0)<<'('<<f.sunBillboardScreenX<<','
+     <<f.sunBillboardScreenY<<','<<f.sunBillboardViewDepth<<')'
+     <<" trackedMoon="<<(f.moonBillboardObserved?1:0)<<'('<<f.moonBillboardScreenX<<','
+     <<f.moonBillboardScreenY<<','<<f.moonBillboardViewDepth<<')'
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'

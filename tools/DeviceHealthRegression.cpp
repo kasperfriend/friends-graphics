@@ -515,6 +515,10 @@ int main() try
             Require(Contains(capture, "skyprojection::CanReuseValidatedPerspective(") &&
                     Contains(capture, "m_fallbackProjectionValid") &&
                     Contains(capture, "m_fallbackProjectionSeconds") &&
+                    Contains(capture, "sameScreenViewport") &&
+                    !Contains(capture, "m_fallbackVp.MinZ == vp.MinZ") &&
+                    !Contains(capture, "m_fallbackVp.MaxZ == vp.MaxZ") &&
+                    Contains(capture, "m_skyProjectionObservedMinZ = vp.MinZ;") &&
                     Contains(capture, "m_skyProjectionFallbackUsed = true;") &&
                     Contains(capture, "m_skyEyeCandidateObserved = true;") &&
                     Contains(capture, "m_skyEyeCandidateValid = true;") &&
@@ -523,13 +527,18 @@ int main() try
                     Contains(capture, "frameContext.cameraPoseStale = !corroborated || !eyeFresh;") &&
                     Contains(frameReset, "skyProjectionFallbackUsed = false;") &&
                     Contains(frameReset, "skyProjectionCacheUsable = false;") &&
+                    Contains(frameReset, "skyProjectionObservedMinZ = skyProjectionObservedMaxZ = -1.f;") &&
                     Contains(frameReset, "cameraEyeObservedThisFrame = false;") &&
                     Contains(frameReset, "skyEyeCandidateObserved = false;") &&
+                    Contains(frameReset, "sunBillboardObserved = false;") &&
+                    Contains(frameReset, "moonBillboardObserved = false;") &&
                     Contains(frameReset, "sunDiscExpectedRawDepth = -1.0f;") &&
                     Contains(clouds, "eyeCurrent=") && Contains(clouds, "skyProjCached=") &&
                     Contains(clouds, "skyProjCacheOk=") && Contains(clouds, "skyProjCache=") &&
+                    Contains(clouds, "skyProjVp=") &&
                     Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
-                    Contains(clouds, "glareSource=") && Contains(clouds, "sunDisc=") &&
+                    Contains(clouds, "glareSource=") && Contains(clouds, "trackedSun=") &&
+                    Contains(clouds, "trackedMoon=") && Contains(clouds, "sunDisc=") &&
                     Contains(clouds, "moonDisc=") &&
                     Contains(volumeSource, "float4 markerDepth:register(c3)") &&
                     Contains(volumeSource, "depthOpen=max(sky,depthMatch);") &&

@@ -71,6 +71,17 @@ namespace renderer
         float sunDiscScreenY = -1.0f;
         float sunDiscViewDepth = 0.0f;
         bool sunDiscValid = false;
+        // Separate from `sunDiscValid`, which also requires a fresh camera pose:
+        // reports whether the fixed-function celestial draw tracker saw each
+        // vanilla billboard this frame, for dark-disc diagnostics.
+        bool sunBillboardObserved = false;
+        bool moonBillboardObserved = false;
+        float sunBillboardScreenX = -1.f;
+        float sunBillboardScreenY = -1.f;
+        float sunBillboardViewDepth = 0.f;
+        float moonBillboardScreenX = -1.f;
+        float moonBillboardScreenY = -1.f;
+        float moonBillboardViewDepth = 0.f;
         // Projection-derived raw depth used by the cloud/atmosphere/ray masks.
         // The debug marker samples actual depth at the tracked centre against it.
         float sunDiscExpectedRawDepth = -1.0f;
@@ -220,8 +231,8 @@ namespace renderer
         uint8_t skyPoseCandidateCount = 0;
         bool skyPoseDiscEvidence = false;
         bool skyEyeCandidateObserved = false;
-        // Distance in yards from a current non-zero D3D VIEW eye candidate to
-        // the last accepted eye; -1 means this frame offered none.
+        // Closest distance in yards from any current non-zero D3D VIEW eye
+        // candidate (including rejected ones) to the last accepted eye; -1 if none.
         float skyEyeCandidateDistanceYards = -1.f;
         SkyObservationResult skyObservationResult = SkyObservationResult::NotAttempted;
         // Last finite D3D projection seen by the sky observer, ordered as
@@ -232,6 +243,10 @@ namespace renderer
         float skyProjectionCacheAgeMs = -1.f;
         float skyProjectionCacheScaleX = 0.f;
         float skyProjectionCacheScaleY = 0.f;
+        float skyProjectionCacheMinZ = -1.f;
+        float skyProjectionCacheMaxZ = -1.f;
+        float skyProjectionObservedMinZ = -1.f;
+        float skyProjectionObservedMaxZ = -1.f;
         // True when a current sky-view candidate was accepted using the recent,
         // validated camera projection rather than the unrelated D3D matrix.
         bool skyProjectionFallbackUsed = false;
