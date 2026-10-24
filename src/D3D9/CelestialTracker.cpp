@@ -12,12 +12,12 @@ namespace renderer
     {
         using Microsoft::WRL::ComPtr;
 
-        void UpdateBody(CelestialBody& body, float cx, float cy, float cz,
+        bool UpdateBody(CelestialBody& body, float cx, float cy, float cz,
             const D3DMATRIX& view, const D3DMATRIX& proj, uint64_t frameIndex, bool cameraRelative)
         {
             float len = std::sqrt(cx * cx + cy * cy + cz * cz);
             if (!std::isfinite(len) || len < 1e-4f)
-                return;
+                return false;
 
             Vec3 viewDir{ cx / len, cy / len, cz / len };
 
@@ -41,10 +41,10 @@ namespace renderer
             }
 
             if (!(proj.m[0][0] > 0.0f) || !(proj.m[1][1] > 0.0f))
-                return;
+                return false;
             float screenX = -1.f, screenY = -1.f;
             if (!ProjectViewPosition({cx, cy, cz}, proj.m, screenX, screenY))
-                return;
+                return false;
 
             body.visible = true;
             body.viewSpacePosition = { cx, cy, cz };
@@ -54,6 +54,7 @@ namespace renderer
             body.screenX = screenX;
             body.screenY = screenY;
             body.lastSeenFrame = frameIndex;
+            return true;
         }
     }
 
@@ -68,6 +69,7 @@ namespace renderer
         m_frameIndex = frameIndex;
         m_sun.visible = false;
         m_moon.visible = false;
+        m_diagnostics = {};
     }
 
     void CelestialTracker::RefreshWorldDirections(const float viewRaw[16])
@@ -85,26 +87,42 @@ namespace renderer
 
     void CelestialTracker::Observe(IDirect3DDevice9* device, UINT primitiveCount)
     {
-        if (!device || primitiveCount == 0 || primitiveCount > 8)
+        if (!device)
             return;
+        ++m_diagnostics.drawCalls;
+        if (primitiveCount == 0 || primitiveCount > 8)
+        {
+            ++m_diagnostics.primitiveRejected;
+            return;
+        }
 
         // Both known patterns are fixed-function - this rejects the vast
-        // majority of draw calls with just two cheap state queries.
+        // majority of draw calls with just two cheap state queries. Keep the
+        // stage counts so an untracked visible disc can be diagnosed without
+        // guessing which signature check rejected it.
         ComPtr<IDirect3DVertexShader9> vs;
         if (FAILED(device->GetVertexShader(vs.GetAddressOf())) || vs)
+        {
+            ++m_diagnostics.vertexShaderDraws;
             return;
+        }
         ComPtr<IDirect3DPixelShader9> ps;
         if (FAILED(device->GetPixelShader(ps.GetAddressOf())) || ps)
+        {
+            ++m_diagnostics.pixelShaderDraws;
             return;
+        }
+        ++m_diagnostics.fixedFunctionDraws;
 
         DWORD alphaTest = 0;
-        device->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-        if (!alphaTest)
+        if (FAILED(device->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest)) || !alphaTest)
             return;
+        ++m_diagnostics.alphaTestDraws;
 
         ComPtr<IDirect3DBaseTexture9> texture;
         if (FAILED(device->GetTexture(0, texture.GetAddressOf())) || !texture)
             return;
+        ++m_diagnostics.texturedDraws;
 
         // Texture size is the most reliable discriminator found: across
         // every in-game capture, the real sun disc is always ~256x256 and
@@ -123,7 +141,12 @@ namespace renderer
                 texW = desc.Width;
         }
         if (texW == 0)
+        {
+            ++m_diagnostics.unknownTextureSize;
             return;
+        }
+        if (texW >= 200) ++m_diagnostics.largeTextureDraws;
+        if (texW >= 96 && texW <= 160) ++m_diagnostics.moonTextureDraws;
 
         D3DMATRIX world{}, view{}, proj{};
         if (FAILED(device->GetTransform(D3DTS_WORLD, &world))) return;
@@ -155,7 +178,9 @@ namespace renderer
 
         if (viewTranslationZero && worldIsLargeScale && texW >= 200)
         {
-            UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex, false);
+            ++m_diagnostics.sunSignatureDraws;
+            if (UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex, false))
+                ++m_diagnostics.sunAcceptedDraws;
         }
         else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 4.0f && viewTransZ < 16.0f
             && texW >= 96 && texW <= 160)
@@ -165,7 +190,9 @@ namespace renderer
             // low as 8.93 (from ~12 near center), so a tight range isn't
             // safe on its own. The texW filter (96-160, i.e. ~128 and
             // explicitly excluding the ~64 impostor) does the real work.
-            UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex, true);
+            ++m_diagnostics.moonSignatureDraws;
+            if (UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex, true))
+                ++m_diagnostics.moonAcceptedDraws;
         }
     }
 }

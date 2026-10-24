@@ -11,6 +11,7 @@
 #include <thread>
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
+#include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
@@ -971,6 +972,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   m_lastDiagnosticState=event;
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   if(!out)return;
+  const auto& celestialTrack = CelestialTracker::Instance().Diagnostics();
   out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
      <<" worldDraw="<<(knownWorldDraw?1:0)<<" freshCamera="<<(freshCameraPose?1:0)
      <<" cameraStale="<<(f.cameraPoseStale?1:0)<<" eyeCurrent="<<(f.cameraEyeObservedThisFrame?1:0)
@@ -999,6 +1001,13 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<f.sunBillboardScreenY<<','<<f.sunBillboardViewDepth<<')'
      <<" trackedMoon="<<(f.moonBillboardObserved?1:0)<<'('<<f.moonBillboardScreenX<<','
      <<f.moonBillboardScreenY<<','<<f.moonBillboardViewDepth<<')'
+     <<" celTrack=("<<celestialTrack.drawCalls<<','<<celestialTrack.primitiveRejected<<','
+     <<celestialTrack.vertexShaderDraws<<','<<celestialTrack.pixelShaderDraws<<','
+     <<celestialTrack.fixedFunctionDraws<<','<<celestialTrack.alphaTestDraws<<','
+     <<celestialTrack.texturedDraws<<','<<celestialTrack.unknownTextureSize<<','
+     <<celestialTrack.largeTextureDraws<<','<<celestialTrack.moonTextureDraws<<','
+     <<celestialTrack.sunSignatureDraws<<','<<celestialTrack.sunAcceptedDraws<<','
+     <<celestialTrack.moonSignatureDraws<<','<<celestialTrack.moonAcceptedDraws<<')'
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'

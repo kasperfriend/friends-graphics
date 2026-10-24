@@ -28,6 +28,24 @@ namespace renderer
         uint64_t lastSeenFrame = 0;
     };
 
+    struct CelestialTrackerDiagnostics
+    {
+        uint32_t drawCalls = 0;
+        uint32_t primitiveRejected = 0;
+        uint32_t vertexShaderDraws = 0;
+        uint32_t pixelShaderDraws = 0;
+        uint32_t fixedFunctionDraws = 0;
+        uint32_t alphaTestDraws = 0;
+        uint32_t texturedDraws = 0;
+        uint32_t unknownTextureSize = 0;
+        uint32_t largeTextureDraws = 0;
+        uint32_t moonTextureDraws = 0;
+        uint32_t sunSignatureDraws = 0;
+        uint32_t sunAcceptedDraws = 0;
+        uint32_t moonSignatureDraws = 0;
+        uint32_t moonAcceptedDraws = 0;
+    };
+
     // Two structurally different draw patterns were found (crosshair-
     // confirmed against the actually visible disc in both cases):
     //
@@ -66,12 +84,14 @@ namespace renderer
 
         const CelestialBody& Sun() const { return m_sun; }
         const CelestialBody& Moon() const { return m_moon; }
+        const CelestialTrackerDiagnostics& Diagnostics() const { return m_diagnostics; }
 
     private:
         CelestialTracker() = default;
 
         CelestialBody m_sun;
         CelestialBody m_moon;
+        CelestialTrackerDiagnostics m_diagnostics{};
         uint64_t m_frameIndex = 0;
     };
 }

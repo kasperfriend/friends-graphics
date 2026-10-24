@@ -512,6 +512,13 @@ int main() try
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
+            const auto celestialTracker = Read("src/D3D9/CelestialTracker.cpp");
+            Require(Contains(celestialTracker, "++m_diagnostics.drawCalls;") &&
+                    Contains(celestialTracker, "++m_diagnostics.sunSignatureDraws;") &&
+                    Contains(celestialTracker, "++m_diagnostics.sunAcceptedDraws;") &&
+                    Contains(celestialTracker, "++m_diagnostics.moonSignatureDraws;") &&
+                    Contains(clouds, "celTrack=("),
+                "the client log reports why actual celestial billboard signatures are or are not being tracked");
             Require(Contains(capture, "skyprojection::CanReuseValidatedPerspective(") &&
                     Contains(capture, "m_fallbackProjectionValid") &&
                     Contains(capture, "m_fallbackProjectionSeconds") &&
@@ -538,8 +545,8 @@ int main() try
                     Contains(clouds, "skyProjVp=") &&
                     Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
                     Contains(clouds, "glareSource=") && Contains(clouds, "trackedSun=") &&
-                    Contains(clouds, "trackedMoon=") && Contains(clouds, "sunDisc=") &&
-                    Contains(clouds, "moonDisc=") &&
+                    Contains(clouds, "trackedMoon=") && Contains(clouds, "celTrack=(") &&
+                    Contains(clouds, "sunDisc=") && Contains(clouds, "moonDisc=") &&
                     Contains(volumeSource, "float4 markerDepth:register(c3)") &&
                     Contains(volumeSource, "depthOpen=max(sky,depthMatch);") &&
                     Contains(volumeIntegration, "markerFrame.sunDiscScreenX") &&
