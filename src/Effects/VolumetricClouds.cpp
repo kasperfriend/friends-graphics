@@ -986,7 +986,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
       <<f.skyProjection[4]<<','<<f.skyProjection[5];
   else
    out<<" skyProj=none";
-  out<<" skyProjCached="<<(f.skyProjectionFallbackUsed?1:0)
+  out<<" skyProjCacheOk="<<(f.skyProjectionCacheUsable?1:0)
+     <<" skyProjCache=("<<f.skyProjectionCacheAgeMs<<','
+     <<f.skyProjectionCacheScaleX<<','<<f.skyProjectionCacheScaleY<<')'
+     <<" skyProjCached="<<(f.skyProjectionFallbackUsed?1:0)
      <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
      <<" base="<<settings.baseAltitude<<" top="<<layerTop
      <<" cameraZ="<<f.cameraPosition.z

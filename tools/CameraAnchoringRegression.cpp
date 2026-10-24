@@ -104,12 +104,16 @@ int main() try
     // --------------------------------------------------------- sky projection ---
     {
         using namespace renderer::skyprojection;
-        Require(MatchesPerspectiveScale(2.16816f, 5.17949f, 2.16816f, 5.17949f),
-            "an unrelated depth mapping may borrow the cached camera projection when both FOV scales match");
-        Require(!MatchesPerspectiveScale(2.35f, 5.17949f, 2.16816f, 5.17949f),
-            "a changed horizontal FOV cannot borrow the cached camera projection");
-        Require(!MatchesPerspectiveScale(std::nanf(""), 5.17949f, 2.16816f, 5.17949f),
-            "non-finite projection scales never corroborate a sky transform");
+        Require(CanReuseValidatedPerspective(true, true, 250.f, 1000.f),
+            "a recent validated camera projection may corroborate a same-viewport sky transform");
+        Require(!CanReuseValidatedPerspective(false, true, 250.f, 1000.f),
+            "an unvalidated projection is never borrowed for sky evidence");
+        Require(!CanReuseValidatedPerspective(true, false, 250.f, 1000.f),
+            "a projection from another viewport cannot corroborate the current sky transform");
+        Require(!CanReuseValidatedPerspective(true, true, 1001.f, 1000.f),
+            "a stale cached projection cannot corroborate the current sky transform");
+        Require(!CanReuseValidatedPerspective(true, true, std::nanf(""), 1000.f),
+            "non-finite cache age never corroborates a sky transform");
     }
 
     // ---------------------------------------------------------------- floor ---

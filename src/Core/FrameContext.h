@@ -228,8 +228,12 @@ namespace renderer
         // P00, P11, P22, P23, P32, P33 for rejection diagnostics.
         float skyProjection[6]{};
         bool skyProjectionAvailable = false;
-        // True when the current D3D view was corroborated using this frame's
-        // lateral projection scale and the cached, validated camera depth terms.
+        bool skyProjectionCacheUsable = false;
+        float skyProjectionCacheAgeMs = -1.f;
+        float skyProjectionCacheScaleX = 0.f;
+        float skyProjectionCacheScaleY = 0.f;
+        // True when a current sky-view candidate was accepted using the recent,
+        // validated camera projection rather than the unrelated D3D matrix.
         bool skyProjectionFallbackUsed = false;
 
         const char* SkyObservationName() const noexcept

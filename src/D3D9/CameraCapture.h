@@ -46,6 +46,7 @@ namespace renderer
             m_rejectedCaptureValid = false;
             m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
             m_skyProjectionAvailable = false;
+            m_skyProjectionCacheUsable = false;
             m_skyProjectionFallbackUsed = false;
             m_skyEyeCandidateValid = false;
             m_skyEyeCandidateObserved = false;
@@ -79,6 +80,7 @@ namespace renderer
             m_cameraGate.Reset();
             m_skyPose.Reset();
             m_fallbackProjectionValid = false;
+            m_fallbackProjectionSeconds = -1.0;
             m_skyProjectionFallbackUsed = false;
             m_skyEyeCandidateValid = false;
             // No draw has carried an eye on the new device yet, so nothing may
@@ -126,8 +128,11 @@ namespace renderer
             FrameContext::SkyObservationResult::NotAttempted;
         float m_skyProjection[6]{}; // P00, P11, P22, P23, P32, P33 from the last finite observation
         bool m_skyProjectionAvailable = false;
+        bool m_skyProjectionCacheUsable = false;
         bool m_skyProjectionFallbackUsed = false;
         bool m_fallbackProjectionValid = false;
+        // Performance-clock seconds of the last validated full-frame projection.
+        double m_fallbackProjectionSeconds = -1.0;
         // A current non-zero VIEW translation may carry the actual camera eye.
         // Keep it only when it is within five yards of the accepted anchor, and
         // refresh the anchor only if this exact basis wins sky-pose selection.

@@ -1,25 +1,20 @@
 #pragma once
 
-#include <algorithm>
 #include <cmath>
 
 namespace renderer::skyprojection
 {
-    // A current D3DTS_PROJECTION can be an orthographic/UI matrix even while
-    // D3DTS_VIEW still carries the scene sky's current rotation. Reuse a known
-    // perspective projection for disc corroboration only when both lateral
-    // scales match the last camera projection; a different FOV/aspect must not
-    // lend its screen-space evidence to this transform.
-    inline bool MatchesPerspectiveScale(float currentX, float currentY,
-                                        float cameraX, float cameraY) noexcept
+    // Some clients leave a non-perspective sky/UI matrix in D3DTS_PROJECTION
+    // while the full-frame shader camera continues to carry the scene. Never
+    // use that matrix's depth terms. Reuse only a perspective already validated
+    // from a full-frame camera capture, for the same viewport, and only while
+    // that projection cache is recent. Disc evidence is evaluated with this
+    // cached perspective and the current rigid VIEW candidate.
+    inline bool CanReuseValidatedPerspective(bool cacheValid, bool sameViewport,
+                                             float cacheAgeMs, float maxAgeMs) noexcept
     {
-        if (!std::isfinite(currentX) || !std::isfinite(currentY) ||
-            !std::isfinite(cameraX) || !std::isfinite(cameraY) ||
-            currentX <= 0.f || currentY <= 0.f || cameraX <= 0.f || cameraY <= 0.f)
-            return false;
-        const float toleranceX = std::max(.001f, std::fabs(cameraX) * .005f);
-        const float toleranceY = std::max(.001f, std::fabs(cameraY) * .005f);
-        return std::fabs(currentX - cameraX) <= toleranceX &&
-               std::fabs(currentY - cameraY) <= toleranceY;
+        return cacheValid && sameViewport &&
+            std::isfinite(cacheAgeMs) && std::isfinite(maxAgeMs) &&
+            cacheAgeMs >= 0.f && maxAgeMs >= 0.f && cacheAgeMs <= maxAgeMs;
     }
 }

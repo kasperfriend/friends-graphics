@@ -512,8 +512,9 @@ int main() try
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
-            Require(Contains(capture, "skyprojection::MatchesPerspectiveScale(") &&
+            Require(Contains(capture, "skyprojection::CanReuseValidatedPerspective(") &&
                     Contains(capture, "m_fallbackProjectionValid") &&
+                    Contains(capture, "m_fallbackProjectionSeconds") &&
                     Contains(capture, "m_skyProjectionFallbackUsed = true;") &&
                     Contains(capture, "m_skyEyeCandidateObserved = true;") &&
                     Contains(capture, "m_skyEyeCandidateValid = true;") &&
@@ -521,10 +522,12 @@ int main() try
                     Contains(capture, "frameContext.cameraEyeObservedThisFrame = true;") &&
                     Contains(capture, "frameContext.cameraPoseStale = !corroborated || !eyeFresh;") &&
                     Contains(frameReset, "skyProjectionFallbackUsed = false;") &&
+                    Contains(frameReset, "skyProjectionCacheUsable = false;") &&
                     Contains(frameReset, "cameraEyeObservedThisFrame = false;") &&
                     Contains(frameReset, "skyEyeCandidateObserved = false;") &&
                     Contains(frameReset, "sunDiscExpectedRawDepth = -1.0f;") &&
                     Contains(clouds, "eyeCurrent=") && Contains(clouds, "skyProjCached=") &&
+                    Contains(clouds, "skyProjCacheOk=") && Contains(clouds, "skyProjCache=") &&
                     Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
                     Contains(clouds, "glareSource=") && Contains(clouds, "sunDisc=") &&
                     Contains(clouds, "moonDisc=") &&

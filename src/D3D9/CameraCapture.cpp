@@ -119,6 +119,7 @@ namespace renderer
                 m_fallbackProj.m[3][3] = v[7][3];
                 m_fallbackVp = vp;
                 m_fallbackProjectionValid = true;
+                m_fallbackProjectionSeconds = PerformanceSeconds();
                 m_fallbackSawSceneDraw = true;
             }
             return false;
@@ -136,6 +137,7 @@ namespace renderer
         m_fallbackProj.m[3][3] = v[7][3];
         m_fallbackVp = vp;
         m_fallbackProjectionValid = true;
+        m_fallbackProjectionSeconds = PerformanceSeconds();
 
         // Swap BEFORE overwriting: whatever viewRaw held (last successful
         // capture's forward view) becomes previousViewRaw for this frame's
@@ -453,16 +455,23 @@ namespace renderer
             RecordSkyObservation(FrameContext::SkyObservationResult::InvalidProjection);
             // The client can leave an unrelated orthographic/UI depth mapping
             // in D3DTS_PROJECTION while the scene sky draw still carries the
-            // current rigid VIEW rotation. Do not trust that projection: use
-            // the cached one only when its viewport and both lateral scales
-            // match this draw. Disc evidence is then evaluated in the validated
-            // camera's perspective space, never the orthographic matrix.
-            const bool cachedProjectionMatches = m_fallbackProjectionValid &&
+            // current rigid VIEW rotation. Do not trust that matrix's depth or
+            // field-of-view terms. Instead, corroborate this transform only with
+            // a recent perspective validated from a full-frame shader camera,
+            // on the same complete viewport/depth range; disc projection uses
+            // those validated terms, never the unrelated matrix.
+            const double cacheAgeSeconds = m_fallbackProjectionSeconds >= 0.0
+                ? PerformanceSeconds() - m_fallbackProjectionSeconds : -1.0;
+            const float cacheAgeMs = std::isfinite(cacheAgeSeconds) && cacheAgeSeconds >= 0.0
+                ? static_cast<float>(cacheAgeSeconds * 1000.0) : -1.0f;
+            const bool sameViewport = m_fallbackVp.X == vp.X && m_fallbackVp.Y == vp.Y &&
                 m_fallbackVp.Width == vp.Width && m_fallbackVp.Height == vp.Height &&
-                skyprojection::MatchesPerspectiveScale(
-                    proj.m[0][0], proj.m[1][1],
-                    m_fallbackProj.m[0][0], m_fallbackProj.m[1][1]);
-            if (!cachedProjectionMatches)
+                m_fallbackVp.MinZ == vp.MinZ && m_fallbackVp.MaxZ == vp.MaxZ;
+            const bool cachedProjectionUsable = skyprojection::CanReuseValidatedPerspective(
+                m_fallbackProjectionValid, sameViewport, cacheAgeMs,
+                FrameContext::kCameraEyeHoldMs);
+            m_skyProjectionCacheUsable = cachedProjectionUsable;
+            if (!cachedProjectionUsable)
                 return;
             projectionFallbackUsed = true;
         }
@@ -504,6 +513,7 @@ namespace renderer
             m_fallbackProj = proj;
             m_fallbackVp = vp;
             m_fallbackProjectionValid = true;
+            m_fallbackProjectionSeconds = PerformanceSeconds();
         }
 
         // Does this transform carry the camera's EYE, or a camera-relative
@@ -627,6 +637,16 @@ namespace renderer
         frameContext.skyPoseDiscEvidence = disc.available;
         frameContext.skyObservationResult = m_skyObservationResult;
         frameContext.skyProjectionAvailable = m_skyProjectionAvailable;
+        frameContext.skyProjectionCacheUsable = m_skyProjectionCacheUsable;
+        const double projectionCacheAgeSeconds = m_fallbackProjectionSeconds >= 0.0
+            ? PerformanceSeconds() - m_fallbackProjectionSeconds : -1.0;
+        frameContext.skyProjectionCacheAgeMs =
+            std::isfinite(projectionCacheAgeSeconds) && projectionCacheAgeSeconds >= 0.0
+                ? static_cast<float>(projectionCacheAgeSeconds * 1000.0) : -1.f;
+        frameContext.skyProjectionCacheScaleX = m_fallbackProjectionValid
+            ? m_fallbackProj.m[0][0] : 0.f;
+        frameContext.skyProjectionCacheScaleY = m_fallbackProjectionValid
+            ? m_fallbackProj.m[1][1] : 0.f;
         frameContext.skyProjectionFallbackUsed = m_skyProjectionFallbackUsed;
         frameContext.skyEyeCandidateObserved = m_skyEyeCandidateObserved;
         frameContext.skyEyeCandidateDistanceYards = m_skyEyeCandidateObserved

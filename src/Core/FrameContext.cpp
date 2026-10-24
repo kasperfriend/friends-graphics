@@ -80,6 +80,9 @@ namespace renderer
         skyProjection[0] = skyProjection[1] = skyProjection[2] =
             skyProjection[3] = skyProjection[4] = skyProjection[5] = 0.0f;
         skyProjectionAvailable = false;
+        skyProjectionCacheUsable = false;
+        skyProjectionCacheAgeMs = -1.f;
+        skyProjectionCacheScaleX = skyProjectionCacheScaleY = 0.f;
         skyProjectionFallbackUsed = false;
 
         depthAvailable = false;
