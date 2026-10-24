@@ -513,7 +513,9 @@ int main() try
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
             const auto celestialTracker = Read("src/D3D9/CelestialTracker.cpp");
-            Require(Contains(celestialTracker, "++m_diagnostics.drawCalls;") &&
+            const auto atmosphereBuild = Read("tools/Test-Atmosphere.cmd");
+            Require(Contains(atmosphereBuild, "src\\D3D9\\CelestialTracker.cpp") &&
+                    Contains(celestialTracker, "++m_diagnostics.drawCalls;") &&
                     Contains(celestialTracker, "++m_diagnostics.sunSignatureDraws;") &&
                     Contains(celestialTracker, "++m_diagnostics.sunAcceptedDraws;") &&
                     Contains(celestialTracker, "++m_diagnostics.moonSignatureDraws;") &&
