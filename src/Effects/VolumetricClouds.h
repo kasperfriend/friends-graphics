@@ -10,6 +10,7 @@
 #include "../Core/DeviceHealth.h"
 #include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
+#include "../Environment/ManualColor.h"
 
 namespace renderer
 {
@@ -64,20 +65,21 @@ namespace renderer
         float multiScatterEccentricity = .55f;
 
         // March shape: the step grows with distance because a 1400-unit-thick
-        // layer seen edge-on is 25000 units long, and the width of the fade
-        // band that hides the layer's edge at the horizon.
+        // layer can stretch to the 200000-unit march limit at the horizon; the
+        // fade hides the final edge without erasing shallow upward views.
         float baseStep = 70.f;
         float stepGrowth = .010f;
         float coarseScale = 3.f;
         float jitter = .25f;
         float horizonFade = .018f;
-        float maxDistance = 26000.f;
+        float maxDistance = 200000.f;
 
         // Aerial perspective: how much of the sky's own haze colour a cloud
         // picks up over the draw distance. Distance has to wash a cloud out,
         // or near and far clouds read as the same contrast and the deck
         // looks like a backdrop painting.
         float aerialPerspective = .60f;
+        manualcolor::Override manualCloudColor{};
 
         // Cloud shadows and rays share a small map on a fixed world plane.
         // It stores the unitless cloud amount of the column between each
@@ -171,6 +173,7 @@ namespace renderer
         uint32_t m_shadowSize = 0;
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;
+        std::string m_lastDiagnosticState;
         uint64_t m_windSequence = 0;
         FrameClock m_clock;
         CloudDynamics m_dynamics;

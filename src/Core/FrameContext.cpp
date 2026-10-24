@@ -12,6 +12,7 @@ namespace renderer
     {
         frameIndex = newFrameIndex;
         device = dev;
+        ResetWorldSceneFrame();
 
         // Keep the last accepted camera pose/projection as a fallback when a
         // frame contains only a skybox and no terrain draw can recapture it.
@@ -24,6 +25,18 @@ namespace renderer
         moonDiscScreenY = -1.0f;
         moonDiscViewDepth = 0.0f;
         moonDiscValid = false;
+        sunDiscScreenX = -1.0f;
+        sunDiscScreenY = -1.0f;
+        sunDiscViewDepth = 0.0f;
+        sunDiscValid = false;
+        sunBillboardObserved = false;
+        moonBillboardObserved = false;
+        sunBillboardScreenX = sunBillboardScreenY = -1.f;
+        sunBillboardViewDepth = 0.f;
+        moonBillboardScreenX = moonBillboardScreenY = -1.f;
+        moonBillboardViewDepth = 0.f;
+        sunDiscExpectedRawDepth = -1.0f;
+        sunDiscRawDepthTolerance = 0.0f;
         celestialIntensity = 0.0f;
         celestialIsMoon = false;
         directLightIntensity = 0.0f;
@@ -40,6 +53,7 @@ namespace renderer
         shadowMapDistance = 180.0f;
 
         waterMaskTexture = waterDepthTexture = nullptr;
+        nativeWaterMaskCaptured = false;
         // Published by the compositor from the water stage's own tracker before any pass
         // reads it, so a frame that never reaches the composite must not inherit the medium
         // the last one left behind.
@@ -62,7 +76,22 @@ namespace renderer
         // No draw has carried an eye into THIS frame yet: a consumer that asks
         // how old the eye is must not read "just now".
         cameraEyeAgeMs = 1.0e6f;
+        cameraEyeObservedThisFrame = false;
         cameraPoseSource = PoseNone;
+        skyPoseCandidateCount = 0;
+        skyPoseDiscEvidence = false;
+        skyEyeCandidateObserved = false;
+        skyEyeCandidateDistanceYards = -1.f;
+        skyObservationResult = SkyObservationResult::NotAttempted;
+        skyProjection[0] = skyProjection[1] = skyProjection[2] =
+            skyProjection[3] = skyProjection[4] = skyProjection[5] = 0.0f;
+        skyProjectionAvailable = false;
+        skyProjectionCacheUsable = false;
+        skyProjectionCacheAgeMs = -1.f;
+        skyProjectionCacheScaleX = skyProjectionCacheScaleY = 0.f;
+        skyProjectionCacheMinZ = skyProjectionCacheMaxZ = -1.f;
+        skyProjectionObservedMinZ = skyProjectionObservedMaxZ = -1.f;
+        skyProjectionFallbackUsed = false;
 
         depthAvailable = false;
         cameraValid = false;

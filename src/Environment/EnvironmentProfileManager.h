@@ -1,6 +1,7 @@
 #pragma once
 #include "EnvironmentProfile.h"
 #include "EnvironmentDatabase.h"
+#include "../Core/DeviceHealth.h"
 #include "../Game/WoWLocationProvider.h"
 #include <vector>
 namespace renderer {
@@ -11,6 +12,10 @@ public:
     void Reload();
     // hold keeps the last confirmed location (focus or device gaps); blending still advances.
     void Update(uint64_t now,bool worldContext,bool holdLocation=false);
+    // Fresh, non-debounced scene presence for rendering gates. Verified client
+    // IDs distinguish a playable world from a login scene; unknown clients fall
+    // back to an observed terrain/liquid draw without weakening location tuning.
+    WorldSceneObservation ObserveWorldScene(bool worldContext,bool knownWorldDrawSeen) const;
     const ResolvedEnvironmentState& State() const {return current;}
     const LocationContext& Location() const {return location;}
     bool LocationTuningVerified() const {return provider.Verified()&&database.Authoritative();}

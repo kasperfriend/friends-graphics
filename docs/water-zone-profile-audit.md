@@ -182,7 +182,7 @@ Colours are `WaterColour/DeepColour/AbsorptionColour`; `global` keeps the `Graph
 | 489 | Warsong Gulch | 3277 | Warsong Gulch | 0.80 | Calm inland water | 0x6E8A76/0x0C2218/0xD07896 | 1/0.9/0.95/0.9/0.95 |
 | 509 | Ruins of Ahn'Qiraj | 3429 | Ruins of Ahn'Qiraj | 0.40 | Sheltered / still water | global | player defaults |
 | 529 | Arathi Basin | 3358 | Arathi Basin | 0.95 | Calm inland water | 0x7FA6BC/0x0B3045/0xE08A64 | 1.25/0.65/1.05/1.05/1.05 |
-| 530 | Outland | 3430 | Eversong Woods | 0.70 | Calm inland water | 0x86B0D0/0x0C3E5E/0xEA9268 | 1.65/0.35/1.25/1.2/1.15 |
+| 530 | Outland | 3430 | Eversong Woods | 0.70 | Calm inland water | 0x86AEB8/0x0C3E4A/0xD48E78 | 1.65/0.35/1.25/1.2/1.15 |
 | 530 | Outland | 3433 | Ghostlands | 0.70 | Calm inland water | 0x5A6A66/0x08141A/0xC8788C | 0.65/1.6/0.4/0.5/0.65 |
 | 530 | Outland | 3455 | The North Sea | 1.45 | Open sea / strongest movement | 0x749CB8/0x0A2E47/0xDC8660 | 1.3/0.55/1/1.15/1.05 |
 | 530 | Outland | 3479 | The Veiled Sea | 1.40 | Open sea / strongest movement | 0x7AA2C0/0x082C46/0xEC9066 | 1.2/0.7/0.95/1.2/1.1 |

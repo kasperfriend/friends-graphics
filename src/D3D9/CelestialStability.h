@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include "../Core/MathTypes.h"
 
 namespace renderer
@@ -35,6 +36,43 @@ namespace renderer
             viewDirection.x * view[1][0] + viewDirection.y * view[1][1] + viewDirection.z * view[1][2],
             viewDirection.x * view[2][0] + viewDirection.y * view[2][1] + viewDirection.z * view[2][2]
         });
+    }
+
+    inline bool IsUsableCelestialDirection(const Vec3& direction) noexcept
+    {
+        const float length = Length(direction);
+        return std::isfinite(direction.x) && std::isfinite(direction.y) && std::isfinite(direction.z) &&
+            std::isfinite(length) && length > 0.25f;
+    }
+
+    // The moon is a camera-relative billboard. Its world direction may only be
+    // recomputed with a camera pose accepted for THIS frame; FrameContext keeps
+    // the last raw view matrix around while the current pose is stale. In that
+    // case the last independently confirmed celestial direction is better
+    // evidence than multiplying the billboard by yesterday's camera rotation.
+    // With no confirmed direction yet, fail closed so sky-pose selection falls
+    // back to camera continuity instead of comparing a pose with stale data.
+    inline bool ResolveCameraRelativeWorldDirection(
+        const Vec3& viewDirection, const float view[4][4], bool cameraPoseFresh,
+        const Vec3& retainedWorldDirection, bool retainedDirectionValid,
+        Vec3& worldDirection) noexcept
+    {
+        if (cameraPoseFresh && view)
+        {
+            const Vec3 current = ViewDirectionToWorld(viewDirection, view);
+            if (IsUsableCelestialDirection(current))
+            {
+                worldDirection = current;
+                return true;
+            }
+        }
+        if (retainedDirectionValid && IsUsableCelestialDirection(retainedWorldDirection))
+        {
+            worldDirection = Normalize(retainedWorldDirection);
+            return true;
+        }
+        worldDirection = {};
+        return false;
     }
 
     struct CelestialLightInput
@@ -66,6 +104,45 @@ namespace renderer
         bool isMoon = false;
         float targetIntensity = 0.0f;
     };
+
+    enum class VisibleCelestialSource : std::uint8_t { None, Sun, Moon };
+
+    // Pick the screen-space glare origin using the already-stabilized scene
+    // light, not the tint-only day/night estimate. A cool, bright noon can
+    // make moonlightFactor exceed daylightFactor even while the sun is plainly
+    // the dominant source; following that weaker estimate pins the halo to the
+    // moon and creates a second pale "sun" elsewhere in the sky.
+    inline VisibleCelestialSource ChooseVisibleCelestialSource(
+        bool sunVisible, bool moonVisible, bool moonDominant) noexcept
+    {
+        if (moonVisible && (moonDominant || !sunVisible))
+            return VisibleCelestialSource::Moon;
+        if (sunVisible)
+            return VisibleCelestialSource::Sun;
+        return VisibleCelestialSource::None;
+    }
+
+    // Project a view-space point with the actual row-vector D3D projection
+    // matrix, including off-centre terms. Most WoW captures are symmetric, for
+    // which this reduces to the familiar P00/P11 formula; using the complete
+    // matrix keeps a tracked disc on the client-painted pixel if the viewport
+    // projection is shifted or otherwise not perfectly symmetric.
+    inline bool ProjectViewPosition(const Vec3& point, const float projection[4][4],
+                                   float& screenX, float& screenY) noexcept
+    {
+        const float clipX = point.x * projection[0][0] + point.y * projection[1][0] +
+                            point.z * projection[2][0] + projection[3][0];
+        const float clipY = point.x * projection[0][1] + point.y * projection[1][1] +
+                            point.z * projection[2][1] + projection[3][1];
+        const float clipW = point.x * projection[0][3] + point.y * projection[1][3] +
+                            point.z * projection[2][3] + projection[3][3];
+        if (!std::isfinite(clipX) || !std::isfinite(clipY) ||
+            !std::isfinite(clipW) || clipW <= 1e-4f)
+            return false;
+        screenX = .5f + .5f * clipX / clipW;
+        screenY = .5f - .5f * clipY / clipW;
+        return std::isfinite(screenX) && std::isfinite(screenY);
+    }
 
     class CelestialLightStabilizer
     {

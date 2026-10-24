@@ -23,7 +23,8 @@ bool IsKnownVerified12340Client(const WoWClientContext& client) {
     return HasVerified12340CodeSignature(client)||
            client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6"||
            client.sha256=="f4b9f6fce448194638c5b1c751483090a48c597c6272237f31b3d151b50d3114"||
-           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da";
+           client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da"||
+           client.sha256=="ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d";
 }
 // Stock 3.3.5a (build 12340) parent zones for areas that Ascension promoted to
 // standalone starter roots (10138..10146) or unparented caves in data/areas.txt.
@@ -72,8 +73,9 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
         if(dir.empty())dir=L".";
         client.EnsureSha256((dir/L"ClientSha256.cache").wstring());
     }
-    // A blank shipped configuration trusts the verified Ascension and stock 3.3.5a
-    // (build 12340) executables. Explicit custom configurations keep their rules.
+    // A blank shipped configuration trusts the supported Ascension, ArdenWoW,
+    // and stock 3.3.5a (build 12340) fingerprints. Explicit custom configurations
+    // keep their rules; Arden's supplied fingerprint uses the shared 12340 location RVAs.
     const bool knownClient=IsKnownVerified12340Client(client);
     const bool bundled=fingerprint.empty()&&knownClient;
     if(!bundled&&(client.sha256.empty()||fingerprint!=client.sha256)) {status="Unrecognized executable fingerprint; Default environment";failure=configureFailure=LocationFailure::FingerprintMismatch;return;}

@@ -110,7 +110,7 @@ struct CloudConfig
     // Fixed layer geometry in world units (WoW world Z is up).
     float bottom = 850.f;
     float top = 3000.f;
-    float maxDistance = 26000.f;
+    float maxDistance = 200000.f;
 
     // Field
     float coverage = .5f;          // user slider, biases the weather map
@@ -153,14 +153,12 @@ struct CloudConfig
     // sky is rendered rather than photographed: distance has to desaturate
     // the radiance AND eat the silhouette.
     V3 hazeColor{ .58f, .68f, .84f };
-    float aerialDistance = 13000.f;   // e-folding distance of that fade
+    float aerialDistance = 100000.f;  // half the default march distance, matching c22
     float aerialOpacity = .60f;       // how much of the silhouette it eats
 
-    // March. The step is a WORLD length, not a slice of the span: a ray
-    // along the horizon crosses 25000 units of layer, and dividing that by
-    // the step budget gives 260-unit steps that step clean over every
-    // detail feature. It grows with distance because the pixel footprint
-    // does, which is what keeps the far field affordable.
+    // March. The step is a WORLD length, not a slice of the span: a shallow
+    // ray can cross 200000 units of layer, and distance growth keeps that far
+    // field affordable without dividing the cloud detail into noisy slices.
     int steps = 96;
     float baseStep = 70.f;
     float stepGrowth = .010f;
@@ -379,7 +377,7 @@ struct Marcher
         const bool belowDeck = origin.z < c.bottom;
         const float horizon = belowDeck ? Smoothstep(0.f, std::max(c.horizonFade, .001f), dir.z) : 1.f;
         if (horizon <= .002f) return {};
-        const float reach = 1.f - Smoothstep(c.maxDistance * .55f, c.maxDistance, entry);
+        const float reach = 1.f - Smoothstep(c.maxDistance * .9f, c.maxDistance, entry);
         const float fade = horizon * reach;
         if (fade <= .002f) return {};
 

@@ -1,9 +1,12 @@
 // Portable regression tests for the actual F7 geometry and gesture implementation.
 // g++ -std=c++20 -Wall -Wextra -pedantic tools/OverlayLayoutRegression.cpp -o build/overlay-test
 #include "../src/Environment/OverlayLayout.h"
+#include <algorithm>
 #include <cassert>
+#include <cwchar>
 #include <iostream>
 #include <set>
+#include <tuple>
 #include <utility>
 
 using namespace tuningoverlay;
@@ -22,6 +25,12 @@ static void ReachEverySetting(OverlayLayout& l) {
     }
     const auto clear=l.ClearOverridesButton(),reset=l.ResetButton();
     const auto inheritTab=l.InheritGlobalTabButton();
+    const auto allGlobal=l.AllToGlobalButton();
+    assert(l.panel.Contains(allGlobal.x,allGlobal.y)&&
+           l.panel.Contains(allGlobal.x+allGlobal.w-1,allGlobal.y+allGlobal.h-1));
+    assert(allGlobal.y>=l.Scope(0).y+l.Scope(0).h&&allGlobal.y+allGlobal.h<l.Content().y);
+    assert(l.HitItem(allGlobal.x+1,allGlobal.y+1)==-1);
+    assert(!l.Begin(allGlobal.x+1,allGlobal.y+1));
     assert(l.panel.Contains(clear.x,clear.y));
     assert(clear.x>=l.Content().x&&clear.x+clear.w<reset.x);
     assert(inheritTab.x==clear.x&&inheritTab.y==clear.y&&inheritTab.w==clear.w&&inheritTab.h==clear.h);
@@ -99,6 +108,17 @@ int main() {
             }
         }
     }
+    for(const wchar_t* section:{L"Atmosphere",L"VolumetricClouds",L"Water"}) {
+        for(const auto& [key,lo,hi,value]:{
+            std::tuple<const wchar_t*,int,int,int>{L"ManualColorRed",0,255,255},
+            {L"ManualColorGreen",0,255,255},{L"ManualColorBlue",0,255,255},
+            {L"ManualColorAlphaPercent",0,100,0},{L"ManualColorBrightnessPercent",0,300,100}}) {
+            const auto found=std::find_if(items.begin(),items.end(),[&](const Item& item){
+                return item.kind==KIND_SLIDER&&std::wcscmp(item.section,section)==0&&std::wcscmp(item.key,key)==0;
+            });
+            assert(found!=items.end()&&found->lo==lo&&found->hi==hi&&found->value==value);
+        }
+    }
     for(const auto& [width,height]:{std::pair{640,480},{800,600},{1280,720},{1920,1080},{2560,1440},{3840,2160}}) {
         for(float dpi:{1.f,1.25f,1.5f,2.f}) {
             OverlayLayout l;l.Fit(width,height,dpi);Inside(l);ReachEverySetting(l);
@@ -137,7 +157,8 @@ int main() {
     l.Drag(thumb.x+1,10000);assert(l.offsets[cloudTab]==l.MaxScroll(cloudTab));
     l.Drag(thumb.x+1,-10000);assert(l.offsets[cloudTab]==0);l.Cancel();
     l.Scroll(3);l.SelectTab(0);l.SelectTab(cloudTab);assert(l.offsets[cloudTab]==3);
-    l.panel.h=1000;l.Clamp();assert(l.offsets[cloudTab]==0); // Growing removes stale scroll offsets.
+    l.panel.h=1000;l.Clamp();assert(l.offsets[cloudTab]==std::min(3,l.MaxScroll(cloudTab)));
+    // Growing the panel clamps a stale position to the new maximum scroll.
     auto close=l.Close();assert(!l.Begin(close.x+1,close.y+1));
     auto reset=l.ResetButton();assert(!l.Begin(reset.x+1,reset.y+1));
     auto row=l.Row(Tabs()[cloudTab].begin);assert(!l.Begin(row.x+1,row.y+1));

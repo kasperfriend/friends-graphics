@@ -302,9 +302,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(ramp<=0.0) return scene;
     // The liquid owns its own pixels: the water stage marched that column with this same
     // coefficient and added this same in-scatter, so shading them here would apply the
-    // medium twice. The mask's red channel is "a water tile was drawn here", which is the
-    // same test the occlusion and atmosphere passes use.
-    if(tex2D(waterMask,sampleUv).r>.25) return scene;
+    // medium twice. The mask's red/green channels mark replacement/native water respectively,
+    // matching the combined coverage test used by occlusion and lighting passes.
+    float4 waterData=tex2D(waterMask,sampleUv);
+    if(max(waterData.r,waterData.g)>.25) return scene;
 
     float raw=tex2D(sceneDepth,sampleUv).r;
     float strength=saturate(deepColour.w)*ramp;
@@ -603,6 +604,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
             if (!IsActive()) { NoteIdle(1, "the pass is not active (Enabled, configuration or shader)"); return false; }
             if (!device || !targetSurface) { NoteIdle(1, "no device or target surface"); return false; }
             if (!depthTexture) { NoteIdle(1, "no captured depth texture - depth capture is off (MSAA refuses INTZ, or the capture never latched)"); return false; }
+            if(frameContext.worldScene.state!=WorldSceneState::InWorld)
+            {
+                NoteIdle(2, "no playable world scene was confirmed for this frame");
+                return false;
+            }
             const float ramp = std::clamp(frameContext.underwaterRamp, 0.f, 1.f);
             // Not submerged: the pass would return the frame it was handed, pixel for pixel,
             // so it does not run at all. This is the identity the whole underwater path is

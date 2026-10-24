@@ -25,9 +25,9 @@ namespace renderer::godrays
     struct SourceLook
     {
         // Sunward glow falloff in squared screen-height units: exp(-d^2 * spread).
-        // 6 keeps beams visible out to about d=0.5 and fades the far sky; 2.2
-        // washed the whole frame, 10 kept the rays too close to the disc.
-        float skySpread = 6.0f;
+        // A compact source keeps the circular bloom close to the disc; the radial
+        // gather still carries visible beams across the frame.
+        float skySpread = 28.0f;
         // Minimum glow in open sky. Zero keeps far sky from washing out; the
         // gather's lift below would brighten any residual floor too much.
         float skyFloor = 0.0f;
@@ -95,10 +95,10 @@ namespace renderer::godrays
         return light / std::max(weightSum, 0.001f);
     }
 
-    // The shaders lift the gathered value with pow(x, 0.72) * 1.2 before the additive
-    // composite, so faint streaks read as beams instead of a uniform wash.
+    // A restrained lift preserves visible beams without turning a faint source
+    // mask into a broad circular wash around the disc.
     inline float LiftGather(float average)
     {
-        return std::pow(Saturate(average), 0.72f) * 1.2f;
+        return std::pow(Saturate(average), 0.9f);
     }
 }

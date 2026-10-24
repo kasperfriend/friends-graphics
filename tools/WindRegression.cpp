@@ -873,7 +873,7 @@ static void TestConfigurationAndWiring()
     Check(main.find("if(f7Edited||(locationTuningChanged&&placeTuningStale)){") != main.npos &&
           main.find("ReloadWindTuning();stage(tWind);") != main.npos &&
           main.find("watereffect::ReloadTuning();stage(tWater);") != main.npos &&
-          main.find("volume::ReloadTuning();stage(tVolume);") != main.npos &&
+          main.find("volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);") != main.npos &&
           main.find("weathervisuals::ReloadTuning();stage(tWeather);") != main.npos &&
           main.find("AppliedTuningStillInForce(") != main.npos &&
           main.find("the place that settled is the one already in force") != main.npos &&

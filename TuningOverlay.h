@@ -91,6 +91,19 @@ inline bool Save(Item& i){
  i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
  return false;
 }
+inline bool ToggleAllToGlobal(){
+ const bool next=!renderer::locationtuning::AllToGlobalEnabled();
+ SetLastError(0);
+ if(!renderer::locationtuning::SetAllToGlobal(next)){
+  const DWORD error=GetLastError();
+  saveError="All-to-global update failed (Windows "+std::to_string(error)+"). Send MenuDiagnostics.log";
+  renderer::menudiagnostics::Write("SET ALL TO GLOBAL FAILED win32="+std::to_string(error));
+  return false;
+ }
+ CancelInteraction();ReloadValues();saveError.clear();
+ renderer::menudiagnostics::Write(next?"ALL TO GLOBAL ENABLED":"ALL TO GLOBAL DISABLED - LOCATION VALUES RESTORED");
+ return true;
+}
 inline bool ResetActiveTab(){
  if(layout.activeTab<0||layout.activeTab>=int(Tabs().size()))return false;
  const auto tab=Tabs()[layout.activeTab];bool changed=false,failed=false;
@@ -121,7 +134,8 @@ inline bool ClearGlobalActiveTab(){
  return changed;
 }
 inline bool CanInheritGlobalTab(){
- return !renderer::locationtuning::editGlobal&&renderer::locationtuning::editable&&!renderer::locationtuning::IsGlobal(items[Tabs()[layout.activeTab].begin].section);
+ return !renderer::locationtuning::editGlobal&&!renderer::locationtuning::AllToGlobalEnabled()&&
+  renderer::locationtuning::editable&&!renderer::locationtuning::IsGlobal(items[Tabs()[layout.activeTab].begin].section);
 }
 inline bool HasActiveTabInheritGlobal(){
  if(!CanInheritGlobalTab())return false;
@@ -250,6 +264,7 @@ inline bool Update(){
   if(layout.Begin(px,py)){dragItem=-1;}
   else if(const int tab=layout.HitTab(px,py);tab>=0){layout.SelectTab(tab);dragItem=-1;}
   else if(HitScope(px,py)>=0){SelectScope(HitScope(px,py));}
+  else if(layout.AllToGlobalButton().Contains(px,py)){dragItem=-1;changed=ToggleAllToGlobal();}
   else if(layout.ScrollButton(false).Contains(px,py)){layout.Scroll(-1);}
   else if(layout.ScrollButton(true).Contains(px,py)){layout.Scroll(1);}
   else if(CanClearGlobalTab()&&layout.ClearOverridesButton().Contains(px,py)){dragItem=-1;changed=ClearGlobalActiveTab();}
@@ -356,11 +371,17 @@ inline void Draw(IDirect3DDevice9* d){
   const std::string text=scope==2?"Global - entire game":scope==0?"Entire zone - "+manager.ZoneName():enabled?"This subarea - "+manager.AreaName():"Subarea unavailable";
   label(b.x+8,b.y+4,text,enabled?0xffdce5ea:0xff81919c,b.x+b.w-8);
  }
- label(x+12,y+168,!saveError.empty()?saveError:renderer::locationtuning::editGlobal?
+ const bool allToGlobal=renderer::locationtuning::AllToGlobalEnabled();
+ const auto allGlobalButton=layout.AllToGlobalButton();
+ box(allGlobalButton,allToGlobal?0xff246b47:0xff263f4b);
+ label(allGlobalButton.x+8,allGlobalButton.y+6,allToGlobal?"ALL TO GLOBAL: ON":"ALL TO GLOBAL: OFF",
+  allToGlobal?0xff9dffc0:0xffb5cbd6,allGlobalButton.x+allGlobalButton.w-6);
+ label(x+12,y+168,!saveError.empty()?saveError:allToGlobal?
+  "Zone/area values are masked, not changed. Turn off to restore them.":renderer::locationtuning::editGlobal?
   "Global edits override all locations. Clear overrides restores location settings.":renderer::locationtuning::editable?
   "Priority: Global > Subarea > Zone. Image & color always applies globally.":
   "Location not verified: edits apply globally. Select Global for priority overrides.",
-  saveError.empty()?0xffb5cbd6:0xffffaaaa,x+w-12);
+  saveError.empty()?0xffb5cbd6:0xffffaaaa,allGlobalButton.x-8);
  box({x+8,y+198,220,panel.h-234},0xff101e28);
  for(int tab=0;tab<int(Tabs().size());++tab){
   const auto b=layout.TabButton(tab);const bool selected=tab==layout.activeTab;

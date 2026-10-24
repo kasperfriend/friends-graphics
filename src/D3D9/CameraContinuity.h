@@ -5,6 +5,19 @@
 
 namespace renderer {
 
+// Standard D3D row-vector perspective projection, including the valid
+// infinite-far-plane form where P22 is exactly 1 (or rounds to 1 in float).
+// Orthographic, reversed-depth, and otherwise unrelated projection matrices
+// remain ineligible as camera evidence.
+inline bool IsStandardD3DPerspectiveProjection(float p00, float p11, float p22,
+                                               float p23, float p32, float p33) noexcept
+{
+    return std::isfinite(p00) && std::isfinite(p11) && std::isfinite(p22) &&
+           std::isfinite(p23) && std::isfinite(p32) && std::isfinite(p33) &&
+           p00 > 0.0f && p11 > 0.0f && p22 >= 1.0f - 1.0e-6f && p32 < 0.0f &&
+           std::fabs(p23 - 1.0f) <= 0.001f && std::fabs(p33) <= 0.001f;
+}
+
 // Decides whether a candidate view matrix is the frame's real camera.
 //
 // CameraCapture reads the projection, the light direction and the daylight
@@ -32,6 +45,16 @@ public:
 
     bool MatchesViewport(unsigned viewportWidth, unsigned viewportHeight) const {
         return valid && viewportWidth == width && viewportHeight == height;
+    }
+
+    // A full-frame shader capture can have a valid current orientation that the
+    // continuity gate rejects after a hard camera turn. It is safe to offer that
+    // orientation to sky-pose corroboration only when its independently decoded
+    // eye still agrees with the accepted world anchor.
+    bool NearAcceptedEye(const float position[3], float maxDistance) const {
+        return valid && std::isfinite(maxDistance) && maxDistance >= 0.f &&
+            std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2]) &&
+            Distance(position, camera) <= maxDistance;
     }
 
     bool MatchesBasis(const float viewBasis[3][4], unsigned viewportWidth, unsigned viewportHeight) const {
@@ -231,7 +254,10 @@ public:
     // consecutive frames say the same thing: long enough to outlive a stray
     // full-screen transform, short enough that a real snap is followed at once.
     static constexpr int kJumpConfirmationFrames = 2;
-    static constexpr unsigned kMaxCandidates = 4;
+    // A frame may expose several full-frame transforms before the actual sky
+    // camera. Keep enough alternatives that early model/reflection draws do not
+    // crowd it out before the celestial pass arrives.
+    static constexpr unsigned kMaxCandidates = 16;
 
     void Reset() noexcept
     {
@@ -245,6 +271,7 @@ public:
     void BeginFrame() noexcept { m_candidateCount = 0; }
 
     bool HasCandidate() const noexcept { return m_candidateCount != 0; }
+    unsigned CandidateCount() const noexcept { return m_candidateCount; }
     bool HasReference() const noexcept { return m_haveReference; }
 
     // A real capture re-synchronises the selector: the next sky candidate is
@@ -300,15 +327,20 @@ public:
                 const float error = std::max(std::abs(x - disc.screenX), std::abs(y - disc.screenY));
                 if (best < 0 || error < bestError) { best = int(i); bestError = error; }
             }
-            if (best < 0)
-                return false; // every transform this frame offered contradicts its own disc
-            Copy(m_candidates[best], outBasis);
-            corroborated = true;
-            SetReference(outBasis);
-            return true;
+            if (best >= 0)
+            {
+                Copy(m_candidates[best], outBasis);
+                corroborated = true;
+                SetReference(outBasis);
+                return true;
+            }
+            // The observation may be stale or its independently tracked world
+            // direction may not be usable this frame. Do not let contradictory
+            // disc evidence veto an otherwise continuous camera; run the same
+            // bounded continuity/jump confirmation below as a no-disc frame.
         }
 
-        // No disc: fall back to continuity with the accepted camera.
+        // No usable disc evidence: fall back to continuity with the accepted camera.
         if (m_haveReference)
         {
             int best = -1;

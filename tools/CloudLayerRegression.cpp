@@ -23,6 +23,9 @@ int main() try
     const std::string text((std::istreambuf_iterator<char>(source)), {});
     Require(text.find("float HeightFraction(float3 p) { return saturate((p.z-layer.x)*layer.z); }") != std::string::npos,
             "production height profile uses world Z, not camera-relative curvature");
+    Require(text.find("if(SunDiscPixel(uv,linearRaw)>.5) return scene;") != std::string::npos &&
+            text.find("if(moonCentre>.5)return scene;") != std::string::npos,
+            "cloud compositing preserves verified vanilla sun and moon sprite pixels");
     Require(text.find("m_fieldsDevice=d;") != std::string::npos &&
             text.find("device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device)") != std::string::npos,
             "cloud noise textures are recreated when the D3D device implementation changes");
@@ -40,8 +43,25 @@ int main() try
     Require(text.find("std::thread([worker,cachePath]") != std::string::npos &&
             workerWait != std::string::npos && cacheRead != std::string::npos && workerWait < cacheRead,
             "cold-start cloud generation owns its async state and avoids per-frame cache I/O while the worker runs");
-    Require(text.find("const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};") != std::string::npos,
+    Require(text.find("const float layer[4]={settings.baseAltitude,layerTop,1.f/thickness,settings.maxDistance};") != std::string::npos,
             "production march receives configured absolute layer bounds");
+    Require(text.find("cameraLayer=") != std::string::npos &&
+            text.find("forwardZ=") != std::string::npos &&
+            text.find("top=\"<<layerTop") != std::string::npos,
+            "cloud diagnostics identify whether a pitched camera is above the fixed world-Z layer");
+    Require(text.find("++m_renderFrames==1||m_renderFrames%600==0") != std::string::npos &&
+            text.find("m_lastDiagnosticState!=event") != std::string::npos &&
+            text.find("logState(\"render=active\")") != std::string::npos,
+            "cloud diagnostics record immediately, on skip transitions, and when rendering recovers");
+    const auto cloudDynamicsUpdate=text.find("static_cast<CloudShape&>(settings)=m_dynamics.Update");
+    const auto layerRefresh=text.find("refreshLayerDiagnostic();",cloudDynamicsUpdate);
+    Require(cloudDynamicsUpdate!=std::string::npos && layerRefresh!=std::string::npos &&
+            layerRefresh>cloudDynamicsUpdate,
+            "the logged and rendered layer bounds follow the live cloud transition settings");
+    Require(text.find("fade*=1-smoothstep(layer.w*.9,layer.w,entry);") != std::string::npos,
+            "distance fade preserves cloud opacity until the final tenth of the march range");
+    Require(text.find("if(maxDistance==26000)maxDistance=200000;") != std::string::npos,
+            "existing installs migrate the former 26,000-unit default to the wider sky reach");
 
     CloudConfig c;
     c.bottom = 900; c.top = 2300; c.windSpeed = 0;
@@ -78,9 +98,46 @@ int main() try
                 Near((camera+view*entry).z,c.bottom) && Near((camera+view*exit).z,c.top),
                 "changing view direction does not move the cloud base or top");
     }
+    {
+        constexpr float pi=3.14159265358979323846f;
+        const float heights[]={0.f,899.f,900.f,1600.f,2300.f,2301.f,8000.f};
+        unsigned checked=0;
+        for (float height : heights) for (int yawDeg=0;yawDeg<360;yawDeg+=15)
+            for (int pitchDeg=-88;pitchDeg<=88;pitchDeg+=4) {
+                const float yaw=float(yawDeg)*pi/180.f,pitch=float(pitchDeg)*pi/180.f;
+                const V3 ray=Normalize({std::cos(yaw)*std::cos(pitch),
+                                        std::sin(yaw)*std::cos(pitch),std::sin(pitch)});
+                const V3 camera{7000,-4000,height};
+                bool expected=false;
+                if (std::fabs(ray.z)<1e-6f) {
+                    expected=height>=c.bottom&&height<=c.top;
+                } else {
+                    const float a=(c.bottom-height)/ray.z,b=(c.top-height)/ray.z;
+                    const float first=std::max(0.f,std::min(a,b)),last=std::max(a,b);
+                    expected=last>first&&first<c.maxDistance;
+                }
+                const bool hit=ground.LayerRange(camera,ray,entry,exit);
+                if (hit!=expected) throw std::runtime_error("cloud intersection changed across camera height/view sweep");
+                if (hit && exit<=entry) throw std::runtime_error("cloud layer sweep produced an empty interval");
+                ++checked;
+            }
+        Require(checked>4000,"absolute cloud-layer intersections survive a dense yaw/pitch/height sweep");
+    }
 
     c.coverage=1.f;
     float transmittance, depth;
+    Marcher upward(c,resources,{0,0,0});
+    unsigned visibleElevations=0;
+    for(float pitchDegrees : {.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f}) {
+        const float pitch=pitchDegrees*3.14159265358979323846f/180.f;
+        const V3 ray=Normalize({0,std::cos(pitch),std::sin(pitch)});
+        upward.March({0,0,0},ray,{0,0,1},.5f,transmittance,depth);
+        if(transmittance>=.99f)
+            throw std::runtime_error("cloud deck disappeared during the upward camera-elevation sweep");
+        ++visibleElevations;
+    }
+    Require(visibleElevations==9,
+            "cloud opacity survives shallow-above-horizon through near-zenith views");
     const V3 light{0,0,1};
     flying.March({0,0,3000}, {0,0,1}, light, 0, transmittance, depth);
     Require(transmittance==1.f, "above the deck, the view march leaves overhead sky clear");

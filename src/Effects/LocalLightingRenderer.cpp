@@ -98,7 +98,8 @@ float2 Snap(float2 uv) {
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  uv=Snap(uv);
  float raw=tex2D(depthMap,uv).r;
- if(raw>=.99990||tex2D(waterMask,uv).r>.25) return float4(0,0,0,0);
+ float4 waterData=tex2D(waterMask,uv);
+ if(raw>=.99990||max(waterData.r,waterData.g)>.25) return float4(0,0,0,0);
  float z=Linear(raw);
  // Screen-space visibility was deliberately removed to avoid duplicate
  // shadows. Its debug view is therefore black; return before reconstructing
@@ -277,7 +278,8 @@ float4 tuning:register(c1); // x=debug mode
 float4 projection:register(c2);
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv); float raw=tex2D(depthMap,uv).r;
- if(raw>=.99990||tex2D(waterMask,uv).r>.25)return scene;
+ float4 waterData=tex2D(waterMask,uv);
+ if(raw>=.99990||max(waterData.r,waterData.g)>.25)return scene;
  float receiverZ=projection.y/(raw-projection.x);
  // Account for a continuous depth slope across a low-resolution texel.
  // Use the smaller one-sided differences so silhouettes do not inflate it.
