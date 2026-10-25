@@ -748,10 +748,10 @@ int main() try {
  Require(pixel(64,110)==0xff202020,"cloud composite leaves solid geometry byte-identical");
  Require((overcastSky&255)>((overcastSky>>16)&255),"deck takes the environment ambient tint instead of a fixed white");
  // WoW's moon billboard writes a near view-space depth into only its own
- // pixels. It must neither clip the cloud march nor be fogged over by the
- // cloud composite; an ordinary foreground surface at the same depth must
- // still occlude the deck. Search the deterministic clear-sky image away from
- // the disc so the occluder assertion measures real cloud contribution.
+ // pixels. The verified moon depth must not clip the cloud march, and the
+ // original disc must now be cloud-shaded; an ordinary foreground surface at
+ // the same depth must still occlude the deck. Search away from the disc in
+ // the deterministic image so the occluder assertion measures real cloud contribution.
  const auto clearCloudImage=readCloudImage();
  constexpr int moonX=64,moonY=20;const float moonU=float(moonX)/128.f,moonV=float(moonY)/128.f;
  const Vec3 moonRay=Normalize({(moonU*2-1)/f.projUnpack[2],(1-moonV*2)/f.projUnpack[3],1});
@@ -784,8 +784,8 @@ int main() try {
  f.moonDiscViewDepth=12.f;f.moonDiscValid=true;
  Require(renderClouds(),"tracked moon depth cloud fixture renders");
  const auto trackedMoonImage=readCloudImage();
- Require(trackedMoonImage[moonY*128+moonX]==moonSpriteColor,
-         "cloud compositing restores the original tracked moon sprite pixel");
+ Require(diff(trackedMoonImage[moonY*128+moonX],moonSpriteColor)>8,
+         "cloud compositing shades the original tracked moon sprite instead of leaving a clear hole");
  Require(diff(trackedMoonImage[foregroundY*128+foregroundX],0xff202020)<=2,
          "ordinary foreground geometry still occludes clouds outside the tracked moon cone");
  f.moonDiscValid=false;f.moonDiscViewDepth=0.f;
@@ -1057,7 +1057,7 @@ int main() try {
  Require(diff(atmosphereMoonUnprotected,atmosphereMoonColor)>8,
          "the atmosphere fixture visibly alters an unprotected billboard pixel");
  Require(diff(atmosphereMoonProtected,atmosphereMoonColor)<=2,
-         "the atmosphere composite restores the original depth-verified moon pixel");
+         "the atmosphere pass preserves the cloud-composited verified moon scene pixel");
 
  f.moonDiscValid=false;f.sunDiscScreenX=.5f;f.sunDiscScreenY=.5f;f.sunDiscViewDepth=500.f;
  constexpr DWORD atmosphereSunColor=0xff40c070;

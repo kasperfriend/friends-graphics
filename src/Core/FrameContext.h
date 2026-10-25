@@ -57,8 +57,9 @@ namespace renderer
         float sunScreenY = -1.0f;
         float sunStrength = 0.0f;
         // The real camera-relative moon billboard, captured only when its draw
-        // is visible this frame. Clouds match its screen centre and view depth so
-        // the sprite does not act like an opaque wall in the scene depth buffer.
+        // is visible this frame. Clouds match its centre, view depth and flat
+        // sprite plane so the near billboard is shaded as sky without letting a
+        // wall at the same distance turn into a cloud hole.
         float moonDiscScreenX = -1.0f;
         float moonDiscScreenY = -1.0f;
         float moonDiscViewDepth = 0.0f;
@@ -220,6 +221,9 @@ namespace renderer
         uint32_t cameraCaptureProjectionRejected = 0;
         uint32_t cameraCaptureBasisRejected = 0;
         uint32_t cameraCaptureContinuityRejected = 0;
+        uint32_t cameraCaptureProjectionScaleMatches = 0;
+        uint32_t cameraCaptureProjectionEyeMatches = 0;
+        uint32_t cameraCaptureProjectionFallbackCandidates = 0;
         // Sky-fallback diagnostics: a zero count means no eligible current-frame
         // candidate survived capture filters; a nonzero count with no fresh pose
         // means corroboration/continuity intentionally kept it out.

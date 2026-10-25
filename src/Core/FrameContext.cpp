@@ -82,6 +82,8 @@ namespace renderer
         cameraCaptureStateRejected = cameraCaptureNonFinite = 0;
         cameraCaptureNotFullFrame = cameraCaptureProjectionRejected = 0;
         cameraCaptureBasisRejected = cameraCaptureContinuityRejected = 0;
+        cameraCaptureProjectionScaleMatches = cameraCaptureProjectionEyeMatches = 0;
+        cameraCaptureProjectionFallbackCandidates = 0;
         skyPoseCandidateCount = 0;
         skyPoseDiscEvidence = false;
         skyEyeCandidateObserved = false;

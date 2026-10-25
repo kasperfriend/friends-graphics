@@ -26,9 +26,10 @@ int main() try
     Require(text.find("if(SunDiscPixel(uv,linearRaw)>.5) return scene;") == std::string::npos &&
             text.find("float sunCentre=SunDiscPixel(uv,linearRaw);") != std::string::npos &&
             text.find("float sky=max(step((depthRange.z+1)*.5,linearRaw),max(moonCentre,sunCentre));") != std::string::npos &&
-            text.find("if(moonCentre>.5)return scene;") != std::string::npos &&
+            text.find("if(moonCentre>.5)return scene;") == std::string::npos &&
+            text.find("float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));") != std::string::npos &&
             text.find("float sunPixel=SunDiscPixel(uv,rawDepth);") != std::string::npos,
-            "clouds attenuate the tracked sun as sky while keeping the near moon sprite intact");
+            "clouds shade verified sun and moon pixels as sky without treating their billboards as depth edges");
     Require(text.find("m_fieldsDevice=d;") != std::string::npos &&
             text.find("device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device)") != std::string::npos,
             "cloud noise textures are recreated when the D3D device implementation changes");

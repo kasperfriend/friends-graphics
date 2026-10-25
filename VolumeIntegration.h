@@ -1067,8 +1067,9 @@ bool Composite(IDirect3DDevice9* d) {
         frameCtx.directLightIsMoon = stable.isMoon;
         frameCtx.directLightValid = true;
 
-        // The sun disc is independent of the chosen glare source: clouds can
-        // preserve the client's original sun even when the moon is dominant.
+        // The sun's depth/sky mask is independent of the chosen glare source,
+        // so a moon-dominant frame still lets clouds shade the tracked sun at
+        // its own position without moving or duplicating the original disc.
         frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&
             !frameCtx.cameraPoseStale;
         frameCtx.sunDiscExpectedRawDepth = -1.f;

@@ -505,9 +505,9 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float sprite=withinDisc>.5?SpriteVerified(moonDisc.xy):0;
  float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);
- // Keep the camera-relative moon sprite exactly as drawn; unlike the tracked
- // world-space sun, the moon is a near billboard and should not be clouded.
- if(moonCentre>.5)return scene;
+ // The verified near moon sprite is not a depth occluder for the cloud march,
+ // but it is still part of the scene radiance: composite clouds over it just
+ // as over the tracked sun, rather than leaving a clear circular cut-out.
  float sunCentre=SunDiscPixel(uv,linearRaw);
  float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x,sprite),MoonDiscPixel(tapUv1,taps.y,tapZ.y,sprite),
                         MoonDiscPixel(tapUv2,taps.z,tapZ.z,sprite),MoonDiscPixel(tapUv3,taps.w,tapZ.w,sprite));
@@ -1002,7 +1002,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" camCap=("<<f.cameraCaptureAttempts<<','<<f.cameraCaptureAccepted<<','
      <<f.cameraCaptureStateRejected<<','<<f.cameraCaptureNonFinite<<','
      <<f.cameraCaptureNotFullFrame<<','<<f.cameraCaptureProjectionRejected<<','
-     <<f.cameraCaptureBasisRejected<<','<<f.cameraCaptureContinuityRejected<<')';
+     <<f.cameraCaptureBasisRejected<<','<<f.cameraCaptureContinuityRejected<<','
+     <<f.cameraCaptureProjectionScaleMatches<<','<<f.cameraCaptureProjectionEyeMatches<<','
+     <<f.cameraCaptureProjectionFallbackCandidates<<')';
   if(f.skyProjectionAvailable)
    out<<" skyProj="<<f.skyProjection[0]<<','<<f.skyProjection[1]<<','
       <<f.skyProjection[2]<<','<<f.skyProjection[3]<<','

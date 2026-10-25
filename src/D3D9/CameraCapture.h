@@ -44,6 +44,7 @@ namespace renderer
             m_skyPose.BeginFrame();
             m_fallbackSawSceneDraw = false;
             m_rejectedCaptureValid = false;
+            m_rejectedCaptureProjectionScaleMatched = false;
             m_skyObservationResult = FrameContext::SkyObservationResult::NotAttempted;
             m_skyProjectionAvailable = false;
             m_skyProjectionCacheUsable = false;
@@ -122,10 +123,13 @@ namespace renderer
         // their rows or their translation as the camera is exactly the
         // reported "clouds and lights dragged along with the camera".
         bool m_fallbackSawSceneDraw = false;
-        // The last full-frame shader pose refused only by orientation continuity;
-        // its eye is retained separately and used only if the selector later
-        // corroborates that exact basis.
+        // A bounded full-frame shader eye can arrive with a non-camera depth
+        // projection, or be refused only by orientation continuity. In either
+        // case retain it only for same-frame sky-selector corroboration. The
+        // scale-match flag permits renewing the validated projection's age only
+        // for the projection-rejected case with matching focal scales.
         bool m_rejectedCaptureValid = false;
+        bool m_rejectedCaptureProjectionScaleMatched = false;
         FrameContext::SkyObservationResult m_skyObservationResult =
             FrameContext::SkyObservationResult::NotAttempted;
         float m_skyProjection[6]{}; // P00, P11, P22, P23, P32, P33 from the last finite observation
@@ -149,6 +153,7 @@ namespace renderer
         float m_skyEyeBasis[3][4]{};
         float m_rejectedCaptureEye[3]{};
         float m_rejectedCaptureBasis[3][4]{};
+        D3DVIEWPORT9 m_rejectedCaptureVp{};
         D3DMATRIX m_fallbackProj{};
         D3DVIEWPORT9 m_fallbackVp{};
         // Performance-clock seconds when a draw last carried the camera's eye.

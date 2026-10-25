@@ -587,10 +587,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  edge*=sky*horizon*horizon;
  result=lerp(result,pow(max(edgeColor.rgb,0),2.2),edge);
  // Boundary depth already clips the air integration to the water surface.
- // Restore both original celestial billboards from the scene copy. The sun is
- // accepted only at sky/far depth; the camera-relative moon additionally has
- // to match a flat, verified sprite plane so a wall at the same distance stays
- // an occluder. Neither body should inherit this pass's fog or cloud scattering.
+ // Keep the current scene radiance at verified celestial pixels instead of
+ // adding this pass's haze again. Clouds have already shaded those scene pixels.
+ // The sun is accepted only at sky/far depth; the camera-relative moon also
+ // has to match a flat verified sprite plane so a wall at that distance stays
+ // an occluder.
  float sunPixel=SunDiscPixel(uv,sceneRaw,skyThreshold);
  float2 moonDelta=float2((uv.x-moonDisc.x)*moonDepth.z,uv.y-moonDisc.y);
  float moonWithin=1-step(length(moonDelta),moonDisc.z*1.75);

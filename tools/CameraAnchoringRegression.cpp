@@ -114,6 +114,16 @@ int main() try
             "a stale cached projection cannot corroborate the current sky transform");
         Require(!CanReuseValidatedPerspective(true, true, std::nanf(""), 1000.f),
             "non-finite cache age never corroborates a sky transform");
+        Require(MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.823f,1.968f),
+            "a current full-frame shader camera may renew the cached projection when both focal scales match");
+        Require(!MatchesValidatedPerspectiveScales(true,false,.821558f,1.96261f,.821558f,1.96261f),
+            "matching focal scales cannot renew a projection across screen viewports");
+        Require(!MatchesValidatedPerspectiveScales(false,true,.821558f,1.96261f,.821558f,1.96261f),
+            "an unvalidated projection cannot be renewed from matching scales alone");
+        Require(!MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.9f,1.96261f),
+            "a changed focal scale cannot keep a stale projection alive");
+        Require(!MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.821558f,std::nanf("")),
+            "non-finite shader focal scales cannot renew the validated projection");
     }
 
     // ---------------------------------------------------------------- floor ---
@@ -317,6 +327,11 @@ int main() try
                 Contains(clouds, "renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)") &&
                 Contains(composite, "frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&"),
             "clouds shade a depth-matched tracked sun without treating its billboard depth as terrain");
+        Require(!Contains(clouds, "if(moonCentre>.5)return scene;") &&
+                Contains(clouds, "float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);") &&
+                Contains(clouds, "float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));") &&
+                Contains(clouds, "float sky=max(step((depthRange.z+1)*.5,linearRaw),max(moonCentre,sunCentre));"),
+            "the verified near-moon depth is ignored for cloud marching but its original disc is still cloud-shaded");
         // Both copies of the helper must stay in the same units the host
         // uploads (raw viewport depth) and with the same arity as their calls:
         // only one of them compiling is invisible until runtime.

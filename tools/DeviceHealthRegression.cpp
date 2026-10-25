@@ -441,7 +441,7 @@ int main() try
                     Contains(atmosphere, "MoonDiscPixel(uv,sceneRaw,skyThreshold,moonSprite)") &&
                     Contains(atmosphere, "SetPixelShaderConstantF(9,sunDisc,1)") &&
                     Contains(atmosphere, "SetPixelShaderConstantF(11,moonDisc,1)"),
-                "the atmosphere composite restores the tracked sun and depth-verified moon billboards");
+                "the atmosphere pass preserves cloud-composited tracked sun and depth-verified moon pixels");
             Require(Contains(distanceFog, "HasPlayableWorldEvidence(frame.worldScene.state,") &&
                     Contains(distanceFog, "frame.cameraValid&&!frame.cameraPoseStale") &&
                     Contains(atmosphere, "HasPlayableWorldEvidence(f.worldScene.state,") &&
@@ -496,8 +496,8 @@ int main() try
             const auto volumeSource = Read("VolumeEffects.h");
             const auto volumeIntegration = Read("VolumeIntegration.h");
             Require(Contains(capture, "m_skyPose.Observe(basis)") &&
-                    Contains(capture, "m_skyPose.Observe(rejectedBasis)") &&
-                    Contains(capture, "NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
+                    Contains(capture, "rememberRejectedCapture(rejectedEye, false)") &&
+                    Contains(capture, "eyeMatchesAcceptedAnchor") &&
                     Contains(capture, "selectedRejectedCapture") &&
                     Contains(capture, "m_cameraGate.AcceptFallback(") &&
                     Contains(capture, "cameraEyeAgeMs = 0.0f;") &&
@@ -521,8 +521,17 @@ int main() try
                     Contains(capture, "++frameContext.cameraCaptureProjectionRejected;") &&
                     Contains(capture, "++frameContext.cameraCaptureBasisRejected;") &&
                     Contains(capture, "++frameContext.cameraCaptureContinuityRejected;") &&
+                    Contains(capture, "++frameContext.cameraCaptureProjectionScaleMatches;") &&
+                    Contains(capture, "++frameContext.cameraCaptureProjectionEyeMatches;") &&
+                    Contains(capture, "++frameContext.cameraCaptureProjectionFallbackCandidates;") &&
+                    Contains(capture, "m_cameraGate.NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards)") &&
+                    Contains(capture, "skyprojection::MatchesValidatedPerspectiveScales(") &&
+                    Contains(capture, "selectedRejectedCapture && m_rejectedCaptureProjectionScaleMatched") &&
+                    Contains(capture, "m_fallbackProjectionSeconds = refreshedAt;") &&
+                    Contains(frameReset, "cameraCaptureProjectionFallbackCandidates = 0;") &&
+                    Contains(clouds, "cameraCaptureProjectionFallbackCandidates") &&
                     Contains(clouds, "camCap=("),
-                "cloud diagnostics count camera-capture attempts and each safety-gate rejection without changing the gate");
+                "only a current rigid view with a leash-bounded eye and matching focal scales can renew the validated sky camera cache");
             const auto celestialTracker = Read("src/D3D9/CelestialTracker.cpp");
             const auto atmosphereBuild = Read("tools/Test-Atmosphere.cmd");
             Require(Contains(atmosphereBuild, "src\\D3D9\\CelestialTracker.cpp") &&
