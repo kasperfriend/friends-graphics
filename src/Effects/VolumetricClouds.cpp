@@ -73,14 +73,16 @@ float4 moonControl:register(c25);   // x=vertical UV radius, y=depth tolerance, 
 // across its whole face; an angled floor, wall or roof at the same distance is
 // not. See src/Effects/CelestialDiscGate.h - change both in the same commit.
 float4 moonSprite:register(c26);
-float4 sunDisc:register(c27); // xy=tracked vanilla sun centre, z=vertical radius, w=valid
-float4 sunDepth:register(c28); // x=horizontal scale, y=expected raw depth, z=raw tolerance
+float4 sunDisc:register(c27); // xy=tracked vanilla sun centre, z=radius squared, w=valid
+float4 sunDepth:register(c28); // x=horizontal scale, y=minimum qualifying raw depth
 float SunDiscPixel(float2 uv,float rawDepth) {
  float2 delta=float2((uv.x-sunDisc.x)*sunDepth.x,uv.y-sunDisc.y);
- float disc=1-step(sunDisc.z*sunDisc.z,dot(delta,delta));
- float sky=step((depthRange.z+1)*.5,rawDepth);
- float depthMatch=1-step(max(sunDepth.z,1e-5),abs(rawDepth-sunDepth.y));
- return disc*sunDisc.w*max(sky,depthMatch);
+ float disc=step(dot(delta,delta),sunDisc.z);
+ // Normal D3D depth grows with distance: clear sky and the far sun are at or
+ // beyond the tracked depth; nearer scene geometry remains an occluder. The
+ // depth threshold and disc radius squared are precomputed by the host.
+ float depthOpen=step(sunDepth.y,rawDepth);
+ return disc*sunDisc.w*depthOpen;
 }
 float SpriteVerified(float2 centre) {
  if(moonSprite.w<.5) return 0;
@@ -437,14 +439,13 @@ float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z
 // Same contract as the march's c26 (see CelestialDiscGate.h).
 float4 moonSprite:register(c12);
 float4 mediumControl:register(c11); // x=how far the camera is under water (0 air, 1 submerged)
-float4 sunDisc:register(c13); // xy=tracked vanilla sun centre, z=vertical radius, w=valid
-float4 sunDepth:register(c14); // x=horizontal scale, y=expected raw depth, z=raw tolerance
+float4 sunDisc:register(c13); // xy=tracked vanilla sun centre, z=radius squared, w=valid
+float4 sunDepth:register(c14); // x=horizontal scale, y=minimum qualifying raw depth
 float SunDiscPixel(float2 pixelUv,float rawDepth) {
  float2 delta=float2((pixelUv.x-sunDisc.x)*sunDepth.x,pixelUv.y-sunDisc.y);
- float disc=1-step(sunDisc.z*sunDisc.z,dot(delta,delta));
- float sky=step((depthRange.z+1)*.5,rawDepth);
- float depthMatch=1-step(max(sunDepth.z,1e-5),abs(rawDepth-sunDepth.y));
- return disc*sunDisc.w*max(sky,depthMatch);
+ float disc=step(dot(delta,delta),sunDisc.z);
+ float depthOpen=step(sunDepth.y,rawDepth);
+ return disc*sunDisc.w*depthOpen;
 }
 float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth,float sprite) {
  float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
@@ -1218,9 +1219,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)*sunDepthScale;
  const float sunDepthTolerance=renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
      sunViewDepth,std::max(.75f,sunViewDepth*.04f))*sunDepthScale;
- const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,.022f,f.sunDiscValid?1.f:0.f};
+ const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,.000484f,f.sunDiscValid?1.f:0.f};
  const float sunDepth[4]={f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f),
-                          expectedSunDepth,sunDepthTolerance,0.f};
+                          expectedSunDepth-sunDepthTolerance,0.f,0.f};
 
  ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);

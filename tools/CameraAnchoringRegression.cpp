@@ -221,6 +221,9 @@ int main() try
         Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
                                    .9988f,.9985f,.001f,1.f,true),
             "a depth-writing sun billboard is preserved at its tracked depth");
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   .9992f,.9985f,.001f,1.f,true),
+            "clear sky beyond the tracked far sun depth remains eligible for cloud shading");
         Require(!IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
                                     .8f,.9985f,.001f,1.f,true),
             "nearer foreground geometry still occludes the tracked sun");
