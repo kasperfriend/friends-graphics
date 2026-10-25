@@ -1069,7 +1069,7 @@ int main() try {
  Require(diff(atmosphereSunUnprotected,atmosphereSunColor)>8,
          "the atmosphere fixture visibly alters an unprotected sun-disc pixel");
  Require(diff(atmosphereSunProtected,atmosphereSunColor)<=2,
-         "the atmosphere composite restores the original tracked sun-disc pixel");
+         "the atmosphere pass preserves the cloud-composited tracked sun scene pixel");
 
  f.directLightValid=false;settings.debugMode=VolumetricDebugMode::None;
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;

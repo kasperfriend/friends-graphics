@@ -78,6 +78,10 @@ namespace renderer
         cameraEyeAgeMs = 1.0e6f;
         cameraEyeObservedThisFrame = false;
         cameraPoseSource = PoseNone;
+        cameraCaptureAttempts = cameraCaptureAccepted = 0;
+        cameraCaptureStateRejected = cameraCaptureNonFinite = 0;
+        cameraCaptureNotFullFrame = cameraCaptureProjectionRejected = 0;
+        cameraCaptureBasisRejected = cameraCaptureContinuityRejected = 0;
         skyPoseCandidateCount = 0;
         skyPoseDiscEvidence = false;
         skyEyeCandidateObserved = false;

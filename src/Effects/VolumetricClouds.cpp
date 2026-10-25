@@ -73,6 +73,15 @@ float4 moonControl:register(c25);   // x=vertical UV radius, y=depth tolerance, 
 // across its whole face; an angled floor, wall or roof at the same distance is
 // not. See src/Effects/CelestialDiscGate.h - change both in the same commit.
 float4 moonSprite:register(c26);
+float4 sunDisc:register(c27); // xy=tracked vanilla sun centre, z=vertical radius, w=valid
+float4 sunDepth:register(c28); // x=horizontal scale, y=expected raw depth, z=raw tolerance
+float SunDiscPixel(float2 uv,float rawDepth) {
+ float2 delta=float2((uv.x-sunDisc.x)*sunDepth.x,uv.y-sunDisc.y);
+ float disc=1-step(sunDisc.z*sunDisc.z,dot(delta,delta));
+ float sky=step((depthRange.z+1)*.5,rawDepth);
+ float depthMatch=1-step(max(sunDepth.z,1e-5),abs(rawDepth-sunDepth.y));
+ return disc*sunDisc.w*max(sky,depthMatch);
+}
 float SpriteVerified(float2 centre) {
  if(moonSprite.w<.5) return 0;
  float2 h=float2(moonSprite.z/max(moonControl.w,1e-3),0),v=float2(0,moonSprite.z);
@@ -179,7 +188,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float moonPixel=MoonDiscPixel(uv,rawDepth,sceneViewDepth,
                                withinDisc>.5?SpriteVerified(moonDisc.xy):0);
- float sceneLimit=hasGeometry>.5&&moonPixel<.5?sceneViewDepth*viewLength:layer.w;
+ float sunPixel=SunDiscPixel(uv,rawDepth);
+ // Both tracked billboards are sky radiance rather than terrain depth. The
+ // cloud composite will still shade the sun; this only lets the march pass
+ // through the sprite's finite depth instead of treating it as an occluder.
+ float sceneLimit=hasGeometry>.5&&moonPixel<.5&&sunPixel<.5
+     ?sceneViewDepth*viewLength:layer.w;
 
  // Intersect fixed world-height planes, never a camera-centred dome.
  // Horizontal rays inside the layer march to the scene/distance limit;
@@ -456,9 +470,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
  float linearRaw=tex2D(depthMap,uv).r;
  // The sampled scene is the client's original frame, before this cloud pass.
- // Keep only the actual tracked vanilla sun pixels from the cloud overlay;
- // nearby geometry still wins because the depth predicate rejects it.
- if(SunDiscPixel(uv,linearRaw)>.5) return scene;
+ // Tracked sun pixels are composited like sky, not returned unchanged: a cloud
+ // over the sun must attenuate the original disc rather than leave a bright
+ // unshaded cut-out. The depth helper below keeps the tracked disc from being
+ // mistaken for foreground geometry.
 
  // Depth-aware upsample of the quarter-resolution march. The deck is no
  // longer sky-only - it is clipped by the scene, so a cloud in front of a
@@ -489,18 +504,19 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float sprite=withinDisc>.5?SpriteVerified(moonDisc.xy):0;
  float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);
- // The client's camera-relative moon is part of the original scene, not a
- // surface for the cloud layer to fog over. Its near depth is ignored by the
- // march so clouds do not form a black hole, then its actual sprite pixel is
- // restored here just like the tracked vanilla sun.
+ // Keep the camera-relative moon sprite exactly as drawn; unlike the tracked
+ // world-space sun, the moon is a near billboard and should not be clouded.
  if(moonCentre>.5)return scene;
+ float sunCentre=SunDiscPixel(uv,linearRaw);
  float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x,sprite),MoonDiscPixel(tapUv1,taps.y,tapZ.y,sprite),
                         MoonDiscPixel(tapUv2,taps.z,tapZ.z,sprite),MoonDiscPixel(tapUv3,taps.w,tapZ.w,sprite));
- // The moon's near billboard depth is a sprite, not a foreground surface.
- // Treat only those matched pixels as clear sky while choosing the four
- // depth-aware taps, so it cannot pull a dark ring through the low-res cloud.
- float filterCentreZ=lerp(centreZ,clearZ,moonCentre);
- float4 filterTapZ=lerp(tapZ,float4(clearZ,clearZ,clearZ,clearZ),moonTaps);
+ float4 sunTaps=float4(SunDiscPixel(tapUv0,taps.x),SunDiscPixel(tapUv1,taps.y),
+                       SunDiscPixel(tapUv2,taps.z),SunDiscPixel(tapUv3,taps.w));
+ // Tracked sprite depths are not cloud/terrain edges. Treat matched sun pixels
+ // as clear sky for upsample weighting, while still applying the cloud colour
+ // and transmittance to the original sun pixel below.
+ float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));
+ float4 filterTapZ=lerp(tapZ,float4(clearZ,clearZ,clearZ,clearZ),max(moonTaps,sunTaps));
  float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
               /(.002+abs(filterTapZ-filterCentreZ)/max(filterCentreZ,1));
  float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
@@ -508,7 +524,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
               /max(dot(weight,1),1e-5);
 
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
- float sky=max(step((depthRange.z+1)*.5,linearRaw),moonCentre);
+ float sky=max(step((depthRange.z+1)*.5,linearRaw),max(moonCentre,sunCentre));
  // The deck is air, and this pass is the last thing that touches a pixel before the frame is
  // graded. Water writes no depth, so a liquid pixel reads as sky to the march above and the
  // deck lands on it at full air brightness - which is right when the camera is standing in
@@ -981,7 +997,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
      <<" skyEyeCandidate="<<(f.skyEyeCandidateObserved?1:0)
      <<'('<<f.skyEyeCandidateDistanceYards<<"yd)"
-     <<" skyObserve="<<f.SkyObservationName();
+     <<" skyObserve="<<f.SkyObservationName()
+     <<" camCap=("<<f.cameraCaptureAttempts<<','<<f.cameraCaptureAccepted<<','
+     <<f.cameraCaptureStateRejected<<','<<f.cameraCaptureNonFinite<<','
+     <<f.cameraCaptureNotFullFrame<<','<<f.cameraCaptureProjectionRejected<<','
+     <<f.cameraCaptureBasisRejected<<','<<f.cameraCaptureContinuityRejected<<')';
   if(f.skyProjectionAvailable)
    out<<" skyProj="<<f.skyProjection[0]<<','<<f.skyProjection[1]<<','
       <<f.skyProjection[2]<<','<<f.skyProjection[3]<<','
@@ -1192,6 +1212,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float c14[4]={kBaseExtinction*settings.density*settings.opacity,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
                      settings.ambientIntensity*ambientLevel*ambientOcclusion};
+ const float sunViewDepth=f.sunDiscValid?f.sunDiscViewDepth:1.f;
+ const float sunDepthScale=std::max(f.depthMaxZ-f.viewport.MinZ,0.f);
+ const float expectedSunDepth=f.viewport.MinZ+
+     renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)*sunDepthScale;
+ const float sunDepthTolerance=renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
+     sunViewDepth,std::max(.75f,sunViewDepth*.04f))*sunDepthScale;
+ const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,.022f,f.sunDiscValid?1.f:0.f};
+ const float sunDepth[4]={f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f),
+                          expectedSunDepth,sunDepthTolerance,0.f};
 
  ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
@@ -1274,6 +1303,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
   d->SetPixelShaderConstantF(24,moonDisc,1);d->SetPixelShaderConstantF(25,moonControl,1);
   d->SetPixelShaderConstantF(26,moonSprite,1);
+  d->SetPixelShaderConstantF(27,sunDisc,1);d->SetPixelShaderConstantF(28,sunDepth,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);
@@ -1315,15 +1345,6 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,inv[0],3);
   d->SetPixelShaderConstantF(6,c6c,1);d->SetPixelShaderConstantF(7,c7c,1);
   const float c8c[4]={slopeX,slopeY,settings.baseAltitude,thickness};
-  const float sunViewDepth=f.sunDiscValid?f.sunDiscViewDepth:1.f;
-  const float sunDepthScale=std::max(f.depthMaxZ-f.viewport.MinZ,0.f);
-  const float expectedSunDepth=f.viewport.MinZ+
-      renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)*sunDepthScale;
-  const float sunDepthTolerance=renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
-      sunViewDepth,std::max(.75f,sunViewDepth*.04f))*sunDepthScale;
-  const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,.022f,f.sunDiscValid?1.f:0.f};
-  const float sunDepth[4]={f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f),
-                           expectedSunDepth,sunDepthTolerance,0.f};
   d->SetPixelShaderConstantF(8,c8c,1);
   d->SetPixelShaderConstantF(9,moonDisc,1);d->SetPixelShaderConstantF(10,moonControl,1);
   d->SetPixelShaderConstantF(12,moonSprite,1);

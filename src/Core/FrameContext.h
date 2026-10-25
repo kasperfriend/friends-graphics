@@ -65,8 +65,8 @@ namespace renderer
         bool moonDiscValid = false;
         // The vanilla sun is a far world-space billboard. Keep its own tracked
         // position separate from the selected glare source so a moon chosen at
-        // night can never move the sun's protection mask. The cloud composite
-        // preserves only original scene pixels at this confirmed disc.
+        // night can never move the sun's depth/sky mask. The cloud composite
+        // shades the original disc with the deck rather than returning it untouched.
         float sunDiscScreenX = -1.0f;
         float sunDiscScreenY = -1.0f;
         float sunDiscViewDepth = 0.0f;
@@ -209,6 +209,17 @@ namespace renderer
         // tools. 0 none, 1 captured, 2 sky fallback, 3 held previous frame.
         uint8_t cameraPoseSource = 0;
         enum CameraPoseSource : uint8_t { PoseNone = 0, PoseCaptured = 1, PoseSky = 2, PoseHeld = 3 };
+        // Per-frame rejection accounting for shader camera captures. These make
+        // an expired held eye actionable: distinguish no candidate draw from a
+        // viewport/projection/basis filter, without relaxing any camera gate.
+        uint32_t cameraCaptureAttempts = 0;
+        uint32_t cameraCaptureAccepted = 0;
+        uint32_t cameraCaptureStateRejected = 0;
+        uint32_t cameraCaptureNonFinite = 0;
+        uint32_t cameraCaptureNotFullFrame = 0;
+        uint32_t cameraCaptureProjectionRejected = 0;
+        uint32_t cameraCaptureBasisRejected = 0;
+        uint32_t cameraCaptureContinuityRejected = 0;
         // Sky-fallback diagnostics: a zero count means no eligible current-frame
         // candidate survived capture filters; a nonzero count with no fresh pose
         // means corroboration/continuity intentionally kept it out.

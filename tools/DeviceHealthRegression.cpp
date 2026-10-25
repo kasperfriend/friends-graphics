@@ -422,7 +422,9 @@ int main() try
                     Contains(clouds, "knownWorldDraw,freshCameraPose") &&
                     Contains(clouds, "poseSource=") && Contains(clouds, "eyeAgeMs=") &&
                     Contains(clouds, "skyCandidates=") && Contains(clouds, "skyDisc=") &&
-                    Contains(clouds, "skyObserve=") &&
+                    Contains(clouds, "skyObserve=") && Contains(clouds, "camCap=(") &&
+                    Contains(clouds, "cameraCaptureContinuityRejected") &&
+                    Contains(frameReset, "cameraCaptureAttempts = cameraCaptureAccepted = 0;") &&
                     Contains(clouds, "lacksWorldContext?") &&
                     Contains(clouds, "skip=world-gate") && Contains(clouds, "skip=stale-camera"),
                 "clouds require a fresh camera for all world paths and log stale-pose skips distinctly");
@@ -512,6 +514,15 @@ int main() try
                     Contains(rendererHooks, "ObserveSkyFallback(d)") &&
                     Contains(rendererHooks, "&table[44],reinterpret_cast<void*>(HookedSetTransform)"),
                 "camera transforms accept infinite-far perspective, preserve projection diagnostics, and feed the guarded sky observer");
+            Require(Contains(capture, "++frameContext.cameraCaptureAttempts;") &&
+                    Contains(capture, "++frameContext.cameraCaptureAccepted;") &&
+                    Contains(capture, "++frameContext.cameraCaptureStateRejected;") &&
+                    Contains(capture, "++frameContext.cameraCaptureNotFullFrame;") &&
+                    Contains(capture, "++frameContext.cameraCaptureProjectionRejected;") &&
+                    Contains(capture, "++frameContext.cameraCaptureBasisRejected;") &&
+                    Contains(capture, "++frameContext.cameraCaptureContinuityRejected;") &&
+                    Contains(clouds, "camCap=("),
+                "cloud diagnostics count camera-capture attempts and each safety-gate rejection without changing the gate");
             const auto celestialTracker = Read("src/D3D9/CelestialTracker.cpp");
             const auto atmosphereBuild = Read("tools/Test-Atmosphere.cmd");
             Require(Contains(atmosphereBuild, "src\\D3D9\\CelestialTracker.cpp") &&

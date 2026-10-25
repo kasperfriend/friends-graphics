@@ -306,10 +306,14 @@ int main() try
                 Contains(clouds, "float4 moonSprite:register(c12);"),
             "both cloud shaders receive the moon sprite's depth contract");
         Require(Contains(clouds, "float SunDiscPixel(float2 pixelUv,float rawDepth)") &&
-                Contains(clouds, "if(SunDiscPixel(uv,linearRaw)>.5) return scene;") &&
+                !Contains(clouds, "if(SunDiscPixel(uv,linearRaw)>.5) return scene;") &&
+                Contains(clouds, "float sunCentre=SunDiscPixel(uv,linearRaw);") &&
+                Contains(clouds, "float4 sunDisc:register(c27);") &&
+                Contains(clouds, "float sunPixel=SunDiscPixel(uv,rawDepth);") &&
+                Contains(clouds, "d->SetPixelShaderConstantF(27,sunDisc,1)") &&
                 Contains(clouds, "renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)") &&
                 Contains(composite, "frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&"),
-            "clouds preserve only the original tracked sun pixels, with a fresh pose and sky/depth check");
+            "clouds shade a depth-matched tracked sun without treating its billboard depth as terrain");
         // Both copies of the helper must stay in the same units the host
         // uploads (raw viewport depth) and with the same arity as their calls:
         // only one of them compiling is invisible until runtime.

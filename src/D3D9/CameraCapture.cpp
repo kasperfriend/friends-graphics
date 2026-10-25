@@ -26,6 +26,7 @@ namespace renderer
         if (!device)
             return false;
 
+        ++frameContext.cameraCaptureAttempts;
         m_cameraCaptureShaderHash = shaderHash;
 
         float v[27][4]{};
@@ -34,12 +35,18 @@ namespace renderer
         if (FAILED(device->GetVertexShaderConstantF(0, v[0], 27)) ||
             FAILED(device->GetViewport(&vp)) ||
             vp.MinZ != 0.0f || vp.MaxZ <= 0.0f)
+        {
+            ++frameContext.cameraCaptureStateRejected;
             return false;
+        }
 
         for (auto& row : v)
             for (float f : row)
                 if (!std::isfinite(f))
+                {
+                    ++frameContext.cameraCaptureNonFinite;
                     return false;
+                }
 
         // Only a draw covering the whole render target can be the scene camera
         // whose light this frame's sky and fog are built from. A target/portrait
@@ -54,13 +61,19 @@ namespace renderer
             vp.X == 0 && vp.Y == 0 && vp.Width == targetDesc.Width && vp.Height == targetDesc.Height;
         if (renderTarget) renderTarget->Release();
         if (!fullFrame)
+        {
+            ++frameContext.cameraCaptureNotFullFrame;
             return false;
+        }
 
         // Verify standard WoW perspective projection and rigid world-view.
         // P22 == 1 is the valid infinite-far-plane form, not an invalid camera.
         if (!IsStandardD3DPerspectiveProjection(
                 v[4][0], v[5][1], v[6][2], v[6][3], v[7][2], v[7][3]))
+        {
+            ++frameContext.cameraCaptureProjectionRejected;
             return false;
+        }
 
         // Verify orthogonality of rotation sub-matrix (v[0..2])
         for (int i = 0; i < 3; ++i)
@@ -71,7 +84,10 @@ namespace renderer
                 for (int k = 0; k < 3; ++k)
                     dot += v[i][k] * v[j][k];
                 if (fabsf(dot - (i == j ? 1.0f : 0.0f)) > 0.002f)
+                {
+                    ++frameContext.cameraCaptureBasisRejected;
                     return false;
+                }
             }
         }
 
@@ -85,6 +101,7 @@ namespace renderer
         // corroborate it. Never promote a distant/teleported eye from this path.
         if (!m_cameraGate.Accept(v[3], v, vp.Width, vp.Height))
         {
+            ++frameContext.cameraCaptureContinuityRejected;
             const float rejectedEye[3] = {
                 -(v[3][0] * v[0][0] + v[3][1] * v[0][1] + v[3][2] * v[0][2]),
                 -(v[3][0] * v[1][0] + v[3][1] * v[1][1] + v[3][2] * v[1][2]),
@@ -124,6 +141,7 @@ namespace renderer
             }
             return false;
         }
+        ++frameContext.cameraCaptureAccepted;
 
         // This full-frame shader draw passed both the perspective and camera
         // continuity gates, so it is the safest projection to reuse when the
