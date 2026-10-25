@@ -420,6 +420,7 @@ namespace renderer
         frameContext.skyObservationResult = m_skyObservationResult;
         m_lastEyeSeconds = PerformanceSeconds();
         frameContext.cameraPoseStale = false;
+        frameContext.cameraOrientationFresh = true;
         frameContext.cameraEyeAgeMs = 0.f;
         frameContext.cameraEyeObservedThisFrame = true;
         frameContext.cameraPoseSource = FrameContext::PoseCaptured;
@@ -529,9 +530,12 @@ namespace renderer
                 m_fallbackProjectionValid, sameScreenViewport, cacheAgeMs,
                 FrameContext::kCameraEyeHoldMs);
             m_skyProjectionCacheUsable = cachedProjectionUsable;
-            if (!cachedProjectionUsable)
-                return;
-            projectionFallbackUsed = true;
+            // An expired projection is not evidence for depth reconstruction
+            // or disc projection, but it must not prevent this rigid current
+            // VIEW basis from reaching the independent continuity selector.
+            // That selector can still corroborate orientation without granting
+            // an eye or revalidating the old projection.
+            projectionFallbackUsed = cachedProjectionUsable;
         }
 
         if (!m_cameraGate.MatchesViewport(vp.Width, vp.Height))
@@ -572,6 +576,11 @@ namespace renderer
             m_fallbackVp = vp;
             m_fallbackProjectionValid = true;
             m_fallbackProjectionSeconds = PerformanceSeconds();
+            m_skyProjectionCacheUsable = true;
+            m_skyProjectionCacheMinZ = vp.MinZ;
+            m_skyProjectionCacheMaxZ = vp.MaxZ;
+            m_skyProjectionObservedMinZ = vp.MinZ;
+            m_skyProjectionObservedMaxZ = vp.MaxZ;
         }
 
         // Does this transform carry the camera's EYE, or a camera-relative
@@ -676,6 +685,7 @@ namespace renderer
         float outCapturedViewTranslation[3],
         bool& outCapturedViewValid)
     {
+        frameContext.cameraOrientationFresh = false;
         if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid || !m_fallbackProjectionValid)
             return false;
 
@@ -690,7 +700,8 @@ namespace renderer
 
         float basis[3][4]{};
         bool corroborated = false;
-        const DiscObservation disc = DiscEvidence(frameContext, m_fallbackProj);
+        const DiscObservation disc = m_skyProjectionCacheUsable
+            ? DiscEvidence(frameContext, m_fallbackProj) : DiscObservation{};
         frameContext.skyPoseCandidateCount = static_cast<uint8_t>(
             std::min(m_skyPose.CandidateCount(), 255u));
         frameContext.skyPoseDiscEvidence = disc.available;
@@ -821,6 +832,7 @@ namespace renderer
         // world-anchored clouds/fog wait until a draw carries the eye again.
         const bool eyeFresh = std::isfinite(frameContext.cameraEyeAgeMs) &&
             frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+        frameContext.cameraOrientationFresh = corroborated;
         frameContext.cameraPoseStale = !corroborated || !eyeFresh;
         frameContext.cameraPoseSource = FrameContext::PoseSky;
 

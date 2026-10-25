@@ -30,6 +30,40 @@ int main() try
             text.find("float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));") != std::string::npos &&
             text.find("float sunPixel=SunDiscPixel(uv,rawDepth);") != std::string::npos,
             "clouds shade verified sun and moon pixels as sky without treating their billboards as depth edges");
+    const auto skyFallbackStart=text.find("const char* kCloudSkyFallbackSource = R\"HLSL(");
+    const auto skyFallbackEnd=text.find(")HLSL\";",skyFallbackStart);
+    const auto skyCompositeStart=text.find("const char* kCloudSkyCompositeSource = R\"HLSL(");
+    const auto skyCompositeEnd=text.find(")HLSL\";",skyCompositeStart);
+    const auto skyRenderStart=text.find("bool VolumetricClouds::RenderSkyFallback(");
+    const auto skyRenderEnd=text.find("bool VolumetricClouds::Render(",skyRenderStart);
+    const auto normalShaderStart=text.find("bool VolumetricClouds::EnsureShaders(");
+    const auto optionalShaderStart=text.find("bool VolumetricClouds::EnsureSkyFallbackShaders(",normalShaderStart);
+    Require(skyFallbackStart!=std::string::npos&&skyFallbackEnd!=std::string::npos&&
+            skyCompositeStart!=std::string::npos&&skyCompositeEnd!=std::string::npos&&
+            skyRenderStart!=std::string::npos&&skyRenderEnd!=std::string::npos&&
+            skyFallbackEnd>skyFallbackStart&&skyCompositeEnd>skyCompositeStart&&
+            skyRenderEnd>skyRenderStart,
+            "the isolated sky fallback shaders and render path are present");
+    const std::string skyFallback=text.substr(skyFallbackStart,skyFallbackEnd-skyFallbackStart);
+    const std::string skyComposite=text.substr(skyCompositeStart,skyCompositeEnd-skyCompositeStart);
+    const std::string skyRender=text.substr(skyRenderStart,skyRenderEnd-skyRenderStart);
+    Require(skyFallback.find("cameraPos")==std::string::npos&&
+            skyFallback.find("cameraPosition")==std::string::npos&&
+            skyFallback.find("shadowMap")==std::string::npos&&
+            skyFallback.find("invView0")!=std::string::npos&&
+            skyComposite.find("cameraPos")==std::string::npos&&
+            skyComposite.find("shadowMap")==std::string::npos&&
+            skyComposite.find("float sky=step((depthRange.z+1)*.5,rawDepth);")!=std::string::npos&&
+            skyComposite.find("float waterPixel=step(.35,max(water.r,water.g));")!=std::string::npos&&
+            skyRender.find("cameraPosition")==std::string::npos&&
+            skyRender.find("m_shadowValid=false;")!=std::string::npos&&
+            skyRender.find("m_shadowSurface")==std::string::npos&&
+            skyRender.find("m_shadowTexture")==std::string::npos,
+            "the fallback is direction-only, excludes water/geometry, and cannot read a held eye or render a world shadow");
+    Require(normalShaderStart!=std::string::npos&&optionalShaderStart!=std::string::npos&&
+            text.substr(normalShaderStart,optionalShaderStart-normalShaderStart).find("kCloudSkyFallbackSource")==std::string::npos&&
+            text.find("m_skyShaderRetry.Fail(now,kOptionalPassRetryMs);")!=std::string::npos,
+            "optional sky shader compilation failure cannot disable normal cloud shaders");
     Require(text.find("m_fieldsDevice=d;") != std::string::npos &&
             text.find("device==nullptr || (m_fieldsDevice && m_fieldsDevice!=device)") != std::string::npos,
             "cloud noise textures are recreated when the D3D device implementation changes");

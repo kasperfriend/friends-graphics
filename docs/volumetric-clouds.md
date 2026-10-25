@@ -431,14 +431,23 @@ the player's head frustum-culled - and it clears up on higher ground because a r
   transform's translation never moves it.
 
 Frames that still cannot be corroborated publish `FrameContext::cameraPoseStale` and keep the previous
-orientation for screen-space passes. Every pass that places something in *world* space must refuse
-(or hold) that frame:
-`VolumetricClouds::Render` refuses a stale pose outright; `LocalLightingRenderer::Render` and
-`LocalLightManager::ObserveTorchDraw` refuse it while `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a
-pose held for a frame keeps the lamps steady (a frame-late lamp is invisible, a lamp placed through a
-second-old eye is in the wrong street) while a genuinely orphaned pose is never drawn from. `capturedViewValid` and
-`cameraCaptureShaderHash` are now cleared every frame and published only by a capture that actually succeeded,
-so `DrawCallClassifier` cannot inherit a failed attempt's shader as "terrain".
+eye for consumers that need it. `cameraOrientationFresh` is tracked separately: a current rigid VIEW basis
+can be trustworthy even after its eye has aged out. The world-height cloud march, local lights, torches,
+fog and weather still require the unchanged fresh-eye/world gate. For the specific case where verified
+`InWorld` state, depth and a current orientation remain but the eye is stale, clouds may use a separate
+screen-direction recovery: it samples the noise field over view rays, composites only clear sky, excludes
+water-mask pixels, and never reads the held eye, intersects the world layer, or renders/publishes a world
+shadow or cloud-ray texture. Unknown, menu and out-of-world scenes still fail closed. If the projection cache
+has expired, the camera observer can still corroborate the current rigid VIEW basis by continuity; that
+expired projection is not reused for scene-depth or celestial-disc validation. The cloud log records
+`orientationFresh`, `skyFallbackEligible`, eye age, projection-cache state and the selected path.
+
+`LocalLightingRenderer::Render` and `LocalLightManager::ObserveTorchDraw` refuse a stale pose while
+`cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a pose held briefly keeps the lamps steady (a frame-late
+lamp is invisible, a lamp placed through a second-old eye is in the wrong street) while a genuinely orphaned
+pose is never drawn from. `capturedViewValid` and `cameraCaptureShaderHash` are cleared every frame and
+published only by a capture that actually succeeded, so `DrawCallClassifier` cannot inherit a failed
+attempt's shader as "terrain".
 
 `tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
 the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.
@@ -467,3 +476,13 @@ Two related gates, both from the camera-freshness work above:
 - The atmosphere's halo and its disc protection are disabled for such a frame
   (`sourceScreen.w`), so a stale screen position cannot paint a sun onto
   whatever now occupies that pixel.
+
+World lighting uses the captured scene day/night state and a per-body direction
+track, not whether the billboard happens to be inside the frustum. Before a
+body has ever been tracked, the direction remains the deterministic overhead
+approximation; the first verified disc now eases toward its world direction
+with the existing bounded response instead of replacing it in one frame. Once
+confirmed, the direction is held while the disc is culled. Cloud diagnostics
+report `directLightDirectionConfirmed`, direction, selected body, intensity,
+day/night factors and captured light color so a client log can separate an
+acquisition transition from changes in the game's light inputs.

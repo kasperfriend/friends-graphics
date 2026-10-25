@@ -37,7 +37,7 @@ $jobs = @(
     @{ File = 'src\Effects\LocalLightingRenderer.cpp'; Names = @('kSurfaceSource', 'kCompositeSource') },
     @{ File = 'WeatherVisuals.h'; Names = @('precipitationHLSL', 'rainHLSL', 'lensDropletsHLSL', 'nativeParticleHLSL') },
     @{ File = 'src\Effects\DirectionalVolumetricLighting.cpp'; Names = @('kBoundarySource', 'kGroundHeightSource', 'kDepthSource', 'kLocalFogFieldSource', 'kIntegrateSource', 'kTemporalSource', 'kUpsampleSource', 'kCompositeSource', 'kBoundaryDebugSource') },
-    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource') },
+    @{ File = 'src\Effects\VolumetricClouds.cpp'; Names = @('kCloudMarchSource', 'kCloudShadowSource', 'kCloudCompositeSource', 'kCloudSkyFallbackSource', 'kCloudSkyCompositeSource') },
     @{ File = 'src\Effects\AmbientOcclusion.cpp'; Names = @('kAmbientOcclusionSource', 'kAmbientOcclusionApplySource') },
     @{ File = 'src\Effects\Underwater.h'; Names = @('kUnderwaterSource') }
 )
@@ -67,6 +67,8 @@ $budgets = @{
     'kCloudMarchSource'      = 496
     'kCloudShadowSource'     = 512
     'kCloudCompositeSource'  = 512
+    'kCloudSkyFallbackSource' = 512
+    'kCloudSkyCompositeSource' = 512
     'kAmbientOcclusionSource' = 512
     'kAmbientOcclusionApplySource' = 512
     # The medium the world is shaded through: five noise evaluations (two for the caustic net,

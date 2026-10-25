@@ -180,6 +180,17 @@ namespace renderer
         return HasPlayableWorldEvidence(state, knownWorldDrawSeen, freshCameraPose);
     }
 
+    // A separate emergency path for the visible sky only. It never substitutes
+    // an old eye for a fresh world pose: verified in-world state and a current,
+    // corroborated view orientation are mandatory, and a still-fresh complete
+    // pose belongs to the normal world-space cloud pass instead.
+    constexpr bool CanRenderSkyCloudFallback(WorldSceneState state,
+                                             bool freshOrientation,
+                                             bool freshCameraPose) noexcept
+    {
+        return state == WorldSceneState::InWorld && freshOrientation && !freshCameraPose;
+    }
+
     // Remembered submersion must not survive leaving the client world, or a
     // confirmed map/zone transition. The first frame in the new location starts
     // clean, while ordinary camera turns inside one zone preserve the medium.

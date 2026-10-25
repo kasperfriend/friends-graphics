@@ -732,6 +732,29 @@ int main() try {
  auto centreCloudContribution=[&]{const auto image=readCloudImage();double sum=0;int n=0;
   for(int y=58;y<70;++y)for(int x=58;x<70;++x){sum+=diff(image[y*128+x],0xff202020);++n;}
   return sum/double(n?n:1);};
+ // A stale eye is not a safe origin for the world-height march. The
+ // recovery instead uses only this frame's corroborated VIEW direction and
+ // must leave geometry and native-water coverage byte-identical.
+ {
+  f.cameraPoseStale=true;f.cameraOrientationFresh=true;f.cameraEyeAgeMs=1201.f;
+  setPixel(scene.Get(),20,20,0xff123456);setPixel(mask.Get(),20,20,0xffff0000);
+  setPixel(scene.Get(),64,110,0xff345678);
+  Check(d->BeginScene());
+  const bool fallbackRendered=renderClouds();
+  Check(d->EndScene());
+  Require(fallbackRendered&&clouds.UsedSkyFallback(),
+          "stale-eye in-world sky uses the isolated orientation-only cloud recovery");
+  Require(clouds.GetShadowTexture()==nullptr,
+          "screen-direction cloud recovery never publishes a world shadow map");
+  Require(skyMean()>48.0,
+          "directional fallback produces visible clouds in clear sky without a world eye");
+  Require(pixel(64,110)==0xff345678,
+          "screen-direction fallback leaves foreground geometry byte-identical");
+  Require(pixel(20,20)==0xff123456,
+          "screen-direction fallback excludes native-water mask pixels byte-identically");
+  f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
+  fill(scene.Get(),0xff202020);fill(mask.Get(),0);
+ }
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
  Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));
@@ -922,7 +945,7 @@ int main() try {
   const Vec3 sun=Normalize({.6f,.2f,.8f}),moon=Normalize({-.8f,-.2f,.01f});
   CelestialLightStabilizer light;
   CelestialDirectionStabilizer direction;
-  direction.Update(&sun,false,.016f);direction.Update(&moon,true,.016f);
+  for(int i=0;i<600;++i){direction.Update(&sun,false,.016f);direction.Update(&moon,true,.016f);}
   CelestialLightInput sceneLight;sceneLight.daylight=.8f;sceneLight.directionalLuminance=.8f;
   f.directLightDirectionWorld=direction.Update(nullptr,false,sceneLight.deltaSeconds);
   Require(renderClouds(),"angled world light casts cloud shadows");

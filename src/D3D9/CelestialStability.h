@@ -209,39 +209,46 @@ namespace renderer
     // a camera turn become a slow sunset (at 2.5 degrees/s it could remove
     // every ground shadow in under a minute). Never integrate that source.
     // Until a body is observed, use a deterministic overhead approximation;
-    // afterwards retain its own direction while its billboard is culled.
+    // the first real track eases into that approximation instead of making
+    // the world light jump on the exact frame its billboard enters the view.
+    // Once confirmed, retain that body's direction while its billboard is culled.
     class CelestialDirectionStabilizer
     {
     public:
         Vec3 Update(const Vec3* confirmed, bool moon, float dt) noexcept
         {
             const unsigned body = moon ? 1u : 0u;
+            if (!m_initialized[body])
+            {
+                m_direction[body] = {0, 0, 1};
+                m_initialized[body] = true;
+            }
             if (!confirmed)
-                return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
+                return m_direction[body];
             const float length = Length(*confirmed);
             if (!std::isfinite(length) || length < 1e-4f)
-                return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
+                return m_direction[body];
+
             const Vec3 target = *confirmed * (1.f / length);
-            if (!m_primed[body])
-            {
-                m_direction[body] = target;
-                m_primed[body] = true;
-            }
-            else
-            {
-                // Follow actual celestial movement, including server time
-                // changes. A culled disc never supplies a replacement target.
-                const float step = std::clamp(dt, 0.f, .25f);
-                const float alpha = 1.f - std::exp(-step / .35f);
-                const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
-                if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
-            }
+            // A newly observed billboard is real direction evidence, but its
+            // first frame is also when the old overhead approximation was
+            // replaced abruptly. Use the same bounded, view-independent
+            // response for acquisition and subsequent server-time motion.
+            const float step = std::clamp(dt, 0.f, .25f);
+            const float alpha = 1.f - std::exp(-step / .35f);
+            const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
+            if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
+            m_confirmed[body] = true;
             return m_direction[body];
         }
+
+        bool HasConfirmed(bool moon) const noexcept { return m_confirmed[moon ? 1u : 0u]; }
         void Reset() noexcept { *this = CelestialDirectionStabilizer{}; }
+
     private:
-        Vec3 m_direction[2]{};
-        bool m_primed[2]{};
+        Vec3 m_direction[2]{{0, 0, 1}, {0, 0, 1}};
+        bool m_initialized[2]{};
+        bool m_confirmed[2]{};
     };
 
     // ---- which body's direction a consumer inside the draw stream takes ----------

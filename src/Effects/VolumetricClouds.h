@@ -124,6 +124,9 @@ namespace renderer
         void ForgetWeather() noexcept { m_dynamics.ForgetWeather(); }
         IDirect3DTexture9* GetCloudTexture() const { return m_cloudTexture.Get(); }
         IDirect3DTexture9* GetShadowTexture() const { return m_shadowValid ? m_shadowTexture.Get() : nullptr; }
+        // A screen-direction recovery has no world cloud texture or shadow to
+        // publish to later atmosphere/ray passes; the composite is already on target.
+        bool UsedSkyFallback() const { return m_skyFallbackUsed; }
         Vec4 ShadowArea() const { return m_shadowArea; }
         Vec4 LightProjection() const { return m_lightProjection; }
         // True once the noise fields exist on the GPU. Generation happens on
@@ -134,6 +137,11 @@ namespace renderer
     private:
         VolumetricClouds() = default;
         bool EnsureShaders(IDirect3DDevice9* device);
+        bool EnsureSkyFallbackShaders(IDirect3DDevice9* device);
+        bool RenderSkyFallback(IDirect3DDevice9* device, const FrameContext& frameContext,
+                               IDirect3DSurface9* targetSurface,
+                               const VolumetricCloudSettings& settings,
+                               const CloudMotion& motion);
         bool EnsureResources(IDirect3DDevice9* device, uint32_t fullWidth, uint32_t fullHeight);
         bool EnsureFields(IDirect3DDevice9* device);
         void DrawScreenQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
@@ -155,10 +163,13 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_marchShader;
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_shadowShader;
+        ComPtr<IDirect3DPixelShader9> m_skyFallbackShader;
+        ComPtr<IDirect3DPixelShader9> m_skyCompositeShader;
         std::wstring m_logPath;
         std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
         RetryGate m_shaderRetry;
+        RetryGate m_skyShaderRetry;
         bool m_fieldsReady = false;
         IDirect3DDevice9* m_fieldsDevice = nullptr;
         // Detached generation can outlive a device transition (or DLL object
@@ -168,6 +179,7 @@ namespace renderer
         std::shared_ptr<FieldWorkerState> m_fieldWorker = std::make_shared<FieldWorkerState>();
         uint64_t m_fieldsWaitStart = 0; // first frame that skipped for the worker
         bool m_shadowValid = false;
+        bool m_skyFallbackUsed = false;
         Vec4 m_shadowArea;
         Vec4 m_lightProjection;
         uint32_t m_shadowSize = 0;

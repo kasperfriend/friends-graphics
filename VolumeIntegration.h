@@ -1191,6 +1191,7 @@ bool Composite(IDirect3DDevice9* d) {
             const auto moonWorld = celestialDirectionStabilizer.Update(
                 moon.visible ? &moonDirectionWorld : nullptr, true, lightDt);
             frameCtx.directLightDirectionWorld = stable.isMoon ? moonWorld : sunWorld;
+            frameCtx.directLightDirectionConfirmed = celestialDirectionStabilizer.HasConfirmed(stable.isMoon);
             const auto& world = frameCtx.directLightDirectionWorld;
             frameCtx.directLightDirectionView = {
                 renderer::Dot(world, {frameCtx.inverseView.m[0][0], frameCtx.inverseView.m[0][1], frameCtx.inverseView.m[0][2]}),
@@ -1316,20 +1317,32 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudShadowTexture = nullptr;
     frameCtx.cloudRayStrength = 0.f;
     if (!shaftDebug && cloudsEffectEnabled) {
-        // Render owns the same menu/world/camera gate so it can log which gate
-        // suppressed clouds on an upward sky-only view; it exits before any GPU
-        // work unless current world evidence and a fresh camera are present.
+        // Render owns the menu/world/camera gates and distinguishes the normal
+        // world-space march from a separate sky-only recovery. The latter is
+        // permitted only for confirmed in-world state plus a current VIEW basis;
+        // it never publishes a held eye, cloud shadow, or ray-attenuation texture.
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
         // Already resolved once at the frame boundary, alongside wind/water.
         clouds.Settings().weatherStrength = cloudWeatherStrength;
         if (clouds.Render(d, frameCtx, target.Get())) {
-            frameCtx.cloudTexture = clouds.GetCloudTexture();
-            frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
-            frameCtx.cloudShadowArea = clouds.ShadowArea();
-            frameCtx.cloudLightProjection = clouds.LightProjection();
-            frameCtx.cloudRayStrength = shaftsEffectEnabled && clouds.Settings().sunRays
-                ? clouds.Settings().sunRayStrength : 0.f;
+            if (clouds.UsedSkyFallback()) {
+                // The directional overlay is already in target. Its low-res
+                // texture is not a world column and must never be sampled later
+                // as a cloud shadow or as cloud-filtered god rays.
+                frameCtx.cloudTexture = nullptr;
+                frameCtx.cloudShadowTexture = nullptr;
+                frameCtx.cloudShadowArea = {};
+                frameCtx.cloudLightProjection = {};
+                frameCtx.cloudRayStrength = 0.f;
+            } else {
+                frameCtx.cloudTexture = clouds.GetCloudTexture();
+                frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
+                frameCtx.cloudShadowArea = clouds.ShadowArea();
+                frameCtx.cloudLightProjection = clouds.LightProjection();
+                frameCtx.cloudRayStrength = shaftsEffectEnabled && clouds.Settings().sunRays
+                    ? clouds.Settings().sunRayStrength : 0.f;
+            }
             // Everything downstream samples legacyTargets.scene, so the
             // copy has to carry the clouds too.
             check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));

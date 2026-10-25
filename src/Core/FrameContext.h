@@ -104,6 +104,11 @@ namespace renderer
         float directLightIntensity = 0.0f;
         bool directLightIsMoon = false;
         bool directLightValid = false;
+        // True after the selected sun/moon direction has come from an actual
+        // tracked billboard. False means the safe overhead approximation is
+        // still in its acquisition state; directLightValid alone does not imply
+        // the orientation was confirmed.
+        bool directLightDirectionConfirmed = false;
         Vec3 directLightDirectionView;
         Vec3 directLightDirectionWorld;
 
@@ -192,6 +197,10 @@ namespace renderer
         // space must check this, and skip instead of drawing it in the wrong
         // place; screen-space passes that merely want a direction do not.
         bool cameraPoseStale = false;
+        // The current frame has a rigid, corroborated VIEW orientation, even
+        // if its eye is held and therefore unsafe for world-space placement.
+        // Only direction/screen-space passes may use this independently.
+        bool cameraOrientationFresh = false;
         // Milliseconds since a draw actually carried the camera's EYE (a real
         // capture, not a rotation-only sky transform). Anything placed within a
         // few yards of the camera - torch emitters above all - needs a fresh

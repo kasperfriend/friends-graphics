@@ -419,6 +419,10 @@ int main() try
             const auto deviceHealth = Read("src/Core/DeviceHealth.h");
             const auto rendererHook = Read("ModernWoWRenderer.cpp");
             Require(Contains(clouds, "const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;") &&
+                    Contains(clouds, "const bool freshOrientation=f.cameraOrientationFresh;") &&
+                    Contains(clouds, "CanRenderSkyCloudFallback(f.worldScene.state,freshOrientation,freshCameraPose)") &&
+                    Contains(frameContext, "bool cameraOrientationFresh = false;") &&
+                    Contains(deviceHealth, "CanRenderSkyCloudFallback") &&
                     Contains(clouds, "knownWorldDraw,freshCameraPose") &&
                     Contains(clouds, "poseSource=") && Contains(clouds, "eyeAgeMs=") &&
                     Contains(clouds, "skyCandidates=") && Contains(clouds, "skyDisc=") &&
@@ -427,13 +431,16 @@ int main() try
                     Contains(frameReset, "cameraCaptureAttempts = cameraCaptureAccepted = 0;") &&
                     Contains(clouds, "lacksWorldContext?") &&
                     Contains(clouds, "skip=world-gate") && Contains(clouds, "skip=stale-camera"),
-                "clouds require a fresh camera for all world paths and log stale-pose skips distinctly");
+                "world-space clouds retain the fresh-eye gate while a separate orientation-only fallback is diagnosable");
             Require(Contains(composite, "ResolveWorldSceneForFrame();") &&
                     Contains(composite, "watereffect::ObserveWorldSceneForUnderwater(frame);") &&
                     Contains(composite, "if (!shaftDebug && cloudsEffectEnabled)") &&
                     Contains(composite, "if (clouds.Render(d, frameCtx, target.Get()))") &&
+                    Contains(composite, "if (clouds.UsedSkyFallback())") &&
+                    Contains(composite, "frameCtx.cloudTexture = nullptr;") &&
+                    Contains(composite, "frameCtx.directLightDirectionConfirmed = celestialDirectionStabilizer.HasConfirmed(stable.isMoon);") &&
                     Contains(clouds, "CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)"),
-                "the compositor delegates cloud world/camera gating to the pass so skipped sky views are diagnosable");
+                "the compositor publishes no world cloud/shadow texture after the screen-only recovery");
             Require(Contains(atmosphere, "screenPhase*.12*discProtection+directionalLean*.25;") &&
                     !Contains(atmosphere, "screenPhase*.12+directionalLean*.25)*discProtection;"),
                 "the on-screen disc mask suppresses only synthetic halo, never physical cloud illumination");
@@ -554,6 +561,11 @@ int main() try
                     Contains(capture, "frameContext.skyEyeCandidateObserved = m_skyEyeCandidateObserved;") &&
                     Contains(capture, "frameContext.cameraEyeObservedThisFrame = true;") &&
                     Contains(capture, "frameContext.cameraPoseStale = !corroborated || !eyeFresh;") &&
+                    Contains(capture, "frameContext.cameraOrientationFresh = corroborated;") &&
+                    Contains(capture, "frameContext.cameraOrientationFresh = true;") &&
+                    !Contains(capture, "if (!cachedProjectionUsable)\n                return;") &&
+                    Contains(frameReset, "cameraOrientationFresh = false;") &&
+                    Contains(frameReset, "directLightDirectionConfirmed = false;") &&
                     Contains(frameReset, "skyProjectionFallbackUsed = false;") &&
                     Contains(frameReset, "skyProjectionCacheUsable = false;") &&
                     Contains(frameReset, "skyProjectionObservedMinZ = skyProjectionObservedMaxZ = -1.f;") &&
@@ -569,6 +581,8 @@ int main() try
                     Contains(clouds, "glareSource=") && Contains(clouds, "trackedSun=") &&
                     Contains(clouds, "trackedMoon=") && Contains(clouds, "celTrack=(") &&
                     Contains(clouds, "sunDisc=") && Contains(clouds, "moonDisc=") &&
+                    Contains(clouds, "directionSource=") && Contains(clouds, "directLight=(") &&
+                    Contains(clouds, "orientationFresh=") &&
                     Contains(volumeSource, "float4 markerDepth:register(c3)") &&
                     Contains(volumeSource, "depthOpen=max(sky,depthMatch);") &&
                     Contains(volumeIntegration, "markerFrame.sunDiscScreenX") &&
@@ -753,8 +767,12 @@ int main() try
         {
             CelestialLightStabilizer light;
             CelestialDirectionStabilizer direction;
-            direction.Update(&sun, false, .016f);
-            direction.Update(&moon, true, .016f);
+            // Seed both world directions before changing only frustum visibility.
+            for (int i = 0; i < 600; ++i)
+            {
+                direction.Update(&sun, false, .016f);
+                direction.Update(&moon, true, .016f);
+            }
             CelestialLightInput scene;
             scene.daylight = night ? 0.f : .8f;
             scene.moonlight = night ? .8f : 0.f;
@@ -832,8 +850,15 @@ int main() try
     {
         CelestialDirectionStabilizer direction;
         const Vec3 sun = Normalize({.6f, .2f, .8f});
-        auto stable = direction.Update(&sun, false, 1.f/60.f);
-        Require(Length(stable-sun)<1e-6f, "confirmed world direction primes the sun");
+        auto stable = direction.Update(nullptr, false, 1.f/60.f);
+        Require(Length(stable-Vec3{0,0,1})<1e-6f && !direction.HasConfirmed(false),
+                "an unseen sun starts from the fixed overhead approximation");
+        stable = direction.Update(&sun, false, 1.f/60.f);
+        Require(Length(stable-Vec3{0,0,1})<Length(sun-Vec3{0,0,1}) &&
+                Length(stable-sun)>1e-3f && direction.HasConfirmed(false),
+                "the first tracked sun direction eases in rather than snapping with billboard visibility");
+        for (int i=0;i<600;++i) stable=direction.Update(&sun, false, 1.f/60.f);
+        Require(Length(stable-sun)<1e-6f, "the confirmed sun direction converges to the tracked world direction");
         for (int i=0;i<600;++i)
         {
             stable=direction.Update(nullptr, false, 1.f/60.f);
@@ -841,8 +866,9 @@ int main() try
         }
         Require(Length(stable-sun)<1e-6f, "camera-dependent fallback cannot move confirmed sunlight");
         const Vec3 moon=Normalize({-.2f,-.6f,.7f});
-        Require(Length(direction.Update(&moon, true, .016f)-moon)<1e-6f,
-                "moon keeps a separate confirmed direction");
+        for (int i=0;i<600;++i) direction.Update(&moon, true, .016f);
+        Require(Length(direction.Update(nullptr, true, .016f)-moon)<1e-6f,
+                "moon keeps its own independently confirmed direction");
         Require(Length(direction.Update(nullptr, false, .016f)-sun)<1e-6f,
                 "returning to sunlight restores its own direction");
         const Vec3 moved=Normalize({.7f,.2f,.7f});
@@ -850,7 +876,8 @@ int main() try
         Require(Length(stable-sun)<Length(moved-sun) && std::fabs(Length(stable)-1.f)<1e-5f,
                 "real celestial movement is smoothed and normalized");
         direction.Reset();
-        Require(Length(direction.Update(nullptr, false, .016f)-Vec3{0,0,1})<1e-6f,
+        Require(Length(direction.Update(nullptr, false, .016f)-Vec3{0,0,1})<1e-6f &&
+                !direction.HasConfirmed(false),
                 "loading reset allows a fresh world direction");
     }
 
@@ -866,15 +893,22 @@ int main() try
         }
         Require(true, "unconfirmed light stays world-fixed for minutes, not just one frame");
         const Vec3 zero{};
-        Require(Length(direction.Update(&zero, false, .016f) - Vec3{0,0,1}) < 1e-6f,
+        Require(Length(direction.Update(&zero, false, .016f) - Vec3{0,0,1}) < 1e-6f &&
+                !direction.HasConfirmed(false),
                 "invalid observation does not prime a body");
         const Vec3 actual = Normalize({.5f, -.2f, .8f});
-        Require(Length(direction.Update(&actual, false, .016f) - actual) < 1e-6f,
-                "first actual disc replaces the unconfirmed approximation");
-        Require(Length(direction.Update(&zero, false, .016f) - actual) < 1e-6f,
+        const Vec3 first = direction.Update(&actual, false, .016f);
+        Require(Length(first-Vec3{0,0,1})<Length(actual-Vec3{0,0,1}) &&
+                Length(first-actual)>1e-3f && direction.HasConfirmed(false),
+                "first actual disc starts a bounded transition from the approximation");
+        Require(Length(direction.Update(&zero, false, .016f)-first)<1e-6f,
                 "invalid observation cannot replace a confirmed world direction");
+        for (int i=0;i<600;++i) direction.Update(&actual, false, .016f);
+        const Vec3 converged=direction.Update(nullptr, false, .016f);
+        Require(Length(converged-actual)<1e-6f,
+                "a confirmed body converges while visible and remains fixed when culled");
         const Vec3 invalid{std::numeric_limits<float>::quiet_NaN(), 0, 1};
-        Require(Length(direction.Update(&invalid, false, .016f) - actual) < 1e-6f,
+        Require(Length(direction.Update(&invalid, false, .016f)-converged)<1e-6f,
                 "non-finite observation cannot poison cloud shadows");
     }
 
@@ -1016,6 +1050,15 @@ int main() try
                 "an in-world ID tuple without a current camera pose cannot render sky-only clouds");
         Require(HasPlayableWorldEvidence(easternKingdoms.state, false, true),
                 "fresh verified sky-only cameras keep fog and atmospheric passes active");
+        Require(CanRenderSkyCloudFallback(easternKingdoms.state, true, false),
+                "confirmed in-world orientation can render a sky-only recovery after the eye ages out");
+        Require(!CanRenderSkyCloudFallback(easternKingdoms.state, false, false),
+                "an uncorroborated held orientation cannot render the screen-space cloud recovery");
+        Require(!CanRenderSkyCloudFallback(easternKingdoms.state, true, true),
+                "a fresh eye stays on the normal world-space cloud path, not the sky fallback");
+        Require(!CanRenderSkyCloudFallback(WorldSceneState::Unknown, true, false) &&
+                !CanRenderSkyCloudFallback(WorldSceneState::OutOfWorld, true, false),
+                "unknown and verified out-of-world scenes cannot render the sky-only recovery");
         Require(!HasPlayableWorldEvidence(easternKingdoms.state, false, false),
                 "stale cameras cannot keep fog or atmosphere active from remembered world IDs");
         Require(!HasPlayableWorldEvidence(WorldSceneState::Unknown, false, true),

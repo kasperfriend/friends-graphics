@@ -42,6 +42,7 @@ namespace renderer
         directLightIntensity = 0.0f;
         directLightIsMoon = false;
         directLightValid = false;
+        directLightDirectionConfirmed = false;
         directLightDirectionView = { 0.0f, 0.0f, 1.0f };
         directLightDirectionWorld = { 0.0f, 0.0f, 1.0f };
 
@@ -73,6 +74,7 @@ namespace renderer
         // these as it publishes the pose itself. Until then a consumer must
         // treat the pose as stale, which the boolean's own default does.
         cameraPoseStale = true;
+        cameraOrientationFresh = false;
         // No draw has carried an eye into THIS frame yet: a consumer that asks
         // how old the eye is must not read "just now".
         cameraEyeAgeMs = 1.0e6f;

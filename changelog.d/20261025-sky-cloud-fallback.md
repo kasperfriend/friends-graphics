@@ -1,0 +1,1 @@
+Keep clouds visible when only a corroborated camera orientation remains: render a sky-only, depth- and water-masked fallback without using a held eye or world shadows. Ease in first-tracked sun/moon directions to avoid a visibility-triggered lighting jump.
