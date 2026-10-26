@@ -61,6 +61,12 @@ int main() try
             skyRender.find("m_shadowSurface")==std::string::npos&&
             skyRender.find("m_shadowTexture")==std::string::npos,
             "the fallback is direction-only, excludes water/geometry, and cannot read a held eye or render a world shadow");
+    Require(text.find("constexpr float kSkyFallbackReferenceDistance = 1500.f;")!=std::string::npos&&
+            skyRender.find("settings.planetRadius")==std::string::npos&&
+            skyRender.find("kSkyFallbackReferenceDistance/featureSize")!=std::string::npos&&
+            skyRender.find("kSkyFallbackReferenceDistance/detailSize")!=std::string::npos&&
+            text.find("<<\",angularScale=\"<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)")!=std::string::npos,
+            "screen-only cloud noise uses a layer-scale reference distance instead of the planet-radius projection that created mottled patches");
     Require(normalShaderStart!=std::string::npos&&optionalShaderStart!=std::string::npos&&
             text.substr(normalShaderStart,optionalShaderStart-normalShaderStart).find("kCloudSkyFallbackSource")==std::string::npos&&
             text.find("m_skyShaderRetry.Fail(now,kOptionalPassRetryMs);")!=std::string::npos,

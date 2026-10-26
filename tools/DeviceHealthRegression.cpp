@@ -548,7 +548,9 @@ int main() try
                     Contains(celestialTracker, "++m_diagnostics.sunSignatureDraws;") &&
                     Contains(celestialTracker, "++m_diagnostics.sunAcceptedDraws;") &&
                     Contains(celestialTracker, "++m_diagnostics.moonSignatureDraws;") &&
-                    Contains(clouds, "celTrack=("),
+                    Contains(celestialTracker, "++m_diagnostics.moonTransformCandidates;") &&
+                    Contains(celestialTracker, "lastMoonWorldScaleSq = worldScaleSq;") &&
+                    Contains(clouds, "celTrack=(") && Contains(clouds, "moonCandidate=("),
                 "the client log reports why actual celestial billboard signatures are or are not being tracked");
             Require(Contains(capture, "skyprojection::CanReuseValidatedPerspective(") &&
                     Contains(capture, "m_fallbackProjectionValid") &&

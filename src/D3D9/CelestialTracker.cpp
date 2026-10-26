@@ -173,6 +173,18 @@ namespace renderer
         const float cx = cameraPosition.x;
         const float cy = cameraPosition.y;
         const float cz = cameraPosition.z;
+        // Keep the final candidate's transform evidence even when it fails
+        // the moon signature below. In the field, this distinguishes a
+        // texture filter hit from a genuine camera-relative lunar billboard
+        // without widening the acceptance gate or guessing from texture size.
+        if (texW >= 96 && texW <= 160)
+        {
+            ++m_diagnostics.moonTransformCandidates;
+            m_diagnostics.lastMoonWorldScaleSq = worldScaleSq;
+            m_diagnostics.lastMoonViewTranslationZero = viewTranslationZero;
+            m_diagnostics.lastMoonViewTranslationZ = viewTransZ;
+            m_diagnostics.lastMoonCameraSpaceZ = cz;
+        }
         if (cz <= 0.05f)
             return;
 

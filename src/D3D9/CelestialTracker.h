@@ -40,6 +40,11 @@ namespace renderer
         uint32_t unknownTextureSize = 0;
         uint32_t largeTextureDraws = 0;
         uint32_t moonTextureDraws = 0;
+        uint32_t moonTransformCandidates = 0;
+        float lastMoonWorldScaleSq = 0.f;
+        bool lastMoonViewTranslationZero = false;
+        float lastMoonViewTranslationZ = 0.f;
+        float lastMoonCameraSpaceZ = 0.f;
         uint32_t sunSignatureDraws = 0;
         uint32_t sunAcceptedDraws = 0;
         uint32_t moonSignatureDraws = 0;

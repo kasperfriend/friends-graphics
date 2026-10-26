@@ -572,6 +572,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  return float4(composited,scene.a);
 })HLSL";
 
+// Scalar reference distance used only to size the sky-only noise field. It is
+// deliberately independent of planet radius and camera position; with the
+// configured 850-3000 yard layer, 1500 yards approximates its mid-deck scale
+// without reusing an expired eye/world intersection.
+constexpr float kSkyFallbackReferenceDistance = 1500.f;
+
 // Emergency sky-only field for the narrow case where the current VIEW
 // orientation is independently corroborated but its eye has aged out. This
 // samples cloud shape on a direction sphere: no camera/world position, layer
@@ -583,7 +589,7 @@ sampler3D shapeMap:register(s0); sampler3D detailMap:register(s1);
 sampler2D weatherMap:register(s2);
 float4 invView0:register(c0); float4 invView1:register(c1); float4 invView2:register(c2);
 float4 projection:register(c3); // x=P00, y=P11
-float4 scales:register(c4);     // x=planet radius / feature size, y=shape aspect, z=radius / detail size, w=detail strength
+float4 scales:register(c4);     // x=direction-space feature scale, y=shape aspect, z=direction-space detail scale, w=detail strength
 float4 motion:register(c5);     // xy=shape offset, zw=weather offset
 float4 phase:register(c6);      // xy=detail offset, z=shape slice, w=detail slice
 float4 coverage:register(c7);   // x=coverage low edge, y=window scale, z=weather variation, w=cloud type
@@ -1091,11 +1097,17 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
                          {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
   const float projection[4]={p00,p11,0,0};
-  const float radius=std::max(settings.planetRadius,1000.f);
   const float featureSize=std::max(settings.featureSize,1.f);
   const float detailSize=std::max(settings.detailSize,1.f);
-  const float scales[4]={radius/featureSize,std::max(settings.shapeAspect,.05f),
-                         radius/detailSize,std::clamp(settings.detailStrength,0.f,.9f)};
+  // Screen-direction recovery has no eye with which to intersect the world
+  // layer. Approximate its broad mid-deck footprint with a fixed 1500-yard
+  // reference distance rather than projecting the 42 km planet radius into
+  // the noise field; that made dozens of tiny, camera-following tiles in DK's
+  // overhead view. The user feature/detail sizes still control their scales.
+  const float angularScale=kSkyFallbackReferenceDistance/featureSize;
+  const float detailAngularScale=kSkyFallbackReferenceDistance/detailSize;
+  const float scales[4]={angularScale,std::max(settings.shapeAspect,.05f),
+                         detailAngularScale,std::clamp(settings.detailStrength,0.f,.9f)};
   const float motionConstants[4]={float(motion.shape[0]),float(motion.shape[1]),
                                   float(motion.weather[0]),float(motion.weather[1])};
   const float phase[4]={float(motion.detail[0]),float(motion.detail[1]),
@@ -1224,6 +1236,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
    const auto tint=manualcolor::Multiplier(settings.manualCloudColor);
    out<<" skyField=(coverage="<<settings.coverage<<",type="<<settings.cloudType
       <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
+      <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
+      <<",detailAngularScale="<<kSkyFallbackReferenceDistance/std::max(settings.detailSize,1.f)
       <<",density="<<settings.density<<",opacity="<<settings.opacity
       <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
       <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
@@ -1245,6 +1259,11 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<celestialTrack.largeTextureDraws<<','<<celestialTrack.moonTextureDraws<<','
      <<celestialTrack.sunSignatureDraws<<','<<celestialTrack.sunAcceptedDraws<<','
      <<celestialTrack.moonSignatureDraws<<','<<celestialTrack.moonAcceptedDraws<<')'
+     <<" moonCandidate=("<<celestialTrack.moonTransformCandidates<<','
+     <<celestialTrack.lastMoonWorldScaleSq<<','
+     <<(celestialTrack.lastMoonViewTranslationZero?1:0)<<','
+     <<celestialTrack.lastMoonViewTranslationZ<<','
+     <<celestialTrack.lastMoonCameraSpaceZ<<')'
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
