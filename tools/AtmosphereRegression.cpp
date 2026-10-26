@@ -786,8 +786,35 @@ int main() try {
   f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
   fill(scene.Get(),0xff202020);fill(mask.Get(),0);
  }
- // The fallback sweep uses the same 50% coverage as the reported failure;
- // restore full coverage for the overcast world-march fixture below.
+ // Exercise the actual world-space marcher directly overhead at the reported
+ // 50% coverage. This must stay on the fresh-eye path; the direction-only
+ // recovery is not a substitute for normal clouds when the camera pose is valid.
+ {
+  const Matrix4 savedWorldView=f.inverseView;
+  cloud.coverage=.5f;
+  f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
+  f.cameraPosition={0,0,0};
+  f.inverseView.SetZero();
+  f.inverseView.m[0][0]=1.f;f.inverseView.m[1][1]=-1.f;
+  f.inverseView.m[2][2]=1.f;f.inverseView.m[3][3]=1.f;
+  fillFloat(depth.Get(),1.f);fill(scene.Get(),0xff202020);fill(mask.Get(),0);
+  const bool upwardWorldRendered=renderClouds();
+  Require(upwardWorldRendered&&!clouds.UsedSkyFallback(),
+          "a fresh-eye straight-up view uses normal world-space clouds, not the sky fallback");
+  Require(skyMean()>48.0,
+          "normal world-space clouds remain visible looking directly up at 50% coverage");
+  f.inverseView=savedWorldView;
+  {
+   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+   for(int y=0;y<128;++y)for(int x=0;x<128;++x)
+    reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=
+      y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
+   Check(depth->UnlockRect(0));
+  }
+  fill(scene.Get(),0xff202020);fill(mask.Get(),0);
+ }
+ // The fallback sweep above uses 50% coverage; restore full coverage for the
+ // separate overcast world-march fixture below.
  cloud.coverage=1.f;
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
@@ -896,9 +923,9 @@ int main() try {
  Require(renderClouds()&&pixel(64,20)==0xff202020,"above the deck the sky overhead is genuinely empty");
  f.cameraPosition={0,0,0};
  // Looking above the horizon can leave no terrain or liquid draw in the
- // frame. A verified in-world camera must still render the fixed deck, from
- // a shallow upward angle through a near-zenith view, while foreground depth
- // clipping remains covered by the assertions above.
+  // frame. A fresh in-world eye must keep the normal world-space deck visible
+  // from shallow elevation all the way to straight up; foreground depth
+  // clipping remains covered by the assertions above.
  {
   const Matrix4 horizontalView=f.inverseView;
   auto setCameraPitch=[&](float degrees){
@@ -908,7 +935,7 @@ int main() try {
    f.inverseView.m[2][1]=c;f.inverseView.m[2][2]=s;f.inverseView.m[3][3]=1;
   };
   fillFloat(depth.Get(),1.f);
-  for(float pitch:{.3f,.35f,.5f,1.f,2.f,5.f,15.f,45.f,80.f}){
+  for(float pitch:{.3f,.35f,.5f,1.f,2.f,5.f,15.f,45.f,80.f,90.f}){
    setCameraPitch(pitch);
    Require(renderClouds(),"sky-only upward camera renders the cloud deck");
    const double contribution=centreCloudContribution();

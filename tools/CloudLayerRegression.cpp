@@ -279,7 +279,7 @@ int main() try
     float transmittance, depth;
     Marcher upward(c,resources,{0,0,0});
     unsigned visibleElevations=0;
-    for(float pitchDegrees : {.3f,.35f,.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f}) {
+    for(float pitchDegrees : {.3f,.35f,.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f,90.f}) {
         const float pitch=pitchDegrees*3.14159265358979323846f/180.f;
         const V3 ray=Normalize({0,std::cos(pitch),std::sin(pitch)});
         upward.March({0,0,0},ray,{0,0,1},.5f,transmittance,depth);
@@ -287,8 +287,8 @@ int main() try
             throw std::runtime_error("cloud deck disappeared during the upward camera-elevation sweep");
         ++visibleElevations;
     }
-    Require(visibleElevations==11,
-            "cloud opacity survives shallow-above-horizon through near-zenith views");
+    Require(visibleElevations==12,
+            "cloud opacity survives shallow-above-horizon through a straight-up view");
     const V3 light{0,0,1};
     flying.March({0,0,3000}, {0,0,1}, light, 0, transmittance, depth);
     Require(transmittance==1.f, "above the deck, the view march leaves overhead sky clear");
