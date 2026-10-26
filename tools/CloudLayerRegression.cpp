@@ -3,10 +3,16 @@
 // Run from the repository root. The GPU/state checks live in AtmosphereRegression.
 #define CLOUD_PREVIEW_NO_MAIN
 #include "CloudPreview.cpp"
+#include "../src/Effects/CloudDynamics.h"
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
+
+using renderer::CloudShape;
+using renderer::SkyFallbackCloudType;
+using renderer::SkyFallbackCoverage;
 
 static void Require(bool ok, const char* message)
 {
@@ -17,6 +23,37 @@ static bool Near(float a, float b, float epsilon = .001f) { return std::fabs(a-b
 
 int main() try
 {
+    // The direction-only fallback cannot query the world weather map without
+    // inventing a world coordinate. It must preserve the climate-resolved
+    // mean controls rather than making screen patches depend on yaw/pitch.
+    {
+        CloudShape shape;
+        shape.coverage=-1.f;
+        Require(SkyFallbackCoverage(shape)==0.f,
+                "sky fallback coverage clamps clear-climate input to zero");
+        shape.coverage=.5f;
+        Require(Near(SkyFallbackCoverage(shape),.5f),
+                "sky fallback uses the climate-resolved mean coverage directly");
+        shape.coverage=2.f;
+        Require(SkyFallbackCoverage(shape)==1.f,
+                "sky fallback coverage clamps overcast-climate input to one");
+        shape.coverage=std::numeric_limits<float>::quiet_NaN();
+        Require(SkyFallbackCoverage(shape)==0.f,
+                "invalid sky fallback coverage fails closed");
+        shape.cloudType=-1.f;
+        Require(SkyFallbackCloudType(shape)==0.f,
+                "sky fallback maps the stratus climate endpoint");
+        shape.cloudType=0.f;
+        Require(Near(SkyFallbackCloudType(shape),.5f),
+                "sky fallback maps neutral climate type to mean cumulus");
+        shape.cloudType=1.f;
+        Require(SkyFallbackCloudType(shape)==1.f,
+                "sky fallback maps the cumulonimbus climate endpoint");
+        shape.cloudType=std::numeric_limits<float>::infinity();
+        Require(Near(SkyFallbackCloudType(shape),.5f),
+                "invalid sky fallback type uses a neutral safe profile");
+    }
+
     // Guard the production height profile as well as the reference math.
     std::ifstream source("src/Effects/VolumetricClouds.cpp");
     Require(bool(source), "production shader source is available");
@@ -54,6 +91,12 @@ int main() try
     Require(skyFallback.find("cameraPos")==std::string::npos&&
             skyFallback.find("cameraPosition")==std::string::npos&&
             skyFallback.find("shadowMap")==std::string::npos&&
+            skyFallback.find("weatherMap")==std::string::npos&&
+            skyFallback.find("weatherUv")==std::string::npos&&
+            cloudMarch.find("sampler2D weatherMap:register(s3)")!=std::string::npos&&
+            cloudMarch.find("tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0))")!=std::string::npos&&
+            skyFallback.find("float cov=saturate(coverage.x);")!=std::string::npos&&
+            skyFallback.find("float cloudType=saturate(coverage.y);")!=std::string::npos&&
             skyFallback.find("invView0")!=std::string::npos&&
             skyFallback.find("float4 volume:register(c10)")!=std::string::npos&&
             skyFallback.find("float4 shear:register(c11)")!=std::string::npos&&
@@ -87,9 +130,10 @@ int main() try
             skyRender.find("cameraPosition")==std::string::npos&&
             skyRender.find("m_shadowValid=false;")!=std::string::npos&&
             skyRender.find("m_shadowSurface")==std::string::npos&&
-            skyRender.find("m_shadowTexture")==std::string::npos,
-            "the fallback is direction-only and adds sheared, shape-shaded volume while excluding water, geometry, held eyes, and world shadows");
-    Require(text.find("constexpr float kSkyFallbackReferenceDistance = 1500.f;")!=std::string::npos&&
+            skyRender.find("m_shadowTexture")==std::string::npos&&
+            skyRender.find("m_weatherTexture")==std::string::npos,
+            "the fallback is direction-only, uses climate-resolved coverage/type without weather-map projection, and excludes geometry, water, held eyes, and world shadows");
+    Require(text.find("constexpr float kSkyFallbackReferenceDistance = 6000.f;")!=std::string::npos&&
             skyRender.find("settings.planetRadius")==std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/featureSize")!=std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/detailSize")!=std::string::npos&&
@@ -97,14 +141,18 @@ int main() try
             skyRender.find("const float shear[4]={std::cos(windRadians)*settings.windShear")!=std::string::npos&&
             skyRender.find("std::sin(windRadians)*settings.windShear*featureSize/detailSize")!=std::string::npos&&
             skyRender.find("d->SetPixelShaderConstantF(10,volume,1);d->SetPixelShaderConstantF(11,shear,1);")!=std::string::npos&&
+            skyRender.find("SkyFallbackCoverage(settings)")!=std::string::npos&&
+            skyRender.find("SkyFallbackCloudType(settings)")!=std::string::npos&&
+            skyRender.find("const float coverageConstants[4]={fallbackCoverage,fallbackCloudType,0.f,0.f};")!=std::string::npos&&
             skyRender.find("std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])*color[0]")!=std::string::npos&&
             skyRender.find("f.directLightValid&&f.directLightDirectionConfirmed")!=std::string::npos&&
             text.find("<<\",angularScale=\"<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)")!=std::string::npos&&
             text.find("<<\",shapeDepth=\"<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)")!=std::string::npos&&
             text.find("<<\",windShear=\"<<settings.windShear")!=std::string::npos&&
             text.find("<<\",cloudAmbient=\"<<fallbackCloudR")!=std::string::npos&&
-            text.find("skyField=(samples=16,coverage=")!=std::string::npos,
-            "screen-space noise uses a fixed scale, layer-depth wind shear, and the same subdued ambient floor without reading planet radius");
+            text.find("skyField=(samples=16,coverageSource=climate-mean,coverage=")!=std::string::npos&&
+            text.find("weatherField=unused")!=std::string::npos,
+            "screen-space noise uses a medium fixed scale, climate-resolved coverage/type, layer-depth shear, and the existing zone-tinted ambient without planet-radius or weather-map projection");
     {
         const float height=.2f,shapeSignal=.5f,detailSignal=.5f;
         const float nightMaterialG=std::max(.211765f*.5f,.10f);

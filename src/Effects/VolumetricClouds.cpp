@@ -578,10 +578,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 })HLSL";
 
 // Scalar reference distance used only to size the sky-only noise field. It is
-// deliberately independent of planet radius and camera position; with the
-// configured 850-3000 yard layer, 1500 yards approximates its mid-deck scale
-// without reusing an expired eye/world intersection.
-constexpr float kSkyFallbackReferenceDistance = 1500.f;
+// deliberately independent of planet radius and camera position. The former
+// 1500-yard anchor sampled less than one default shape tile across a typical
+// view and, once the world weather map was removed from this direction-only
+// pass, often read as one empty/soft mass. 6000 yards gives roughly two
+// default feature widths across the reported view without planet-scale tiling.
+constexpr float kSkyFallbackReferenceDistance = 6000.f;
 // A subdued, cool floor for the cloud deck alone. Some zones report zero
 // native ambient after sunset; clouds should become dark blue, not disappear
 // into mathematically black radiance. Manual tint is applied after this floor.
@@ -596,13 +598,12 @@ constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};
 // and explicitly leaves native-water pixels untouched.
 const char* kCloudSkyFallbackSource = R"HLSL(
 sampler3D shapeMap:register(s0); sampler3D detailMap:register(s1);
-sampler2D weatherMap:register(s2);
 float4 invView0:register(c0); float4 invView1:register(c1); float4 invView2:register(c2);
 float4 projection:register(c3); // x=P00, y=P11
 float4 scales:register(c4);     // x=direction-space feature scale, y=shape aspect, z=direction-space detail scale, w=detail strength
-float4 motion:register(c5);     // xy=shape offset, zw=weather offset
+float4 motion:register(c5);     // xy=shape offset
 float4 phase:register(c6);      // xy=detail offset, z=shape slice, w=detail slice
-float4 coverage:register(c7);   // x=coverage low edge, y=window scale, z=weather variation, w=cloud type
+float4 coverage:register(c7);   // x=climate-resolved mean coverage, y=climate-resolved mean cloud type
 float4 material:register(c8);   // rgb=zone/manual tint, w=density * opacity
 float4 lighting:register(c9);   // xyz=world light direction, w=confirmed silver-lining strength
 float4 volume:register(c10);    // xy=vertical shape/detail span; normalized by each feature size
@@ -644,11 +645,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 focal=max(projection.xy,.01);
  float3 viewRay=normalize(float3((uv.x*2-1)/focal.x,(1-uv.y*2)/focal.y,1));
  float3 ray=normalize(viewRay.x*invView0.xyz+viewRay.y*invView1.xyz+viewRay.z*invView2.xyz);
- // The weather field is a direction-space projection, with no seam at zenith.
- float2 weatherUv=.5+.32*float2(ray.x+ray.z*.35,ray.y-ray.z*.18)+motion.zw;
- float3 weather=tex2Dlod(weatherMap,float4(weatherUv,0,0)).rgb;
- float cov=saturate((weather.r+(weather.b-.5)*coverage.z-coverage.x)*coverage.y);
- float cloudType=saturate(weather.g*(1-abs(coverage.w))+max(coverage.w,0));
+ // This recovery has no trusted world XY for the spatial weather map. A
+ // direction-space weather projection invented one front across the whole
+ // dome, which produced broad, disconnected blobs as the view turned. The
+ // host supplies the climate/native-weather-resolved mean for this sky-only
+ // approximation; the normal world march keeps the full spatial weather map.
+ float cov=saturate(coverage.x);
+ float cloudType=saturate(coverage.y);
  float sun=saturate(dot(ray,normalize(lighting.xyz)));
  float transmittance=1;
  float3 scattered=0;
@@ -1139,7 +1142,6 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
   d->SetPixelShader(m_skyFallbackShader.Get());
   d->SetTexture(0,m_shapeTexture.Get());SetSampler(d,0,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
   d->SetTexture(1,m_detailTexture.Get());SetSampler(d,1,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
-  d->SetTexture(2,m_weatherTexture.Get());SetSampler(d,2,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
   const float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},
                          {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},
                          {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
@@ -1147,16 +1149,15 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
   const float featureSize=std::max(settings.featureSize,1.f);
   const float detailSize=std::max(settings.detailSize,1.f);
   // Screen-direction recovery has no eye with which to intersect the world
-  // layer. Approximate its broad mid-deck footprint with a fixed 1500-yard
-  // reference distance rather than projecting the 42 km planet radius into
-  // the noise field; that made dozens of tiny, camera-following tiles in DK's
-  // overhead view. The user feature/detail sizes still control their scales.
+  // layer or weather map. Use a fixed, medium angular footprint for shape and
+  // detail: 1500 yards made one broad/soft patch in the reported view, while
+  // planet-radius scaling made many tiny camera-following tiles. The user
+  // feature/detail sizes still control their relative scales.
   const float angularScale=kSkyFallbackReferenceDistance/featureSize;
   const float detailAngularScale=kSkyFallbackReferenceDistance/detailSize;
   const float scales[4]={angularScale,std::max(settings.shapeAspect,.05f),
                          detailAngularScale,std::clamp(settings.detailStrength,0.f,.9f)};
-  const float motionConstants[4]={float(motion.shape[0]),float(motion.shape[1]),
-                                  float(motion.weather[0]),float(motion.weather[1])};
+  const float motionConstants[4]={float(motion.shape[0]),float(motion.shape[1]),0.f,0.f};
   const float phase[4]={float(motion.detail[0]),float(motion.detail[1]),
                         float(motion.shapeZ),float(motion.detailZ)};
   const float depthSpan=std::clamp(settings.thickness,100.f,12000.f);
@@ -1166,11 +1167,9 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
                         std::sin(windRadians)*settings.windShear,
                         std::cos(windRadians)*settings.windShear*featureSize/detailSize,
                         std::sin(windRadians)*settings.windShear*featureSize/detailSize};
-  const float coverage=std::clamp(settings.coverage,0.f,1.f);
-  const float windowLow=1.f-coverage*1.5f;
-  const float windowHigh=1.f-coverage*coverage*1.05f;
-  const float coverageConstants[4]={windowLow,
-      1.f/std::max(windowHigh-windowLow,1e-4f),motion.variation,settings.cloudType};
+  const float fallbackCoverage=SkyFallbackCoverage(settings);
+  const float fallbackCloudType=SkyFallbackCloudType(settings);
+  const float coverageConstants[4]={fallbackCoverage,fallbackCloudType,0.f,0.f};
   const auto& envFog=EnvironmentFogCapture::Instance().State();
   const float ambientLevel=std::clamp(std::max(std::clamp(f.daylightFactor,0.f,1.f),
                                                    std::clamp(f.moonlightFactor,0.f,1.f)*.5f),.2f,1.f);
@@ -1299,7 +1298,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
    const float fallbackCloudR=std::max(fallbackSkyR*fallbackAmbientLevel,kCloudSkyAmbientFloor[0]);
    const float fallbackCloudG=std::max(fallbackSkyG*fallbackAmbientLevel,kCloudSkyAmbientFloor[1]);
    const float fallbackCloudB=std::max(fallbackSkyB*fallbackAmbientLevel,kCloudSkyAmbientFloor[2]);
-   out<<" skyField=(samples=16,coverage="<<settings.coverage<<",type="<<settings.cloudType
+   out<<" skyField=(samples=16,coverageSource=climate-mean,coverage="
+      <<SkyFallbackCoverage(settings)<<",type="<<SkyFallbackCloudType(settings)
+      <<",typeBias="<<settings.cloudType<<",weatherField=unused"
       <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
       <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
       <<",detailAngularScale="<<kSkyFallbackReferenceDistance/std::max(settings.detailSize,1.f)
@@ -1309,7 +1310,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
       <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
       <<",windAngle="<<settings.windAngle<<",windShear="<<settings.windShear
       <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
-      <<",detailPhase="<<fieldMotion.detailZ<<",weatherPhase="<<fieldMotion.weather[0]<<','
+      <<",detailPhase="<<fieldMotion.detailZ<<",weatherPhaseUnused="<<fieldMotion.weather[0]<<','
       <<fieldMotion.weather[1]<<",ambientValid="<<(fog.colorValid?1:0)
       <<",ambientLevel="<<fallbackAmbientLevel<<",ambient="<<fog.ambientFogColor[0]<<','
       <<fog.ambientFogColor[1]<<','<<fog.ambientFogColor[2]

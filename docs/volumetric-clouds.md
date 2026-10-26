@@ -68,6 +68,12 @@ The march itself:
 6. Accumulate a transmittance-weighted mean distance alongside the radiance, and apply aerial perspective once to
    the integrated result.
 
+## Direction-only recovery
+
+Normal rendering samples the weather map at world XY only while a fresh camera eye is accepted. If the eye goes stale but the current view orientation is independently corroborated in-world, the emergency sky pass cannot safely recover that world coordinate. Projecting the 34 km weather map over screen-ray directions instead made one large weather front span the view; its coverage mask split the fallback into smooth grey blobs, and the pattern changed with the view rather than the local climate.
+
+The fallback therefore uses the already zone/native-weather-resolved mean coverage and cloud type from `CloudDynamics`, while shape and detail still come from the generated 3D fields. Its fixed 6000-yard angular reference is independent of any held eye, planet radius, or world-layer intersection. The normal world march retains its full spatial weather map, fresh-eye gate, and shadows. This recovery remains screen-space only, composites only over clear sky, and leaves geometry and native water untouched. Fine-grained local weather placement is intentionally unavailable until a safe world eye returns.
+
 ## Field shape
 
 Density at a point is

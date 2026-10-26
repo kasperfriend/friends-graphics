@@ -686,9 +686,9 @@ int main() try {
    throw std::runtime_error("cloud preset/independent resolution changed incorrectly");
  }
  Require(true,"all four cloud march presets change samples/step but not resolution");
- clouds.ApplyQualityPreset(1);
- cloud.zoneClouds=false;cloud.evolutionSpeed=0;cloud.transitionSeconds=0;
- cloud.enabled=true;cloud.coverage=1.f;cloud.density=1.f;cloud.weather=CloudWeather::Clear;cloud.weatherStrength=0;
+  clouds.ApplyQualityPreset(1);
+  cloud.zoneClouds=false;cloud.evolutionSpeed=0;cloud.transitionSeconds=0;
+ cloud.enabled=true;cloud.coverage=.5f;cloud.density=1.f;cloud.weather=CloudWeather::Clear;cloud.weatherStrength=0;
  cloud.debugMode=CloudDebugMode::None;cloud.cloudType=0;
  cloud.planetRadius=42000;cloud.baseAltitude=900;cloud.thickness=1400;
  cloud.featureSize=5200;cloud.detailSize=380;cloud.weatherSize=34000;
@@ -767,7 +767,7 @@ int main() try {
   auto fullSkyMean=[&]{const auto image=readCloudImage();double sum=0;int n=0;
    for(int y=6;y<122;++y)for(int x=6;x<122;++x){sum+=double(image[y*128+x]&255);++n;}
    return sum/double(n?n:1);};
-  for(float yaw:{0.f,90.f,180.f,270.f})for(float pitch:{-10.f,-1.f,0.f,.3f,.5f,5.f,45.f,80.f}){
+  for(float yaw:{0.f,90.f,180.f,270.f})for(float pitch:{-10.f,-1.f,0.f,.3f,.5f,5.f,45.f,80.f,90.f}){
    setFallbackView(yaw,pitch);
    const bool angleRendered=renderClouds();
    const double angleMean=fullSkyMean();
@@ -786,6 +786,9 @@ int main() try {
   f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
   fill(scene.Get(),0xff202020);fill(mask.Get(),0);
  }
+ // The fallback sweep uses the same 50% coverage as the reported failure;
+ // restore full coverage for the overcast world-march fixture below.
+ cloud.coverage=1.f;
  Require(renderClouds(),"overcast cloud deck renders on the production device");
  Require(clouds.FieldsReady(),"the shape, detail and weather fields reach the GPU");
  Check(clouds.GetCloudTexture()->GetLevelDesc(0,&cloudDesc));

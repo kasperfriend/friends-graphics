@@ -584,7 +584,8 @@ int main() try
                     Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
                     Contains(clouds, "glareSource=") && Contains(clouds, "trackedSun=") &&
                     Contains(clouds, "trackedMoon=") && Contains(clouds, "bodyTrackValid=(sun=") &&
-                    Contains(clouds, "celTrack=(") && Contains(clouds, "skyField=(samples=16,coverage=") && Contains(clouds, "ambient=(") &&
+                    Contains(clouds, "celTrack=(") && Contains(clouds, "skyField=(samples=16,coverageSource=climate-mean,coverage=") &&
+                    Contains(clouds, "weatherField=unused") && Contains(clouds, "ambient=(") &&
                     Contains(clouds, "sunDisc=") && Contains(clouds, "moonDisc=") &&
                     Contains(clouds, "directionSource=") && Contains(clouds, "directLight=(") &&
                     Contains(clouds, "orientationFresh=") &&
