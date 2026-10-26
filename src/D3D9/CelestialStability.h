@@ -91,6 +91,11 @@ namespace renderer
         // can read near zero at a cool-tinted noon, and a bright colour
         // must not let those factors reclassify noon as moonlit.
         float directionalLuminance = 0.0f;
+        // Persistent world-direction evidence, not per-frame billboard visibility.
+        // When only one body's direction has been corroborated, strong scene
+        // day/night factors can identify it even if its color is very blue.
+        bool sunDirectionConfirmed = false;
+        bool moonDirectionConfirmed = false;
         float deltaSeconds = 1.0f / 60.0f;
     };
 
@@ -162,6 +167,18 @@ namespace renderer
                 isMoon = false;
             else if (input.moonlight > input.daylight + 0.25f)
                 isMoon = true;
+
+            // A saturated blue moon can have directional luminance above the
+            // old sun threshold. If only one body has a real, retained world
+            // direction, strong scene factors identify that track without
+            // following the billboard's current visibility. This only resolves
+            // an otherwise ambiguous body choice; it cannot invent a direction.
+            if (input.moonDirectionConfirmed && !input.sunDirectionConfirmed &&
+                input.moonlight > input.daylight + 0.25f)
+                isMoon = true;
+            else if (input.sunDirectionConfirmed && !input.moonDirectionConfirmed &&
+                     input.daylight > input.moonlight + 0.25f)
+                isMoon = false;
 
             // Magnitudes are still gates, not strength multipliers. Taking
             // either period avoids extinguishing the light inside the body

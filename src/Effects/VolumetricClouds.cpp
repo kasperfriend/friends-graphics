@@ -1213,11 +1213,27 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<",confirmed="<<(f.directLightDirectionConfirmed?1:0)
      <<",dir="<<f.directLightDirectionWorld.x<<','<<f.directLightDirectionWorld.y<<','
      <<f.directLightDirectionWorld.z<<",color="<<f.directionalLightColor.x<<','
-     <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')'
-     <<" trackedSun="<<(f.sunBillboardObserved?1:0)<<'('<<f.sunBillboardScreenX<<','
+     <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')';
+  if(skyFallback){
+   const auto& fieldMotion=m_dynamics.Motion();
+   const auto& fog=EnvironmentFogCapture::Instance().State();
+   const auto tint=manualcolor::Multiplier(settings.manualCloudColor);
+   out<<" skyField=(coverage="<<settings.coverage<<",type="<<settings.cloudType
+      <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
+      <<",density="<<settings.density<<",opacity="<<settings.opacity
+      <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
+      <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
+      <<",detailPhase="<<fieldMotion.detailZ<<",weatherPhase="<<fieldMotion.weather[0]<<','
+      <<fieldMotion.weather[1]<<",ambientValid="<<(fog.colorValid?1:0)
+      <<",ambient="<<fog.ambientFogColor[0]<<','<<fog.ambientFogColor[1]<<','
+      <<fog.ambientFogColor[2]<<",manual="<<tint[0]<<','<<tint[1]<<','<<tint[2]<<')';
+  }
+  out<<" trackedSun="<<(f.sunBillboardObserved?1:0)<<'('<<f.sunBillboardScreenX<<','
      <<f.sunBillboardScreenY<<','<<f.sunBillboardViewDepth<<')'
      <<" trackedMoon="<<(f.moonBillboardObserved?1:0)<<'('<<f.moonBillboardScreenX<<','
      <<f.moonBillboardScreenY<<','<<f.moonBillboardViewDepth<<')'
+     <<" bodyTrackValid=(sun="<<(CelestialTracker::Instance().Sun().worldDirectionValid?1:0)
+     <<",moon="<<(CelestialTracker::Instance().Moon().worldDirectionValid?1:0)<<')'
      <<" celTrack=("<<celestialTrack.drawCalls<<','<<celestialTrack.primitiveRejected<<','
      <<celestialTrack.vertexShaderDraws<<','<<celestialTrack.pixelShaderDraws<<','
      <<celestialTrack.fixedFunctionDraws<<','<<celestialTrack.alphaTestDraws<<','
@@ -1376,6 +1392,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" lightInput=(moon="<<(moon?1:0)<<",intensity="<<directIntensity
      <<",day="<<daylight<<",night="<<moonlight<<",color="<<f.directionalLightColor.x<<','
      <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')'
+     <<" ambient=("<<skyR<<','<<skyG<<','<<skyB<<") ambientLevel="<<ambientLevel
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'

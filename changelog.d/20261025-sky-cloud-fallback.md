@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Clouds stay visible when the camera eye ages out
 ---
-Keep clouds visible when only a corroborated camera orientation remains: render a sky-only, depth- and water-masked fallback without using a held eye or world shadows. Ease in first-tracked sun/moon directions to avoid a visibility-triggered lighting jump.
+A verified sky-only cloud pass keeps clouds visible after the camera eye ages out without touching geometry, water, or world shadows. Strong night lighting can use a confirmed moon direction despite its bright-blue color; first-tracked directions ease in.

@@ -1061,6 +1061,15 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.directionalLightColor.x * .2126f +
             frameCtx.directionalLightColor.y * .7152f +
             frameCtx.directionalLightColor.z * .0722f;
+        // Use historical, world-space direction confirmation rather than
+        // this frame's `visible` bit: a bright-blue moonlight can exceed the
+        // luminance threshold, while the moon's disc is a frustum event. The
+        // retained track lets strong night factors select the actual moon
+        // without making light direction blink as the player turns away.
+        lightInput.sunDirectionConfirmed =
+            celestialDirectionStabilizer.HasConfirmed(false) || sun.worldDirectionValid;
+        lightInput.moonDirectionConfirmed =
+            celestialDirectionStabilizer.HasConfirmed(true) || moon.worldDirectionValid;
         lightInput.deltaSeconds = lightDt;
         const auto stable = celestialLightStabilizer.Update(lightInput);
         frameCtx.directLightIntensity = stable.intensity;

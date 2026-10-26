@@ -477,12 +477,13 @@ Two related gates, both from the camera-freshness work above:
   (`sourceScreen.w`), so a stale screen position cannot paint a sun onto
   whatever now occupies that pixel.
 
-World lighting uses the captured scene day/night state and a per-body direction
-track, not whether the billboard happens to be inside the frustum. Before a
-body has ever been tracked, the direction remains the deterministic overhead
-approximation; the first verified disc now eases toward its world direction
-with the existing bounded response instead of replacing it in one frame. Once
-confirmed, the direction is held while the disc is culled. Cloud diagnostics
-report `directLightDirectionConfirmed`, direction, selected body, intensity,
-day/night factors and captured light color so a client log can separate an
-acquisition transition from changes in the game's light inputs.
+World lighting uses the captured scene day/night state and persistent per-body
+world directions, not whether a billboard happens to be inside the frustum. A
+strong night signal can select a confirmed moon direction even when the moon's
+blue captured light has high luminance; a billboard's current visibility never
+selects or drops the direction. Before either body has been tracked, the
+renderer keeps the deterministic overhead approximation; the first verified
+disc eases toward its world direction instead of replacing it in one frame.
+Cloud diagnostics report `directLightDirectionConfirmed`, direction, selected
+body, intensity, day/night factors and captured light color so a client log can
+separate direction acquisition from changes in the game's light inputs.

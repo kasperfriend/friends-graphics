@@ -439,6 +439,8 @@ int main() try
                     Contains(composite, "if (clouds.UsedSkyFallback())") &&
                     Contains(composite, "frameCtx.cloudTexture = nullptr;") &&
                     Contains(composite, "frameCtx.directLightDirectionConfirmed = celestialDirectionStabilizer.HasConfirmed(stable.isMoon);") &&
+                    Contains(composite, "lightInput.sunDirectionConfirmed =") &&
+                    Contains(composite, "lightInput.moonDirectionConfirmed =") &&
                     Contains(clouds, "CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose)"),
                 "the compositor publishes no world cloud/shadow texture after the screen-only recovery");
             Require(Contains(atmosphere, "screenPhase*.12*discProtection+directionalLean*.25;") &&
@@ -579,7 +581,8 @@ int main() try
                     Contains(clouds, "skyProjVp=") &&
                     Contains(clouds, "skyEyeCandidate=") && Contains(clouds, "sunRaw=") &&
                     Contains(clouds, "glareSource=") && Contains(clouds, "trackedSun=") &&
-                    Contains(clouds, "trackedMoon=") && Contains(clouds, "celTrack=(") &&
+                    Contains(clouds, "trackedMoon=") && Contains(clouds, "bodyTrackValid=(sun=") &&
+                    Contains(clouds, "celTrack=(") && Contains(clouds, "skyField=(coverage=") && Contains(clouds, "ambient=(") &&
                     Contains(clouds, "sunDisc=") && Contains(clouds, "moonDisc=") &&
                     Contains(clouds, "directionSource=") && Contains(clouds, "directLight=(") &&
                     Contains(clouds, "orientationFresh=") &&
@@ -722,6 +725,24 @@ int main() try
         frame.directionalLuminance = 1.0f;
         const auto coolNoon = light.Update(frame);
         Require(!coolNoon.isMoon, "bright cool-tinted noon selects sunlight regardless of past discs");
+        {
+            CelestialLightStabilizer blueNightLight;
+            CelestialLightInput blueNight;
+            blueNight.daylight = 0.f;
+            blueNight.moonlight = 1.f;
+            blueNight.directionalLuminance = .588f; // the bright blue color seen in the DK log
+            blueNight.moonDirectionConfirmed = true;
+            const auto trackedNight = blueNightLight.Update(blueNight);
+            Require(trackedNight.isMoon && trackedNight.intensity == 1.f,
+                    "a confirmed moon track wins over bright-blue luminance when scene factors say night");
+            // The confirmation is retained when the billboard leaves the frustum;
+            // no per-frame visibility input exists in this decision.
+            bool remainsMoon=true;
+            for (int i=0;i<120;++i)
+                remainsMoon=remainsMoon&&blueNightLight.Update(blueNight).isMoon;
+            Require(remainsMoon,
+                    "blue moon lighting remains selected while its disc is no longer drawn");
+        }
         Require(ChooseVisibleCelestialSource(true,true,coolNoon.isMoon)==VisibleCelestialSource::Sun,
                 "a visible moon cannot drag the screen-space halo away from bright noon sun");
         Require(ChooseVisibleCelestialSource(false,true,coolNoon.isMoon)==VisibleCelestialSource::Moon &&
