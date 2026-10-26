@@ -1,6 +1,7 @@
 #include "WoWClientContext.h"
 #include <bcrypt.h>
 #include <array>
+#include <limits>
 #include <fstream>
 #include <filesystem>
 #include <sstream>
@@ -8,12 +9,23 @@
 #pragma comment(lib,"bcrypt.lib")
 namespace renderer {
 bool WoWClientContext::Read(uintptr_t rva,void* value,size_t size) const {
-    if(!base||!size||rva>=imageSize||size>imageSize-rva)return false;
+    if(!base||!size||rva>=imageSize||size>imageSize-rva||
+       rva>std::numeric_limits<uintptr_t>::max()-base)return false;
+    return ReadAddress(base+rva,value,size);
+}
+bool WoWClientContext::ReadAddress(uintptr_t address,void* value,size_t size) const {
+    if(!base||!address||!value||!size||
+       size>std::numeric_limits<uintptr_t>::max()-address)return false;
     MEMORY_BASIC_INFORMATION region{};
-    const auto address=base+rva;
-    if(VirtualQuery(reinterpret_cast<void*>(address),&region,sizeof(region))!=sizeof(region)||region.State!=MEM_COMMIT||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return false;
-    if(!(region.Protect&(PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)))return false;
-    if(size>region.RegionSize-(address-reinterpret_cast<uintptr_t>(region.BaseAddress)))return false;
+    if(VirtualQuery(reinterpret_cast<void*>(address),&region,sizeof(region))!=sizeof(region)||
+       region.State!=MEM_COMMIT||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return false;
+    const DWORD readable=PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY|
+        PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY;
+    if(!(region.Protect&readable))return false;
+    const uintptr_t regionBase=reinterpret_cast<uintptr_t>(region.BaseAddress);
+    if(address<regionBase)return false;
+    const uintptr_t regionOffset=address-regionBase;
+    if(regionOffset>=region.RegionSize||size>region.RegionSize-regionOffset)return false;
     SIZE_T copied=0;
     return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address),value,size,&copied)&&copied==size;
 }

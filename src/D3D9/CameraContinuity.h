@@ -18,6 +18,28 @@ inline bool IsStandardD3DPerspectiveProjection(float p00, float p11, float p22,
            std::fabs(p23 - 1.0f) <= 0.001f && std::fabs(p33) <= 0.001f;
 }
 
+// Convert a current world-space camera eye into row-vector D3D view
+// translation using the already-corroborated world-to-view basis. This does
+// not accept the eye; CameraContinuityGate still owns the continuity decision.
+inline bool BuildViewTranslationForCameraEye(const float position[3],
+                                             const float viewBasis[3][4],
+                                             float translation[4]) noexcept
+{
+    if (!position || !viewBasis || !translation ||
+        !std::isfinite(position[0]) || !std::isfinite(position[1]) ||
+        !std::isfinite(position[2]))
+        return false;
+    for (int col = 0; col < 3; ++col)
+    {
+        translation[col] = -(position[0] * viewBasis[0][col] +
+                             position[1] * viewBasis[1][col] +
+                             position[2] * viewBasis[2][col]);
+        if (!std::isfinite(translation[col])) return false;
+    }
+    translation[3] = 1.f;
+    return true;
+}
+
 // Decides whether a candidate view matrix is the frame's real camera.
 //
 // CameraCapture reads the projection, the light direction and the daylight

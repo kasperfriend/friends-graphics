@@ -15,6 +15,10 @@ public:
     bool Verified() const {return available&&verified;}
     const std::string& Status() const {return status;}
     const WoWClientContext& Client() const {return client;}
+    // Reads the active 3.3.5a world camera only for a verified supported
+    // client. The caller must still require current in-world/orientation
+    // evidence and pass the eye through CameraContinuityGate before use.
+    bool ReadCameraEye(float position[3]) const;
     const LocationContext& RawSample() const {return rawSample;}
     // True once the three addresses have been read successfully at least once, so the
     // panel can tell "the client says 0 / 0 / 0" from "we never got to read".
@@ -39,7 +43,7 @@ private:
     LocationFailure configureFailure=LocationFailure::NotConfigured;
     WoWClientContext client;
     WoWLocationOffsets offsets;
-    bool available=false,verified=false;
+    bool available=false,verified=false,cameraLayoutSupported=false;
     std::string status="Location provider not configured";
 };
 }

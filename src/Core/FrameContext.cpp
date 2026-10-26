@@ -17,7 +17,8 @@ namespace renderer
         // Keep the last accepted camera pose/projection as a fallback when a
         // frame contains only a skybox and no terrain draw can recapture it.
         // `cameraValid` is the freshness gate: consumers must not use that pose
-        // until this frame's camera capture or sky fallback explicitly accepts it.
+        // until this frame's camera capture or corroborated sky pose explicitly
+        // accepts a trusted current eye source.
         sunScreenX = -1.0f;
         sunScreenY = -1.0f;
         sunStrength = 0.0f;
@@ -79,6 +80,9 @@ namespace renderer
         // how old the eye is must not read "just now".
         cameraEyeAgeMs = 1.0e6f;
         cameraEyeObservedThisFrame = false;
+        clientCameraEyeReadThisFrame = false;
+        clientCameraEyeAcceptedThisFrame = false;
+        clientCameraEyeDistanceYards = -1.f;
         cameraPoseSource = PoseNone;
         cameraCaptureAttempts = cameraCaptureAccepted = 0;
         cameraCaptureStateRejected = cameraCaptureNonFinite = 0;

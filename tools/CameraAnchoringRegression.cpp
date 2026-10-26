@@ -31,6 +31,7 @@
 #include "../src/Effects/GroundReference.h"
 #include "../src/Effects/CelestialDiscGate.h"
 #include "../src/D3D9/SkyProjectionGate.h"
+#include "../src/D3D9/CameraContinuity.h"
 #include "../src/Lighting/LocalLightSelection.h"
 
 #include <algorithm>
@@ -124,6 +125,32 @@ int main() try
             "a changed focal scale cannot keep a stale projection alive");
         Require(!MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.821558f,std::nanf("")),
             "non-finite shader focal scales cannot renew the validated projection");
+    }
+
+    // ------------------------------------------------------ client camera eye ---
+    {
+        using namespace renderer;
+        CameraContinuityGate gate;
+        const float eye[3]={2351.77f,-5693.45f,426.16f};
+        const float horizontal[3][4]={{1,0,0,0},{0,1,0,0},{0,0,1,0}};
+        const float straightUp[3][4]={{1,0,0,0},{0,-1,0,0},{0,0,1,0}};
+        float viewTranslation[4]{};
+        Require(BuildViewTranslationForCameraEye(eye,horizontal,viewTranslation) &&
+                gate.Accept(viewTranslation,horizontal,1920,1080),
+            "a shader-captured eye establishes the world-camera anchor");
+        Require(BuildViewTranslationForCameraEye(eye,straightUp,viewTranslation) &&
+                gate.AcceptFallback(viewTranslation,straightUp,1920,1080),
+            "a fresh client eye paired with a corroborated straight-up basis refreshes the normal world pose");
+        Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f &&
+                std::fabs(gate.Position()[1]-eye[1])<1e-3f &&
+                std::fabs(gate.Position()[2]-eye[2])<1e-3f,
+            "view-translation reconstruction preserves the client eye in world coordinates");
+        const float discontinuousEye[3]={eye[0]+41.f,eye[1],eye[2]};
+        Require(BuildViewTranslationForCameraEye(discontinuousEye,straightUp,viewTranslation) &&
+                !gate.AcceptFallback(viewTranslation,straightUp,1920,1080),
+            "a client-eye jump beyond the existing continuity leash cannot refresh the world pose");
+        Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f,
+            "a rejected client-eye jump leaves the accepted world anchor unchanged");
     }
 
     // ---------------------------------------------------------------- floor ---
@@ -367,6 +394,28 @@ int main() try
             "raw-score partial sorting no longer decides pool membership on its own");
         Require(Contains(manager, "it = m_fade.erase(it)") && !Contains(manager, "m_fade.clear()"),
             "a dissolved fade is forgotten instead of accumulating one entry per light");
+
+        const auto cameraProvider = Read("src/Game/WoWLocationProvider.cpp");
+        const auto cameraCapture = Read("src/D3D9/CameraCapture.cpp");
+        Require(Contains(cameraProvider, "kWorldFramePointerRva=0x77436C") &&
+                Contains(cameraProvider, "kWorldFrameCameraOffset=0x7E20") &&
+                Contains(cameraProvider, "kCameraPositionOffset=0x08") &&
+                Contains(cameraProvider, "cameraLayoutSupported=knownClient&&client.base==0x00400000") &&
+                Contains(cameraProvider, "!available||!verified||!cameraLayoutSupported") &&
+                Contains(cameraProvider, "worldFrameAfter!=worldFrame") &&
+                Contains(cameraProvider, "cameraAfter!=camera") &&
+                Contains(cameraProvider, "dx*dx+dy*dy+dz*dz>.25f"),
+            "the active-camera eye reader is pinned to the supported 3.3.5a layout and client gate");
+        Require(Contains(cameraProvider, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d"),
+            "the ArdenWoW executable fingerprint remains an explicitly supported camera source");
+        Require(Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&") &&
+                Contains(composite, "ReadCameraEye(clientCameraEye)"),
+            "the direct eye read is attempted only in a confirmed playable world");
+        Require(Contains(cameraCapture, "BuildViewTranslationForCameraEye(currentCameraEye, basis, eyeTranslation)") &&
+                Contains(cameraCapture, "m_cameraGate.AcceptFallback(") &&
+                Contains(cameraCapture, "cameraPoseStale = !corroborated || !eyeFresh") &&
+                Contains(cameraCapture, "FrameContext::kCameraEyeHoldMs"),
+            "a client eye still needs corroborated orientation, the existing continuity leash and freshness gate");
     }
 
     std::printf("ALL CAMERA ANCHORING TESTS PASSED\n");

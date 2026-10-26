@@ -69,7 +69,8 @@ namespace renderer
             const CameraCaptureConfig& config,
             float outConstants[13][4],
             float outCapturedViewTranslation[3],
-            bool& outCapturedViewValid);
+            bool& outCapturedViewValid,
+            const float currentCameraEye[3] = nullptr);
 
         bool IsValid() const { return m_valid; }
         uint32_t GetCapturedFrames() const { return m_capturedFrames; }
@@ -156,9 +157,10 @@ namespace renderer
         D3DVIEWPORT9 m_rejectedCaptureVp{};
         D3DMATRIX m_fallbackProj{};
         D3DVIEWPORT9 m_fallbackVp{};
-        // Performance-clock seconds when a draw last carried the camera's eye.
-        // Published as FrameContext::cameraEyeAgeMs; passes that place things
-        // within a few yards of the camera refuse an older one.
+        // Performance-clock seconds when a trusted current source last supplied
+        // the camera eye (shader capture, bounded D3D eye, or verified client
+        // camera memory). Published as cameraEyeAgeMs; world-space passes still
+        // refuse the pose after the existing hold expires.
         double m_lastEyeSeconds = -1.0;
         static constexpr float kSkyEyeLeashYards = 40.0f;
         // Rejected shader captures carry a trustworthy eye, so keep this path

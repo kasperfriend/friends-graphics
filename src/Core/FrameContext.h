@@ -189,8 +189,9 @@ namespace renderer
         // only says a pose was published; it does not say the pose is this
         // frame's. In a place where the terrain capture never latches - a city
         // with everything overhead culled, which is most of Orgrimmar from
-        // street level - the frame falls back to the sky transform, and when
-        // even that cannot be corroborated the previous frame's pose is held.
+        // street level - the frame may use a corroborated sky orientation and,
+        // on supported clients, a separately verified active-camera eye. When
+        // no current pose can be corroborated, the previous frame is held.
         // Drawing the deck or a torch from that pose is what "the clouds and the
         // dynamic lights go with the camera" looks like: they are anchored to a
         // camera the player already left. A pass that places something in WORLD
@@ -201,24 +202,31 @@ namespace renderer
         // if its eye is held and therefore unsafe for world-space placement.
         // Only direction/screen-space passes may use this independently.
         bool cameraOrientationFresh = false;
-        // Milliseconds since a draw actually carried the camera's EYE (a real
-        // capture, not a rotation-only sky transform). Anything placed within a
-        // few yards of the camera - torch emitters above all - needs a fresh
-        // eye, where far-away anchoring only needs a fresh orientation.
-        // About sixty frames at 60 Hz. Long enough to survive the gaps in the
-        // draw stream that cities and interiors produce (capture is not the
-        // only way to get an eye, but it is the only way to REFRESH one), and
-        // short enough that a lamp is never put where the player stood a
-        // second ago: at running speed that is a dozen yards.
+        // Milliseconds since a current camera-eye source was accepted: a
+        // full-frame shader capture, a leash-checked D3D eye, or (on an exact
+        // supported client) its active CGCamera position. A rotation-only sky
+        // transform never refreshes the eye. Anything placed within a few yards
+        // of the camera - torch emitters above all - needs a fresh eye, where
+        // far-away anchoring also needs a current corroborated orientation.
+        // The 1000 ms hold bridges capture gaps, but an expired eye remains
+        // unusable for world-anchored rendering until a trusted source returns.
         static constexpr float kCameraEyeHoldMs = 1000.f;
         float cameraEyeAgeMs = 0.f;
-        // True only when this frame accepted a draw/transform that carried the
-        // camera eye, rather than inheriting the previous eye's age.
+        // True only when this frame accepted a current camera-eye source rather
+        // than inheriting the previous eye's age.
         bool cameraEyeObservedThisFrame = false;
+        // Verified-client active-camera memory is only a current eye source;
+        // it still needs a corroborated D3D orientation and continuity acceptance.
+        bool clientCameraEyeReadThisFrame = false;
+        bool clientCameraEyeAcceptedThisFrame = false;
+        float clientCameraEyeDistanceYards = -1.f;
         // How the pose was obtained, for diagnostics and the regression
-        // tools. 0 none, 1 captured, 2 sky fallback, 3 held previous frame.
+        // tools. 0 none, 1 captured, 2 sky orientation, 3 held, 4 verified client eye.
         uint8_t cameraPoseSource = 0;
-        enum CameraPoseSource : uint8_t { PoseNone = 0, PoseCaptured = 1, PoseSky = 2, PoseHeld = 3 };
+        enum CameraPoseSource : uint8_t
+        {
+            PoseNone = 0, PoseCaptured = 1, PoseSky = 2, PoseHeld = 3, PoseClientCamera = 4
+        };
         // Per-frame rejection accounting for shader camera captures. These make
         // an expired held eye actionable: distinguish no candidate draw from a
         // viewport/projection/basis filter, without relaxing any camera gate.

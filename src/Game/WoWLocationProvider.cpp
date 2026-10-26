@@ -1,6 +1,8 @@
 #include "WoWLocationProvider.h"
 #include "../Environment/LocationTuning.h"
 #include "../Environment/EnvironmentDatabase.h"
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -26,6 +28,24 @@ bool IsKnownVerified12340Client(const WoWClientContext& client) {
            client.sha256=="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da"||
            client.sha256=="ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d";
 }
+
+// WoW 3.3.5a (12340): *(WorldFrame global) -> CGWorldFrame, whose active
+// CGCamera is at +0x7E20; CGCamera::position is the float3 at +0x08. The
+// offsets are used only after the exact supported-client/signature gate above.
+constexpr uintptr_t kWorldFramePointerRva=0x77436C; // VA 0x00B7436C at image base 0x00400000
+constexpr uintptr_t kWorldFrameCameraOffset=0x7E20;
+constexpr uintptr_t kCameraPositionOffset=0x08;
+constexpr uint32_t kMinimumClientPointer=0x10000;
+
+bool IsPlausibleClientPointer(uint32_t pointer) {
+    return pointer>=kMinimumClientPointer&&(pointer&3u)==0;
+}
+
+bool IsPlausibleWorldPosition(const float position[3]) {
+    for(int axis=0;axis<3;++axis)
+        if(!std::isfinite(position[axis])||std::fabs(position[axis])>1000000.f)return false;
+    return true;
+}
 // Stock 3.3.5a (build 12340) parent zones for areas that Ascension promoted to
 // standalone starter roots (10138..10146) or unparented caves in data/areas.txt.
 uint32_t StockParentZone(uint32_t areaId) {
@@ -50,7 +70,7 @@ uint32_t StockParentZone(uint32_t areaId) {
 }
 }
 void WoWLocationProvider::Configure(const std::wstring& path) {
-    available=verified=false;offsets={};rawSample={};sampled=false;validation="Not sampled";
+    available=verified=cameraLayoutSupported=false;offsets={};rawSample={};sampled=false;validation="Not sampled";
     failure=configureFailure=LocationFailure::NotConfigured;
     if(!client.base&&!client.Detect()) {status="Unsupported executable / PE headers";failure=configureFailure=LocationFailure::UnsupportedExecutable;return;}
     // Only an exact executable fingerprint (or verified 12340 client signature)
@@ -77,6 +97,7 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // and stock 3.3.5a (build 12340) fingerprints. Explicit custom configurations
     // keep their rules; Arden's supplied fingerprint uses the shared 12340 location RVAs.
     const bool knownClient=IsKnownVerified12340Client(client);
+    cameraLayoutSupported=knownClient&&client.base==0x00400000;
     const bool bundled=fingerprint.empty()&&knownClient;
     if(!bundled&&(client.sha256.empty()||fingerprint!=client.sha256)) {status="Unrecognized executable fingerprint; Default environment";failure=configureFailure=LocationFailure::FingerprintMismatch;return;}
     auto read=[&](const wchar_t* key)->uintptr_t {uint64_t value=0;return ParseIniUnsigned(iniValue(key),value)&&value<=std::numeric_limits<uintptr_t>::max()?static_cast<uintptr_t>(value):0;};
@@ -95,6 +116,36 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // the hook did not take) kept the startup wording instead of this one.
     failure=configureFailure=LocationFailure::NoWorldContext;
     validation="Configured; no world frame sampled yet";
+}
+bool WoWLocationProvider::ReadCameraEye(float position[3]) const {
+    // The camera layout is supported only for the verified 12340 client family;
+    // a configurable location RVA must never authorize unrelated pointer reads.
+    if(!position||!available||!verified||!cameraLayoutSupported)return false;
+
+    uint32_t worldFrame=0,camera=0;
+    if(!client.Read(kWorldFramePointerRva,&worldFrame,sizeof(worldFrame))||
+       !IsPlausibleClientPointer(worldFrame)||
+       worldFrame>std::numeric_limits<uintptr_t>::max()-kWorldFrameCameraOffset||
+       !client.ReadAddress(uintptr_t(worldFrame)+kWorldFrameCameraOffset,&camera,sizeof(camera))||
+       !IsPlausibleClientPointer(camera)||
+       camera>std::numeric_limits<uintptr_t>::max()-kCameraPositionOffset)return false;
+
+    float first[3]{},second[3]{};
+    const uintptr_t positionAddress=uintptr_t(camera)+kCameraPositionOffset;
+    if(!client.ReadAddress(positionAddress,first,sizeof(first))||!IsPlausibleWorldPosition(first)||
+       !client.ReadAddress(positionAddress,second,sizeof(second))||!IsPlausibleWorldPosition(second))return false;
+    const float dx=second[0]-first[0],dy=second[1]-first[1],dz=second[2]-first[2];
+    if(dx*dx+dy*dy+dz*dz>.25f)return false;
+
+    // Do not publish a mixed pointer-chain snapshot if the client replaced its
+    // active world frame/camera during the read.
+    uint32_t worldFrameAfter=0,cameraAfter=0;
+    if(!client.Read(kWorldFramePointerRva,&worldFrameAfter,sizeof(worldFrameAfter))||
+       worldFrameAfter!=worldFrame||
+       !client.ReadAddress(uintptr_t(worldFrameAfter)+kWorldFrameCameraOffset,
+                           &cameraAfter,sizeof(cameraAfter))||cameraAfter!=camera)return false;
+    std::copy(second,second+3,position);
+    return true;
 }
 LocationContext WoWLocationProvider::Sample(const EnvironmentDatabase& db,bool world) const {
     LocationContext a,b;

@@ -1252,6 +1252,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" orientationFresh="<<(freshOrientation?1:0)
      <<" skyFallbackEligible="<<(skyFallback?1:0)
      <<" cameraStale="<<(f.cameraPoseStale?1:0)<<" eyeCurrent="<<(f.cameraEyeObservedThisFrame?1:0)
+     <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
+     <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
      <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
      <<" skyCandidates="<<int(f.skyPoseCandidateCount)
      <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
@@ -1497,6 +1499,9 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')'
      <<" ambient=("<<skyR<<','<<skyG<<','<<skyB<<") ambientLevel="<<ambientLevel
      <<" cloudAmbient=("<<cloudSkyR<<','<<cloudSkyG<<','<<cloudSkyB<<')'
+     <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
+     <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
+     <<" eyeAgeMs="<<f.cameraEyeAgeMs<<" poseSource="<<int(f.cameraPoseSource)
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'

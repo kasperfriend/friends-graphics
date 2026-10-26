@@ -683,14 +683,16 @@ namespace renderer
         const CameraCaptureConfig& config,
         float outConstants[13][4],
         float outCapturedViewTranslation[3],
-        bool& outCapturedViewValid)
+        bool& outCapturedViewValid,
+        const float currentCameraEye[3])
     {
         frameContext.cameraOrientationFresh = false;
         if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid || !m_fallbackProjectionValid)
             return false;
 
-        // The eye is whatever a draw last carried. A rotation-only sky
-        // transform says nothing about where the camera is, so it can age.
+        // A rotation-only sky transform says nothing about where the camera is,
+        // so the last trusted eye ages unless a current shader/D3D/client source
+        // is paired with this frame's corroborated orientation below.
         const double now = PerformanceSeconds();
         const float eyeAge = m_lastEyeSeconds >= 0.0
             ? float(std::clamp(now - m_lastEyeSeconds, 0.0, 1e6)) : 1e6f;
@@ -757,16 +759,38 @@ namespace renderer
         }
 
         // The corroborated rotation is what the gate should expect a real
-        // capture to continue from. A candidate originating in a rejected
-        // full-frame shader capture also carries a current eye; once the same
-        // candidate wins corroboration, refresh that tightly bounded eye too.
-        // Sky-only transforms never move the anchor.
+        // capture to continue from. A current eye read from the supported
+        // client's active CGCamera is independently tied to this same frame;
+        // it can refresh the anchor only through the existing continuity gate.
+        // A selected D3D eye remains the fallback source when it itself carried
+        // a bounded, non-zero translation. Rotation-only sky transforms never
+        // move the anchor.
         const bool selectedRejectedCapture = m_rejectedCaptureValid &&
             BasisAgreement(m_rejectedCaptureBasis, basis) > .9999f;
         const bool selectedD3DEye = m_skyEyeCandidateValid &&
             BasisAgreement(m_skyEyeBasis, basis) > .9999f;
         bool refreshedEye = false;
-        if (selectedRejectedCapture)
+        bool refreshedClientEye = false;
+        if (currentCameraEye &&
+            std::isfinite(currentCameraEye[0]) && std::isfinite(currentCameraEye[1]) &&
+            std::isfinite(currentCameraEye[2]) &&
+            std::fabs(currentCameraEye[0]) < 1000000.f &&
+            std::fabs(currentCameraEye[1]) < 1000000.f &&
+            std::fabs(currentCameraEye[2]) < 1000000.f)
+        {
+            const float* acceptedEye = m_cameraGate.Position();
+            const float dx = currentCameraEye[0] - acceptedEye[0];
+            const float dy = currentCameraEye[1] - acceptedEye[1];
+            const float dz = currentCameraEye[2] - acceptedEye[2];
+            frameContext.clientCameraEyeDistanceYards = std::sqrt(dx*dx + dy*dy + dz*dz);
+            float eyeTranslation[4]{};
+            if (BuildViewTranslationForCameraEye(currentCameraEye, basis, eyeTranslation))
+                refreshedEye = m_cameraGate.AcceptFallback(
+                    eyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
+            refreshedClientEye = refreshedEye;
+            frameContext.clientCameraEyeAcceptedThisFrame = refreshedClientEye;
+        }
+        if (!refreshedEye && selectedRejectedCapture)
         {
             float eyeTranslation[4]{};
             for (int col = 0; col < 3; ++col)
@@ -777,7 +801,7 @@ namespace renderer
             refreshedEye = m_cameraGate.AcceptFallback(
                 eyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
         }
-        else if (selectedD3DEye)
+        if (!refreshedEye && selectedD3DEye)
         {
             // The non-zero D3D VIEW translation already passed the five-yard
             // anchor leash in ObserveSkyFallback; this exact basis won camera
@@ -829,12 +853,13 @@ namespace renderer
 
         // A corroborated rotation with an expired retained eye is not a safe
         // world-space pose. Keep the camera for screen-space consumers, but let
-        // world-anchored clouds/fog wait until a draw carries the eye again.
+        // world-anchored passes wait until a trusted current eye source returns.
         const bool eyeFresh = std::isfinite(frameContext.cameraEyeAgeMs) &&
             frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
         frameContext.cameraOrientationFresh = corroborated;
         frameContext.cameraPoseStale = !corroborated || !eyeFresh;
-        frameContext.cameraPoseSource = FrameContext::PoseSky;
+        frameContext.cameraPoseSource = refreshedClientEye
+            ? FrameContext::PoseClientCamera : FrameContext::PoseSky;
 
         frameContext.previousViewRaw = frameContext.viewRaw;
         frameContext.previousViewValid = frameContext.viewRawValid;
