@@ -4,4 +4,4 @@ type: fixed
 audience: players
 title: Keep night clouds visible and more dimensional
 ---
-Cloud ambient lighting no longer applies the day/night level twice, preventing unnecessary near-black shading. The safe sky-only fallback samples the cloud profile through a short direction-space volume for more natural structure without using a camera eye or world shadow.
+Cloud ambient lighting applies day/night once and keeps a subdued cool floor at night. The sky-only recovery now shears its volume through the configured depth and shades its shape/detail, breaking up flat blobs without using a held camera eye or world shadows.

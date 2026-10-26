@@ -601,31 +601,35 @@ float4 coverage:register(c7);   // x=coverage low edge, y=window scale, z=weathe
 float4 material:register(c8);   // rgb=zone/manual tint, w=density * opacity
 float4 lighting:register(c9);   // xyz=world light direction, w=confirmed silver-lining strength
 float4 volume:register(c10);    // xy=vertical shape/detail span; normalized by each feature size
+float4 shear:register(c11);     // xy=shape shear, zw=detail shear across the virtual depth
 float Gradient(float h,float type) {
  float stratus=saturate(h*14.2857)*saturate((.32-h)*8.3333);
  float cumulus=saturate((h-.08)*4.1667)*saturate((.96-h)*2.6316);
  float tower=saturate((h-.04)*7.1429)*saturate((1-h)*5.5556);
  return stratus*saturate(1-type*2)+cumulus*saturate(1-abs(type-.5)*2)+tower*saturate(type*2-1);
 }
-float Density(float3 ray,float h,float cov,float cloudType) {
+float Density(float3 ray,float h,float cov,float cloudType,out float shapeSignal,out float detailSignal) {
+ shapeSignal=0;detailSignal=1;
  float gradient=Gradient(h,cloudType);
  if(cov*gradient<=0)return 0;
  // Treat the fallback as a short direction-space volume, not a single flat
  // noise sample. Its normalized vertical coordinate spans the configured
  // deck thickness; no camera eye, world point, or layer intersection enters.
- float3 shapePoint=float3(ray.x*scales.x,ray.y*scales.x,
+ float3 shapePoint=float3(ray.x*scales.x+shear.x*h,ray.y*scales.x+shear.y*h,
      ray.z*scales.x*max(scales.y,.05)+(h-.5)*volume.x*max(scales.y,.05))
      +float3(motion.xy,phase.z);
  float4 shape=tex3Dlod(shapeMap,float4(shapePoint,0));
  float fbm=shape.g*.625+shape.b*.25+shape.a*.125;
- float density=saturate((shape.r-fbm+1)/max(2-fbm,1e-4))*gradient;
+ shapeSignal=saturate((shape.r-fbm+1)/max(2-fbm,1e-4));
+ float density=shapeSignal*gradient;
  density=saturate((density-1+cov)/max(cov,1e-4))*(.45+.55*cov);
  if(density<=0)return 0;
  if(scales.w>0) {
-  float3 detailPoint=float3(ray.x*scales.z,ray.y*scales.z,
+  float3 detailPoint=float3(ray.x*scales.z+shear.z*h,ray.y*scales.z+shear.w*h,
       ray.z*scales.z+(h-.5)*volume.y)+float3(phase.xy,phase.w);
   float3 detail=tex3Dlod(detailMap,float4(detailPoint,0)).rgb;
   float dfbm=detail.r*.625+detail.g*.25+detail.b*.125;
+  detailSignal=dfbm;
   float erosion=scales.w*(1-density*.7);
   density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)/max(1-scales.w,1e-4));
  }
@@ -645,13 +649,16 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 scattered=0;
  [loop] for(int i=0;i<8;++i) {
   float h=(i+.5)/8;
-  float density=Density(ray,h,cov,cloudType);
+  float shapeSignal,detailSignal;
+  float density=Density(ray,h,cov,cloudType,shapeSignal,detailSignal);
   if(density>0) {
    float sampleTransmittance=exp(-density*max(material.w,0)*2.25/8);
    float deposited=transmittance*(1-sampleTransmittance);
-   float bodyLight=.78+.22*saturate(density);
-   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.12+.20*h)*(.75+.25*h)*bodyLight;
-   cloudColour+=pow(sun,16)*lighting.w*.16*(.5+.5*h);
+   float bodyLight=.34+.66*saturate(shapeSignal);
+   float detailLight=.84+.16*saturate(detailSignal);
+   float verticalLight=.45+.55*h;
+   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.04+.10*h)*verticalLight*bodyLight*detailLight;
+   cloudColour+=pow(sun,16)*lighting.w*.16*(.5+.5*h)*saturate(1-density);
    scattered+=max(cloudColour,0)*deposited;
    transmittance*=sampleTransmittance;
   }
@@ -1147,6 +1154,11 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
                         float(motion.shapeZ),float(motion.detailZ)};
   const float depthSpan=std::clamp(settings.thickness,100.f,12000.f);
   const float volume[4]={depthSpan/featureSize,depthSpan/detailSize,0.f,0.f};
+  const float windRadians=settings.windAngle*.01745329252f;
+  const float shear[4]={std::cos(windRadians)*settings.windShear,
+                        std::sin(windRadians)*settings.windShear,
+                        std::cos(windRadians)*settings.windShear*featureSize/detailSize,
+                        std::sin(windRadians)*settings.windShear*featureSize/detailSize};
   const float coverage=std::clamp(settings.coverage,0.f,1.f);
   const float windowLow=1.f-coverage*1.5f;
   const float windowHigh=1.f-coverage*coverage*1.05f;
@@ -1159,9 +1171,9 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
   const float skyG=envFog.colorValid?envFog.ambientFogColor[1]:.56f;
   const float skyB=envFog.colorValid?envFog.ambientFogColor[2]:.80f;
   const auto color=manualcolor::Multiplier(settings.manualCloudColor);
-  const float material[4]={std::clamp(skyR*ambientLevel*color[0],0.f,2.f),
-                           std::clamp(skyG*ambientLevel*color[1],0.f,2.f),
-                           std::clamp(skyB*ambientLevel*color[2],0.f,2.f),
+  const float material[4]={std::clamp(std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])*color[0],0.f,2.f),
+                           std::clamp(std::max(skyG*ambientLevel,kCloudSkyAmbientFloor[1])*color[1],0.f,2.f),
+                           std::clamp(std::max(skyB*ambientLevel,kCloudSkyAmbientFloor[2])*color[2],0.f,2.f),
                            std::clamp(settings.density,0.f,3.f)*std::clamp(settings.opacity,0.f,3.f)};
   Vec3 light{0,0,1};
   if(f.directLightValid&&IsUsableCelestialDirection(f.directLightDirectionWorld))
@@ -1173,7 +1185,7 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
   d->SetPixelShaderConstantF(4,scales,1);d->SetPixelShaderConstantF(5,motionConstants,1);
   d->SetPixelShaderConstantF(6,phase,1);d->SetPixelShaderConstantF(7,coverageConstants,1);
   d->SetPixelShaderConstantF(8,material,1);d->SetPixelShaderConstantF(9,lighting,1);
-  d->SetPixelShaderConstantF(10,volume,1);
+  d->SetPixelShaderConstantF(10,volume,1);d->SetPixelShaderConstantF(11,shear,1);
   DrawScreenQuad(d,m_lowWidth,m_lowHeight);
   for(DWORD stage=0;stage<3;++stage)d->SetTexture(stage,nullptr);
  }
@@ -1272,6 +1284,14 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
    const auto& fieldMotion=m_dynamics.Motion();
    const auto& fog=EnvironmentFogCapture::Instance().State();
    const auto tint=manualcolor::Multiplier(settings.manualCloudColor);
+   const float fallbackAmbientLevel=std::clamp(std::max(std::clamp(f.daylightFactor,0.f,1.f),
+                                                          std::clamp(f.moonlightFactor,0.f,1.f)*.5f),.2f,1.f);
+   const float fallbackSkyR=fog.colorValid?fog.ambientFogColor[0]:.42f;
+   const float fallbackSkyG=fog.colorValid?fog.ambientFogColor[1]:.56f;
+   const float fallbackSkyB=fog.colorValid?fog.ambientFogColor[2]:.80f;
+   const float fallbackCloudR=std::max(fallbackSkyR*fallbackAmbientLevel,kCloudSkyAmbientFloor[0]);
+   const float fallbackCloudG=std::max(fallbackSkyG*fallbackAmbientLevel,kCloudSkyAmbientFloor[1]);
+   const float fallbackCloudB=std::max(fallbackSkyB*fallbackAmbientLevel,kCloudSkyAmbientFloor[2]);
    out<<" skyField=(coverage="<<settings.coverage<<",type="<<settings.cloudType
       <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
       <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
@@ -1280,11 +1300,14 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
       <<",detailDepth="<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.detailSize,1.f)
       <<",density="<<settings.density<<",opacity="<<settings.opacity
       <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
+      <<",windAngle="<<settings.windAngle<<",windShear="<<settings.windShear
       <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
       <<",detailPhase="<<fieldMotion.detailZ<<",weatherPhase="<<fieldMotion.weather[0]<<','
       <<fieldMotion.weather[1]<<",ambientValid="<<(fog.colorValid?1:0)
-      <<",ambient="<<fog.ambientFogColor[0]<<','<<fog.ambientFogColor[1]<<','
-      <<fog.ambientFogColor[2]<<",manual="<<tint[0]<<','<<tint[1]<<','<<tint[2]<<')';
+      <<",ambientLevel="<<fallbackAmbientLevel<<",ambient="<<fog.ambientFogColor[0]<<','
+      <<fog.ambientFogColor[1]<<','<<fog.ambientFogColor[2]
+      <<",cloudAmbient="<<fallbackCloudR<<','<<fallbackCloudG<<','<<fallbackCloudB
+      <<",manual="<<tint[0]<<','<<tint[1]<<','<<tint[2]<<')';
   }
   out<<" trackedSun="<<(f.sunBillboardObserved?1:0)<<'('<<f.sunBillboardScreenX<<','
      <<f.sunBillboardScreenY<<','<<f.sunBillboardViewDepth<<')'

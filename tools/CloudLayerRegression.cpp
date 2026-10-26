@@ -52,11 +52,18 @@ int main() try
             skyFallback.find("shadowMap")==std::string::npos&&
             skyFallback.find("invView0")!=std::string::npos&&
             skyFallback.find("float4 volume:register(c10)")!=std::string::npos&&
-            skyFallback.find("Density(float3 ray,float h,float cov,float cloudType)")!=std::string::npos&&
+            skyFallback.find("float4 shear:register(c11)")!=std::string::npos&&
+            skyFallback.find("Density(float3 ray,float h,float cov,float cloudType,out float shapeSignal,out float detailSignal)")!=std::string::npos&&
             skyFallback.find("float gradient=Gradient(h,cloudType);")!=std::string::npos&&
-            skyFallback.find("float density=saturate((shape.r-fbm+1)/max(2-fbm,1e-4))*gradient;")!=std::string::npos&&
+            skyFallback.find("shapeSignal=saturate((shape.r-fbm+1)/max(2-fbm,1e-4));")!=std::string::npos&&
+            skyFallback.find("float density=shapeSignal*gradient;")!=std::string::npos&&
+            skyFallback.find("ray.x*scales.x+shear.x*h")!=std::string::npos&&
+            skyFallback.find("ray.x*scales.z+shear.z*h")!=std::string::npos&&
+            skyFallback.find("detailSignal=dfbm;")!=std::string::npos&&
             skyFallback.find("[loop] for(int i=0;i<8;++i)")!=std::string::npos&&
-            skyFallback.find("lerp(material.rgb,float3(1,1,1),.12+.20*h)")!=std::string::npos&&
+            skyFallback.find("float bodyLight=.34+.66*saturate(shapeSignal);")!=std::string::npos&&
+            skyFallback.find("float detailLight=.84+.16*saturate(detailSignal);")!=std::string::npos&&
+            skyFallback.find("float verticalLight=.45+.55*h;")!=std::string::npos&&
             skyFallback.find("density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)")!=std::string::npos&&
             skyComposite.find("cameraPos")==std::string::npos&&
             skyComposite.find("shadowMap")==std::string::npos&&
@@ -66,17 +73,22 @@ int main() try
             skyRender.find("m_shadowValid=false;")!=std::string::npos&&
             skyRender.find("m_shadowSurface")==std::string::npos&&
             skyRender.find("m_shadowTexture")==std::string::npos,
-            "the fallback is direction-only, excludes water/geometry, and cannot read a held eye or render a world shadow");
+            "the fallback is direction-only and adds sheared, shape-shaded volume while excluding water, geometry, held eyes, and world shadows");
     Require(text.find("constexpr float kSkyFallbackReferenceDistance = 1500.f;")!=std::string::npos&&
             skyRender.find("settings.planetRadius")==std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/featureSize")!=std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/detailSize")!=std::string::npos&&
             skyRender.find("const float volume[4]={depthSpan/featureSize,depthSpan/detailSize,0.f,0.f};")!=std::string::npos&&
-            skyRender.find("d->SetPixelShaderConstantF(10,volume,1);")!=std::string::npos&&
+            skyRender.find("const float shear[4]={std::cos(windRadians)*settings.windShear")!=std::string::npos&&
+            skyRender.find("std::sin(windRadians)*settings.windShear*featureSize/detailSize")!=std::string::npos&&
+            skyRender.find("d->SetPixelShaderConstantF(10,volume,1);d->SetPixelShaderConstantF(11,shear,1);")!=std::string::npos&&
+            skyRender.find("std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])*color[0]")!=std::string::npos&&
             skyRender.find("f.directLightValid&&f.directLightDirectionConfirmed")!=std::string::npos&&
             text.find("<<\",angularScale=\"<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)")!=std::string::npos&&
-            text.find("<<\",shapeDepth=\"<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)")!=std::string::npos,
-            "screen-only cloud noise uses a layer-scale reference distance and vertical span instead of a planet-radius point sample");
+            text.find("<<\",shapeDepth=\"<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)")!=std::string::npos&&
+            text.find("<<\",windShear=\"<<settings.windShear")!=std::string::npos&&
+            text.find("<<\",cloudAmbient=\"<<fallbackCloudR")!=std::string::npos,
+            "screen-space noise uses a fixed scale, layer-depth wind shear, and the same subdued ambient floor without reading planet radius");
     Require(text.find("constexpr float kCloudSkyAmbientFloor[3] = {.08f,.10f,.14f};")!=std::string::npos&&
             text.find("constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};")!=std::string::npos&&
             text.find("cloudSkyR=std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])")!=std::string::npos&&
