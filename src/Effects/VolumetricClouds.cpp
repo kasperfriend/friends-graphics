@@ -134,7 +134,10 @@ float Density(float3 p,float h,float erosion) {
    // leaves the silhouette smooth or hollows the cloud out; real cumulus
    // shred at the edges and stay solid in the middle.
    float strength=erosion*(1-d*.7);
-   d=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*strength)/max(1-erosion,1e-4));
+   float eroded=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*strength)/max(1-erosion,1e-4));
+   // Preserve enough of the thin lower cloud boundary for grazing rays;
+   // full detail erosion fades in through the base instead of erasing it.
+   d=lerp(d,eroded,saturate(h*10));
  }
  // More water higher up, modulated by the weather map's variation channel.
  return d*lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b)*lighting.x;
@@ -212,13 +215,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  exitDistance=min(exitDistance,min(layer.w,sceneLimit));
  if(exitDistance<=entry) return float4(0,0,0,1);
 
- // The horizon fade stops a grazing ray from UNDER the deck stretching the
- // layer to infinity and showing a hard band; from inside or above the
- // layer, downward rays are the whole point, so it is gated on the region.
- float fade=(region.w>.5&&region.w<1.5)?smoothstep(0,max(groundColor.w,.001),ray.z):1;
- // The march stops at its own limit long before the layer does: fade there
- // too or the cut shows up as a straight edge across the sky.
- fade*=1-smoothstep(layer.w*.9,layer.w,entry);
+ // Do not attenuate by view pitch: that made the deck vanish over a band of
+ // upward angles. The fixed-height intersection and scene depth already decide
+ // which rays can hit clouds; only soften the configured finite-distance edge.
+ float fadeWidth=max(groundColor.w,.1);
+ float fadeStart=layer.w*(1-fadeWidth);
+ float fade=1-smoothstep(fadeStart,layer.w,entry);
  if(fade<=.002) return float4(0,0,0,1);
 
  // Phase depends only on the angle between the ray and the light, so all
@@ -256,10 +258,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    // sites here cost about seventy instruction slots of the 512 budget.
    float density=Density(p,h,mode<0?0:scales.w);
    if(mode<0) {
-     // Big strides until something is hit, then step back and integrate
-     // properly. Doubles the usable range for free.
-     if(density>0) { mode=0; t-=stepLength*stepping.z; }
-     else t+=stepLength*stepping.z;
+     // Coarse probes remain below a feature-sized stride even when t is far
+     // away. A pitch change can move the deck hundreds of kilometres out;
+     // letting t*growth skip whole cells made the entire sky blink off.
+     // The remaining-span term still guarantees progress within the budget.
+     float coarseStride=max(min(stepLength*stepping.z,.75/scales.x),
+                            (exitDistance-t)/(depthRange.w-i));
+     if(density>0) { mode=0; t=max(entry,t-coarseStride); }
+     else t+=coarseStride;
    } else {
      if(density<=0) {
        mode+=1;
@@ -665,9 +671,9 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
    transmittance*=sampleTransmittance;
   }
  }
- float fade=smoothstep(-.08,.16,ray.z);
- scattered*=fade;
- transmittance=lerp(1,transmittance,fade);
+ // The full-resolution composite is already restricted to clear sky and
+ // excludes native water. A second ray-elevation fade would turn clouds off
+ // merely because the player pitches through the horizon.
  return float4(max(scattered,0),saturate(transmittance));
 })HLSL";
 

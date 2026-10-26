@@ -2,6 +2,6 @@
 area: renderer
 type: fixed
 audience: players
-title: Keep night clouds visible and more dimensional
+title: Keep volumetric clouds visible across camera pitches
 ---
-Cloud ambient lighting applies day/night once and keeps a subdued cool floor at night. Sky-only recovery now uses 16 depth samples, configured wind shear, and shape/detail shading to break up flat blobs—without a held camera eye or world shadows.
+Near-horizon world clouds no longer fade by pitch: feature-bounded marching preserves distant coverage, and erosion fades in through the lower deck instead of erasing thin bases. Clouds fade only at finite range; the sky-only fallback stays angle-independent and night lighting remains cool.

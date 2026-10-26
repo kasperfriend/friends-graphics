@@ -287,7 +287,10 @@ struct Marcher
             // either leaves the silhouette smooth or hollows the cloud out;
             // real cumulus shred at the edge and stay solid in the middle.
             const float strength = c.detailStrength * (1.f - density * .7f);
-            density = Saturate((density - modifier * strength) / std::max(1.f - c.detailStrength, 1e-4f));
+            const float eroded = Saturate((density - modifier * strength) / std::max(1.f - c.detailStrength, 1e-4f));
+            // Keep the lower cloud boundary from being erased wholesale by
+            // high-frequency erosion when a grazing ray sees only thin base.
+            density = Lerp(density, eroded, Saturate(h * 10.f));
         }
 
         // Density rises with height inside the cloud (more water up top) and
@@ -370,15 +373,12 @@ struct Marcher
         exitDistance = std::min(exitDistance, limit);
         if (exitDistance <= entry) return {};
 
-        // The horizon fade exists so a grazing ray from UNDER the deck does
-        // not stretch the layer out to infinity and show a hard band. Seen
-        // from inside or above the layer, downward rays are the whole point,
-        // so the fade has to be gated on where the camera actually is.
-        const bool belowDeck = origin.z < c.bottom;
-        const float horizon = belowDeck ? Smoothstep(0.f, std::max(c.horizonFade, .001f), dir.z) : 1.f;
-        if (horizon <= .002f) return {};
-        const float reach = 1.f - Smoothstep(c.maxDistance * .9f, c.maxDistance, entry);
-        const float fade = horizon * reach;
+        // Do not fade by ray elevation: a grazing upward ray that still reaches
+        // the fixed layer must keep its clouds. The finite march range is the
+        // authoritative horizon limit; soften only its final configured span.
+        const float fadeWidth = std::max(c.horizonFade, .1f);
+        const float fadeStart = c.maxDistance * (1.f - fadeWidth);
+        const float fade = 1.f - Smoothstep(fadeStart, c.maxDistance, entry);
         if (fade <= .002f) return {};
 
         const float span = exitDistance - entry;
@@ -416,10 +416,18 @@ struct Marcher
 
             if (coarse)
             {
-                // Big strides until something is hit, then step back and
-                // integrate properly. Doubles the usable range for free.
-                if (Density(p, h, false) > 0.f) { coarse = false; t -= stepLength * c.coarseScale; emptySteps = 0; }
-                else t += stepLength * c.coarseScale;
+                // Bound empty-space probes by cloud features even when a
+                // shallow ray reaches far out, and still consume the remaining
+                // span within the sample budget. Otherwise whole cloud cells
+                // could be skipped and the deck would blink off with pitch.
+                const float coarseStride = std::max(
+                    std::min(stepLength * c.coarseScale, .75f * c.featureSize),
+                    (exitDistance - t) / float(c.steps - i));
+                if (Density(p, h, false) > 0.f)
+                {
+                    coarse = false; t = std::max(entry, t - coarseStride); emptySteps = 0;
+                }
+                else t += coarseStride;
                 continue;
             }
 

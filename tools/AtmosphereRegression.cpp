@@ -739,9 +739,7 @@ int main() try {
   f.cameraPoseStale=true;f.cameraOrientationFresh=true;f.cameraEyeAgeMs=1201.f;
   setPixel(scene.Get(),20,20,0xff123456);setPixel(mask.Get(),20,20,0xffff0000);
   setPixel(scene.Get(),64,110,0xff345678);
-  Check(d->BeginScene());
   const bool fallbackRendered=renderClouds();
-  Check(d->EndScene());
   Require(fallbackRendered&&clouds.UsedSkyFallback(),
           "stale-eye in-world sky uses the isolated orientation-only cloud recovery");
   Require(clouds.GetShadowTexture()==nullptr,
@@ -752,6 +750,39 @@ int main() try {
           "screen-direction fallback leaves foreground geometry byte-identical");
   Require(pixel(20,20)==0xff123456,
           "screen-direction fallback excludes native-water mask pixels byte-identically");
+  // Re-run the actual GPU fallback with an all-sky depth buffer while rotating
+  // through the horizon and all yaw quadrants. The shader must not use a ray-Z
+  // fade as an angle-dependent on/off switch; clear depth remains the authority.
+  const Matrix4 savedFallbackView=f.inverseView;
+  auto setFallbackView=[&](float yawDegrees,float pitchDegrees){
+   const float yaw=yawDegrees*.01745329252f,pitch=pitchDegrees*.01745329252f;
+   const float cy=std::cos(yaw),sy=std::sin(yaw),cp=std::cos(pitch),sp=std::sin(pitch);
+   f.inverseView.SetZero();
+   f.inverseView.m[0][0]=cy;f.inverseView.m[0][1]=sy;
+   f.inverseView.m[1][0]=sp*sy;f.inverseView.m[1][1]=-sp*cy;f.inverseView.m[1][2]=cp;
+   f.inverseView.m[2][0]=-cp*sy;f.inverseView.m[2][1]=cp*cy;f.inverseView.m[2][2]=sp;
+   f.inverseView.m[3][3]=1;
+  };
+  fillFloat(depth.Get(),1.f);fill(scene.Get(),0xff202020);fill(mask.Get(),0);
+  auto fullSkyMean=[&]{const auto image=readCloudImage();double sum=0;int n=0;
+   for(int y=6;y<122;++y)for(int x=6;x<122;++x){sum+=double(image[y*128+x]&255);++n;}
+   return sum/double(n?n:1);};
+  for(float yaw:{0.f,90.f,180.f,270.f})for(float pitch:{-10.f,-1.f,0.f,.3f,.5f,5.f,45.f,80.f}){
+   setFallbackView(yaw,pitch);
+   const bool angleRendered=renderClouds();
+   const double angleMean=fullSkyMean();
+   if(!angleRendered||!clouds.UsedSkyFallback()||angleMean<=48.0)
+    throw std::runtime_error("screen-space sky clouds disappeared during yaw/pitch sweep");
+  }
+  f.inverseView=savedFallbackView;
+  // Restore the original sky/geometry split for the world-space fixtures below.
+  {
+   D3DLOCKED_RECT r{};Check(depth->LockRect(0,&r,nullptr,0));
+   for(int y=0;y<128;++y)for(int x=0;x<128;++x)
+    reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=
+      y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
+   Check(depth->UnlockRect());
+  }
   f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
   fill(scene.Get(),0xff202020);fill(mask.Get(),0);
  }
@@ -874,7 +905,7 @@ int main() try {
    f.inverseView.m[2][1]=c;f.inverseView.m[2][2]=s;f.inverseView.m[3][3]=1;
   };
   fillFloat(depth.Get(),1.f);
-  for(float pitch:{.5f,1.f,2.f,5.f,15.f,45.f,80.f}){
+  for(float pitch:{.3f,.35f,.5f,1.f,2.f,5.f,15.f,45.f,80.f}){
    setCameraPitch(pitch);
    Require(renderClouds(),"sky-only upward camera renders the cloud deck");
    const double contribution=centreCloudContribution();

@@ -53,14 +53,15 @@ The march itself:
 
 1. Reconstruct the world ray from `projUnpack` and the inverse view rows, and intersect the two fixed world-Z
    planes, clamping entry to zero when inside the deck.
-2. Fade grazing rays near the horizon and fade the far end of the march, so neither the layer nor the march limit
-   ends in a hard edge.
+2. Fade only at the finite march limit; camera pitch never attenuates density. The fixed layer intersection and scene
+   depth decide which rays can reach clouds, and `HorizonFadePermille` softens only that final distance band.
 3. Jitter the first step with an interleaved-gradient offset derived from `VPOS` - fixed in screen space, never a
    frame counter, so the bilinear upsample averages neighbouring phases instead of flickering.
 4. March with a **step tied to world length that grows with distance**, never the span divided by a step count: the
    layer is 2150 units thick and the default ray limit is 200000 units; dividing the span is what turns detail into
-   putty. Empty space is crossed with strides three times longer; the march steps back and integrates properly as
-   soon as it hits density, and returns to striding after seven empty samples.
+   putty. Empty-space probes use at most 75% of a shape-feature tile (unless the remaining sample budget requires
+   larger steps); after a hit the march steps back and integrates properly, returning to coarse probes after seven
+   empty samples.
 5. At each sample with density: a six-step Beer march toward the sun or moon whose last step is a long reach sample
    (a tower far up the light path still has to cast), three scattering octaves with geometrically scaled extinction,
    contribution and phase, a powder term, and a vertical ambient gradient from the zone's own fog colour.
@@ -72,10 +73,13 @@ The march itself:
 Density at a point is
 
 ```
-base    = Remap(shape.r, (shape.g*.625 + shape.b*.25 + shape.a*.125) - 1, 1)   // Perlin-Worley
-profile = analytic vertical gradient for the cloud type at this point
-d       = Remap(base * profile, 1 - coverage, 1) * coverage
-d       = Remap(d, detailFbm * strength * (1 - d*.7), 1)                       // erosion
+base     = Remap(shape.r, (shape.g*.625 + shape.b*.25 + shape.a*.125) - 1, 1)  // Perlin-Worley
+profile  = analytic vertical gradient for the cloud type at this point
+d        = Remap(base * profile, 1 - coverage, 1) * coverage
+modifier = lerp(1-detailFbm, detailFbm, saturate(h*4))
+strength = detailStrength * (1 - d*.7)
+eroded   = saturate((d - modifier*strength) / (1-detailStrength))
+d        = lerp(d, eroded, saturate(h*10))                                        // fade erosion in through base
 ```
 
 Three details matter more than they look:
@@ -83,9 +87,10 @@ Three details matter more than they look:
 - **`ShapeAspectPercent` is how many times the base volume repeats vertically per horizontal tile.** It shipped at
   320 in the first build, which made vertical features three times smaller than horizontal ones and flattened every
   cloud into a lozenge. 130 gives billows that are about as tall as they are wide.
-- **Erosion fades inside the core** (`* (1 - d*.7)`). Eroding uniformly either leaves the silhouette smooth or
-  hollows the cloud out. Raising `DetailPercent` towards 1 does not produce wisps either - the `Remap` normalisation
-  divides by `1 - strength`, so it just hardens edges into binary cut-outs.
+- **Erosion fades inside the core** (`* (1 - d*.7)`) and fades in across the lower 10% of the layer. The gradual
+  base ramp prevents detail noise from erasing the entire thin cloud boundary seen by grazing rays; it changes density,
+  not the fixed layer altitude. Raising `DetailPercent` towards 1 still does not produce wisps - the normalisation
+  divides by `1 - detailStrength`, so it just hardens edges into binary cut-outs.
 - **The coverage window closes quadratically at the top.** The slider slides a window `[1 - c*1.5, 1 - c²*1.05]`
   along the weather map's equalised coverage channel. With a linear high edge the window still ends at 0.6 and half
   the sky keeps broken cloud no matter how far the slider is pushed, so overcast was unreachable.
@@ -151,7 +156,7 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `ShapeAspectPercent` | 130 | Vertical repeats of the shape volume per horizontal tile. |
 | `DetailSize` | 240 | World size of one tile of the erosion volume. |
 | `WeatherSize` | 34000 | World size of one tile of the weather map. |
-| `DetailPercent` | 88 | Strength of the erosion that shreds cloud edges. |
+| `DetailPercent` | 88 | Strength of edge erosion; it fades in through the lower 10% of the layer to preserve thin bases on grazing rays. |
 | `WindSpeed` / `WindShearPercent` | 26 / 22 | Cloud-local drift speed at shared wind strength 100% and shear gain. The optional, unshipped `WindAngle` (legacy default 25) is a sampling angle used only when unlinked from `[Wind]`. See [shared wind](wind-system.md). |
 | `AbsorptionPercent` | 38 | Self-shadowing strength along the light march. |
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
@@ -162,7 +167,7 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `SilverLiningPercent` | 55 | Bright rim on a backlit edge. |
 | `PowderPercent` | 70 | Dark edge where a cloud faces the light. |
 | `StepGrowthPermille` / `CoarseStepScale` / `JitterPercent` | 10 / 3 / 25 | March shape. |
-| `HorizonFadePermille` | 18 | How quickly grazing rays fade out. |
+| `HorizonFadePermille` | 18 | Width of the finite-distance fade for grazing rays; it no longer suppresses clouds by camera pitch (minimum 10% of `MaxDistance`). |
 | `MaxDistance` | 200000 | March limit; the deck fades only in its final 10% so near-horizon clouds remain visible. The former shipped default of 26000 is upgraded automatically. |
 | `AerialPerspectivePercent` | 60 | How much of the sky's haze a cloud picks up with distance. 0 makes near and far clouds equally contrasty. |
 | `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 24000 | Cloud shadows cast on the world below. |

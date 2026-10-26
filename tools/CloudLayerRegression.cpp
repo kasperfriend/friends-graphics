@@ -30,6 +30,8 @@ int main() try
             text.find("float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));") != std::string::npos &&
             text.find("float sunPixel=SunDiscPixel(uv,rawDepth);") != std::string::npos,
             "clouds shade verified sun and moon pixels as sky without treating their billboards as depth edges");
+    const auto cloudMarchStart=text.find("const char* kCloudMarchSource = R\"HLSL(");
+    const auto cloudMarchEnd=text.find(")HLSL\";",cloudMarchStart);
     const auto skyFallbackStart=text.find("const char* kCloudSkyFallbackSource = R\"HLSL(");
     const auto skyFallbackEnd=text.find(")HLSL\";",skyFallbackStart);
     const auto skyCompositeStart=text.find("const char* kCloudSkyCompositeSource = R\"HLSL(");
@@ -38,12 +40,14 @@ int main() try
     const auto skyRenderEnd=text.find("bool VolumetricClouds::Render(",skyRenderStart);
     const auto normalShaderStart=text.find("bool VolumetricClouds::EnsureShaders(");
     const auto optionalShaderStart=text.find("bool VolumetricClouds::EnsureSkyFallbackShaders(",normalShaderStart);
-    Require(skyFallbackStart!=std::string::npos&&skyFallbackEnd!=std::string::npos&&
+    Require(cloudMarchStart!=std::string::npos&&cloudMarchEnd!=std::string::npos&&
+            skyFallbackStart!=std::string::npos&&skyFallbackEnd!=std::string::npos&&
             skyCompositeStart!=std::string::npos&&skyCompositeEnd!=std::string::npos&&
             skyRenderStart!=std::string::npos&&skyRenderEnd!=std::string::npos&&
-            skyFallbackEnd>skyFallbackStart&&skyCompositeEnd>skyCompositeStart&&
-            skyRenderEnd>skyRenderStart,
-            "the isolated sky fallback shaders and render path are present");
+            cloudMarchEnd>cloudMarchStart&&skyFallbackEnd>skyFallbackStart&&
+            skyCompositeEnd>skyCompositeStart&&skyRenderEnd>skyRenderStart,
+            "the production marcher, isolated sky fallback shaders, and render path are present");
+    const std::string cloudMarch=text.substr(cloudMarchStart,cloudMarchEnd-cloudMarchStart);
     const std::string skyFallback=text.substr(skyFallbackStart,skyFallbackEnd-skyFallbackStart);
     const std::string skyComposite=text.substr(skyCompositeStart,skyCompositeEnd-skyCompositeStart);
     const std::string skyRender=text.substr(skyRenderStart,skyRenderEnd-skyRenderStart);
@@ -68,6 +72,14 @@ int main() try
             skyFallback.find("float verticalLight=.75+.25*h;")!=std::string::npos&&
             skyFallback.find("lerp(material.rgb,float3(1,1,1),.12+.20*h)")!=std::string::npos&&
             skyFallback.find("density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)")!=std::string::npos&&
+            skyFallback.find("smoothstep(-.08,.16,ray.z)")==std::string::npos&&
+            skyFallback.find("scattered*=fade")==std::string::npos&&
+            cloudMarch.find("smoothstep(0,max(groundColor.w,.001),ray.z)")==std::string::npos&&
+            cloudMarch.find("float fadeWidth=max(groundColor.w,.1);")!=std::string::npos&&
+            cloudMarch.find("float fadeStart=layer.w*(1-fadeWidth);")!=std::string::npos&&
+            cloudMarch.find("float coarseStride=max(min(stepLength*stepping.z,.75/scales.x),")!=std::string::npos&&
+            cloudMarch.find("(exitDistance-t)/(depthRange.w-i)")!=std::string::npos&&
+            cloudMarch.find("d=lerp(d,eroded,saturate(h*10));")!=std::string::npos&&
             skyComposite.find("cameraPos")==std::string::npos&&
             skyComposite.find("shadowMap")==std::string::npos&&
             skyComposite.find("float sky=step((depthRange.z+1)*.5,rawDepth);")!=std::string::npos&&
@@ -148,8 +160,9 @@ int main() try
     Require(cloudDynamicsUpdate!=std::string::npos && layerRefresh!=std::string::npos &&
             layerRefresh>cloudDynamicsUpdate,
             "the logged and rendered layer bounds follow the live cloud transition settings");
-    Require(text.find("fade*=1-smoothstep(layer.w*.9,layer.w,entry);") != std::string::npos,
-            "distance fade preserves cloud opacity until the final tenth of the march range");
+    Require(cloudMarch.find("float fadeWidth=max(groundColor.w,.1);")!=std::string::npos&&
+            cloudMarch.find("float fade=1-smoothstep(fadeStart,layer.w,entry);")!=std::string::npos,
+            "cloud opacity is not pitched off at the horizon and fades only at the finite-distance boundary");
     Require(text.find("if(maxDistance==26000)maxDistance=200000;") != std::string::npos,
             "existing installs migrate the former 26,000-unit default to the wider sky reach");
 
@@ -218,7 +231,7 @@ int main() try
     float transmittance, depth;
     Marcher upward(c,resources,{0,0,0});
     unsigned visibleElevations=0;
-    for(float pitchDegrees : {.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f}) {
+    for(float pitchDegrees : {.3f,.35f,.5f,.75f,1.f,2.f,3.f,5.f,15.f,45.f,89.f}) {
         const float pitch=pitchDegrees*3.14159265358979323846f/180.f;
         const V3 ray=Normalize({0,std::cos(pitch),std::sin(pitch)});
         upward.March({0,0,0},ray,{0,0,1},.5f,transmittance,depth);
@@ -226,7 +239,7 @@ int main() try
             throw std::runtime_error("cloud deck disappeared during the upward camera-elevation sweep");
         ++visibleElevations;
     }
-    Require(visibleElevations==9,
+    Require(visibleElevations==11,
             "cloud opacity survives shallow-above-horizon through near-zenith views");
     const V3 light{0,0,1};
     flying.March({0,0,3000}, {0,0,1}, light, 0, transmittance, depth);
