@@ -781,7 +781,7 @@ int main() try {
    for(int y=0;y<128;++y)for(int x=0;x<128;++x)
     reinterpret_cast<float*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch)[x]=
       y<64?1.f:.94f*(f.projUnpack[0]+f.projUnpack[1]/30.f);
-   Check(depth->UnlockRect());
+   Check(depth->UnlockRect(0));
   }
   f.cameraPoseStale=false;f.cameraOrientationFresh=false;f.cameraEyeAgeMs=0.f;
   fill(scene.Get(),0xff202020);fill(mask.Get(),0);
