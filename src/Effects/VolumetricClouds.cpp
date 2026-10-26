@@ -614,7 +614,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  density*=smoothstep(-.08,.16,ray.z);
  float alpha=1-exp(-density*max(material.w,0)*2.25);
  float sun=saturate(dot(ray,normalize(lighting.xyz)));
- float3 cloudColour=lerp(material.rgb,float3(1,1,1),.38)+pow(sun,16)*lighting.w*.16;
+ // The sky pass has no world-space sun march; keep its emergency color
+ // anchored to the captured zone/manual ambient instead of bleaching every
+ // density island white (the previous .38 neutral lift looked like static
+ // white patches against DK's dark sky).
+ float3 cloudColour=lerp(material.rgb,float3(1,1,1),.15)+pow(sun,16)*lighting.w*.16;
  cloudColour*=.72+.28*saturate(ray.z);
  return float4(max(cloudColour,0)*alpha,1-alpha);
 })HLSL";

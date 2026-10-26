@@ -51,6 +51,7 @@ int main() try
             skyFallback.find("cameraPosition")==std::string::npos&&
             skyFallback.find("shadowMap")==std::string::npos&&
             skyFallback.find("invView0")!=std::string::npos&&
+            skyFallback.find("lerp(material.rgb,float3(1,1,1),.15)")!=std::string::npos&&
             skyComposite.find("cameraPos")==std::string::npos&&
             skyComposite.find("shadowMap")==std::string::npos&&
             skyComposite.find("float sky=step((depthRange.z+1)*.5,rawDepth);")!=std::string::npos&&
