@@ -221,7 +221,6 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float fadeWidth=max(groundColor.w,.1);
  float fadeStart=layer.w*(1-fadeWidth);
  float fade=1-smoothstep(fadeStart,layer.w,entry);
- if(fade<=.002) return float4(0,0,0,1);
 
  // Phase depends only on the angle between the ray and the light, so all
  // three scattering octaves are evaluated once per pixel.

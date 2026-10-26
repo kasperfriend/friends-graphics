@@ -379,7 +379,6 @@ struct Marcher
         const float fadeWidth = std::max(c.horizonFade, .1f);
         const float fadeStart = c.maxDistance * (1.f - fadeWidth);
         const float fade = 1.f - Smoothstep(fadeStart, c.maxDistance, entry);
-        if (fade <= .002f) return {};
 
         const float span = exitDistance - entry;
         const float baseStep = std::max(c.baseStep, span / float(c.steps * 3));
