@@ -63,9 +63,10 @@ int main() try
             skyFallback.find("[loop] for(int i=0;i<16;++i)")!=std::string::npos&&
             skyFallback.find("float h=(i+.5)/16;")!=std::string::npos&&
             skyFallback.find("2.25/16")!=std::string::npos&&
-            skyFallback.find("float bodyLight=.34+.66*saturate(shapeSignal);")!=std::string::npos&&
-            skyFallback.find("float detailLight=.84+.16*saturate(detailSignal);")!=std::string::npos&&
-            skyFallback.find("float verticalLight=.45+.55*h;")!=std::string::npos&&
+            skyFallback.find("float bodyLight=.75+.25*saturate(shapeSignal);")!=std::string::npos&&
+            skyFallback.find("float detailLight=.95+.05*saturate(detailSignal);")!=std::string::npos&&
+            skyFallback.find("float verticalLight=.75+.25*h;")!=std::string::npos&&
+            skyFallback.find("lerp(material.rgb,float3(1,1,1),.12+.20*h)")!=std::string::npos&&
             skyFallback.find("density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)")!=std::string::npos&&
             skyComposite.find("cameraPos")==std::string::npos&&
             skyComposite.find("shadowMap")==std::string::npos&&
@@ -92,6 +93,15 @@ int main() try
             text.find("<<\",cloudAmbient=\"<<fallbackCloudR")!=std::string::npos&&
             text.find("skyField=(samples=16,coverage=")!=std::string::npos,
             "screen-space noise uses a fixed scale, layer-depth wind shear, and the same subdued ambient floor without reading planet radius");
+    {
+        const float height=.2f,shapeSignal=.5f,detailSignal=.5f;
+        const float nightMaterialG=std::max(.211765f*.5f,.10f);
+        const float whiteMix=.12f+.20f*height;
+        const float nightCloudRadiance=(nightMaterialG+(1-nightMaterialG)*whiteMix)*
+            (.75f+.25f*height)*(.75f+.25f*shapeSignal)*(.95f+.05f*detailSignal);
+        Require(nightCloudRadiance>.16f,
+                "night fallback keeps a visible ambient cloud radiance while preserving shape and detail modulation");
+    }
     Require(text.find("constexpr float kCloudSkyAmbientFloor[3] = {.08f,.10f,.14f};")!=std::string::npos&&
             text.find("constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};")!=std::string::npos&&
             text.find("cloudSkyR=std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])")!=std::string::npos&&

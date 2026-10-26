@@ -656,10 +656,10 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
   if(density>0) {
    float sampleTransmittance=exp(-density*max(material.w,0)*2.25/16);
    float deposited=transmittance*(1-sampleTransmittance);
-   float bodyLight=.34+.66*saturate(shapeSignal);
-   float detailLight=.84+.16*saturate(detailSignal);
-   float verticalLight=.45+.55*h;
-   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.04+.10*h)*verticalLight*bodyLight*detailLight;
+   float bodyLight=.75+.25*saturate(shapeSignal);
+   float detailLight=.95+.05*saturate(detailSignal);
+   float verticalLight=.75+.25*h;
+   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.12+.20*h)*verticalLight*bodyLight*detailLight;
    cloudColour+=pow(sun,16)*lighting.w*.16*(.5+.5*h)*saturate(1-density);
    scattered+=max(cloudColour,0)*deposited;
    transmittance*=sampleTransmittance;
