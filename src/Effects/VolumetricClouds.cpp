@@ -647,12 +647,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float sun=saturate(dot(ray,normalize(lighting.xyz)));
  float transmittance=1;
  float3 scattered=0;
- [loop] for(int i=0;i<8;++i) {
-  float h=(i+.5)/8;
+ // Sixteen samples resolve the narrow stratus profile and the detail erosion
+ // across the configured depth; eight left only two or three samples in low clouds.
+ [loop] for(int i=0;i<16;++i) {
+  float h=(i+.5)/16;
   float shapeSignal,detailSignal;
   float density=Density(ray,h,cov,cloudType,shapeSignal,detailSignal);
   if(density>0) {
-   float sampleTransmittance=exp(-density*max(material.w,0)*2.25/8);
+   float sampleTransmittance=exp(-density*max(material.w,0)*2.25/16);
    float deposited=transmittance*(1-sampleTransmittance);
    float bodyLight=.34+.66*saturate(shapeSignal);
    float detailLight=.84+.16*saturate(detailSignal);
@@ -1292,7 +1294,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
    const float fallbackCloudR=std::max(fallbackSkyR*fallbackAmbientLevel,kCloudSkyAmbientFloor[0]);
    const float fallbackCloudG=std::max(fallbackSkyG*fallbackAmbientLevel,kCloudSkyAmbientFloor[1]);
    const float fallbackCloudB=std::max(fallbackSkyB*fallbackAmbientLevel,kCloudSkyAmbientFloor[2]);
-   out<<" skyField=(coverage="<<settings.coverage<<",type="<<settings.cloudType
+   out<<" skyField=(samples=16,coverage="<<settings.coverage<<",type="<<settings.cloudType
       <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
       <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
       <<",detailAngularScale="<<kSkyFallbackReferenceDistance/std::max(settings.detailSize,1.f)
