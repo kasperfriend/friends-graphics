@@ -577,6 +577,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 // configured 850-3000 yard layer, 1500 yards approximates its mid-deck scale
 // without reusing an expired eye/world intersection.
 constexpr float kSkyFallbackReferenceDistance = 1500.f;
+// A subdued, cool floor for the cloud deck alone. Some zones report zero
+// native ambient after sunset; clouds should become dark blue, not disappear
+// into mathematically black radiance. Manual tint is applied after this floor.
+constexpr float kCloudSkyAmbientFloor[3] = {.08f,.10f,.14f};
+constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};
 
 // Emergency sky-only field for the narrow case where the current VIEW
 // orientation is independently corroborated but its eye has aged out. This
@@ -594,39 +599,67 @@ float4 motion:register(c5);     // xy=shape offset, zw=weather offset
 float4 phase:register(c6);      // xy=detail offset, z=shape slice, w=detail slice
 float4 coverage:register(c7);   // x=coverage low edge, y=window scale, z=weather variation, w=cloud type
 float4 material:register(c8);   // rgb=zone/manual tint, w=density * opacity
-float4 lighting:register(c9);   // xyz=world light direction, w=silver lining
+float4 lighting:register(c9);   // xyz=world light direction, w=confirmed silver-lining strength
+float4 volume:register(c10);    // xy=vertical shape/detail span; normalized by each feature size
+float Gradient(float h,float type) {
+ float stratus=saturate(h*14.2857)*saturate((.32-h)*8.3333);
+ float cumulus=saturate((h-.08)*4.1667)*saturate((.96-h)*2.6316);
+ float tower=saturate((h-.04)*7.1429)*saturate((1-h)*5.5556);
+ return stratus*saturate(1-type*2)+cumulus*saturate(1-abs(type-.5)*2)+tower*saturate(type*2-1);
+}
+float Density(float3 ray,float h,float cov,float cloudType) {
+ float gradient=Gradient(h,cloudType);
+ if(cov*gradient<=0)return 0;
+ // Treat the fallback as a short direction-space volume, not a single flat
+ // noise sample. Its normalized vertical coordinate spans the configured
+ // deck thickness; no camera eye, world point, or layer intersection enters.
+ float3 shapePoint=float3(ray.x*scales.x,ray.y*scales.x,
+     ray.z*scales.x*max(scales.y,.05)+(h-.5)*volume.x*max(scales.y,.05))
+     +float3(motion.xy,phase.z);
+ float4 shape=tex3Dlod(shapeMap,float4(shapePoint,0));
+ float fbm=shape.g*.625+shape.b*.25+shape.a*.125;
+ float density=saturate((shape.r-fbm+1)/max(2-fbm,1e-4))*gradient;
+ density=saturate((density-1+cov)/max(cov,1e-4))*(.45+.55*cov);
+ if(density<=0)return 0;
+ if(scales.w>0) {
+  float3 detailPoint=float3(ray.x*scales.z,ray.y*scales.z,
+      ray.z*scales.z+(h-.5)*volume.y)+float3(phase.xy,phase.w);
+  float3 detail=tex3Dlod(detailMap,float4(detailPoint,0)).rgb;
+  float dfbm=detail.r*.625+detail.g*.25+detail.b*.125;
+  float erosion=scales.w*(1-density*.7);
+  density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)/max(1-scales.w,1e-4));
+ }
+ return density;
+}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 focal=max(projection.xy,.01);
  float3 viewRay=normalize(float3((uv.x*2-1)/focal.x,(1-uv.y*2)/focal.y,1));
  float3 ray=normalize(viewRay.x*invView0.xyz+viewRay.y*invView1.xyz+viewRay.z*invView2.xyz);
- // A compact, overlapping projection of the upper hemisphere avoids the
- // equirectangular seam at the zenith; the 3D shape remains fully directional.
+ // The weather field is a direction-space projection, with no seam at zenith.
  float2 weatherUv=.5+.32*float2(ray.x+ray.z*.35,ray.y-ray.z*.18)+motion.zw;
  float3 weather=tex2Dlod(weatherMap,float4(weatherUv,0,0)).rgb;
  float cov=saturate((weather.r+(weather.b-.5)*coverage.z-coverage.x)*coverage.y);
- float3 shapePoint=float3(ray.x*scales.x,ray.y*scales.x,ray.z*scales.x*max(scales.y,.05))
-                    +float3(motion.xy,phase.z);
- float4 shape=tex3Dlod(shapeMap,float4(shapePoint,0));
- float fbm=shape.g*.625+shape.b*.25+shape.a*.125;
- float density=saturate((shape.r-fbm+1)/max(2-fbm,1e-4));
- density=saturate((density-1+cov)/max(cov,1e-4))*(.45+.55*cov);
- density*=lerp(.82,1.18,saturate(weather.g*(1-abs(coverage.w))+max(coverage.w,0)));
- if(density>0&&scales.w>0) {
-  float3 detail=tex3Dlod(detailMap,float4(ray*scales.z+float3(phase.xy,phase.w),0)).rgb;
-  float dfbm=detail.r*.625+detail.g*.25+detail.b*.125;
-  float erosion=scales.w*(1-density*.7);
-  density=saturate((density-lerp(1-dfbm,dfbm,saturate(ray.z))*erosion)/max(1-scales.w,1e-4));
- }
- density*=smoothstep(-.08,.16,ray.z);
- float alpha=1-exp(-density*max(material.w,0)*2.25);
+ float cloudType=saturate(weather.g*(1-abs(coverage.w))+max(coverage.w,0));
  float sun=saturate(dot(ray,normalize(lighting.xyz)));
- // The sky pass has no world-space sun march; keep its emergency color
- // anchored to the captured zone/manual ambient instead of bleaching every
- // density island white (the previous .38 neutral lift looked like static
- // white patches against DK's dark sky).
- float3 cloudColour=lerp(material.rgb,float3(1,1,1),.15)+pow(sun,16)*lighting.w*.16;
- cloudColour*=.72+.28*saturate(ray.z);
- return float4(max(cloudColour,0)*alpha,1-alpha);
+ float transmittance=1;
+ float3 scattered=0;
+ [loop] for(int i=0;i<8;++i) {
+  float h=(i+.5)/8;
+  float density=Density(ray,h,cov,cloudType);
+  if(density>0) {
+   float sampleTransmittance=exp(-density*max(material.w,0)*2.25/8);
+   float deposited=transmittance*(1-sampleTransmittance);
+   float bodyLight=.78+.22*saturate(density);
+   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.12+.20*h)*(.75+.25*h)*bodyLight;
+   cloudColour+=pow(sun,16)*lighting.w*.16*(.5+.5*h);
+   scattered+=max(cloudColour,0)*deposited;
+   transmittance*=sampleTransmittance;
+  }
+ }
+ float fade=smoothstep(-.08,.16,ray.z);
+ scattered*=fade;
+ transmittance=lerp(1,transmittance,fade);
+ return float4(max(scattered,0),saturate(transmittance));
 })HLSL";
 
 // Screen-only composite: no inverse view, held eye, world reconstruction or
@@ -1112,6 +1145,8 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
                                   float(motion.weather[0]),float(motion.weather[1])};
   const float phase[4]={float(motion.detail[0]),float(motion.detail[1]),
                         float(motion.shapeZ),float(motion.detailZ)};
+  const float depthSpan=std::clamp(settings.thickness,100.f,12000.f);
+  const float volume[4]={depthSpan/featureSize,depthSpan/detailSize,0.f,0.f};
   const float coverage=std::clamp(settings.coverage,0.f,1.f);
   const float windowLow=1.f-coverage*1.5f;
   const float windowHigh=1.f-coverage*coverage*1.05f;
@@ -1131,11 +1166,14 @@ bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext&
   Vec3 light{0,0,1};
   if(f.directLightValid&&IsUsableCelestialDirection(f.directLightDirectionWorld))
    light=Normalize(f.directLightDirectionWorld);
-  const float lighting[4]={light.x,light.y,light.z,std::clamp(settings.silverLining,0.f,3.f)};
+  const float silver=f.directLightValid&&f.directLightDirectionConfirmed
+      ?std::clamp(settings.silverLining,0.f,3.f):0.f;
+  const float lighting[4]={light.x,light.y,light.z,silver};
   d->SetPixelShaderConstantF(0,inv[0],3);d->SetPixelShaderConstantF(3,projection,1);
   d->SetPixelShaderConstantF(4,scales,1);d->SetPixelShaderConstantF(5,motionConstants,1);
   d->SetPixelShaderConstantF(6,phase,1);d->SetPixelShaderConstantF(7,coverageConstants,1);
   d->SetPixelShaderConstantF(8,material,1);d->SetPixelShaderConstantF(9,lighting,1);
+  d->SetPixelShaderConstantF(10,volume,1);
   DrawScreenQuad(d,m_lowWidth,m_lowHeight);
   for(DWORD stage=0;stage<3;++stage)d->SetTexture(stage,nullptr);
  }
@@ -1238,6 +1276,8 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
       <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
       <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
       <<",detailAngularScale="<<kSkyFallbackReferenceDistance/std::max(settings.detailSize,1.f)
+      <<",shapeDepth="<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)
+      <<",detailDepth="<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.detailSize,1.f)
       <<",density="<<settings.density<<",opacity="<<settings.opacity
       <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
       <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
@@ -1346,6 +1386,15 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float daylight=std::clamp(f.daylightFactor,0.f,1.f);
  const float moonlight=std::clamp(f.moonlightFactor,0.f,1.f);
  const float ambientLevel=std::clamp(std::max(daylight,moonlight*.5f),.2f,1.f);
+ // Apply day/night scaling once, and keep a small zone-independent floor for
+ // clouds alone when native ambient is black. The floor is deliberately
+ // subdued and cool, then still passes through the user's manual tint.
+ const float cloudSkyR=std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0]);
+ const float cloudSkyG=std::max(skyG*ambientLevel,kCloudSkyAmbientFloor[1]);
+ const float cloudSkyB=std::max(skyB*ambientLevel,kCloudSkyAmbientFloor[2]);
+ const float cloudGroundR=std::max(skyR*ambientLevel*.62f,kCloudGroundAmbientFloor[0]);
+ const float cloudGroundG=std::max(skyG*ambientLevel*.52f,kCloudGroundAmbientFloor[1]);
+ const float cloudGroundB=std::max(skyB*ambientLevel*.45f,kCloudGroundAmbientFloor[2]);
  // Direct light comes from the stabilized signal when the compositor
  // filled it: the disc-draw signal (celestialIntensity) toggles as the
  // camera pans the disc in and out of frame and made the deck blink
@@ -1416,6 +1465,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<",day="<<daylight<<",night="<<moonlight<<",color="<<f.directionalLightColor.x<<','
      <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')'
      <<" ambient=("<<skyR<<','<<skyG<<','<<skyB<<") ambientLevel="<<ambientLevel
+     <<" cloudAmbient=("<<cloudSkyR<<','<<cloudSkyG<<','<<cloudSkyB<<')'
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
      <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
@@ -1465,7 +1515,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                             (f.moonDiscValid&&f.moonDiscViewDepth>.05f&&!f.cameraPoseStale)?1.f:0.f};
  const float c14[4]={kBaseExtinction*settings.density*settings.opacity,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
-                     settings.ambientIntensity*ambientLevel*ambientOcclusion};
+                     settings.ambientIntensity*ambientOcclusion};
  const float sunViewDepth=f.sunDiscValid?f.sunDiscViewDepth:1.f;
  const float sunDepthScale=std::max(f.depthMaxZ-f.viewport.MinZ,0.f);
  const float expectedSunDepth=f.viewport.MinZ+
@@ -1533,14 +1583,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c13[4]={std::max(settings.baseStep,1.f),settings.stepGrowth,settings.coarseScale,settings.jitter};
   const float c15[4]={sunR*cloudColourMultiplier[0],sunG*cloudColourMultiplier[1],
                       sunB*cloudColourMultiplier[2],settings.powder};
-  const float c16[4]={skyR*ambientLevel*cloudColourMultiplier[0],
-                      skyG*ambientLevel*cloudColourMultiplier[1],
-                      skyB*ambientLevel*cloudColourMultiplier[2],settings.silverLining};
-  // Ground bounce keeps the tuned relationship with whatever palette the
-  // zone pushed: cooler, much darker, never a flat grey.
-  const float c17[4]={skyR*ambientLevel*.62f*cloudColourMultiplier[0],
-                      skyG*ambientLevel*.52f*cloudColourMultiplier[1],
-                      skyB*ambientLevel*.45f*cloudColourMultiplier[2],settings.horizonFade};
+  // Day/night scaling and the low-ambient floor are already applied once
+  // in cloudSky/cloudGround. c14.w is a gain only; putting ambientLevel in
+  // both places squared the night dimmer and made clouds nearly black.
+  const float c16[4]={cloudSkyR*cloudColourMultiplier[0],
+                      cloudSkyG*cloudColourMultiplier[1],
+                      cloudSkyB*cloudColourMultiplier[2],settings.silverLining};
+  // Ground bounce keeps the zone palette, with its own lower night fill.
+  const float c17[4]={cloudGroundR*cloudColourMultiplier[0],
+                      cloudGroundG*cloudColourMultiplier[1],
+                      cloudGroundB*cloudColourMultiplier[2],settings.horizonFade};
   const float c18[4]={settings.forwardScatter,settings.backwardScatter,settings.multiScatterEccentricity,
                       float(uint32_t(settings.debugMode))};
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;

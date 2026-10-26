@@ -51,7 +51,13 @@ int main() try
             skyFallback.find("cameraPosition")==std::string::npos&&
             skyFallback.find("shadowMap")==std::string::npos&&
             skyFallback.find("invView0")!=std::string::npos&&
-            skyFallback.find("lerp(material.rgb,float3(1,1,1),.15)")!=std::string::npos&&
+            skyFallback.find("float4 volume:register(c10)")!=std::string::npos&&
+            skyFallback.find("Density(float3 ray,float h,float cov,float cloudType)")!=std::string::npos&&
+            skyFallback.find("float gradient=Gradient(h,cloudType);")!=std::string::npos&&
+            skyFallback.find("float density=saturate((shape.r-fbm+1)/max(2-fbm,1e-4))*gradient;")!=std::string::npos&&
+            skyFallback.find("[loop] for(int i=0;i<8;++i)")!=std::string::npos&&
+            skyFallback.find("lerp(material.rgb,float3(1,1,1),.12+.20*h)")!=std::string::npos&&
+            skyFallback.find("density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)")!=std::string::npos&&
             skyComposite.find("cameraPos")==std::string::npos&&
             skyComposite.find("shadowMap")==std::string::npos&&
             skyComposite.find("float sky=step((depthRange.z+1)*.5,rawDepth);")!=std::string::npos&&
@@ -65,8 +71,22 @@ int main() try
             skyRender.find("settings.planetRadius")==std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/featureSize")!=std::string::npos&&
             skyRender.find("kSkyFallbackReferenceDistance/detailSize")!=std::string::npos&&
-            text.find("<<\",angularScale=\"<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)")!=std::string::npos,
-            "screen-only cloud noise uses a layer-scale reference distance instead of the planet-radius projection that created mottled patches");
+            skyRender.find("const float volume[4]={depthSpan/featureSize,depthSpan/detailSize,0.f,0.f};")!=std::string::npos&&
+            skyRender.find("d->SetPixelShaderConstantF(10,volume,1);")!=std::string::npos&&
+            skyRender.find("f.directLightValid&&f.directLightDirectionConfirmed")!=std::string::npos&&
+            text.find("<<\",angularScale=\"<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)")!=std::string::npos&&
+            text.find("<<\",shapeDepth=\"<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)")!=std::string::npos,
+            "screen-only cloud noise uses a layer-scale reference distance and vertical span instead of a planet-radius point sample");
+    Require(text.find("constexpr float kCloudSkyAmbientFloor[3] = {.08f,.10f,.14f};")!=std::string::npos&&
+            text.find("constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};")!=std::string::npos&&
+            text.find("cloudSkyR=std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])")!=std::string::npos&&
+            text.find("cloudGroundR=std::max(skyR*ambientLevel*.62f,kCloudGroundAmbientFloor[0])")!=std::string::npos&&
+            text.find("settings.ambientIntensity*ambientOcclusion")!=std::string::npos&&
+            text.find("settings.ambientIntensity*ambientLevel*ambientOcclusion") == std::string::npos&&
+            text.find("const float c16[4]={cloudSkyR*cloudColourMultiplier[0]")!=std::string::npos&&
+            text.find("const float c17[4]={cloudGroundR*cloudColourMultiplier[0]")!=std::string::npos&&
+            text.find("cloudAmbient=(")!=std::string::npos,
+            "normal cloud ambient applies day/night once and keeps a subdued tinted floor in zones with black native ambient");
     Require(normalShaderStart!=std::string::npos&&optionalShaderStart!=std::string::npos&&
             text.substr(normalShaderStart,optionalShaderStart-normalShaderStart).find("kCloudSkyFallbackSource")==std::string::npos&&
             text.find("m_skyShaderRetry.Fail(now,kOptionalPassRetryMs);")!=std::string::npos,
