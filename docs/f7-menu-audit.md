@@ -112,8 +112,8 @@ extended to the scrollbar strip if the comment is the intent.
   `Save failed (Windows 2). Send MenuDiagnostics.log` disappears. Debug-only path.
 * `TuningOverlay.h` puts `#include "src/Environment/LocationTuning.h"` before
   `#pragma once`; move it below so the header reads like the rest of the tree.
-* `Screenshots/f7-location-settings.png` (used by the README table) still shows the old
-  three-column menu, and `docs/ENVIRONMENT-SYSTEM-RU.md` still states that F7 "has three
+* `Screenshots/f7-location-settings.png` still shows the old three-column menu, and
+  `docs/ENVIRONMENT-SYSTEM-RU.md` still states that F7 "has three
   columns without pages or scrolling". Both predate the tab rewrite and should be
   re-captured/updated.
 
