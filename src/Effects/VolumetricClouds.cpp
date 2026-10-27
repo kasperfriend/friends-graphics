@@ -1255,6 +1255,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
      <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
      <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" clientPoseRead="<<(f.clientCameraPoseReadStatus?f.clientCameraPoseReadStatus:"unknown")
      <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
      <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
      <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'
@@ -1506,6 +1507,7 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
      <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
      <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" clientPoseRead="<<(f.clientCameraPoseReadStatus?f.clientCameraPoseReadStatus:"unknown")
      <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
      <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
      <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'

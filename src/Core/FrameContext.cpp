@@ -83,6 +83,7 @@ namespace renderer
         clientCameraEyeReadThisFrame = false;
         clientCameraOrientationReadThisFrame = false;
         clientCameraEyeAcceptedThisFrame = false;
+        clientCameraPoseReadStatus = "not-attempted";
         clientCameraEyeDistanceYards = -1.f;
         cameraPoseSource = PoseNone;
         cameraCaptureAttempts = cameraCaptureAccepted = 0;

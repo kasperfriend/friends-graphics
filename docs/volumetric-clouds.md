@@ -460,9 +460,10 @@ shadow or cloud-ray texture. Unknown, menu and out-of-world scenes still fail cl
 has expired, the camera observer can still corroborate the current rigid VIEW basis by continuity; that
 expired projection is not reused for scene-depth or celestial-disc validation. The cloud log records
 `clientEye=(read,accepted,distance)`, `orientationFresh`, `skyFallbackEligible`, eye age,
-projection-cache state and the selected path. `clientOrientationRead` reports whether the complete memory pose
-passed its snapshot checks; `worldViewBasis` logs the accepted basis so a stationary yaw test can verify it rotates
-with the player rather than remaining screen-locked.
+projection-cache state and the selected path. `clientPoseRead` names the first failed client-memory validation
+stage (for example, an unsupported layout, a matrix-axis mismatch or an eye mismatch); `clientOrientationRead`
+reports whether the complete pose passed those checks. `worldViewBasis` logs the accepted basis so a stationary
+yaw test can verify it rotates with the player rather than remaining screen-locked.
 
 `LocalLightingRenderer::Render` and `LocalLightManager::ObserveTorchDraw` refuse a stale pose while
 `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a pose held briefly keeps the lamps steady (a frame-late

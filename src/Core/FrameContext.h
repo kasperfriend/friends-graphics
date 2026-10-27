@@ -222,6 +222,9 @@ namespace renderer
         bool clientCameraEyeReadThisFrame = false;
         bool clientCameraOrientationReadThisFrame = false;
         bool clientCameraEyeAcceptedThisFrame = false;
+        // ReadCameraPose writes a string literal for the first rejected stage,
+        // so diagnostics distinguish unsupported clients from bad candidate offsets.
+        const char* clientCameraPoseReadStatus = "not-attempted";
         float clientCameraEyeDistanceYards = -1.f;
         // How the pose was obtained, for diagnostics and the regression
         // tools. 0 none, 1 captured, 2 sky orientation, 3 held, 4 verified client pose.

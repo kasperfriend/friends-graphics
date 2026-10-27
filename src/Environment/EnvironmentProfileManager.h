@@ -18,7 +18,7 @@ public:
     WorldSceneObservation ObserveWorldScene(bool worldContext,bool knownWorldDrawSeen) const;
     const ResolvedEnvironmentState& State() const {return current;}
     const LocationContext& Location() const {return location;}
-    bool ReadCameraPose(ClientCameraPoseSnapshot& pose) const {return provider.ReadCameraPose(pose);}
+    bool ReadCameraPose(ClientCameraPoseSnapshot& pose,const char** readStatus=nullptr) const {return provider.ReadCameraPose(pose,readStatus);}
     bool LocationTuningVerified() const {return provider.Verified()&&database.Authoritative();}
     std::string ZoneName() const {const auto* area=database.Area(location.zoneId);return area?area->name:std::to_string(location.zoneId);}
     std::string AreaName() const {const auto* area=database.Area(location.areaId);return area?area->name:std::to_string(location.areaId);}

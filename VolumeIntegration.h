@@ -719,8 +719,11 @@ bool CaptureSkyFallback() {
 
     renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
     renderer::ClientCameraPoseSnapshot clientCameraPose{};
-    const bool haveClientCameraPose=frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&
-        renderer::EnvironmentProfileManager::Instance().ReadCameraPose(clientCameraPose);
+    const bool inWorld=frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;
+    const char* clientPoseReadStatus=inWorld?"not-read":"not-in-world";
+    const bool haveClientCameraPose=inWorld&&
+        renderer::EnvironmentProfileManager::Instance().ReadCameraPose(clientCameraPose,&clientPoseReadStatus);
+    frameCtx.clientCameraPoseReadStatus=clientPoseReadStatus;
     frameCtx.clientCameraEyeReadThisFrame=haveClientCameraPose;
     frameCtx.clientCameraOrientationReadThisFrame=haveClientCameraPose;
     bool ok = renderer::CameraCapture::Instance().ApplySkyFallback(

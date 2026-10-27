@@ -482,7 +482,13 @@ int main() try
                 Contains(cameraProvider, "kWorldViewMatrixRva=0x6DF5E8") &&
                 Contains(cameraProvider, "kCameraViewEyeLeashYards=5.f") &&
                 Contains(cameraProvider, "cameraLayoutSupported=knownClient&&client.base==0x00400000") &&
-                Contains(cameraProvider, "!available||!verified||!cameraLayoutSupported") &&
+                Contains(cameraProvider, "provider-unavailable") &&
+                Contains(cameraProvider, "client-unverified") &&
+                Contains(cameraProvider, "unsupported-camera-layout") &&
+                Contains(cameraProvider, "world-view-not-rigid") &&
+                Contains(cameraProvider, "camera-view-axis-mismatch") &&
+                Contains(cameraProvider, "camera-view-eye-mismatch") &&
+                Contains(cameraProvider, "active-camera-changed") &&
                 Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,firstView,sizeof(firstView))") &&
                 Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,secondView,sizeof(secondView))") &&
                 Contains(cameraProvider, "IsOrthonormalViewBasis(basis,.002f)") &&
@@ -497,8 +503,9 @@ int main() try
             "the active camera pose is stable, matrix-matched, pointer-revalidated and pinned to the supported 3.3.5a layout");
         Require(Contains(cameraProvider, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d"),
             "the ArdenWoW executable fingerprint remains an explicitly supported camera source");
-        Require(Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&") &&
-                Contains(composite, "ReadCameraPose(clientCameraPose)"),
+        Require(Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
+                Contains(composite, "ReadCameraPose(clientCameraPose,&clientPoseReadStatus)") &&
+                Contains(clouds,"clientPoseRead="),
             "the complete camera pose read is attempted only in a confirmed playable world");
         const auto clientPoseUse=cameraCapture.find("if (currentClientPose &&");
         const auto skyPoseResolve=cameraCapture.find("m_skyPose.Resolve(disc, basis, corroborated)");
