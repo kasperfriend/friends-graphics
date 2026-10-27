@@ -3,48 +3,69 @@
 Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern lighting, atmosphere, water, weather, and post-processing effects to the World of Warcraft client used by [Project Ascension](https://ascension.gg/).
 
 > [!IMPORTANT]
-> This project is developed and tested for the **Ascension client**. It is **not tested with a stock World of Warcraft 3.3.5 client**. The renderer is under active development, so visual glitches, compatibility problems, crashes, and performance regressions may still occur.
+> This project is developed and tested for the **Stock 3.3.5a client**. It is **not tested with a Ascension client yet, but it could work**. `LocationGraphics.ini` holds the per-location overrides with my manual settings. Updating after setting your own may wipe them!
 
 ## Screenshots
 
 <table>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092826_215004.jpg" alt="Rain, fog and local lighting" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092826_215807.jpg" alt="Volumetric fog around a lantern" /></td>
+    <td><img src="Screenshots/image_2026-10-26_17-35-02.png" alt="Nagrand water and clouds sunset" /></td>
+    <td><img src="Screenshots/image_2026-10-25_14-29-04.png" alt="Dynamic lights Elwynn Forest" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092826_220551.jpg" alt="Local fire lighting and fog" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092826_222851.jpg" alt="Rain and volumetric lighting in a forest" /></td>
+    <td><img src="Screenshots/image_2026-10-26_09-38-31.png" alt="Wintergrasp clouds and water" /></td>
+    <td><img src="Screenshots/image_2026-10-26_17-03-38.png" alt="Zuldrak water and fog" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092626_222609.jpg" alt="Water and atmospheric lighting" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092626_232041.jpg" alt="Water reflections at night" /></td>
+    <td><img src="Screenshots/image_2026-10-25_15-35-49.png" alt="Godrays test" /></td>
+    <td><img src="Screenshots/image_2026-10-26_09-34-51.png" alt="Underwater caustics" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092626_232124.jpg" alt="Water rendering and distant atmosphere" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092626_232814.jpg" alt="Rain in Stormwind" /></td>
+    <td><img src="Screenshots/image_2026-10-26_17-06-36.png" alt="Grizzly Hills clouds" /></td>
+    <td><img src="Screenshots/image_2026-10-26_17-13-38.png" alt="Howling Fjord water, fog and clouds" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092726_000028.jpg" alt="Night reflections in Stormwind" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092726_000456.jpg" alt="Coastal water and ship" /></td>
+    <td><img src="Screenshots/image_2026-10-24_13-50-08.png" alt="Menethil Harbour fog and water" /></td>
+    <td><img src="Screenshots/image_2026-10-24_14-07-38.png" alt="Redridge water" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/WoWScrnShot_092726_000647.jpg" alt="Night sky and environment lighting" /></td>
-    <td><img src="Screenshots/WoWScrnShot_092726_000749.jpg" alt="Red environment lighting" /></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/f7-location-settings.png" alt="Compact F7 menu with zone and subarea preset selection" /></td>
-    <td></td>
-  </tr>
+    <td><img src="Screenshots/image_2026-10-26_16-46-33.png" alt="Icecrown dark clouds and fog" /></td>
+    <td><img src="Screenshots/{214B1804-2DA1-4624-A336-D797C32DE38A}.png" alt="New rewritten menu" /></td>
+
 </table>
+
+## Installation
+
+1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
+2. Extract its contents into the Ascension client directory, next to the game executable.
+3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, `EnvironmentProfiles.ini`, and `LocationGraphics.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
+4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` or `LocationGraphics.ini` by hand.
+
+Example layout:
+
+```text
+Ascension/
+├── d3d9.dll
+├── ModernWoWRenderer.ini
+├── GraphicsEffects.ini
+├── EnvironmentProfiles.ini
+├── LocationGraphics.ini
+├── data/
+│   └── areas.txt
+├── MaterialCache/
+│   ├── local_light_manifest.json
+│   └── LocalLightReview.json
+└── textures/
+    └── weather/
+```
+
+Remove or rename `d3d9.dll` to disable the proxy completely.
 
 ## Current features
 
 ### Atmosphere and volumetric lighting
 
 - Sun and moon god rays are a whole-frame, depth-aware gather toward the tracked celestial source: sky shows as beams, while trees, characters and buildings cast visible shadows along them and clouds break them into gaps. The math lives in `src/Effects/GodRayCore.h`; `tools/GodRayPreview.cpp` renders a reference frame and `tools/GodRayRegression.cpp` checks it.
-- Height fog, aerial haze, and ground mist are integrated in world space. The animated terrain-relative local fog layer is integrated the same way but ships switched off; `Enabled=1` under `[LocalFog]` in GraphicsEffects.ini turns it on.
-- When enabled, local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
 - Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.
 
 ### Volumetric clouds
@@ -59,17 +80,13 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 - Cloud-filtered sunlight forms rays through moving gaps; world-anchored ground shadows no longer change with camera height or off-screen sun tracking.
 - Coverage, altitude, thickness, drift gain, haze, lighting, cloud-ray strength, independent resolution (20–100%) and a four-step **march** quality level are on F7 and in `[VolumetricClouds]`. Changing quality now actually changes steps without overriding resolution. See [docs/volumetric-clouds.md](docs/volumetric-clouds.md).
 
-![Volumetric clouds](Screenshots/volumetric-clouds.png)
-
-*Scattered, backlit broken, overcast and the deck from above - rendered by `tools/CloudPreview.cpp`, the CPU mirror
-of the cloud shader, at the shipped defaults.*
-
-### Dynamic environment lighting
+### Dynamic environment lighting(Exists, tuned, but NOT SUPPORTED)
 
 - Trusted native point and spot lights can illuminate nearby world surfaces.
 - Strong local lights contribute to volumetric scattering in fog and mist.
 - Held torches and lanterns retain their light while the player briefly occludes the source from the camera.
 - Screen-space occlusion and depth-derived normals keep the effect attached to visible geometry.
+- NOTE: I tried to push the game's limits but it's old 32 bit dx9 game, so nothing past current implementation could be implemented
 
 ### Ambient occlusion
 
@@ -78,11 +95,6 @@ of the cloud shader, at the shipped defaults.*
 - Tuned to be felt rather than seen: at the shipped radius every open surface - floor, wall face, rooftop - keeps its brightness exactly, while a right-angled corner still darkens by a quarter. Raising `AO RADIUS` reaches further into architecture and starts darkening whole surfaces; `AO STRENGTH` alone never does.
 - A depth-aware blur keeps occlusion from smearing across an object edge onto the background behind it, and the effect retires with distance instead of sparkling.
 - **F7 → AMBIENT OCCLUSION** holds the switch, strength, radius, distance fade and a debug view. See [how it works and why the defaults are what they are](docs/ambient-occlusion.md).
-
-![Ambient occlusion off and on](Screenshots/ambient-occlusion.png)
-
-*Off, on at the shipped defaults, on at twice the shipped strength, and the raw occlusion term - rendered by
-`tools/AmbientOcclusionPreview.cpp`, which runs the same math the GPU runs over the same depth buffer.*
 
 ### Weather
 
@@ -136,33 +148,12 @@ model is being moved to and which parts of it a `ps_3_0` shader can and cannot c
 - Per-zone sea state and live weather response: an exposed coast carries more water than a
   sheltered pond, and stronger shared wind roughens and quickens both without counting weather twice.
   Sea strength eases over `[Water] WeatherEaseSeconds`; unlinked water retains its legacy weather response. Turning sea-energy response to zero retains authored swell but does not invent wind-driven foam in calm air.
-- Explicit sea states cover all 414 roots in the verified Ascension patch-M tables. This is a
-  custom WotLK 3.3.5-based dataset, including Ascension and expansion-derived map IDs, not the
-  stock Wrath zone catalog; the [full zone audit](docs/water-zone-profile-audit.md) documents scope.
-
-![Water: a river, an open sea at a low sun, a windward coast and a moonlit lake](Screenshots/water-forever-look.png)
-
-*The four bodies the look was tuned against - rendered by `tools/WaterPreview.cpp`, the CPU mirror of the water
-shader, at the shipped defaults.*
-
-![The same sea four times: a sheltered zone and an exposed coast, each in calm air and in a rainstorm](Screenshots/water-zone-weather.png)
-
-*One sea, four sea states - `build/waterpreview --matrix --scene sea --grid 2 --supersample 2`. The columns are the
-sky, the rows are what the zone asks for, and every panel shares a clock and a camera, so the difference is the model.*
 
 ### Native shadows and post-processing
 
 - Softness and strength controls enhance the client-created cascaded shadow maps. The receivers are recognised from the shader's own bytecode (it samples the four cascade slots, and the constants it adds to a UV are its kernel), so a client update that recompiles its material shaders does not silently turn the sliders off.
 - Optional brightness, contrast, gamma, and sharpness post-processing.
 - Native distance-fog controls remain available for compatibility with the client's own fog path.
-
-## Known limitations
-
-- Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
-- Ambient occlusion only sees what is on screen: off-screen geometry cannot occlude, contact shading is weaker than it should be where a normal is reconstructed across a crease, and occluders thinner than about a yard can be stepped over. Run it inside the atmosphere composite, so it needs `[Volume] Enabled=1`.
-- Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
-- D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive. Device-loss handling pauses the effects while the device cannot draw and resumes when it is restored, but the exclusive-fullscreen and window-switch paths have not yet been verified in the Ascension client.
-- This mod is in active development. Bugs are expected; include `ModernWoWRenderer.log`, the zone, and reproduction steps when reporting one.
 
 ## Controls
 
@@ -187,38 +178,6 @@ The `ALL TO GLOBAL` switch temporarily masks every Map/Zone/Area override and us
 
 The F7 Atmosphere, Volumetric Clouds and Water tabs include manual RGB, alpha and brightness controls. Alpha 0 preserves the inherited zone colour; raising it blends in your chosen colour. These controls can override the water, fog and cloud palettes supplied by the current zone.
 
-Location presets automatically recognize the verified Ascension executable SHA-256 `e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6`, stock 3.3.5a build 12340, and the supplied ArdenWoW SHA-256 `ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d` when `[LocationProvider] ExeSHA256` is blank. Arden uses the shared 3.3.5a location RVA preset. Releases include `data/areas.txt`, exported from Ascension's loaded tables; custom Arden area IDs still need a matching database. Keep `data` next to the DLL. Other executable versions need [environment setup and validation](docs/ENVIRONMENT-SYSTEM-RU.md). Unknown clients keep local presets locked; global image/color remains editable. Existing explicit client configurations are respected.
-
-If the header says `Location unavailable`, the reason follows it on the same line: `not configured` means `EnvironmentProfiles.ini` is not next to `d3d9.dll`, `unrecognized executable` means your client build has no verified location addresses yet (its SHA-256 is recorded in `ModernWoWRenderer.log`), `ids fail area database` means `data\areas.txt` is missing or was not exported from the client you are running, and `no world frame yet` clears itself once the world is drawn. `F12` retries after you fix a file.
-
-If F7 is locked, unresponsive, or fails to save, open F7 and reproduce the problem, then send `MenuDiagnostics.log` from the client directory with a screenshot. It records the build, executable hash, location validation, database status, viewport/client sizes, and save/render failures. It rotates at 1 MiB to `MenuDiagnostics.log.previous`. If no log exists, include `ModernWoWRenderer.log`. F12 reloads both settings and the area database; installing a new DLL requires restarting the game.
-
-## Installation
-
-1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
-2. Extract its contents into the Ascension client directory, next to the game executable.
-3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, `EnvironmentProfiles.ini`, and `LocationGraphics.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
-4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` or `LocationGraphics.ini` by hand.
-
-Example layout:
-
-```text
-Ascension/
-├── d3d9.dll
-├── ModernWoWRenderer.ini
-├── GraphicsEffects.ini
-├── EnvironmentProfiles.ini
-├── LocationGraphics.ini
-├── data/
-│   └── areas.txt
-├── MaterialCache/
-│   ├── local_light_manifest.json
-│   └── LocalLightReview.json
-└── textures/
-    └── weather/
-```
-
-Remove or rename `d3d9.dll` to disable the proxy completely.
 
 ## Configuration
 
@@ -241,7 +200,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 
 The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.
 
-`LocationGraphics.ini` holds the per-location overrides, and ships empty: every example in it is commented out, so it changes nothing until you fill a value in. A setting is read from the most specific scope that holds it - the subarea, then the zone, then the map, and finally the `GraphicsEffects.ini` baseline. The whole-game `[Global.<Section>]` scope applies where a location opts in through its `[Map.<map>.Zone.<zone>.InheritGlobal]` section, unless F7's `ALL TO GLOBAL` switch temporarily masks location scopes. The switch is persisted as `[Overlay] AllToGlobal=1`; turning it off restores all saved location values. The file documents the scope names, the sections you may use and how to find the current Map/Zone/Area IDs. F7 saves the overlay's own changes into this same file, and it rewrites the section it writes, so keep notes above the first section header.
+`LocationGraphics.ini` holds the per-location overrides. A setting is read from the most specific scope that holds it - the subarea, then the zone, then the map, and finally the `GraphicsEffects.ini` baseline. The whole-game `[Global.<Section>]` scope applies where a location opts in through its `[Map.<map>.Zone.<zone>.InheritGlobal]` section, unless F7's `ALL TO GLOBAL` switch temporarily masks location scopes. The switch is persisted as `[Overlay] AllToGlobal=1`; turning it off restores all saved location values. The file documents the scope names, the sections you may use and how to find the current Map/Zone/Area IDs. F7 saves the overlay's own changes into this same file, and it rewrites the section it writes, so keep notes above the first section header.
 
 `EnvironmentProfiles.ini` holds the authored environment table: `[Default]`, the named climates in `[Environment.<Name>]`, and the per-place multipliers in `[Map.<id>]`, `[Zone.<id>]` and `[Area.<id>]`, resolved as `Default` then `Map` then `Zone` then `Area`. It also carries the `[LocationProvider]` block that tells the renderer which client build it may read location ids from, and without a verified client and `data/areas.txt` the renderer cannot tell which zone you are in - so none of the zone settings apply.
 
@@ -255,7 +214,7 @@ Requirements:
 
 - Visual Studio 2026 with the MSVC C++ x86/x64 tools and `v145` platform toolset.
 - Windows SDK and MSBuild.
-- A 32-bit `Win32` build target. The Ascension client is a 32-bit D3D9 process.
+- A 32-bit `Win32` build target. The 3.3.5 client is a 32-bit D3D9 process.
 
 Build from a Visual Studio developer PowerShell:
 
@@ -265,23 +224,6 @@ msbuild ModernWoWRenderer.sln /m /p:Configuration=Release /p:Platform=Win32 /p:P
 
 The installable output is written to `build\Release\`. The post-build step copies both INI files, the local-light manifests, and weather textures alongside `d3d9.dll`.
 
-## Continuous integration and releases
-
-`.github/workflows/build.yml` builds Release for each pull request targeting `main` and each push to `main`. Feature-branch pushes are not built a second time alongside their PR. A manual Build run is also available for any branch; enable its `debug` option when a Debug build is needed.
-
-Normal CI has two jobs: the Windows Release build (including shader validation, water/weather device tests, package verification and artifact upload), and the fast portable regressions on Linux. Changelog validation runs separately only when fragments or its workflow change. Tests for current renderer behavior are retained; duplicate runs and separate runner startups are removed.
-
-Each successful Release build uploads an install-ready artifact containing:
-
-- `d3d9.dll`
-- `ModernWoWRenderer.ini`
-- `GraphicsEffects.ini`
-- `EnvironmentProfiles.ini` (location verification and environment configuration)
-- `LocationGraphics.ini` (the per-location override file, shipped empty so it can be filled in by hand)
-- required `MaterialCache` local-light manifests
-- packaged weather textures
-
-Artifacts are retained for 14 days, including PR and manual builds. Publishing a GitHub Release is separate: run the manual `Release` workflow to build, validate and publish the ZIP. Ordinary pushes do not publish releases.
 
 ## Validation
 
@@ -334,9 +276,13 @@ The proxy loads the system Direct3D 9 runtime, forwards the normal API, observes
 
 Open a GitHub issue with:
 
-- the Ascension client build and zone;
+- the client build and zone;
 - the effect and settings involved;
 - exact reproduction steps, including whether Alt+Tab, F7, a mount, or a device reset is involved;
 - `ModernWoWRenderer.log` and a screenshot or short video when available.
 
-Reports from stock 3.3.5 clients are still useful, but that client is currently outside the tested compatibility target.
+## Known Issues
+
+- Orgrimmar(and some of places) water - in a couple of capitals, Orgri and Dala for now, water is turned off because these cities exist in "void" in simple words, so they can't get nice cool looking water, so I turned it off
+- DK starting zone - clouds seem to completely lack depth to render, I spent 4 days breaking this to no avail, so they're turned off
+- Capitals - as with Orgri and Dala, capital cities exist in special places, so their effects can be buggy by design, I did my best to guard this, but there may happen instabilities
