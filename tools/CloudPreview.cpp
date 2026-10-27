@@ -110,7 +110,7 @@ struct CloudConfig
     // Fixed layer geometry in world units (WoW world Z is up).
     float bottom = 850.f;
     float top = 3000.f;
-    float maxDistance = 26000.f;
+    float maxDistance = 200000.f;
 
     // Field
     float coverage = .5f;          // user slider, biases the weather map
@@ -153,14 +153,12 @@ struct CloudConfig
     // sky is rendered rather than photographed: distance has to desaturate
     // the radiance AND eat the silhouette.
     V3 hazeColor{ .58f, .68f, .84f };
-    float aerialDistance = 13000.f;   // e-folding distance of that fade
+    float aerialDistance = 100000.f;  // half the default march distance, matching c22
     float aerialOpacity = .60f;       // how much of the silhouette it eats
 
-    // March. The step is a WORLD length, not a slice of the span: a ray
-    // along the horizon crosses 25000 units of layer, and dividing that by
-    // the step budget gives 260-unit steps that step clean over every
-    // detail feature. It grows with distance because the pixel footprint
-    // does, which is what keeps the far field affordable.
+    // March. The step is a WORLD length, not a slice of the span: a shallow
+    // ray can cross 200000 units of layer, and distance growth keeps that far
+    // field affordable without dividing the cloud detail into noisy slices.
     int steps = 96;
     float baseStep = 70.f;
     float stepGrowth = .010f;
@@ -289,7 +287,10 @@ struct Marcher
             // either leaves the silhouette smooth or hollows the cloud out;
             // real cumulus shred at the edge and stay solid in the middle.
             const float strength = c.detailStrength * (1.f - density * .7f);
-            density = Saturate((density - modifier * strength) / std::max(1.f - c.detailStrength, 1e-4f));
+            const float eroded = Saturate((density - modifier * strength) / std::max(1.f - c.detailStrength, 1e-4f));
+            // Keep the lower cloud boundary from being erased wholesale by
+            // high-frequency erosion when a grazing ray sees only thin base.
+            density = Lerp(density, eroded, Saturate(h * 10.f));
         }
 
         // Density rises with height inside the cloud (more water up top) and
@@ -372,16 +373,12 @@ struct Marcher
         exitDistance = std::min(exitDistance, limit);
         if (exitDistance <= entry) return {};
 
-        // The horizon fade exists so a grazing ray from UNDER the deck does
-        // not stretch the layer out to infinity and show a hard band. Seen
-        // from inside or above the layer, downward rays are the whole point,
-        // so the fade has to be gated on where the camera actually is.
-        const bool belowDeck = origin.z < c.bottom;
-        const float horizon = belowDeck ? Smoothstep(0.f, std::max(c.horizonFade, .001f), dir.z) : 1.f;
-        if (horizon <= .002f) return {};
-        const float reach = 1.f - Smoothstep(c.maxDistance * .55f, c.maxDistance, entry);
-        const float fade = horizon * reach;
-        if (fade <= .002f) return {};
+        // Do not fade by ray elevation: a grazing upward ray that still reaches
+        // the fixed layer must keep its clouds. The finite march range is the
+        // authoritative horizon limit; soften only its final configured span.
+        const float fadeWidth = std::max(c.horizonFade, .1f);
+        const float fadeStart = c.maxDistance * (1.f - fadeWidth);
+        const float fade = 1.f - Smoothstep(fadeStart, c.maxDistance, entry);
 
         const float span = exitDistance - entry;
         const float baseStep = std::max(c.baseStep, span / float(c.steps * 3));
@@ -418,10 +415,18 @@ struct Marcher
 
             if (coarse)
             {
-                // Big strides until something is hit, then step back and
-                // integrate properly. Doubles the usable range for free.
-                if (Density(p, h, false) > 0.f) { coarse = false; t -= stepLength * c.coarseScale; emptySteps = 0; }
-                else t += stepLength * c.coarseScale;
+                // Bound empty-space probes by cloud features even when a
+                // shallow ray reaches far out, and still consume the remaining
+                // span within the sample budget. Otherwise whole cloud cells
+                // could be skipped and the deck would blink off with pitch.
+                const float coarseStride = std::max(
+                    std::min(stepLength * c.coarseScale, .75f * c.featureSize),
+                    (exitDistance - t) / float(c.steps - i));
+                if (Density(p, h, false) > 0.f)
+                {
+                    coarse = false; t = std::max(entry, t - coarseStride); emptySteps = 0;
+                }
+                else t += coarseStride;
                 continue;
             }
 

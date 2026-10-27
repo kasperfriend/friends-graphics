@@ -72,6 +72,8 @@ void TestWaterSettings(WaterSettings& settings) {
     Require(watereffect::enabled&&!watereffect::code.empty()&&!watereffect::vertexCode.empty(),
         "production shaders prepared even when startup and live water are OFF");
     Require(!watereffect::effectEnabled&&!watereffect::NeedsScene(),"starting OFF does not request water capture");
+    Require(!watereffect::nativeWaterCoverageCode.empty(),
+        "native-water coverage shader is prepared independently of replacement-water readiness");
     // The pin the fixture wrote above, read back through the production reload: the same
     // key, the same file order, the same clamp a player's edit would take.
     watereffect::ReloadTuning();
@@ -373,9 +375,25 @@ int main() try {
     Require(memcmp(currentFog,badFog,sizeof(badFog))==0,
         "malformed native c4 is restored exactly after the water draw");
     Check(d->SetVertexShaderConstantF(4,savedFog,1));
+    // A camera looking only at the sky submits no terrain/liquid draw before
+    // this point. Water replacement is deliberately draw-local: an actual
+    // visible liquid draw must still install its shader without that frame gate.
+    auto& skyOnlyFrame=renderer::FrameContext::Current();
+    const auto savedWorldScene=skyOnlyFrame.worldScene;
+    const bool savedWorldSceneResolved=skyOnlyFrame.worldSceneResolved;
+    const bool savedTerrainSeen=skyOnlyFrame.worldTerrainSeenThisFrame;
+    const bool savedWaterSeen=skyOnlyFrame.worldWaterSeenThisFrame;
+    const bool savedCameraValid=skyOnlyFrame.cameraValid;
+    const bool savedCameraPoseStale=skyOnlyFrame.cameraPoseStale;
+    skyOnlyFrame.worldScene.state=renderer::WorldSceneState::InWorld;
+    skyOnlyFrame.worldSceneResolved=true;
+    skyOnlyFrame.worldTerrainSeenThisFrame=false;
+    skyOnlyFrame.worldWaterSeenThisFrame=false;
+    skyOnlyFrame.cameraValid=true;
+    skyOnlyFrame.cameraPoseStale=false;
     {
         watereffect::Scope scope(d.Get());
-        Require(scope.device==d.Get(),"replacement installs without scene/depth capture");
+        Require(scope.device==d.Get(),"water replacement remains active for a visible liquid draw in a sky-only frame");
         float c[36];Check(d->GetPixelShaderConstantF(200,c,9));
         Require(c[23]==0&&c[13]<0&&c[19]>0,"missing capture has valid depth unpack constants");
         // c197/c198 are the client's and stay untouched; c199 is WATER OPACITY, which the
@@ -389,6 +407,12 @@ int main() try {
             "the same upload writes the WATER OPACITY floor on c199");
         scope.Restore();scope.Restore(); // idempotent; destructor also restores
     }
+    skyOnlyFrame.worldScene=savedWorldScene;
+    skyOnlyFrame.worldSceneResolved=savedWorldSceneResolved;
+    skyOnlyFrame.worldTerrainSeenThisFrame=savedTerrainSeen;
+    skyOnlyFrame.worldWaterSeenThisFrame=savedWaterSeen;
+    skyOnlyFrame.cameraValid=savedCameraValid;
+    skyOnlyFrame.cameraPoseStale=savedCameraPoseStale;
     restored();
     {
         TextureFailure failure(d.Get());
@@ -621,8 +645,13 @@ int main() try {
             pixel(0);
             Check(d->GetRenderTargetData(maskRT.Get(),readback.Get()));D3DLOCKED_RECT r{};
             Check(readback->LockRect(&r,nullptr,D3DLOCK_READONLY));
-            DWORD coverage=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64]&255;
-            Check(readback->UnlockRect());Require(coverage>=126&&coverage<=130,"water mask preserves fractional shoreline coverage");
+            const DWORD replacementMask=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+64*r.Pitch)[64];
+            const DWORD coverage=replacementMask&255u;
+            const DWORD replacementGreen=(replacementMask>>8)&255u;
+            const DWORD replacementRed=(replacementMask>>16)&255u;
+            Check(readback->UnlockRect());
+            Require(coverage>=126&&coverage<=130&&replacementRed>=126&&replacementRed<=130&&replacementGreen==0,
+                "replacement water keeps fractional red/blue coverage and reserves green for native pixels");
             ComPtr<IDirect3DSurface9> floatReadback;
             Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_R32F,D3DPOOL_SYSTEMMEM,floatReadback.GetAddressOf(),nullptr));
             Check(d->GetRenderTargetData(depthRT.Get(),floatReadback.Get()));Check(floatReadback->LockRect(&r,nullptr,D3DLOCK_READONLY));
@@ -638,6 +667,51 @@ int main() try {
         restored();watereffect::waterTargetSurface=watereffect::waterMaskSurface=watereffect::waterDepthSurface=nullptr;
     } else std::puts("SKIP optional R32F MRT checks: unsupported format");
     settings.Set(false);
+    // With the replacement switched off, replay one native liquid draw into
+    // the production coverage RT and prove neither the main target nor native
+    // shader state is disturbed.
+    D3DSURFACE_DESC mainTargetDesc{};Check(back->GetDesc(&mainTargetDesc));
+    watereffect::waterTargetSurface=back.Get();watereffect::waterMaskSurface=maskRT.Get();
+    watereffect::waterDepthSurface=nullptr;watereffect::waterTargetDesc=mainTargetDesc;
+    watereffect::waterTargetDescValid=true;
+    auto& nativeWaterFrame=renderer::FrameContext::Current();
+    nativeWaterFrame.waterMaskTexture=mask.Get();nativeWaterFrame.nativeWaterMaskCaptured=false;
+    Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&viewport));
+    Check(d->SetVertexShader(originalVS.Get()));Check(d->SetPixelShader(originalPS.Get()));
+    Check(d->SetTexture(0,base.Get()));Check(d->SetTexture(1,surface.Get()));
+    Check(d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+    Check(d->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE));
+    Check(d->SetRenderState(D3DRS_ZENABLE,FALSE));
+    Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,0x0f));
+    constexpr DWORD nativeCoverageClear=0xff193755;
+    Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,nativeCoverageClear,1,0));
+    Check(d->ColorFill(maskRT.Get(),nullptr,0));
+    const auto nativeWaterObservation=renderer::water::Observe(d.Get());
+    Require(nativeWaterObservation.liquid,"native-water coverage fixture is identified as water");
+    bool nativeCoverageDrawn=false;
+    Check(d->BeginScene());
+    nativeCoverageDrawn=watereffect::CaptureNativeWaterCoverage(d.Get(),nativeWaterObservation,
+        [&]{return d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,vertices,sizeof(Vertex));});
+    Check(d->EndScene());
+    Require(nativeCoverageDrawn&&nativeWaterFrame.nativeWaterMaskCaptured,
+        "water OFF replays native geometry into the per-frame coverage mask");
+    Check(d->GetRenderTargetData(maskRT.Get(),readback.Get()));
+    D3DLOCKED_RECT coverageRead{};Check(readback->LockRect(&coverageRead,nullptr,D3DLOCK_READONLY));
+    const DWORD nativeCoveragePixel=reinterpret_cast<DWORD*>(
+        static_cast<BYTE*>(coverageRead.pBits)+64*coverageRead.Pitch)[64];
+    Check(readback->UnlockRect());
+    Require((nativeCoveragePixel&0x00ffffffu)==0x0000ff00u,
+        "native-water mask-only replay marks green without claiming replacement-water surface depth");
+    Check(d->GetRenderTargetData(back.Get(),readback.Get()));
+    D3DLOCKED_RECT mainRead{};Check(readback->LockRect(&mainRead,nullptr,D3DLOCK_READONLY));
+    const DWORD untouchedMain=reinterpret_cast<DWORD*>(
+        static_cast<BYTE*>(mainRead.pBits)+64*mainRead.Pitch)[64];
+    Check(readback->UnlockRect());
+    Require(untouchedMain==nativeCoverageClear,"native-water mask replay leaves the original scene color untouched");
+    restored();
+    watereffect::waterTargetSurface=watereffect::waterMaskSurface=watereffect::waterDepthSurface=nullptr;
+    watereffect::waterTargetDescValid=false;
+    nativeWaterFrame.waterMaskTexture=nullptr;nativeWaterFrame.nativeWaterMaskCaptured=false;
     const DWORD nativePixel=pixel(1,false);
     Require((nativePixel&0xffffff)!=0xff00ff&&(nativePixel&0xffffff)!=0,"menu OFF renders visible native water");restored();
     settings.Set(true);
@@ -646,7 +720,8 @@ int main() try {
     Require(pixel(1,false)==nativePixel,"master OFF still renders native water");restored();
     watereffect::active=true;
     Require((pixel(1)&0xffffff)==0xff00ff,"master ON restores live enabled water");restored();
-    watereffect::Reset(d.Get());Require(!watereffect::cachedReplacementPS&&!watereffect::cachedReplacementVS,"reset releases cached shaders");
+    watereffect::Reset(d.Get());Require(!watereffect::cachedReplacementPS&&!watereffect::cachedReplacementVS&&
+        !watereffect::cachedNativeWaterCoveragePS,"reset releases replacement and native-coverage shaders");
     {watereffect::Scope scope(d.Get());Require(scope.device==d.Get(),"replacement recreated after reset");}
     restored();watereffect::Reset(d.Get());
     TestDiagnosticDevice(settings,d.Get());

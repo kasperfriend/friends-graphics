@@ -19,6 +19,20 @@ struct CloudShape
     float evolutionSpeed = 1.f;
 };
 
+// The stale-eye sky fallback has no trustworthy world XY at which to sample
+// the world weather map. Keep the zone/native-weather-resolved mean instead
+// of inventing a weather-front projection over screen directions.
+inline float SkyFallbackCoverage(const CloudShape& shape)
+{
+    return std::isfinite(shape.coverage) ? std::clamp(shape.coverage, 0.f, 1.f) : 0.f;
+}
+
+inline float SkyFallbackCloudType(const CloudShape& shape)
+{
+    if (!std::isfinite(shape.cloudType)) return .5f;
+    return std::clamp((std::clamp(shape.cloudType, -1.f, 1.f) + 1.f) * .5f, 0.f, 1.f);
+}
+
 // These are detected native precipitation types, NOT an invented server
 // weather forecast. The client currently exposes no verified severity signal.
 enum class CloudWeather { Clear = 0, Rain = 1, Snow = 2, Sand = 3 };

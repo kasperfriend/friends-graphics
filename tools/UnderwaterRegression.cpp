@@ -2173,7 +2173,8 @@ void TestMirror()
                 && pass.find("colour+=deepColour.rgb*(absorption*strength);") != std::string::npos,
             "the sky over the surface lights up-looking rays in the water's own hue, and the column ends at its deep colour");
     Require(pass.find("if(ramp<=0.0) return scene;") != std::string::npos
-                && pass.find("if(tex2D(waterMask,sampleUv).r>.25) return scene;") != std::string::npos
+                && pass.find("float4 waterData=tex2D(waterMask,sampleUv);") != std::string::npos
+                && pass.find("if(max(waterData.r,waterData.g)>.25) return scene;") != std::string::npos
                 && pass.find("float wobble=saturate(invView1.w)*peakTexels*ramp/sinePeak;") != std::string::npos,
             "above water the pass returns the frame it was handed, and the liquid's own pixels stay the water stage's");
     // fxc rejects a forced dynamic branch around a body that samples with an implicit LOD on
@@ -2407,12 +2408,20 @@ void TestMirror()
     Require(frameContext.find("float underwaterRamp = 0.f;") != std::string::npos
                 && frameContext.find("float underwaterYards = -1.f;") != std::string::npos,
             "the camera's medium is one published number in the frame context, not three opinions");
-    Require(composite.find("frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;")
+    Require(composite.find("frameCtx.underwaterRamp = underwaterActive && confirmedPlayableWorld")
                 != std::string::npos
+                && composite.find("const bool confirmedPlayableWorld = frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;")
+                    != std::string::npos
+                && composite.find("frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;")
+                    == std::string::npos
                 && composite.find("frameCtx.underwaterYards = watereffect::submersionTracker.yards;") != std::string::npos
                 && composite.find("const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();")
                     != std::string::npos,
-            "the compositor publishes the water stage's settled answer, gated on the medium's own switch");
+            "the compositor publishes the water stage's settled answer only inside the playable world");
+    Require(pass.find("if(frameContext.worldScene.state!=WorldSceneState::InWorld)") != std::string::npos
+                && water.find("underwaterWorldContinuity.Observe(frame.worldScene)") != std::string::npos
+                && water.find("submersionTracker=renderer::underwater::Tracker{};") != std::string::npos,
+            "the underwater pass fails closed off-world and its retained plane resets on verified location transitions");
     // The precipitation stage composites during the client's draw stream, before the composite
     // that settles this frame's medium, so the same answer is published for it one frame ahead:
     // rain (and snow/sand) fades out below the surface instead of drawing over a diver.
@@ -2483,7 +2492,8 @@ void TestMirror()
             "the atmosphere integrates air only, and fades every one of its densities out on the same ramp");
     Require(clouds.find("sampler2D waterMask:register(s4);") != std::string::npos
                 && clouds.find("float4 mediumControl:register(c11);") != std::string::npos
-                && clouds.find("float submergedWater=step(.35,tex2D(waterMask,uv).r)*saturate(mediumControl.x);")
+                && clouds.find("float4 waterData=tex2D(waterMask,uv);") != std::string::npos
+                && clouds.find("float submergedWater=step(.35,max(waterData.r,waterData.g))*saturate(mediumControl.x);")
                     != std::string::npos
                 && clouds.find("cloud.rgb*=1-submergedWater;") != std::string::npos
                 && clouds.find("cloud.a=lerp(cloud.a,1,submergedWater);") != std::string::npos

@@ -240,10 +240,48 @@ void TestInheritGlobalScope() {
     editGlobal=false;editZone=false;
     std::printf("PASS Inherit global toggle per-item, per-tab, and scope resolution\n");
 }
+void TestAllToGlobalMode() {
+    using namespace tuningoverlay;
+    using namespace renderer::locationtuning;
+    const auto directory=std::filesystem::absolute("build/overlay-all-to-global");
+    std::filesystem::create_directories(directory);
+    std::filesystem::remove(directory/L"LocationGraphics.ini");
+    std::filesystem::remove(directory/L"GraphicsEffects.ini");
+    const auto base=directory.wstring()+L"\\";
+    Sync(base,{571,65,4164,true},true);
+    const auto graphics=(directory/L"GraphicsEffects.ini").wstring();
+    const auto scoped=(directory/L"LocationGraphics.ini").wstring();
+    Require(WritePrivateProfileStringW(L"Atmosphere",L"DensityPermille",L"5",graphics.c_str())&&
+            WritePrivateProfileStringW(L"Global.Atmosphere",L"DensityPermille",L"2",scoped.c_str())&&
+            WritePrivateProfileStringW(L"Map.571.Zone.65.Area.4164.Atmosphere",L"DensityPermille",L"9",scoped.c_str()),
+            "all-to-global test values saved");
+    InvalidateScopedKeys();Configure(base);editGlobal=false;editZone=false;layout.SelectTab(0);
+    auto found=std::find_if(items.begin(),items.end(),[](const Item& item){
+        return item.section&&item.key&&std::wcscmp(item.section,L"Atmosphere")==0&&
+               std::wcscmp(item.key,L"DensityPermille")==0;
+    });
+    Require(found!=items.end(),"F7 exposes the fog density setting");
+    Item& density=*found;
+    Require(!AllToGlobalEnabled()&&ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str())==9&&density.value==9,
+            "F7 starts from the area value");
+    Require(ToggleAllToGlobal()&&AllToGlobalEnabled()&&
+            ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str())==2&&density.value==2,
+            "F7 All to Global loads global values across the active location");
+    density.value=4;
+    Require(Save(density)&&ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str())==4&&
+            GetPrivateProfileIntW(L"Map.571.Zone.65.Area.4164.Atmosphere",L"DensityPermille",0,scoped.c_str())==9,
+            "F7 edits while masked save globally without replacing area values");
+    Require(ToggleAllToGlobal()&&!AllToGlobalEnabled()&&
+            ReadInt(L"Atmosphere",L"DensityPermille",0,graphics.c_str())==9&&density.value==9,
+            "F7 turning the mask off restores the saved area value");
+    editGlobal=false;editZone=false;layout.SelectTab(0);
+    std::printf("PASS F7 All to Global is reversible and routes edits to Global\n");
+}
 int main() try {
     TestResetDefaults();
     TestGlobalScope();
     TestInheritGlobalScope();
+    TestAllToGlobalMode();
     wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path, L"\\d3d9.dll");
     auto runtime = LoadLibraryW(path); Require(runtime != nullptr, "system D3D9 loaded");
     auto create = reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(runtime, "Direct3DCreate9"));

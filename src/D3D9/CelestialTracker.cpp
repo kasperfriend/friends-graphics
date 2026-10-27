@@ -12,41 +12,49 @@ namespace renderer
     {
         using Microsoft::WRL::ComPtr;
 
-        void UpdateBody(CelestialBody& body, float cx, float cy, float cz,
+        bool UpdateBody(CelestialBody& body, float cx, float cy, float cz,
             const D3DMATRIX& view, const D3DMATRIX& proj, uint64_t frameIndex, bool cameraRelative)
         {
             float len = std::sqrt(cx * cx + cy * cy + cz * cz);
             if (!std::isfinite(len) || len < 1e-4f)
-                return;
+                return false;
 
             Vec3 viewDir{ cx / len, cy / len, cz / len };
 
-            // World-space direction: VIEW is a row-vector world->view
-            // transform, so invert its rotation by multiplying with the
-            // transpose. For the camera-relative moon billboard, the draw's
-            // own D3DTS_VIEW has an identity 3x3 rotation and carries only the
-            // view-space translation, so invert against the captured scene
-            // camera (FrameContext::viewRaw) whenever available.
-            Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            // The sun's billboard carries the camera rotation in its own
+            // D3DTS_VIEW, so it can be converted directly. The moon is a
+            // camera-relative billboard: its world direction must use a pose
+            // accepted for THIS frame, or retain the last confirmed world
+            // direction. FrameContext::viewRaw remains populated while stale;
+            // using it here would pair today's screen position with yesterday's
+            // basis and make DiscEvidence reject the real sky camera at some
+            // camera angles.
             const FrameContext& frameCtx = FrameContext::Current();
-            if (cameraRelative && frameCtx.viewRawValid)
+            Vec3 worldDir = ViewDirectionToWorld(viewDir, view.m);
+            bool worldDirectionValid = IsUsableCelestialDirection(worldDir);
+            if (cameraRelative)
             {
-                float worldOut[3]{ worldDir.x, worldDir.y, worldDir.z };
-                ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &viewDir.x, worldOut);
-                worldDir = { worldOut[0], worldOut[1], worldOut[2] };
+                const float (*viewRaw)[4] = frameCtx.viewRawValid ? frameCtx.viewRaw.m : nullptr;
+                worldDirectionValid = ResolveCameraRelativeWorldDirection(
+                    viewDir, viewRaw, frameCtx.viewRawValid && !frameCtx.cameraPoseStale,
+                    body.worldSpaceDirection, body.worldDirectionValid, worldDir);
             }
 
-            float p00 = proj.m[0][0], p11 = proj.m[1][1];
-            if (!(p00 > 0.0f) || !(p11 > 0.0f))
-                return;
+            if (!(proj.m[0][0] > 0.0f) || !(proj.m[1][1] > 0.0f))
+                return false;
+            float screenX = -1.f, screenY = -1.f;
+            if (!ProjectViewPosition({cx, cy, cz}, proj.m, screenX, screenY))
+                return false;
 
             body.visible = true;
             body.viewSpacePosition = { cx, cy, cz };
             body.viewSpaceDirection = viewDir;
-            body.worldSpaceDirection = worldDir;
-            body.screenX = 0.5f + 0.5f * (cx / cz) * p00;
-            body.screenY = 0.5f - 0.5f * (cy / cz) * p11;
+            body.worldSpaceDirection = worldDirectionValid ? worldDir : Vec3{};
+            body.worldDirectionValid = worldDirectionValid;
+            body.screenX = screenX;
+            body.screenY = screenY;
             body.lastSeenFrame = frameIndex;
+            return true;
         }
     }
 
@@ -61,39 +69,60 @@ namespace renderer
         m_frameIndex = frameIndex;
         m_sun.visible = false;
         m_moon.visible = false;
+        m_diagnostics = {};
     }
 
     void CelestialTracker::RefreshWorldDirections(const float viewRaw[16])
     {
         if (!viewRaw || !m_moon.visible)
             return;
-        float worldOut[3]{ m_moon.worldSpaceDirection.x, m_moon.worldSpaceDirection.y, m_moon.worldSpaceDirection.z };
+        float worldOut[3]{};
         ViewDirectionToWorld(viewRaw, &m_moon.viewSpaceDirection.x, worldOut);
-        m_moon.worldSpaceDirection = { worldOut[0], worldOut[1], worldOut[2] };
+        const Vec3 world{ worldOut[0], worldOut[1], worldOut[2] };
+        if (!IsUsableCelestialDirection(world))
+            return;
+        m_moon.worldSpaceDirection = world;
+        m_moon.worldDirectionValid = true;
     }
 
     void CelestialTracker::Observe(IDirect3DDevice9* device, UINT primitiveCount)
     {
-        if (!device || primitiveCount == 0 || primitiveCount > 8)
+        if (!device)
             return;
+        ++m_diagnostics.drawCalls;
+        if (primitiveCount == 0 || primitiveCount > 8)
+        {
+            ++m_diagnostics.primitiveRejected;
+            return;
+        }
 
         // Both known patterns are fixed-function - this rejects the vast
-        // majority of draw calls with just two cheap state queries.
+        // majority of draw calls with just two cheap state queries. Keep the
+        // stage counts so an untracked visible disc can be diagnosed without
+        // guessing which signature check rejected it.
         ComPtr<IDirect3DVertexShader9> vs;
         if (FAILED(device->GetVertexShader(vs.GetAddressOf())) || vs)
+        {
+            ++m_diagnostics.vertexShaderDraws;
             return;
+        }
         ComPtr<IDirect3DPixelShader9> ps;
         if (FAILED(device->GetPixelShader(ps.GetAddressOf())) || ps)
+        {
+            ++m_diagnostics.pixelShaderDraws;
             return;
+        }
+        ++m_diagnostics.fixedFunctionDraws;
 
         DWORD alphaTest = 0;
-        device->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-        if (!alphaTest)
+        if (FAILED(device->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest)) || !alphaTest)
             return;
+        ++m_diagnostics.alphaTestDraws;
 
         ComPtr<IDirect3DBaseTexture9> texture;
         if (FAILED(device->GetTexture(0, texture.GetAddressOf())) || !texture)
             return;
+        ++m_diagnostics.texturedDraws;
 
         // Texture size is the most reliable discriminator found: across
         // every in-game capture, the real sun disc is always ~256x256 and
@@ -112,7 +141,12 @@ namespace renderer
                 texW = desc.Width;
         }
         if (texW == 0)
+        {
+            ++m_diagnostics.unknownTextureSize;
             return;
+        }
+        if (texW >= 200) ++m_diagnostics.largeTextureDraws;
+        if (texW >= 96 && texW <= 160) ++m_diagnostics.moonTextureDraws;
 
         D3DMATRIX world{}, view{}, proj{};
         if (FAILED(device->GetTransform(D3DTS_WORLD, &world))) return;
@@ -139,12 +173,26 @@ namespace renderer
         const float cx = cameraPosition.x;
         const float cy = cameraPosition.y;
         const float cz = cameraPosition.z;
+        // Keep the final candidate's transform evidence even when it fails
+        // the moon signature below. In the field, this distinguishes a
+        // texture filter hit from a genuine camera-relative lunar billboard
+        // without widening the acceptance gate or guessing from texture size.
+        if (texW >= 96 && texW <= 160)
+        {
+            ++m_diagnostics.moonTransformCandidates;
+            m_diagnostics.lastMoonWorldScaleSq = worldScaleSq;
+            m_diagnostics.lastMoonViewTranslationZero = viewTranslationZero;
+            m_diagnostics.lastMoonViewTranslationZ = viewTransZ;
+            m_diagnostics.lastMoonCameraSpaceZ = cz;
+        }
         if (cz <= 0.05f)
             return;
 
         if (viewTranslationZero && worldIsLargeScale && texW >= 200)
         {
-            UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex, false);
+            ++m_diagnostics.sunSignatureDraws;
+            if (UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex, false))
+                ++m_diagnostics.sunAcceptedDraws;
         }
         else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 4.0f && viewTransZ < 16.0f
             && texW >= 96 && texW <= 160)
@@ -154,7 +202,9 @@ namespace renderer
             // low as 8.93 (from ~12 near center), so a tight range isn't
             // safe on its own. The texW filter (96-160, i.e. ~128 and
             // explicitly excluding the ~64 impostor) does the real work.
-            UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex, true);
+            ++m_diagnostics.moonSignatureDraws;
+            if (UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex, true))
+                ++m_diagnostics.moonAcceptedDraws;
         }
     }
 }

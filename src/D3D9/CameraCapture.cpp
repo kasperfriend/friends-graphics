@@ -1,5 +1,6 @@
 #include "CameraCapture.h"
 #include "CelestialTracker.h"
+#include "SkyProjectionGate.h"
 #include "../Core/FrameClock.h"
 #include <cmath>
 #include <algorithm>
@@ -25,6 +26,7 @@ namespace renderer
         if (!device)
             return false;
 
+        ++frameContext.cameraCaptureAttempts;
         m_cameraCaptureShaderHash = shaderHash;
 
         float v[27][4]{};
@@ -33,12 +35,18 @@ namespace renderer
         if (FAILED(device->GetVertexShaderConstantF(0, v[0], 27)) ||
             FAILED(device->GetViewport(&vp)) ||
             vp.MinZ != 0.0f || vp.MaxZ <= 0.0f)
+        {
+            ++frameContext.cameraCaptureStateRejected;
             return false;
+        }
 
         for (auto& row : v)
             for (float f : row)
                 if (!std::isfinite(f))
+                {
+                    ++frameContext.cameraCaptureNonFinite;
                     return false;
+                }
 
         // Only a draw covering the whole render target can be the scene camera
         // whose light this frame's sky and fog are built from. A target/portrait
@@ -53,14 +61,22 @@ namespace renderer
             vp.X == 0 && vp.Y == 0 && vp.Width == targetDesc.Width && vp.Height == targetDesc.Height;
         if (renderTarget) renderTarget->Release();
         if (!fullFrame)
+        {
+            ++frameContext.cameraCaptureNotFullFrame;
             return false;
+        }
 
-        // Verify standard WoW perspective projection and rigid world-view
-        if (v[4][0] <= 0.0f || v[5][1] <= 0.0f || v[6][2] <= 1.0f || v[7][2] >= 0.0f ||
-            fabsf(v[6][3] - 1.0f) > 0.001f || fabsf(v[7][3]) > 0.001f)
-            return false;
-
-        // Verify orthogonality of rotation sub-matrix (v[0..2])
+        // Validate the view basis before the depth projection. Some full-frame
+        // shaders carry the current camera VIEW but replace the projection for
+        // their own draw; a rigid, leash-bounded eye can still be offered to the
+        // sky selector, while only the separately validated projection is used.
+        float basis[3][4]{};
+        for (int i = 0; i < 3; ++i)
+        {
+            for (int c = 0; c < 3; ++c)
+                basis[i][c] = v[i][c];
+            basis[i][3] = 0.f;
+        }
         for (int i = 0; i < 3; ++i)
         {
             for (int j = 0; j < 3; ++j)
@@ -69,17 +85,109 @@ namespace renderer
                 for (int k = 0; k < 3; ++k)
                     dot += v[i][k] * v[j][k];
                 if (fabsf(dot - (i == j ? 1.0f : 0.0f)) > 0.002f)
+                {
+                    ++frameContext.cameraCaptureBasisRejected;
                     return false;
+                }
             }
+        }
+
+        auto rememberRejectedCapture = [&](const float eye[3], bool projectionScaleMatched)
+        {
+            std::copy(eye, eye + 3, m_rejectedCaptureEye);
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 4; ++col)
+                    m_rejectedCaptureBasis[row][col] = basis[row][col];
+            m_rejectedCaptureValid = true;
+            m_rejectedCaptureProjectionScaleMatched = projectionScaleMatched;
+            m_rejectedCaptureVp = vp;
+            m_skyPose.Observe(basis);
+            RecordSkyObservation(FrameContext::SkyObservationResult::RejectedShaderCandidate);
+            m_fallbackSawSceneDraw = true;
+        };
+
+        const float rejectedEye[3] = {
+            -(v[3][0] * v[0][0] + v[3][1] * v[0][1] + v[3][2] * v[0][2]),
+            -(v[3][0] * v[1][0] + v[3][1] * v[1][1] + v[3][2] * v[1][2]),
+            -(v[3][0] * v[2][0] + v[3][1] * v[2][1] + v[3][2] * v[2][2]) };
+        const bool eyeMatchesAcceptedAnchor =
+            m_cameraGate.MatchesViewport(vp.Width, vp.Height) &&
+            m_cameraGate.NearAcceptedEye(rejectedEye, kRejectedCaptureEyeLeashYards);
+
+        const bool currentProjectionValid = IsStandardD3DPerspectiveProjection(
+            v[4][0], v[5][1], v[6][2], v[6][3], v[7][2], v[7][3]);
+        if (!currentProjectionValid)
+        {
+            ++frameContext.cameraCaptureProjectionRejected;
+            if (eyeMatchesAcceptedAnchor)
+                ++frameContext.cameraCaptureProjectionEyeMatches;
+
+            const bool sameScreenViewport = m_fallbackVp.X == vp.X && m_fallbackVp.Y == vp.Y &&
+                m_fallbackVp.Width == vp.Width && m_fallbackVp.Height == vp.Height;
+            const bool projectionScaleMatches = skyprojection::MatchesValidatedPerspectiveScales(
+                m_fallbackProjectionValid, sameScreenViewport,
+                m_fallbackProj.m[0][0], m_fallbackProj.m[1][1], v[4][0], v[5][1]);
+            if (projectionScaleMatches)
+                ++frameContext.cameraCaptureProjectionScaleMatches;
+
+            // The captured draw's depth terms are not camera evidence. Only its
+            // rigid VIEW, a current eye within five yards, and unchanged focal
+            // scales may nominate it; ApplySkyFallback still requires this exact
+            // basis to win the normal disc/continuity selector before renewing
+            // the validated projection cache or the eye timestamp.
+            if (projectionScaleMatches && eyeMatchesAcceptedAnchor)
+            {
+                ++frameContext.cameraCaptureProjectionFallbackCandidates;
+                rememberRejectedCapture(rejectedEye, true);
+            }
+            return false;
         }
 
         // Even at full frame, the first qualifying draw is not automatically
         // this frame's camera - the gate holds the last accepted one and asks
-        // whether this candidate can be it. A rejection is not an overwrite:
-        // nothing below runs, the previous camera's factors stay in place, and
-        // the real scene draw that follows in the same frame still latches.
+        // whether this candidate can be it. A hard mouse-look turn can make a
+        // genuine current camera fail the orientation continuity test, though.
+        // In that one case, feed only its rotation to the sky selector: require
+        // the same full-frame viewport and an eye within five yards of the
+        // accepted anchor, then let the celestial disc/continuity selector
+        // corroborate it. Never promote a distant/teleported eye from this path.
         if (!m_cameraGate.Accept(v[3], v, vp.Width, vp.Height))
+        {
+            ++frameContext.cameraCaptureContinuityRejected;
+            if (eyeMatchesAcceptedAnchor)
+            {
+                rememberRejectedCapture(rejectedEye, false);
+
+                // Preserve only this validated perspective as evidence for the
+                // disc painted later in the frame.
+                m_fallbackProj = {};
+                m_fallbackProj.m[0][0] = v[4][0];
+                m_fallbackProj.m[1][1] = v[5][1];
+                m_fallbackProj.m[2][2] = v[6][2];
+                m_fallbackProj.m[2][3] = v[6][3];
+                m_fallbackProj.m[3][2] = v[7][2];
+                m_fallbackProj.m[3][3] = v[7][3];
+                m_fallbackVp = vp;
+                m_fallbackProjectionValid = true;
+                m_fallbackProjectionSeconds = PerformanceSeconds();
+            }
             return false;
+        }
+        ++frameContext.cameraCaptureAccepted;
+
+        // This full-frame shader draw passed both the perspective and camera
+        // continuity gates, so it is the safest projection to reuse when the
+        // fixed-function transform state later exposes an unrelated matrix.
+        m_fallbackProj = {};
+        m_fallbackProj.m[0][0] = v[4][0];
+        m_fallbackProj.m[1][1] = v[5][1];
+        m_fallbackProj.m[2][2] = v[6][2];
+        m_fallbackProj.m[2][3] = v[6][3];
+        m_fallbackProj.m[3][2] = v[7][2];
+        m_fallbackProj.m[3][3] = v[7][3];
+        m_fallbackVp = vp;
+        m_fallbackProjectionValid = true;
+        m_fallbackProjectionSeconds = PerformanceSeconds();
 
         // Swap BEFORE overwriting: whatever viewRaw held (last successful
         // capture's forward view) becomes previousViewRaw for this frame's
@@ -305,10 +413,16 @@ namespace renderer
                 capturedBasis[r][c] = v[r][c];
             capturedBasis[r][3] = 0.f;
         }
+        m_skyPose.BeginFrame();
         m_skyPose.SetReference(capturedBasis);
+        m_rejectedCaptureValid = false;
+        RecordSkyObservation(FrameContext::SkyObservationResult::Captured);
+        frameContext.skyObservationResult = m_skyObservationResult;
         m_lastEyeSeconds = PerformanceSeconds();
         frameContext.cameraPoseStale = false;
+        frameContext.cameraOrientationFresh = true;
         frameContext.cameraEyeAgeMs = 0.f;
+        frameContext.cameraEyeObservedThisFrame = true;
         frameContext.cameraPoseSource = FrameContext::PoseCaptured;
 
         m_valid = true;
@@ -319,11 +433,17 @@ namespace renderer
     void CameraCapture::ObserveSkyFallback(IDirect3DDevice9* device)
     {
         if (!device || !m_valid || !m_cameraGate.Valid())
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::CameraUnavailable);
             return;
+        }
 
         D3DVIEWPORT9 vp{};
         if (FAILED(device->GetViewport(&vp)) || vp.MaxZ <= 0.0f)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::ViewportUnavailable);
             return;
+        }
 
         IDirect3DSurface9* renderTarget = nullptr;
         D3DSURFACE_DESC targetDesc{};
@@ -332,7 +452,10 @@ namespace renderer
             vp.X == 0 && vp.Y == 0 && vp.Width == targetDesc.Width && vp.Height == targetDesc.Height;
         if (renderTarget) renderTarget->Release();
         if (!fullFrame)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::NotFullFrame);
             return;
+        }
 
         // Record that a full-frame scene/sky draw occurred during this depth-captured frame.
         float m2Consts[6][4]{};
@@ -351,19 +474,75 @@ namespace renderer
         D3DMATRIX view{}, proj{};
         if (FAILED(device->GetTransform(D3DTS_VIEW, &view)) ||
             FAILED(device->GetTransform(D3DTS_PROJECTION, &proj)))
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::TransformUnavailable);
             return;
+        }
 
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 if (!std::isfinite(view.m[r][c]) || !std::isfinite(proj.m[r][c]))
+                {
+                    RecordSkyObservation(FrameContext::SkyObservationResult::NonFiniteTransform);
                     return;
+                }
 
-        if (proj.m[0][0] <= 0.0f || proj.m[1][1] <= 0.0f || proj.m[2][2] <= 1.0f || proj.m[3][2] >= 0.0f ||
-            fabsf(proj.m[2][3] - 1.0f) > 0.001f || fabsf(proj.m[3][3]) > 0.001f)
-            return;
+        // Keep the coefficients on rejected observations so the player log can
+        // distinguish an infinite-far perspective matrix (P22 == 1) from an
+        // unrelated orthographic/UI projection if this gate still refuses one.
+        m_skyProjection[0] = proj.m[0][0];
+        m_skyProjection[1] = proj.m[1][1];
+        m_skyProjection[2] = proj.m[2][2];
+        m_skyProjection[3] = proj.m[2][3];
+        m_skyProjection[4] = proj.m[3][2];
+        m_skyProjection[5] = proj.m[3][3];
+        m_skyProjectionAvailable = true;
+        const bool currentProjectionValid = IsStandardD3DPerspectiveProjection(
+            proj.m[0][0], proj.m[1][1], proj.m[2][2],
+            proj.m[2][3], proj.m[3][2], proj.m[3][3]);
+        bool projectionFallbackUsed = false;
+        if (!currentProjectionValid)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::InvalidProjection);
+            // The client can leave an unrelated orthographic/UI depth mapping
+            // in D3DTS_PROJECTION while the scene sky draw still carries the
+            // current rigid VIEW rotation. Do not trust that matrix's depth or
+            // field-of-view terms. Instead, corroborate this transform only with
+            // a recent perspective validated from a full-frame shader camera,
+            // on the same complete viewport/depth range; disc projection uses
+            // those validated terms, never the unrelated matrix.
+            const double cacheAgeSeconds = m_fallbackProjectionSeconds >= 0.0
+                ? PerformanceSeconds() - m_fallbackProjectionSeconds : -1.0;
+            const float cacheAgeMs = std::isfinite(cacheAgeSeconds) && cacheAgeSeconds >= 0.0
+                ? static_cast<float>(cacheAgeSeconds * 1000.0) : -1.0f;
+            // The matrix's projection is independent of D3D's viewport depth
+            // remap. The camera capture cache owns the scene depth range; the
+            // sky draw can temporarily change MinZ/MaxZ while retaining the same
+            // full-screen rectangle. Requiring depth-range equality rejected the
+            // real camera projection on this client (fresh cache, zero candidates).
+            const bool sameScreenViewport = m_fallbackVp.X == vp.X && m_fallbackVp.Y == vp.Y &&
+                m_fallbackVp.Width == vp.Width && m_fallbackVp.Height == vp.Height;
+            m_skyProjectionCacheMinZ = m_fallbackVp.MinZ;
+            m_skyProjectionCacheMaxZ = m_fallbackVp.MaxZ;
+            m_skyProjectionObservedMinZ = vp.MinZ;
+            m_skyProjectionObservedMaxZ = vp.MaxZ;
+            const bool cachedProjectionUsable = skyprojection::CanReuseValidatedPerspective(
+                m_fallbackProjectionValid, sameScreenViewport, cacheAgeMs,
+                FrameContext::kCameraEyeHoldMs);
+            m_skyProjectionCacheUsable = cachedProjectionUsable;
+            // An expired projection is not evidence for depth reconstruction
+            // or disc projection, but it must not prevent this rigid current
+            // VIEW basis from reaching the independent continuity selector.
+            // That selector can still corroborate orientation without granting
+            // an eye or revalidating the old projection.
+            projectionFallbackUsed = cachedProjectionUsable;
+        }
 
         if (!m_cameraGate.MatchesViewport(vp.Width, vp.Height))
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::ViewportMismatch);
             return;
+        }
 
         float basis[3][4]{};
         for (int r = 0; r < 3; ++r)
@@ -377,16 +556,32 @@ namespace renderer
             // the transform carries a scale (a scaled billboard's, above all) and
             // its rows are not this camera's axes.
             if (fabsf(lengthSquared - 1.0f) > 0.01f)
+            {
+                RecordSkyObservation(FrameContext::SkyObservationResult::NonRigidBasis);
                 return;
+            }
             for (int other = r + 1; other < 3; ++other)
                 if (fabsf(basis[r][0] * basis[other][0] + basis[r][1] * basis[other][1] +
                           basis[r][2] * basis[other][2]) > 0.02f)
+                {
+                    RecordSkyObservation(FrameContext::SkyObservationResult::NonRigidBasis);
                     return;
+                }
         }
 
         m_fallbackSawSceneDraw = true;
-        m_fallbackProj = proj;
-        m_fallbackVp = vp;
+        if (currentProjectionValid)
+        {
+            m_fallbackProj = proj;
+            m_fallbackVp = vp;
+            m_fallbackProjectionValid = true;
+            m_fallbackProjectionSeconds = PerformanceSeconds();
+            m_skyProjectionCacheUsable = true;
+            m_skyProjectionCacheMinZ = vp.MinZ;
+            m_skyProjectionCacheMaxZ = vp.MaxZ;
+            m_skyProjectionObservedMinZ = vp.MinZ;
+            m_skyProjectionObservedMaxZ = vp.MaxZ;
+        }
 
         // Does this transform carry the camera's EYE, or a camera-relative
         // offset? The sun is drawn with a zero view translation (the classic
@@ -401,29 +596,56 @@ namespace renderer
         const bool zeroTranslation =
             fabsf(view.m[3][0]) < 0.05f && fabsf(view.m[3][1]) < 0.05f && fabsf(view.m[3][2]) < 0.05f;
         bool eyeCompatible = zeroTranslation;
+        float currentEye[3]{};
+        float eyeDistance = 1e30f;
         if (!zeroTranslation)
         {
-            const float px = -(view.m[3][0] * basis[0][0] + view.m[3][1] * basis[0][1] + view.m[3][2] * basis[0][2]);
-            const float py = -(view.m[3][0] * basis[1][0] + view.m[3][1] * basis[1][1] + view.m[3][2] * basis[1][2]);
-            const float pz = -(view.m[3][0] * basis[2][0] + view.m[3][1] * basis[2][1] + view.m[3][2] * basis[2][2]);
+            currentEye[0] = -(view.m[3][0] * basis[0][0] + view.m[3][1] * basis[0][1] + view.m[3][2] * basis[0][2]);
+            currentEye[1] = -(view.m[3][0] * basis[1][0] + view.m[3][1] * basis[1][1] + view.m[3][2] * basis[1][2]);
+            currentEye[2] = -(view.m[3][0] * basis[2][0] + view.m[3][1] * basis[2][1] + view.m[3][2] * basis[2][2]);
             const float* anchor = m_cameraGate.Position();
-            const float dx = px - anchor[0], dy = py - anchor[1], dz = pz - anchor[2];
-            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            eyeCompatible = std::isfinite(distance) && distance <= kSkyEyeLeashYards;
+            const float dx = currentEye[0] - anchor[0], dy = currentEye[1] - anchor[1], dz = currentEye[2] - anchor[2];
+            eyeDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            eyeCompatible = std::isfinite(eyeDistance) && eyeDistance <= kSkyEyeLeashYards;
+        }
+        if (!zeroTranslation && (!m_skyEyeCandidateObserved ||
+                                 eyeDistance < m_skyEyeCandidateDistanceYards))
+        {
+            // Keep rejected distances too: they distinguish a camera-eye
+            // convention mismatch from a billboard/reflection far from the anchor.
+            m_skyEyeCandidateObserved = true;
+            m_skyEyeCandidateDistanceYards = eyeDistance;
         }
         if (!eyeCompatible)
+        {
+            RecordSkyObservation(FrameContext::SkyObservationResult::EyeIncompatible);
             return;
+        }
 
         // The frame's candidates are decided at the UI draw, when the frame's
         // own sun/moon disc has already been drawn and can testify about the
         // camera. Collect; do not publish.
+        if (projectionFallbackUsed)
+            m_skyProjectionFallbackUsed = true;
         m_skyPose.Observe(basis);
+        // Refresh the retained position only under the much tighter five-yard
+        // leash also used for rejected shader captures. The selected basis has
+        // to match before that position refreshes the world anchor.
+        if (!zeroTranslation && eyeDistance <= kRejectedCaptureEyeLeashYards)
+        {
+            std::copy(view.m[3], view.m[3] + 4, m_skyEyeTranslation);
+            for (int r = 0; r < 3; ++r)
+                std::copy(basis[r], basis[r] + 4, m_skyEyeBasis[r]);
+            m_skyEyeCandidateValid = true;
+        }
+        RecordSkyObservation(FrameContext::SkyObservationResult::D3DTransformCandidate);
     }
 
-    // What the frame's own celestial draw says about the camera: the stabilized
-    // world direction towards the body, and where the client painted it. Both
-    // are independent of the pose being tested, which is what makes agreement
-    // evidence rather than a pose compared with itself.
+    // What the frame's own celestial draw says about the camera: a world
+    // direction confirmed independently of the pose being tested, plus where
+    // the client painted that same body. Never synthesize moon evidence from a
+    // held camera or from the opposite body's light vector; a mismatched pair
+    // can reject the correct sky basis on a camera turn.
     static DiscObservation DiscEvidence(const FrameContext& frameContext, const D3DMATRIX& proj)
     {
         DiscObservation disc;
@@ -434,27 +656,16 @@ namespace renderer
         const CelestialBody* body = lightIsMoon ? &moon : &sun;
         if (!body->visible)
             body = sun.visible ? &sun : (moon.visible ? &moon : nullptr);
-        if (!body)
+        if (!body || !body->worldDirectionValid)
             return disc;
         // A disc at the very edge of the frame is half outside it, and its
         // painted position is then the least reliable thing in the frame.
         if (!(body->screenX > .03f && body->screenX < .97f && body->screenY > .03f && body->screenY < .97f))
             return disc;
-        // The direction the tracker derived for the SAME billboard is the one
-        // paired with screenX/Y; only fall back to the captured light when the
-        // tracker's own direction is unusable. (The light direction is a
-        // stabilized, possibly held value - good for shading, less direct as
-        // evidence about this draw.)
-        Vec3 world = body->worldSpaceDirection;
-        float lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
+        const Vec3 world = body->worldSpaceDirection;
+        const float lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
         if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
-        {
-            world = frameContext.directLightValid ? frameContext.directLightDirectionWorld
-                                                  : frameContext.sunDirectionWorld;
-            lengthSquared = world.x * world.x + world.y * world.y + world.z * world.z;
-            if (!(lengthSquared > .25f) || !std::isfinite(lengthSquared))
-                return disc;
-        }
+            return disc;
         const float inverseLength = 1.0f / std::sqrt(lengthSquared);
         disc.world[0] = world.x * inverseLength;
         disc.world[1] = world.y * inverseLength;
@@ -472,13 +683,16 @@ namespace renderer
         const CameraCaptureConfig& config,
         float outConstants[13][4],
         float outCapturedViewTranslation[3],
-        bool& outCapturedViewValid)
+        bool& outCapturedViewValid,
+        const ClientCameraPoseSnapshot* currentClientPose)
     {
-        if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid)
+        frameContext.cameraOrientationFresh = false;
+        if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid || !m_fallbackProjectionValid)
             return false;
 
-        // The eye is whatever a draw last carried. A rotation-only sky
-        // transform says nothing about where the camera is, so it can age.
+        // A rotation-only sky transform says nothing about where the camera is,
+        // so the last trusted eye ages unless a current shader/D3D eye source or
+        // a complete supported-client pose refreshes it below.
         const double now = PerformanceSeconds();
         const float eyeAge = m_lastEyeSeconds >= 0.0
             ? float(std::clamp(now - m_lastEyeSeconds, 0.0, 1e6)) : 1e6f;
@@ -488,8 +702,73 @@ namespace renderer
 
         float basis[3][4]{};
         bool corroborated = false;
-        const bool havePose = m_skyPose.HasCandidate() &&
-            m_skyPose.Resolve(DiscEvidence(frameContext, m_fallbackProj), basis, corroborated);
+        const DiscObservation disc = m_skyProjectionCacheUsable
+            ? DiscEvidence(frameContext, m_fallbackProj) : DiscObservation{};
+        frameContext.skyPoseCandidateCount = static_cast<uint8_t>(
+            std::min(m_skyPose.CandidateCount(), 255u));
+        frameContext.skyPoseDiscEvidence = disc.available;
+        frameContext.skyObservationResult = m_skyObservationResult;
+        frameContext.skyProjectionAvailable = m_skyProjectionAvailable;
+        frameContext.skyProjectionCacheUsable = m_skyProjectionCacheUsable;
+        const double projectionCacheAgeSeconds = m_fallbackProjectionSeconds >= 0.0
+            ? PerformanceSeconds() - m_fallbackProjectionSeconds : -1.0;
+        frameContext.skyProjectionCacheAgeMs =
+            std::isfinite(projectionCacheAgeSeconds) && projectionCacheAgeSeconds >= 0.0
+                ? static_cast<float>(projectionCacheAgeSeconds * 1000.0) : -1.f;
+        frameContext.skyProjectionCacheScaleX = m_fallbackProjectionValid
+            ? m_fallbackProj.m[0][0] : 0.f;
+        frameContext.skyProjectionCacheScaleY = m_fallbackProjectionValid
+            ? m_fallbackProj.m[1][1] : 0.f;
+        frameContext.skyProjectionCacheMinZ = m_skyProjectionCacheMinZ;
+        frameContext.skyProjectionCacheMaxZ = m_skyProjectionCacheMaxZ;
+        frameContext.skyProjectionObservedMinZ = m_skyProjectionObservedMinZ;
+        frameContext.skyProjectionObservedMaxZ = m_skyProjectionObservedMaxZ;
+        frameContext.skyProjectionFallbackUsed = m_skyProjectionFallbackUsed;
+        frameContext.skyEyeCandidateObserved = m_skyEyeCandidateObserved;
+        frameContext.skyEyeCandidateDistanceYards = m_skyEyeCandidateObserved
+            ? m_skyEyeCandidateDistanceYards : -1.f;
+        if (m_skyProjectionAvailable)
+            std::copy(m_skyProjection, m_skyProjection + 6, frameContext.skyProjection);
+        bool havePose = false;
+        bool refreshedEye = false;
+        bool refreshedClientEye = false;
+        if (currentClientPose &&
+            IsOrthonormalViewBasis(currentClientPose->viewBasis, .002f) &&
+            std::isfinite(currentClientPose->position[0]) &&
+            std::isfinite(currentClientPose->position[1]) &&
+            std::isfinite(currentClientPose->position[2]) &&
+            std::fabs(currentClientPose->position[0]) < 1000000.f &&
+            std::fabs(currentClientPose->position[1]) < 1000000.f &&
+            std::fabs(currentClientPose->position[2]) < 1000000.f)
+        {
+            const float* acceptedEye = m_cameraGate.Position();
+            const float dx = currentClientPose->position[0] - acceptedEye[0];
+            const float dy = currentClientPose->position[1] - acceptedEye[1];
+            const float dz = currentClientPose->position[2] - acceptedEye[2];
+            frameContext.clientCameraEyeDistanceYards = std::sqrt(dx*dx + dy*dy + dz*dz);
+            float eyeTranslation[4]{};
+            if (BuildViewTranslationForCameraEye(currentClientPose->position,
+                                                 currentClientPose->viewBasis,eyeTranslation) &&
+                m_cameraGate.AcceptFallback(eyeTranslation,currentClientPose->viewBasis,
+                                            m_fallbackVp.Width,m_fallbackVp.Height))
+            {
+                for (int r = 0; r < 3; ++r)
+                    std::copy(currentClientPose->viewBasis[r],
+                              currentClientPose->viewBasis[r] + 4,basis[r]);
+                corroborated = true;
+                havePose = true;
+                refreshedEye = true;
+                refreshedClientEye = true;
+                frameContext.clientCameraEyeAcceptedThisFrame = true;
+                // Prefer the active camera's live world-view matrix over a
+                // zero-translation sky billboard transform. This is a current
+                // full pose, but it still passed the same viewport/eye leash.
+                m_skyPose.SetReference(basis);
+            }
+        }
+        if (!havePose)
+            havePose = m_skyPose.HasCandidate() &&
+                m_skyPose.Resolve(disc, basis, corroborated);
 
         if (!havePose)
         {
@@ -503,7 +782,8 @@ namespace renderer
                 return false;
             outConstants[9][0] = float(std::fmod(PerformanceSeconds(), 1200.0));
             frameContext.cameraValid = true;
-            CelestialTracker::Instance().RefreshWorldDirections(&frameContext.viewRaw.m[0][0]);
+            // Do not refresh camera-relative celestial directions from this
+            // held viewRaw: no candidate corroborated it for this frame.
             ++m_capturedFrames;
             return true;
         }
@@ -516,29 +796,84 @@ namespace renderer
             v[r][3] = 0.0f;
         }
 
-        // The corroborated rotation is what the gate should expect a real
-        // capture to continue from. Teaching it the basis (never the position -
-        // the position is only ever accepted from a draw that carried it) means
-        // that when terrain draws appear again on higher ground, the first one
-        // is accepted immediately instead of taking three frames to escape the
-        // teleport guard.
-        m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
+        // A stable active-client pose provides both the current eye and the
+        // matching world-view basis; a selected D3D eye remains a fallback only
+        // when its own non-zero translation passed the anchor leash. A
+        // rotation-only sky transform never moves the world anchor.
+        const bool selectedRejectedCapture = m_rejectedCaptureValid &&
+            BasisAgreement(m_rejectedCaptureBasis, basis) > .9999f;
+        const bool selectedD3DEye = m_skyEyeCandidateValid &&
+            BasisAgreement(m_skyEyeBasis, basis) > .9999f;
+        if (!refreshedEye && selectedRejectedCapture)
+        {
+            float eyeTranslation[4]{};
+            for (int col = 0; col < 3; ++col)
+                eyeTranslation[col] = -(m_rejectedCaptureEye[0] * basis[0][col] +
+                                        m_rejectedCaptureEye[1] * basis[1][col] +
+                                        m_rejectedCaptureEye[2] * basis[2][col]);
+            eyeTranslation[3] = 1.0f;
+            refreshedEye = m_cameraGate.AcceptFallback(
+                eyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
+        }
+        if (!refreshedEye && selectedD3DEye)
+        {
+            // The non-zero D3D VIEW translation already passed the five-yard
+            // anchor leash in ObserveSkyFallback; this exact basis won camera
+            // corroboration, so it can safely refresh the eye age and position.
+            refreshedEye = m_cameraGate.AcceptFallback(
+                m_skyEyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
+        }
+        if (!refreshedEye)
+            m_cameraGate.UpdateBasis(v, m_fallbackVp.Width, m_fallbackVp.Height);
+        else
+        {
+            const double refreshedAt = PerformanceSeconds();
+            m_lastEyeSeconds = refreshedAt;
+            frameContext.cameraEyeAgeMs = 0.0f;
+            frameContext.cameraEyeObservedThisFrame = true;
+            // A current rigid view with a five-yard eye leash and matching P00/P11
+            // revalidates use of the last full perspective/depth mapping, but it
+            // never supplies its own rejected depth terms. Renew only after this
+            // exact client or sky basis has passed the applicable pose gate.
+            if (selectedRejectedCapture && m_rejectedCaptureProjectionScaleMatched)
+            {
+                m_fallbackProjectionSeconds = refreshedAt;
+                m_skyProjectionCacheUsable = true;
+                m_skyProjectionFallbackUsed = true;
+                m_skyProjectionCacheMinZ = m_fallbackVp.MinZ;
+                m_skyProjectionCacheMaxZ = m_fallbackVp.MaxZ;
+                m_skyProjectionObservedMinZ = m_rejectedCaptureVp.MinZ;
+                m_skyProjectionObservedMaxZ = m_rejectedCaptureVp.MaxZ;
+                frameContext.skyProjectionCacheUsable = true;
+                frameContext.skyProjectionFallbackUsed = true;
+                frameContext.skyProjectionCacheAgeMs = 0.f;
+                frameContext.skyProjectionCacheMinZ = m_skyProjectionCacheMinZ;
+                frameContext.skyProjectionCacheMaxZ = m_skyProjectionCacheMaxZ;
+                frameContext.skyProjectionObservedMinZ = m_skyProjectionObservedMinZ;
+                frameContext.skyProjectionObservedMaxZ = m_skyProjectionObservedMaxZ;
+            }
+        }
 
-        // The eye stays the one a draw carried. Deliberately NOT the sky
-        // transform's translation: for a camera-relative billboard that
-        // translation is an offset from the eye that swings with the mouse,
-        // and anchoring the world to it is exactly the reported "clouds and
-        // lights dragged along with the camera". A transform that does carry
-        // the eye only *confirms* that the anchor is plausible; it never
-        // moves it.
+        // The client pose (when present) has already refreshed the eye through
+        // the same continuity gate. Otherwise a zero-translation skybox cannot
+        // move it; a non-zero D3D candidate refreshes only when its translation
+        // independently passed the leash and this exact basis won. Camera-facing
+        // billboards and reflections therefore cannot drag the world anchor.
         const float* anchor = m_cameraGate.Position();
         const float camPos[3] = { anchor[0], anchor[1], anchor[2] };
         for (int c = 0; c < 3; ++c)
             v[3][c] = -(camPos[0] * v[0][c] + camPos[1] * v[1][c] + camPos[2] * v[2][c]);
         v[3][3] = 1.0f;
 
-        frameContext.cameraPoseStale = !corroborated;
-        frameContext.cameraPoseSource = FrameContext::PoseSky;
+        // A corroborated rotation with an expired retained eye is not a safe
+        // world-space pose. Keep the camera for screen-space consumers, but let
+        // world-anchored passes wait until a trusted current eye source returns.
+        const bool eyeFresh = std::isfinite(frameContext.cameraEyeAgeMs) &&
+            frameContext.cameraEyeAgeMs <= FrameContext::kCameraEyeHoldMs;
+        frameContext.cameraOrientationFresh = corroborated;
+        frameContext.cameraPoseStale = !corroborated || !eyeFresh;
+        frameContext.cameraPoseSource = refreshedClientEye
+            ? FrameContext::PoseClientCamera : FrameContext::PoseSky;
 
         frameContext.previousViewRaw = frameContext.viewRaw;
         frameContext.previousViewValid = frameContext.viewRawValid;

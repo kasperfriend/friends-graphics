@@ -30,6 +30,17 @@ float4 groundMist:register(c13);
 // God-ray look (src/Effects/GodRayCore.h): x=sunward glow spread (per screen-height^2),
 // y=glow floor in open sky, z=gain on the whole-frame mask, w=unused
 float4 rayLook:register(c15);
+// The depth-writing vanilla sun disc is itself the ray source, not an occluder.
+// It is opened only at the tracked centre and at sky/far depth or its own depth.
+float4 trackedSunDisc:register(c16); // xy=tracked centre, z=vertical UV radius, w=valid
+float4 trackedSunDepth:register(c17); // x=horizontal scale, y=expected raw depth, z=tolerance
+float TrackedSunDiscOpen(float2 uv,float raw) {
+    float2 delta=float2((uv.x-trackedSunDisc.x)*trackedSunDepth.x,uv.y-trackedSunDisc.y);
+    float disc=1-step(trackedSunDisc.z*trackedSunDisc.z,dot(delta,delta));
+    float sky=step((sun.w+1)*.5,raw);
+    float depthMatch=1-step(max(trackedSunDepth.z,1e-5),abs(raw-trackedSunDepth.y));
+    return disc*trackedSunDisc.w*max(sky,depthMatch);
+}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     // INTZ contains viewport-mapped depth. Normalize for the projection
@@ -45,7 +56,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // enters the emission term below. Geometry maps to <=MaxZ while the
         // midpoint between those values rejects every occluder and keeps the
         // clear sky open, including when MaxZ itself is nearly one.
-        float openness=step((sun.w+1)*.5,raw);
+        float skyOpen=step((sun.w+1)*.5,raw);
+        // The original sun billboard writes a far depth slightly nearer than
+        // the clear value, so raw sky-only openness cut a dark hole exactly at
+        // the source while the surrounding halo/rays were added. Admit only
+        // its independently tracked circle at the sun's own depth; a nearer
+        // roof, wall, or character still blocks the ray source.
+        float openness=max(skyOpen,TrackedSunDiscOpen(uv,raw));
         // Aspect-ratio-correct distance to the real, CelestialTracker-
         // confirmed disc position (sun.xy). Raw UV-space distance is
         // squashed on non-square screens - a 0.1 horizontal delta covers
@@ -65,11 +82,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         // band ended the mask abruptly enough that the radial blur below
         // smeared the cut into a visible ring around the disc.
         float discCutoff=1.0-smoothstep(0.08,0.22,sunDist);
-        // Whole-frame god-ray source (GodRayCore.h SourceWeight): a sunward
-        // sky glow reaches across the frame, so the gather below draws beams
-        // away from the source. Trees, walls, characters and ground have
-        // openness 0 and cut those beams; cloud alpha thins them. The disc
-        // core is kept inside the max, so the source itself stays brightest.
+        // Whole-frame god-ray source (GodRayCore.h SourceWeight): a compact
+        // sunward glow stays near the tracked disc, and the gather below carries
+        // its visibility away from the source. Trees, walls, characters and
+        // ground have openness 0 and cut those beams; cloud alpha thins them.
+        // The disc core is kept inside the max, so the source itself stays brightest.
         float glow=rayLook.y+(1-rayLook.y)*exp(-sunDist*sunDist*rayLook.x);
         float sunMask=(sun.x<-.5) ? 0.0 : max(discFalloff*discCutoff,glow)*rayLook.z;
         // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
@@ -331,12 +348,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
         illumination*=radial.w;
     }
     light.rgb=light.rgb/max(weightSum,.001);
-    // Contrast lift: a plain weighted average reads as a soft, low-contrast
-    // glow (the "blob" look) because most of the sampled path is usually
-    // empty sky diluting the mean. A sub-1 power pulls dim/mid values up
-    // faster than bright ones, so partial-occlusion streaks (branches,
-    // rooflines) read as more defined beams instead of a uniform wash.
-    light.rgb=pow(saturate(light.rgb),0.72)*1.2;
+    // Keep the gather's contrast lift restrained: the wider sub-1 curve used
+    // to raise faint source-mask values into a broad circular wash around the
+    // disc. Compact falloff plus a near-linear lift preserves the beams and
+    // the shadows they pick up from branches and rooflines.
+    light.rgb=pow(saturate(light.rgb),0.9);
     // Half a level of dither into the 8-bit ray target: without it the
     // smooth radial falloff quantizes into concentric rings around the
     // source, and the 0.72-weighted temporal history toggles a level at a
@@ -348,14 +364,18 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
 )HLSL";
 
 // Debug-only crosshair drawn at the exact screen position rays/glare use for
-// the celestial source. If this ring does not sit on the real sun/moon disc
-// at any yaw/pitch, the source projection is still wrong - this is the check.
+// the celestial source. The vanilla-sun marker also colors its centre dot by
+// the same sky-or-depth predicate used by the restoration masks: green means
+// the sampled source depth is accepted, red means the tracked depth disagrees.
 inline const char* celestialMarkerPixelSource=R"HLSL(
-// xy=target uv, z=valid, w=unused
+sampler2D sceneDepth:register(s0);
+// xy=target uv, z=valid, w=enable the depth-match centre probe
 float4 markerTarget:register(c0);
 float4 markerColor:register(c1);
 // xy=1/render size (pixels -> uv)
 float4 markerSize:register(c2);
+// x=expected raw sun depth, y=tolerance, z=clear-sky threshold, w=valid
+float4 markerDepth:register(c3);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float valid=markerTarget.z;
     float2 d=(uv-markerTarget.xy)/markerSize.xy;
@@ -364,8 +384,19 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float ringMask=1-smoothstep(1.2,2.6,ring);
     float onXAxis=(1-smoothstep(1.2,2.2,abs(d.y)))*step(6.0,dist)*step(dist,26.0);
     float onYAxis=(1-smoothstep(1.2,2.2,abs(d.x)))*step(6.0,dist)*step(dist,26.0);
-    float mask=saturate(ringMask+onXAxis+onYAxis)*valid;
-    return float4(markerColor.rgb*mask,mask);
+    float depthOpen=0;
+    if(markerTarget.w>.5 && markerDepth.w>.5) {
+        // Uniform debug-only branch; ordinary source markers do not fetch depth.
+        float raw=tex2D(sceneDepth,uv).r;
+        float sky=step(markerDepth.z,raw);
+        float depthMatch=1-step(max(markerDepth.y,1e-5),abs(raw-markerDepth.x));
+        depthOpen=max(sky,depthMatch);
+    }
+    float depthDot=(1-smoothstep(2.5,3.5,dist))*markerTarget.w*markerDepth.w;
+    float3 depthColor=lerp(float3(1,.08,.04),float3(.08,1,.2),depthOpen);
+    float3 color=lerp(markerColor.rgb,depthColor,depthDot);
+    float mask=saturate(ringMask+onXAxis+onYAxis+depthDot)*valid;
+    return float4(color*mask,mask);
 }
 )HLSL";
 

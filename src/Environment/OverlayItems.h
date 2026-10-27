@@ -21,6 +21,13 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereMaxDistance","FOG DISTANCE",200,1200,20,520},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereWashPercent","FOG WASH",0,100,2,55},
+ // A nonzero alpha blends a chosen manual fog colour over the zone's authored
+ // fog colour; brightness scales RGB before the blend. Alpha 0 is no override.
+ {KIND_SLIDER,L"Atmosphere",L"ManualColorRed","FOG COLOR RED (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Atmosphere",L"ManualColorGreen","FOG COLOR GREEN (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Atmosphere",L"ManualColorBlue","FOG COLOR BLUE (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Atmosphere",L"ManualColorAlphaPercent","FOG COLOR ALPHA (0-100, 0=ZONE)",0,100,1,0},
+ {KIND_SLIDER,L"Atmosphere",L"ManualColorBrightnessPercent","FOG COLOR BRIGHTNESS (0-300%)",0,300,5,100},
  // Separate near-ground world-space volume integrated by the atmosphere
  // raymarch. Movement opens a soft wake which gradually fills back in.
  {KIND_HEADER,nullptr,nullptr,"--- LOCAL VOLUMETRIC FOG ---",0,0,0,0},
@@ -90,6 +97,12 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"VolumetricClouds",L"SunRayPercent","CLOUD RAY STRENGTH",0,200,5,80},
  {KIND_SLIDER,L"VolumetricClouds",L"ResolutionPercent","CLOUD RESOLUTION (%)",20,100,5,75},
  {KIND_SLIDER,L"VolumetricClouds",L"Quality","CLOUD MARCH QUALITY (0 LOW 3 ULTRA)",0,3,1,3},
+ // A nonzero alpha tints the cloud radiance over its zone-authored palette.
+ {KIND_SLIDER,L"VolumetricClouds",L"ManualColorRed","CLOUD COLOR RED (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"VolumetricClouds",L"ManualColorGreen","CLOUD COLOR GREEN (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"VolumetricClouds",L"ManualColorBlue","CLOUD COLOR BLUE (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"VolumetricClouds",L"ManualColorAlphaPercent","CLOUD COLOR ALPHA (0-100, 0=ZONE)",0,100,1,0},
+ {KIND_SLIDER,L"VolumetricClouds",L"ManualColorBrightnessPercent","CLOUD COLOR BRIGHTNESS (0-300%)",0,300,5,100},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
@@ -151,6 +164,13 @@ inline std::vector<Item> items={
  // Wave-energy response only; wind-driven foam still stops in calm air.
  {KIND_SLIDER,L"Water",L"WeatherResponsePercent","SEA ENERGY RESPONSE (WIND OR NATIVE WEATHER)",0,200,5,100},
  {KIND_TOGGLE,L"Water",L"ZoneWaves","PER-ZONE SEA STATE",0,1,1,1},
+ // Alpha blends a chosen manual water colour over the zone's water palette;
+ // brightness scales the selected RGB and zero alpha preserves inherited colours.
+ {KIND_SLIDER,L"Water",L"ManualColorRed","WATER COLOR RED (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Water",L"ManualColorGreen","WATER COLOR GREEN (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Water",L"ManualColorBlue","WATER COLOR BLUE (0-255)",0,255,1,255},
+ {KIND_SLIDER,L"Water",L"ManualColorAlphaPercent","WATER COLOR ALPHA (0-100, 0=ZONE)",0,100,1,0},
+ {KIND_SLIDER,L"Water",L"ManualColorBrightnessPercent","WATER COLOR BRIGHTNESS (0-300%)",0,300,5,100},
  // The world seen from inside the water. These live in the WATER tab and in their own
  // [Underwater] ini section, because they are the same water: the medium itself is WATER
  // CLARITY, WATER DEPTH, DeepColour and AbsorptionColour above, resolved per zone exactly as

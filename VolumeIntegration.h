@@ -23,11 +23,13 @@
 #include "src/Effects/GroundSurfaceCapture.h"
 #include "src/Effects/LocalLightingCore.h"
 #include "src/Effects/LocalLightingRenderer.h"
+#include "src/Effects/CelestialDiscGate.h"
 #include "src/Lighting/LocalLightManager.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/D3D9/CelestialStability.h"
 #include "src/D3D9/CameraContinuity.h"
+#include "src/Environment/EnvironmentProfileManager.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -157,6 +159,26 @@ unsigned celestialProbeLogCounter = 0;
 unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws = 0, shadowFrameDraws = 0;
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
+
+renderer::WorldSceneObservation ResolveWorldSceneForFrame() {
+    auto& frame=renderer::FrameContext::Current();
+    const bool knownWorldDraw=frame.worldTerrainSeenThisFrame||frame.worldWaterSeenThisFrame;
+    // An early depth-clear probe catches a verified login/menu transition before
+    // the first UI composite. If the provider is unverified, leave Unknown open
+    // to be upgraded once a terrain/liquid draw supplies independent evidence.
+    if(!frame.worldSceneResolved||
+       (frame.worldScene.state==renderer::WorldSceneState::Unknown&&knownWorldDraw)) {
+        const bool renderContext=renderer::HasWorldContext(
+            renderer::DepthCapture::Instance().HasDepth(),knownWorldDraw);
+        frame.worldScene=renderer::EnvironmentProfileManager::Instance().ObserveWorldScene(
+            renderContext,knownWorldDraw);
+        frame.worldSceneResolved=true;
+    }
+    watereffect::ObserveWorldSceneForUnderwater(frame);
+    if(frame.worldScene.state!=renderer::WorldSceneState::InWorld)
+        renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
+    return frame.worldScene;
+}
 
 // This file is NOT on the shared sink, even though it is written on a crossing:
 // PerformanceProfiler is handed the same path below and appends to it directly
@@ -506,6 +528,7 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
     if (renderer::DepthCapture::Instance().HasDepth()) {
         auto& frameCtx = renderer::FrameContext::Current();
         frameCtx.ResetForNewFrame(frameCtx.frameIndex + 1, d);
+        ResolveWorldSceneForFrame();
         // Precipitation composites itself over the scene during the client's draw stream, which
         // starts now and ends before this frame's water draws settle the medium at Present. So it
         // cannot read underwaterRamp (cleared just above) or wait for the composite: publish the
@@ -527,14 +550,14 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD f
         cameraCaptureShaderHash = 0;
 
         // Per-frame water mask: watereffect::Scope binds this as a second
-        // render target during every actual water draw (see WaterEffect.h)
-        // and marks its pixels, blended by the GPU exactly like water's own
-        // colour output. The atmosphere composite reads it back to exclude
-        // fog from water entirely - the low-res, depth-aware fog upsample
-        // was producing a flat, wrong, hard-edged patch of fog colour on
-        // open water (confirmed via AtmosphereDebugMode=9), because water's
-        // constantly animated/refracting/reflecting surface makes that
-        // depth-based reconstruction unreliable right at the water plane.
+        // render target during replacement-water draws; when that shader is
+        // switched off, the draw hooks replay native liquid geometry through
+        // a mask-only pixel shader instead. Replacement coverage stays in red;
+        // the native-only green tag lets the final pass preserve only those pixels.
+        // The replacement path also supplies a surface-depth MRT. Native
+        // water has no matching MRT, so the final atmosphere composite uses
+        // this frame's capture flag to pass those marked pixels through rather
+        // than reconstructing fog to the seabed and painting over the sheet.
         // Sized to the real render target, cleared fresh every frame before
         // any water draws happen.
         watereffect::waterTargetSurface = watereffect::waterMaskSurface = watereffect::waterDepthSurface = nullptr;
@@ -695,8 +718,17 @@ bool CaptureSkyFallback() {
     cfg.rayFalloff = rayFalloff;
 
     renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
+    renderer::ClientCameraPoseSnapshot clientCameraPose{};
+    const bool inWorld=frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;
+    const char* clientPoseReadStatus=inWorld?"not-read":"not-in-world";
+    const bool haveClientCameraPose=inWorld&&
+        renderer::EnvironmentProfileManager::Instance().ReadCameraPose(clientCameraPose,&clientPoseReadStatus);
+    frameCtx.clientCameraPoseReadStatus=clientPoseReadStatus;
+    frameCtx.clientCameraEyeReadThisFrame=haveClientCameraPose;
+    frameCtx.clientCameraOrientationReadThisFrame=haveClientCameraPose;
     bool ok = renderer::CameraCapture::Instance().ApplySkyFallback(
-        frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid);
+        frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid,
+        haveClientCameraPose?&clientCameraPose:nullptr);
     if (ok) {
         renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         frameCtx.depthTexture = resources.depth.Get();
@@ -941,6 +973,13 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
+    ResolveWorldSceneForFrame();
+    const auto& sceneFrame=renderer::FrameContext::Current();
+    const bool freshCameraPose=sceneFrame.cameraValid&&!sceneFrame.cameraPoseStale;
+    const bool playableWorldEvidence=renderer::HasPlayableWorldEvidence(
+        sceneFrame.worldScene.state,sceneFrame.worldTerrainSeenThisFrame||sceneFrame.worldWaterSeenThisFrame,
+        freshCameraPose);
+    if(!playableWorldEvidence) renderer::DirectionalVolumetricLighting::Instance().InvalidateHistory();
     // Every branch below samples or writes the scene copy the clear hook publishes.
     // A camera captured without a depth capture (which is now possible, and is the
     // point) must not reach them: there is nothing to composite onto.
@@ -1010,6 +1049,62 @@ bool Composite(IDirect3DDevice9* d) {
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
         auto& frameCtx = renderer::FrameContext::Current();
+        frameCtx.sunBillboardObserved = sun.visible;
+        frameCtx.moonBillboardObserved = moon.visible;
+        frameCtx.sunBillboardScreenX = sun.visible ? sun.screenX : -1.f;
+        frameCtx.sunBillboardScreenY = sun.visible ? sun.screenY : -1.f;
+        frameCtx.sunBillboardViewDepth = sun.visible ? sun.viewSpacePosition.z : 0.f;
+        frameCtx.moonBillboardScreenX = moon.visible ? moon.screenX : -1.f;
+        frameCtx.moonBillboardScreenY = moon.visible ? moon.screenY : -1.f;
+        frameCtx.moonBillboardViewDepth = moon.visible ? moon.viewSpacePosition.z : 0.f;
+        // Stabilize the scene's dominant light before selecting a screen-space
+        // halo source. Tint-only daylight/moonlight ratios can call a bright
+        // blue noon "moonlit" and place a second glow at the moon instead of
+        // over the visible sun.
+        const float lightDt = celestialLightClock.Observe(
+            renderer::PerformanceCounter(), renderer::PerformanceFrequency());
+        renderer::CelestialLightInput lightInput;
+        lightInput.daylight = frameCtx.daylightFactor;
+        lightInput.moonlight = frameCtx.moonlightFactor;
+        lightInput.directionalLuminance =
+            frameCtx.directionalLightColor.x * .2126f +
+            frameCtx.directionalLightColor.y * .7152f +
+            frameCtx.directionalLightColor.z * .0722f;
+        // Use historical, world-space direction confirmation rather than
+        // this frame's `visible` bit: a bright-blue moonlight can exceed the
+        // luminance threshold, while the moon's disc is a frustum event. The
+        // retained track lets strong night factors select the actual moon
+        // without making light direction blink as the player turns away.
+        lightInput.sunDirectionConfirmed =
+            celestialDirectionStabilizer.HasConfirmed(false) || sun.worldDirectionValid;
+        lightInput.moonDirectionConfirmed =
+            celestialDirectionStabilizer.HasConfirmed(true) || moon.worldDirectionValid;
+        lightInput.deltaSeconds = lightDt;
+        const auto stable = celestialLightStabilizer.Update(lightInput);
+        frameCtx.directLightIntensity = stable.intensity;
+        frameCtx.directLightIsMoon = stable.isMoon;
+        frameCtx.directLightValid = true;
+
+        // The sun's depth/sky mask is independent of the chosen glare source,
+        // so a moon-dominant frame still lets clouds shade the tracked sun at
+        // its own position without moving or duplicating the original disc.
+        frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&
+            !frameCtx.cameraPoseStale;
+        frameCtx.sunDiscExpectedRawDepth = -1.f;
+        frameCtx.sunDiscRawDepthTolerance = 0.f;
+        if (frameCtx.sunDiscValid) {
+            frameCtx.sunDiscScreenX = sun.screenX;
+            frameCtx.sunDiscScreenY = sun.screenY;
+            frameCtx.sunDiscViewDepth = sun.viewSpacePosition.z;
+            const float rawScale = std::max(
+                frameCtx.depthMaxZ - frameCtx.viewport.MinZ, 0.f);
+            frameCtx.sunDiscExpectedRawDepth = frameCtx.viewport.MinZ +
+                renderer::discgate::RawDepth(frameCtx.projUnpack[0], frameCtx.projUnpack[1],
+                                             frameCtx.sunDiscViewDepth) * rawScale;
+            frameCtx.sunDiscRawDepthTolerance = renderer::discgate::RawTolerance(
+                frameCtx.projUnpack[0], frameCtx.projUnpack[1], frameCtx.sunDiscViewDepth,
+                std::max(.75f, frameCtx.sunDiscViewDepth * .04f)) * rawScale;
+        }
         // A stale pose means the disc position/depth were measured against a
         // camera this frame is not using: the atmosphere, the cloud deck and the
         // water treat that signal as "the moon is here", so a stale one would
@@ -1022,16 +1117,14 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.moonDiscScreenY = moon.screenY;
             frameCtx.moonDiscViewDepth = moon.viewSpacePosition.z;
         }
-        // Both discs can be rendered in the same frame.  "Sun wins whenever
-        // visible" consequently kept the radial pass attached to the bright
-        // sun candidate even in a moon-lit sky, producing an oversized halo
-        // while the actual moon had no shafts. CameraCapture already supplies
-        // the authoritative day/night blend: prefer the tracked moon when
-        // moonlight dominates and the sun when daylight dominates. There is
-        // still exactly one directional source, matching the scene lighting.
-        const bool nightDominant = frameCtx.moonlightFactor > frameCtx.daylightFactor;
-        bool useMoon = moon.visible && (nightDominant || !sun.visible);
-        bool useSun = sun.visible && !useMoon;
+        // Both discs can be rendered in the same frame. Choose the visible
+        // screen-space source using the same stabilized body that drives world
+        // lighting and cloud shadows, not the tint-only factors that can label
+        // a cool, bright noon as night.
+        const auto source = renderer::ChooseVisibleCelestialSource(
+            sun.visible, moon.visible, stable.isMoon);
+        const bool useMoon = source == renderer::VisibleCelestialSource::Moon;
+        const bool useSun = source == renderer::VisibleCelestialSource::Sun;
         // The tracked screen position belongs to the camera that was captured
         // when the sprite was drawn. With a stale pose it points somewhere the
         // current view does not, and every consumer of it - the glare, the
@@ -1066,17 +1159,19 @@ bool Composite(IDirect3DDevice9* d) {
         // converting with the draw's own VIEW yields a direction expressed
         // against the camera, not the world. Fed into the cloud deck, that is
         // "look at the moon and the cloud lighting follows the camera". Convert
-        // the reported view-space direction with this frame's captured scene
-        // camera instead (CameraCapture gated it, so it is the real one); only
-        // when no camera was captured fall back to the tracker's derivation.
+        // the reported view-space direction with this frame's accepted scene
+        // camera instead. The raw matrix remains populated after a failed
+        // capture, so only use it when cameraPoseStale is false; otherwise the
+        // tracker supplies its last confirmed direction rather than rotating the
+        // light with a held view.
         auto celestialWorldDirection = [&frameCtx](const renderer::CelestialBody& celestial) {
-            if (frameCtx.viewRawValid) {
+            if (frameCtx.viewRawValid && !frameCtx.cameraPoseStale) {
                 const renderer::Vec3& view = celestial.viewSpaceDirection;
                 float world[3];
                 renderer::ViewDirectionToWorld(&frameCtx.viewRaw.m[0][0], &view.x, world);
                 return renderer::Vec3{world[0], world[1], world[2]};
             }
-            return celestial.worldSpaceDirection;
+            return celestial.worldDirectionValid ? celestial.worldSpaceDirection : renderer::Vec3{};
         };
         if (body) {
             frameCtx.sunScreenX = body->screenX;
@@ -1104,20 +1199,6 @@ bool Composite(IDirect3DDevice9* d) {
         // selects the dominant body and strength. Track each disc direction
         // independently, even when it is not the selected glare/light source.
         {
-            const float lightDt = celestialLightClock.Observe(
-                renderer::PerformanceCounter(), renderer::PerformanceFrequency());
-            renderer::CelestialLightInput lightInput;
-            lightInput.daylight = frameCtx.daylightFactor;
-            lightInput.moonlight = frameCtx.moonlightFactor;
-            lightInput.directionalLuminance =
-                frameCtx.directionalLightColor.x * .2126f +
-                frameCtx.directionalLightColor.y * .7152f +
-                frameCtx.directionalLightColor.z * .0722f;
-            lightInput.deltaSeconds = lightDt;
-            const auto stable = celestialLightStabilizer.Update(lightInput);
-            frameCtx.directLightIntensity = stable.intensity;
-            frameCtx.directLightIsMoon = stable.isMoon;
-            frameCtx.directLightValid = true;
             // Directions enter the stabilizer already in world space, converted
             // above: stabilizing the tracker's camera-relative moon vector here
             // only made the camera tracking smoother, not smaller.
@@ -1128,6 +1209,7 @@ bool Composite(IDirect3DDevice9* d) {
             const auto moonWorld = celestialDirectionStabilizer.Update(
                 moon.visible ? &moonDirectionWorld : nullptr, true, lightDt);
             frameCtx.directLightDirectionWorld = stable.isMoon ? moonWorld : sunWorld;
+            frameCtx.directLightDirectionConfirmed = celestialDirectionStabilizer.HasConfirmed(stable.isMoon);
             const auto& world = frameCtx.directLightDirectionWorld;
             frameCtx.directLightDirectionView = {
                 renderer::Dot(world, {frameCtx.inverseView.m[0][0], frameCtx.inverseView.m[0][1], frameCtx.inverseView.m[0][2]}),
@@ -1161,7 +1243,9 @@ bool Composite(IDirect3DDevice9* d) {
     // they were: the tracker still settles (the water pixel stage classifies from it, and
     // that classification is a bug fix rather than a feature), but nothing fades on it.
     const bool underwaterActive = !shaftDebug && renderer::Underwater::Instance().IsActive();
-    frameCtx.underwaterRamp = underwaterActive ? watereffect::submersionTracker.ramp : 0.f;
+    const bool confirmedPlayableWorld = frameCtx.worldScene.state==renderer::WorldSceneState::InWorld;
+    frameCtx.underwaterRamp = underwaterActive && confirmedPlayableWorld
+        ? watereffect::submersionTracker.ramp : 0.f;
     frameCtx.underwaterYards = watereffect::submersionTracker.yards;
 
     // One Capture on the shared D3DSBT_ALL stack replaces the ~170-call
@@ -1251,17 +1335,32 @@ bool Composite(IDirect3DDevice9* d) {
     frameCtx.cloudShadowTexture = nullptr;
     frameCtx.cloudRayStrength = 0.f;
     if (!shaftDebug && cloudsEffectEnabled) {
+        // Render owns the menu/world/camera gates and distinguishes the normal
+        // world-space march from a separate sky-only recovery. The latter is
+        // permitted only for confirmed in-world state plus a current VIEW basis;
+        // it never publishes a held eye, cloud shadow, or ray-attenuation texture.
         auto& clouds = renderer::VolumetricClouds::Instance();
         clouds.Settings().weather = cloudWeather;
         // Already resolved once at the frame boundary, alongside wind/water.
         clouds.Settings().weatherStrength = cloudWeatherStrength;
         if (clouds.Render(d, frameCtx, target.Get())) {
-            frameCtx.cloudTexture = clouds.GetCloudTexture();
-            frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
-            frameCtx.cloudShadowArea = clouds.ShadowArea();
-            frameCtx.cloudLightProjection = clouds.LightProjection();
-            frameCtx.cloudRayStrength = shaftsEffectEnabled && clouds.Settings().sunRays
-                ? clouds.Settings().sunRayStrength : 0.f;
+            if (clouds.UsedSkyFallback()) {
+                // The directional overlay is already in target. Its low-res
+                // texture is not a world column and must never be sampled later
+                // as a cloud shadow or as cloud-filtered god rays.
+                frameCtx.cloudTexture = nullptr;
+                frameCtx.cloudShadowTexture = nullptr;
+                frameCtx.cloudShadowArea = {};
+                frameCtx.cloudLightProjection = {};
+                frameCtx.cloudRayStrength = 0.f;
+            } else {
+                frameCtx.cloudTexture = clouds.GetCloudTexture();
+                frameCtx.cloudShadowTexture = clouds.GetShadowTexture();
+                frameCtx.cloudShadowArea = clouds.ShadowArea();
+                frameCtx.cloudLightProjection = clouds.LightProjection();
+                frameCtx.cloudRayStrength = shaftsEffectEnabled && clouds.Settings().sunRays
+                    ? clouds.Settings().sunRayStrength : 0.f;
+            }
             // Everything downstream samples legacyTargets.scene, so the
             // copy has to carry the clouds too.
             check(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE));
@@ -1289,10 +1388,11 @@ bool Composite(IDirect3DDevice9* d) {
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
     bool atmosphereRendered = false;
     const auto& atmosphereSettings = renderer::DirectionalVolumetricLighting::Instance().Settings();
-    if (!shaftDebug && (fogEffectEnabled || atmosphereSettings.localFogEnabled ||
-        atmosphereSettings.edgeFogEnabled || atmosphereSettings.debugMode == renderer::VolumetricDebugMode::LocalLightScattering))
+    if (!shaftDebug && playableWorldEvidence &&
+        (fogEffectEnabled || atmosphereSettings.localFogEnabled ||
+         atmosphereSettings.edgeFogEnabled || atmosphereSettings.debugMode == renderer::VolumetricDebugMode::LocalLightScattering))
         atmosphereRendered = renderer::DirectionalVolumetricLighting::Instance().Render(
-            d, renderer::FrameContext::Current(), target.Get(), fogEffectEnabled);
+            d, frameCtx, target.Get(), fogEffectEnabled);
     if (localLightingRendered && !atmosphereRendered)
         check(d->StretchRect(frameCtx.sceneSurface, nullptr,
                              target.Get(), nullptr, D3DTEXF_NONE));
@@ -1319,6 +1419,23 @@ bool Composite(IDirect3DDevice9* d) {
         const int glowPercent = renderer::FrameContext::Current().celestialIsMoon ? moonGlowPercent : sunGlowPercent;
         float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(glowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
+        // The source mask normally treats every depth-writing object as an
+        // occluder. Pass the actual tracked sun's depth so its own billboard
+        // is open to rays without opening foreground geometry at that pixel.
+        const bool trackedSunRaySourceValid = frameCtx.sunDiscValid && !frameCtx.celestialIsMoon;
+        const float trackedSunViewDepth = trackedSunRaySourceValid ? frameCtx.sunDiscViewDepth : 1.f;
+        const float trackedSunRawScale = std::max(frameCtx.depthMaxZ-frameCtx.viewport.MinZ,0.f);
+        const float expectedTrackedSunRaw = frameCtx.viewport.MinZ + renderer::discgate::RawDepth(
+            frameCtx.projUnpack[0],frameCtx.projUnpack[1],trackedSunViewDepth)*trackedSunRawScale;
+        const float trackedSunRawTolerance = renderer::discgate::RawTolerance(
+            frameCtx.projUnpack[0],frameCtx.projUnpack[1],trackedSunViewDepth,
+            std::max(.75f,trackedSunViewDepth*.04f))*trackedSunRawScale;
+        const float trackedSunDisc[4]={frameCtx.sunDiscScreenX,frameCtx.sunDiscScreenY,.022f,
+                                       trackedSunRaySourceValid?1.f:0.f};
+        const float trackedSunDepth[4]={frameCtx.projUnpack[3]/std::max(frameCtx.projUnpack[2],1e-4f),
+                                        expectedTrackedSunRaw,trackedSunRawTolerance,0.f};
+        check(d->SetPixelShaderConstantF(16,trackedSunDisc,1));
+        check(d->SetPixelShaderConstantF(17,trackedSunDepth,1));
         check(d->SetTexture(3, frameCtx.cloudTexture));
         check(d->SetSamplerState(3, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(3, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
@@ -1328,12 +1445,11 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(3, D3DSAMP_SRGBTEXTURE, FALSE));
         float cloudMask[4] = {frameCtx.cloudTexture ? 1.f : 0.f, 0, 0, 0};
         check(d->SetPixelShaderConstantF(14, cloudMask, 1));
-        // Ray look (see rayLook in volumePixelSource): sunward glow spread,
-        // glow floor, and gain. Gain 0.35 is the calibrated level of the new
-        // whole-frame mask (equal to the GodRayPreview "0.45" over the old 1.28).
-        // Gain 0.6 is the look calibrated in tools/GodRayPreview (0.35 at full
-        // visibility) divided by the 0.6 clear-air floor applied in the composite.
-        float rayLook[4] = { 6.f, 0.f, 0.6f, 0.f };
+        // Ray look (see rayLook in volumePixelSource): compact sunward glow
+        // spread, no glow floor, and a restrained whole-frame-mask gain. The
+        // previous gain made clear-sky samples build a broad circular wash; the
+        // radial gather still carries visible, occlusion-shaped beams.
+        float rayLook[4] = { 28.f, 0.f, 0.4f, 0.f };
         check(d->SetPixelShaderConstantF(15, rayLook, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
         check(d->SetTexture(3, nullptr));
@@ -1531,15 +1647,23 @@ bool Composite(IDirect3DDevice9* d) {
     if ((celestialMarkerDebug || celestialMemoryProbeDebug) && legacyShaders.celestialMarker) {
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.celestialMarker.Get()));
-        check(d->SetTexture(0, nullptr));
+        check(d->SetTexture(0, depth.Get()));
+        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+        check(d->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+        check(d->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE));
+        check(d->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+        check(d->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
         float markerSize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
         check(d->SetPixelShaderConstantF(2, markerSize, 1));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
 
-        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b) {
-            float markerTarget[4] = { x, y, valid ? 1.f : 0.f, 0 };
+        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b,
+                              bool depthProbe = false) {
+            float markerTarget[4] = { x, y, valid ? 1.f : 0.f,
+                                      depthProbe && valid ? 1.f : 0.f };
             float markerColor[4] = { r, g, b, 1.f };
             check(d->SetPixelShaderConstantF(0, markerTarget, 1));
             check(d->SetPixelShaderConstantF(1, markerColor, 1));
@@ -1547,14 +1671,29 @@ bool Composite(IDirect3DDevice9* d) {
         };
 
         // RED (or the original yellow/blue when the memory probe overlay is
-        // off): the current v[24]-projection marker used by rays/glare.
+        // off): the selected screen-space source used by rays and glare.
         bool legacyValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
         if (celestialMemoryProbeDebug) {
             drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .15f, .15f);
         } else {
-            bool moonDominant = celestialMoonlight > celestialDaylight;
+            const bool moonDominant = renderer::FrameContext::Current().celestialIsMoon;
             if (moonDominant) drawMarker(constants[2][0], constants[2][1], legacyValid, .55f, .70f, 1.f);
             else drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .85f, .25f);
+        }
+
+        // With DebugCelestialMarker on, MAGENTA marks the independently
+        // tracked vanilla sun disc. Its centre dot is GREEN when the shared
+        // sky/depth predicate accepts that pixel, RED when neither sky nor the
+        // expected sun depth matches. Yellow/blue separation identifies a different halo source.
+        if (celestialMarkerDebug) {
+            const auto& markerFrame = renderer::FrameContext::Current();
+            const float sunMaskDepth[4] = {
+                markerFrame.sunDiscExpectedRawDepth, markerFrame.sunDiscRawDepthTolerance,
+                (markerFrame.depthMaxZ + 1.f) * .5f,
+                markerFrame.sunDiscValid ? 1.f : 0.f };
+            check(d->SetPixelShaderConstantF(3, sunMaskDepth, 1));
+            drawMarker(markerFrame.sunDiscScreenX, markerFrame.sunDiscScreenY,
+                       markerFrame.sunDiscValid, 1.f, .15f, 1.f, true);
         }
 
         // GREEN / CYAN: candidates read from CelestialMemoryProbe (see that

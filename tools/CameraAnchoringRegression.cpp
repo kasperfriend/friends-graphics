@@ -30,6 +30,8 @@
 //    use of them is checked in the source.
 #include "../src/Effects/GroundReference.h"
 #include "../src/Effects/CelestialDiscGate.h"
+#include "../src/D3D9/SkyProjectionGate.h"
+#include "../src/D3D9/CameraContinuity.h"
 #include "../src/Lighting/LocalLightSelection.h"
 
 #include <algorithm>
@@ -100,6 +102,126 @@ namespace
 
 int main() try
 {
+    // --------------------------------------------------------- sky projection ---
+    {
+        using namespace renderer::skyprojection;
+        Require(CanReuseValidatedPerspective(true, true, 250.f, 1000.f),
+            "a recent validated camera projection may corroborate a same-screen-viewport sky transform even when its per-draw depth remap differs");
+        Require(!CanReuseValidatedPerspective(false, true, 250.f, 1000.f),
+            "an unvalidated projection is never borrowed for sky evidence");
+        Require(!CanReuseValidatedPerspective(true, false, 250.f, 1000.f),
+            "a projection from another viewport cannot corroborate the current sky transform");
+        Require(!CanReuseValidatedPerspective(true, true, 1001.f, 1000.f),
+            "a stale cached projection cannot corroborate the current sky transform");
+        Require(!CanReuseValidatedPerspective(true, true, std::nanf(""), 1000.f),
+            "non-finite cache age never corroborates a sky transform");
+        Require(MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.823f,1.968f),
+            "a current full-frame shader camera may renew the cached projection when both focal scales match");
+        Require(!MatchesValidatedPerspectiveScales(true,false,.821558f,1.96261f,.821558f,1.96261f),
+            "matching focal scales cannot renew a projection across screen viewports");
+        Require(!MatchesValidatedPerspectiveScales(false,true,.821558f,1.96261f,.821558f,1.96261f),
+            "an unvalidated projection cannot be renewed from matching scales alone");
+        Require(!MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.9f,1.96261f),
+            "a changed focal scale cannot keep a stale projection alive");
+        Require(!MatchesValidatedPerspectiveScales(true,true,.821558f,1.96261f,.821558f,std::nanf("")),
+            "non-finite shader focal scales cannot renew the validated projection");
+    }
+
+    // ------------------------------------------------------ client camera eye ---
+    {
+        using namespace renderer;
+        CameraContinuityGate gate;
+        const float eye[3]={2351.77f,-5693.45f,426.16f};
+        const float horizontal[3][4]={{1,0,0,0},{0,1,0,0},{0,0,1,0}};
+        const float straightUp[3][4]={{1,0,0,0},{0,-1,0,0},{0,0,1,0}};
+        float viewTranslation[4]{};
+        Require(BuildViewTranslationForCameraEye(eye,horizontal,viewTranslation) &&
+                gate.Accept(viewTranslation,horizontal,1920,1080),
+            "a shader-captured eye establishes the world-camera anchor");
+        Require(BuildViewTranslationForCameraEye(eye,straightUp,viewTranslation) &&
+                gate.AcceptFallback(viewTranslation,straightUp,1920,1080),
+            "a complete current client pose refreshes the normal world pose even when looking straight up");
+        Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f &&
+                std::fabs(gate.Position()[1]-eye[1])<1e-3f &&
+                std::fabs(gate.Position()[2]-eye[2])<1e-3f,
+            "view-translation reconstruction preserves the client eye in world coordinates");
+        const float discontinuousEye[3]={eye[0]+41.f,eye[1],eye[2]};
+        Require(BuildViewTranslationForCameraEye(discontinuousEye,straightUp,viewTranslation) &&
+                !gate.AcceptFallback(viewTranslation,straightUp,1920,1080),
+            "a client-eye jump beyond the existing continuity leash cannot refresh the world pose");
+        Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f,
+            "a rejected client-eye jump leaves the accepted world anchor unchanged");
+
+        const float turnedView[3][4]={{0,-1,0,0},{1,0,0,0},{0,0,1,0}};
+        ClientCameraPoseSnapshot clientPose{};
+        std::copy(eye,eye+3,clientPose.position);
+        for(int r=0;r<3;++r)std::copy(turnedView[r],turnedView[r]+4,clientPose.viewBasis[r]);
+        Require(IsOrthonormalViewBasis(clientPose.viewBasis)&&
+                BuildViewTranslationForCameraEye(clientPose.position,clientPose.viewBasis,viewTranslation)&&
+                ViewTranslationMatchesCameraEye(viewTranslation,clientPose.viewBasis,
+                                                clientPose.position,5.f),
+            "a turned live client view basis is a rigid pose matched to the active camera eye");
+        Require(gate.AcceptFallback(viewTranslation,clientPose.viewBasis,1920,1080)&&
+                gate.MatchesBasis(clientPose.viewBasis,1920,1080),
+            "a current client view rotation updates the accepted world basis instead of retaining the screen-facing one");
+        viewTranslation[0]+=6.f;
+        Require(!ViewTranslationMatchesCameraEye(viewTranslation,clientPose.viewBasis,
+                                                  clientPose.position,5.f),
+            "a view matrix whose translation no longer matches the active camera eye is rejected");
+        const float shearedView[3][4]={{1,.03f,0,0},{0,1,0,0},{0,0,1,0}};
+        Require(!IsOrthonormalViewBasis(shearedView),
+            "a non-rigid client view matrix cannot refresh camera orientation");
+    }
+
+    // A world-space cloud point must move across the screen as the camera yaws,
+    // and the same center pixel must therefore query a different world column.
+    {
+        constexpr float halfPi=1.57079632679f;
+        constexpr float planeZ=1000.f;
+        const float eye[3]={0.f,0.f,0.f};
+        auto worldFromView=[](float yaw,float pitch,float matrix[3][4]) {
+            const float cy=std::cos(yaw),sy=std::sin(yaw);
+            const float cp=std::cos(pitch),sp=std::sin(pitch);
+            matrix[0][0]=cy;    matrix[0][1]=sy;     matrix[0][2]=0.f;
+            matrix[1][0]=sp*sy; matrix[1][1]=-sp*cy; matrix[1][2]=cp;
+            matrix[2][0]=-cp*sy;matrix[2][1]=cp*cy; matrix[2][2]=sp;
+            for(int r=0;r<3;++r)matrix[r][3]=0.f;
+        };
+        auto viewBasisFromWorldFromView=[](const float inverse[3][4],float view[3][4]) {
+            for(int r=0;r<3;++r)for(int c=0;c<3;++c)view[r][c]=inverse[c][r];
+            for(int r=0;r<3;++r)view[r][3]=0.f;
+        };
+        auto centreCloudSample=[&](const float inverse[3][4],float sample[3]) {
+            const float ray[3]={inverse[2][0],inverse[2][1],inverse[2][2]};
+            if(!(ray[2]>0.f))return false;
+            const float distance=(planeZ-eye[2])/ray[2];
+            for(int axis=0;axis<3;++axis)sample[axis]=eye[axis]+ray[axis]*distance;
+            return std::isfinite(sample[0])&&std::isfinite(sample[1])&&std::isfinite(sample[2]);
+        };
+        float yaw0WorldFromView[3][4]{},yaw90WorldFromView[3][4]{};
+        float yaw0View[3][4]{},yaw90View[3][4]{};
+        worldFromView(0.f,halfPi*.5f,yaw0WorldFromView);
+        worldFromView(halfPi,halfPi*.5f,yaw90WorldFromView);
+        viewBasisFromWorldFromView(yaw0WorldFromView,yaw0View);
+        viewBasisFromWorldFromView(yaw90WorldFromView,yaw90View);
+        float centreSampleYaw0[3]{},centreSampleYaw90[3]{};
+        Require(centreCloudSample(yaw0WorldFromView,centreSampleYaw0)&&
+                centreCloudSample(yaw90WorldFromView,centreSampleYaw90)&&
+                std::fabs(centreSampleYaw0[0]-centreSampleYaw90[0])>900.f&&
+                std::fabs(centreSampleYaw0[1]-centreSampleYaw90[1])>900.f,
+            "the normal world-ray transform samples different fixed world columns after a 90-degree yaw");
+        float sampleScreenX0=0.f,sampleScreenY0=0.f;
+        float sampleScreenX90=0.f,sampleScreenY90=0.f;
+        Require(renderer::ProjectWorldDirection(yaw0View,1.f,1.f,centreSampleYaw0,
+                                                sampleScreenX0,sampleScreenY0)&&
+                renderer::ProjectWorldDirection(yaw90View,1.f,1.f,centreSampleYaw0,
+                                      sampleScreenX90,sampleScreenY90)&&
+                std::fabs(sampleScreenX0-.5f)<1e-4f&&std::fabs(sampleScreenY0-.5f)<1e-4f&&
+                (sampleScreenX90<0.f||sampleScreenX90>1.f||
+                 sampleScreenY90<0.f||sampleScreenY90>1.f),
+            "one fixed world-space cloud sample leaves its original screen position when the camera yaws");
+    }
+
     // ---------------------------------------------------------------- floor ---
     {
         using namespace renderer::groundref;
@@ -197,6 +319,26 @@ int main() try
             "one axis drifting is enough to reject a surface");
         Require(!IsFlatSprite(centre, flat, 2, 0.f, 1.f),
             "a non-positive tolerance can never verify a sprite");
+
+        const float discX=.50f,discY=.25f,radius=.02f,aspect=1.8f;
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   1.f,.9985f,.001f,1.f,true),
+            "the tracked vanilla sun is preserved over clear sky");
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   .9988f,.9985f,.001f,1.f,true),
+            "a depth-writing sun billboard is preserved at its tracked depth");
+        Require(IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                   .9992f,.9985f,.001f,1.f,true),
+            "clear sky beyond the tracked far sun depth remains eligible for cloud shading");
+        Require(!IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                    .8f,.9985f,.001f,1.f,true),
+            "nearer foreground geometry still occludes the tracked sun");
+        Require(!IsTrackedDiscPixel(.505f,.28f,discX,discY,radius,aspect,
+                                    1.f,.9985f,.001f,1.f,true),
+            "the sun mask does not clear sky outside the disc radius");
+        Require(!IsTrackedDiscPixel(.505f,.255f,discX,discY,radius,aspect,
+                                    1.f,.9985f,.001f,1.f,false),
+            "an untracked or stale sun position cannot protect an arbitrary pixel");
     }
 
     // ------------------------------------------------------------ light pool ---
@@ -263,6 +405,13 @@ int main() try
             "a stale pose publishes no celestial position to the halo");
 
         const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
+        const auto composite = Read("VolumeIntegration.h");
+        Require(Contains(clouds,"float3 ray=(view.x*invView0.xyz+view.y*invView1.xyz+view.z*invView2.xyz)/viewLength;")&&
+                Contains(clouds,"float3 p=cameraPos.xyz+ray*t;")&&
+                Contains(clouds,"float3 w=tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0)).rgb;"),
+            "the normal cloud shader reconstructs world rays from the camera basis and samples weather at world XY");
+        Require(Contains(clouds,"clientOrientationRead=")&&Contains(clouds,"worldViewBasis="),
+            "the cloud diagnostic exposes client-pose acceptance and yaw-sensitive world-view basis values");
         Require(Contains(clouds, "float SpriteVerified(float2 centre)") &&
                 Contains(clouds, "SpriteVerified(moonDisc.xy)") &&
                 Contains(clouds, "renderer::discgate::RawTolerance") &&
@@ -270,7 +419,21 @@ int main() try
             "the moon sprite is depth-verified before any pass treats geometry as the moon");
         Require(Contains(clouds, "float4 moonSprite:register(c26);") &&
                 Contains(clouds, "float4 moonSprite:register(c12);"),
-            "both cloud shaders receive the sprite's depth contract");
+            "both cloud shaders receive the moon sprite's depth contract");
+        Require(Contains(clouds, "float SunDiscPixel(float2 pixelUv,float rawDepth)") &&
+                !Contains(clouds, "if(SunDiscPixel(uv,linearRaw)>.5) return scene;") &&
+                Contains(clouds, "float sunCentre=SunDiscPixel(uv,linearRaw);") &&
+                Contains(clouds, "float4 sunDisc:register(c27);") &&
+                Contains(clouds, "float sunPixel=SunDiscPixel(uv,rawDepth);") &&
+                Contains(clouds, "d->SetPixelShaderConstantF(27,sunDisc,1)") &&
+                Contains(clouds, "renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)") &&
+                Contains(composite, "frameCtx.sunDiscValid = sun.visible && sun.viewSpacePosition.z > 0.05f &&"),
+            "clouds shade a depth-matched tracked sun without treating its billboard depth as terrain");
+        Require(!Contains(clouds, "if(moonCentre>.5)return scene;") &&
+                Contains(clouds, "float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);") &&
+                Contains(clouds, "float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));") &&
+                Contains(clouds, "float sky=max(step((depthRange.z+1)*.5,linearRaw),max(moonCentre,sunCentre));"),
+            "the verified near-moon depth is ignored for cloud marching but its original disc is still cloud-shaded");
         // Both copies of the helper must stay in the same units the host
         // uploads (raw viewport depth) and with the same arity as their calls:
         // only one of them compiling is invisible until runtime.
@@ -287,11 +450,14 @@ int main() try
                 Count(clouds, "withinDisc>.5?SpriteVerified(moonDisc.xy):0") == 2,
             "both shaders spread the rim tap with the disc's aspect and verify it only near the disc");
 
-        const auto composite = Read("VolumeIntegration.h");
         Require(Contains(composite, "frameCtx.moonDiscValid = moon.visible && moon.viewSpacePosition.z > 0.05f &&") &&
                 Contains(composite, "frameCtx.cameraPoseStale") &&
                 Contains(composite, "frameCtx.cameraPoseStale\n            ? nullptr : (useSun"),
             "a stale pose publishes neither a moon disc nor a celestial source");
+        Require(Contains(composite, "ChooseVisibleCelestialSource(") &&
+                Contains(composite, "sun.visible, moon.visible, stable.isMoon") &&
+                !Contains(composite, "moonlightFactor > frameCtx.daylightFactor"),
+            "the screen-space halo follows stabilized day/night light instead of tint-only factors");
 
         const auto manager = Read("src/Lighting/LocalLightManager.cpp");
         Require(Contains(manager, "local_light_detail::StablePool(candidates, m_selected, limit, byPriority)") &&
@@ -303,6 +469,54 @@ int main() try
             "raw-score partial sorting no longer decides pool membership on its own");
         Require(Contains(manager, "it = m_fade.erase(it)") && !Contains(manager, "m_fade.clear()"),
             "a dissolved fade is forgotten instead of accumulating one entry per light");
+
+        const auto cameraProvider = Read("src/Game/WoWLocationProvider.cpp");
+        const auto cameraCapture = Read("src/D3D9/CameraCapture.cpp");
+        Require(Contains(cameraProvider, "kWorldFramePointerRva=0x77436C") &&
+                Contains(cameraProvider, "kWorldFrameCameraOffset=0x7E20") &&
+                Contains(cameraProvider, "kCameraPositionOffset=0x08") &&
+                Contains(cameraProvider, "kCameraPoseFieldsOffset=kCameraPositionOffset") &&
+                Contains(cameraProvider, "kCameraForwardOffset=0x14") &&
+                Contains(cameraProvider, "kCameraRightOffset=0x20") &&
+                Contains(cameraProvider, "kCameraUpOffset=0x2C") &&
+                Contains(cameraProvider, "kWorldViewMatrixRva=0x6DF5E8") &&
+                Contains(cameraProvider, "kCameraViewEyeLeashYards=5.f") &&
+                Contains(cameraProvider, "cameraLayoutSupported=knownClient&&client.base==0x00400000") &&
+                Contains(cameraProvider, "provider-unavailable") &&
+                Contains(cameraProvider, "client-unverified") &&
+                Contains(cameraProvider, "unsupported-camera-layout") &&
+                Contains(cameraProvider, "world-view-not-rigid") &&
+                Contains(cameraProvider, "camera-view-axis-mismatch") &&
+                Contains(cameraProvider, "camera-view-eye-mismatch") &&
+                Contains(cameraProvider, "active-camera-changed") &&
+                Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,firstView,sizeof(firstView))") &&
+                Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,secondView,sizeof(secondView))") &&
+                Contains(cameraProvider, "IsOrthonormalViewBasis(basis,.002f)") &&
+                Contains(cameraProvider, "firstFields[kCameraRightFieldIndex+axis]-firstView[axis*4+0]") &&
+                Contains(cameraProvider, "firstFields[kCameraUpFieldIndex+axis]-firstView[axis*4+1]") &&
+                Contains(cameraProvider, "firstFields[kCameraForwardFieldIndex+axis]-firstView[axis*4+2]") &&
+                Contains(cameraProvider, "static_assert(kCameraForwardFieldIndex==3&&kCameraRightFieldIndex==6&&kCameraUpFieldIndex==9)") &&
+                Contains(cameraProvider, "ViewTranslationMatchesCameraEye(firstView+12,basis,secondFields") &&
+                Contains(cameraProvider, "worldFrameAfter!=worldFrame") &&
+                Contains(cameraProvider, "cameraAfter!=camera") &&
+                Contains(cameraProvider, "kCameraEyeSnapshotDistanceSquared"),
+            "the active camera pose is stable, matrix-matched, pointer-revalidated and pinned to the supported 3.3.5a layout");
+        Require(Contains(cameraProvider, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d"),
+            "the ArdenWoW executable fingerprint remains an explicitly supported camera source");
+        Require(Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld") &&
+                Contains(composite, "ReadCameraPose(clientCameraPose,&clientPoseReadStatus)") &&
+                Contains(clouds,"clientPoseRead="),
+            "the complete camera pose read is attempted only in a confirmed playable world");
+        const auto clientPoseUse=cameraCapture.find("if (currentClientPose &&");
+        const auto skyPoseResolve=cameraCapture.find("m_skyPose.Resolve(disc, basis, corroborated)");
+        Require(clientPoseUse!=std::string::npos&&skyPoseResolve!=std::string::npos&&
+                clientPoseUse<skyPoseResolve&&
+                Contains(cameraCapture,"BuildViewTranslationForCameraEye(currentClientPose->position,")&&
+                Contains(cameraCapture,"m_cameraGate.AcceptFallback(eyeTranslation,currentClientPose->viewBasis,")&&
+                !Contains(cameraCapture,"currentCameraEye")&&
+                Contains(cameraCapture,"cameraPoseStale = !corroborated || !eyeFresh")&&
+                Contains(cameraCapture,"FrameContext::kCameraEyeHoldMs"),
+            "the live client basis takes priority over a possibly stale sky transform, while the eye continuity and freshness guards remain");
     }
 
     std::printf("ALL CAMERA ANCHORING TESTS PASSED\n");

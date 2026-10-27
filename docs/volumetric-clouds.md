@@ -53,29 +53,39 @@ The march itself:
 
 1. Reconstruct the world ray from `projUnpack` and the inverse view rows, and intersect the two fixed world-Z
    planes, clamping entry to zero when inside the deck.
-2. Fade grazing rays near the horizon and fade the far end of the march, so neither the layer nor the march limit
-   ends in a hard edge.
+2. Fade only at the finite march limit; camera pitch never attenuates density. The fixed layer intersection and scene
+   depth decide which rays can reach clouds, and `HorizonFadePermille` softens only that final distance band.
 3. Jitter the first step with an interleaved-gradient offset derived from `VPOS` - fixed in screen space, never a
    frame counter, so the bilinear upsample averages neighbouring phases instead of flickering.
 4. March with a **step tied to world length that grows with distance**, never the span divided by a step count: the
-   layer is 2150 units thick but 25000 units long near the horizon, and dividing the span is what turns detail into
-   putty. Empty space is crossed with strides three times longer; the march steps back and integrates properly as
-   soon as it hits density, and returns to striding after seven empty samples.
+   layer is 2150 units thick and the default ray limit is 200000 units; dividing the span is what turns detail into
+   putty. Empty-space probes use at most 75% of a shape-feature tile (unless the remaining sample budget requires
+   larger steps); after a hit the march steps back and integrates properly, returning to coarse probes after seven
+   empty samples.
 5. At each sample with density: a six-step Beer march toward the sun or moon whose last step is a long reach sample
    (a tower far up the light path still has to cast), three scattering octaves with geometrically scaled extinction,
    contribution and phase, a powder term, and a vertical ambient gradient from the zone's own fog colour.
 6. Accumulate a transmittance-weighted mean distance alongside the radiance, and apply aerial perspective once to
    the integrated result.
 
+## Direction-only recovery
+
+Normal rendering samples the weather map at world XY and requires a fresh camera pose. When an upward view culls every full-frame world draw, a D3D sky transform may be a billboard rather than the current camera basis. For the exact supported 12340 client family, the location provider reads the active-camera position and orientation plus the live world-view matrix from the client-owned world-frame chain. The read is a stable double snapshot; matrix axes must match the active camera basis, its translation must reconstruct the same eye within five yards, and pointer-chain identity is rechecked. It runs only in confirmed `InWorld`, then the complete pose still passes the existing viewport/40-yard continuity gate before updating the **normal world-space march**. This candidate memory layout is cross-checked at runtime and remains fail-closed; the shipped ArdenWoW fingerprint is included in the supported-client gate.
+
+If no trusted current eye can be read or accepted, the separate direction-only recovery remains a last resort, not a replacement for normal clouds. It uses the already zone/native-weather-resolved mean coverage and cloud type from `CloudDynamics`, while shape and detail still come from the generated 3D fields. Its fixed 6000-yard angular reference is independent of any held eye, planet radius, or world-layer intersection. This recovery remains screen-space only, composites only over clear sky, and leaves geometry and native water untouched.
+
 ## Field shape
 
 Density at a point is
 
 ```
-base    = Remap(shape.r, (shape.g*.625 + shape.b*.25 + shape.a*.125) - 1, 1)   // Perlin-Worley
-profile = analytic vertical gradient for the cloud type at this point
-d       = Remap(base * profile, 1 - coverage, 1) * coverage
-d       = Remap(d, detailFbm * strength * (1 - d*.7), 1)                       // erosion
+base     = Remap(shape.r, (shape.g*.625 + shape.b*.25 + shape.a*.125) - 1, 1)  // Perlin-Worley
+profile  = analytic vertical gradient for the cloud type at this point
+d        = Remap(base * profile, 1 - coverage, 1) * coverage
+modifier = lerp(1-detailFbm, detailFbm, saturate(h*4))
+strength = detailStrength * (1 - d*.7)
+eroded   = saturate((d - modifier*strength) / (1-detailStrength))
+d        = lerp(d, eroded, saturate(h*10))                                        // fade erosion in through base
 ```
 
 Three details matter more than they look:
@@ -83,9 +93,10 @@ Three details matter more than they look:
 - **`ShapeAspectPercent` is how many times the base volume repeats vertically per horizontal tile.** It shipped at
   320 in the first build, which made vertical features three times smaller than horizontal ones and flattened every
   cloud into a lozenge. 130 gives billows that are about as tall as they are wide.
-- **Erosion fades inside the core** (`* (1 - d*.7)`). Eroding uniformly either leaves the silhouette smooth or
-  hollows the cloud out. Raising `DetailPercent` towards 1 does not produce wisps either - the `Remap` normalisation
-  divides by `1 - strength`, so it just hardens edges into binary cut-outs.
+- **Erosion fades inside the core** (`* (1 - d*.7)`) and fades in across the lower 10% of the layer. The gradual
+  base ramp prevents detail noise from erasing the entire thin cloud boundary seen by grazing rays; it changes density,
+  not the fixed layer altitude. Raising `DetailPercent` towards 1 still does not produce wisps - the normalisation
+  divides by `1 - detailStrength`, so it just hardens edges into binary cut-outs.
 - **The coverage window closes quadratically at the top.** The slider slides a window `[1 - c*1.5, 1 - c²*1.05]`
   along the weather map's equalised coverage channel. With a linear high edge the window still ends at 0.6 and half
   the sky keeps broken cloud no matter how far the slider is pushed, so overcast was unreachable.
@@ -151,7 +162,7 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `ShapeAspectPercent` | 130 | Vertical repeats of the shape volume per horizontal tile. |
 | `DetailSize` | 240 | World size of one tile of the erosion volume. |
 | `WeatherSize` | 34000 | World size of one tile of the weather map. |
-| `DetailPercent` | 88 | Strength of the erosion that shreds cloud edges. |
+| `DetailPercent` | 88 | Strength of edge erosion; it fades in through the lower 10% of the layer to preserve thin bases on grazing rays. |
 | `WindSpeed` / `WindShearPercent` | 26 / 22 | Cloud-local drift speed at shared wind strength 100% and shear gain. The optional, unshipped `WindAngle` (legacy default 25) is a sampling angle used only when unlinked from `[Wind]`. See [shared wind](wind-system.md). |
 | `AbsorptionPercent` | 38 | Self-shadowing strength along the light march. |
 | `SunIntensityPercent` | 130 | Direct sun/moon contribution. |
@@ -162,8 +173,8 @@ the F7 VOLUMETRIC CLOUDS tab.
 | `SilverLiningPercent` | 55 | Bright rim on a backlit edge. |
 | `PowderPercent` | 70 | Dark edge where a cloud faces the light. |
 | `StepGrowthPermille` / `CoarseStepScale` / `JitterPercent` | 10 / 3 / 25 | March shape. |
-| `HorizonFadePermille` | 18 | How quickly grazing rays fade out. |
-| `MaxDistance` | 26000 | March limit; the deck fades out before it. |
+| `HorizonFadePermille` | 18 | Width of the finite-distance fade for grazing rays; it no longer suppresses clouds by camera pitch (minimum 10% of `MaxDistance`). |
+| `MaxDistance` | 200000 | March limit; the deck fades only in its final 10% so near-horizon clouds remain visible. The former shipped default of 26000 is upgraded automatically. |
 | `AerialPerspectivePercent` | 60 | How much of the sky's haze a cloud picks up with distance. 0 makes near and far clouds equally contrasty. |
 | `GroundShadows` / `GroundShadowPercent` / `GroundShadowExtent` | 1 / 55 / 24000 | Cloud shadows cast on the world below. |
 | `DebugMode` | 0 | 1 = raw low-resolution buffer, 2 = coverage, 3 = direct lighting only, 4 = shadow map. |
@@ -360,6 +371,7 @@ the production classes with a synthetic depth buffer - sky in the top half, geom
 - `DensityPercent` drives the integrated opacity (measured through the coverage diagnostic);
 - a noise field below the coverage threshold leaves the sky exactly as drawn;
 - the weather boost raises coverage without mutating the configured value;
+- a fresh-eye straight-up view at 50% coverage uses the normal world-space pass (never the sky fallback), and a pitch sweep including 90 degrees keeps centre-pixel cloud coverage;
 - a camera inside the deck sees clouds in front of distant geometry; above the deck, the overhead sky is clear;
 - disabled clouds and settled zero coverage without weather do not touch the target at all;
 - `c0..c63`, the viewport and the device resources survive the pass and a device reset.
@@ -407,10 +419,10 @@ recognition still requires a supported client draw signature.
 
 ### Camera pose freshness: cities, interiors, and looking up
 
-The deck is anchored at absolute world heights, so "the clouds are dragged along with the camera" can only
-mean the *frame's camera* was wrong while the client's depth buffer was the real one. That happens where no
-draw ever carries a full-frame rigid camera - most of Orgrimmar seen from street level, with the terrain over
-the player's head frustum-culled - and it clears up on higher ground because a real capture latches there.
+The deck is anchored at absolute world heights, so a cloud that stays at the same screen position during a
+stationary yaw points to a stale or mismatched world-view basis, not to feature size or altitude. This can happen
+where no draw carries a full-frame rigid camera - for example, terrain above the player's head is frustum-culled.
+A fresh eye alone is not enough: the cloud ray needs the orientation from the same current camera pose.
 
 `CameraCapture` now treats every sky/draw transform it sees as a *candidate* for the frame, not as the camera:
 
@@ -427,21 +439,45 @@ the player's head frustum-culled - and it clears up on higher ground because a r
 - Without a disc, continuity with the accepted camera decides (`BasisAgreement >= .75`). A discontinuous
   transform is held for two frames and only adopted if the frame repeats it; one that changes every frame is
   never adopted.
-- The eye is always `CameraContinuityGate::Position()` - the last position a real draw carried. A sky
-  transform's translation never moves it.
+- A zero-translation sky transform still never moves the eye. On the supported 12340 client family, the
+  client-owned WorldFrame/CGCamera chain supplies one position-plus-orientation snapshot and the live world-view
+  matrix. Two reads must agree; the matrix must be rigid, its right/up/forward axes must match the active camera
+  fields, its translation must reconstruct the same eye within five yards, and the pointer chain is rechecked.
+  This complete client pose is tried before D3D sky candidates; the renderer never pairs a fresh client eye with
+  a separately selected sky basis. `CameraContinuityGate::AcceptFallback` still requires the same viewport and
+  the existing 40-yard eye leash before adopting it as the normal world-space camera. Unknown executables and
+  configured custom location RVAs do not authorize this memory layout.
 
 Frames that still cannot be corroborated publish `FrameContext::cameraPoseStale` and keep the previous
-orientation for screen-space passes. Every pass that places something in *world* space must refuse
-(or hold) that frame:
-`VolumetricClouds::Render` refuses a stale pose outright; `LocalLightingRenderer::Render` and
-`LocalLightManager::ObserveTorchDraw` refuse it while `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a
-pose held for a frame keeps the lamps steady (a frame-late lamp is invisible, a lamp placed through a
-second-old eye is in the wrong street) while a genuinely orphaned pose is never drawn from. `capturedViewValid` and
-`cameraCaptureShaderHash` are now cleared every frame and published only by a capture that actually succeeded,
-so `DrawCallClassifier` cannot inherit a failed attempt's shader as "terrain".
+eye for consumers that need it. `cameraOrientationFresh` is tracked separately: a current rigid VIEW basis
+can be trustworthy even after its eye has aged out. The world-height cloud march, local lights, torches,
+fog and weather still require the unchanged fresh-pose/world gate; a fully validated current client pose can
+satisfy it without weakening the existing continuity or scene-state guards. If no trusted eye is available,
+clouds may use the separate
+screen-direction recovery: it samples the noise field over view rays, composites only clear sky, excludes
+water-mask pixels, and never reads the held eye, intersects the world layer, or renders/publishes a world
+shadow or cloud-ray texture. Unknown, menu and out-of-world scenes still fail closed. If the projection cache
+has expired, the camera observer can still corroborate the current rigid VIEW basis by continuity; that
+expired projection is not reused for scene-depth or celestial-disc validation. The cloud log records
+`clientEye=(read,accepted,distance)`, `orientationFresh`, `skyFallbackEligible`, eye age,
+projection-cache state and the selected path. `clientPoseRead` names the first failed client-memory validation
+stage (for example, an unsupported layout, a matrix-axis mismatch or an eye mismatch); `clientOrientationRead`
+reports whether the complete pose passed those checks. `worldViewBasis` logs the accepted basis so a stationary
+yaw test can verify it rotates with the player rather than remaining screen-locked.
+
+`LocalLightingRenderer::Render` and `LocalLightManager::ObserveTorchDraw` refuse a stale pose while
+`cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a pose held briefly keeps the lamps steady (a frame-late
+lamp is invisible, a lamp placed through a second-old eye is in the wrong street) while a genuinely orphaned
+pose is never drawn from. `capturedViewValid` and `cameraCaptureShaderHash` are cleared every frame and
+published only by a capture that actually succeeded, so `DrawCallClassifier` cannot inherit a failed
+attempt's shader as "terrain".
 
 `tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
 the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.
+`tools/CameraAnchoringRegression.cpp` also pins the supported 12340 camera layout, the ArdenWoW fingerprint,
+rigid/axis/eye checks, a turned live basis refreshing the world orientation, and rejection of a mismatched matrix
+translation or a client-eye jump beyond the existing continuity leash. Live yaw testing in Arden is still needed
+to verify the candidate memory fields and world-view RVA against that executable.
 
 ### The celestial disc, verified against geometry (2026-10-19)
 
@@ -467,3 +503,14 @@ Two related gates, both from the camera-freshness work above:
 - The atmosphere's halo and its disc protection are disabled for such a frame
   (`sourceScreen.w`), so a stale screen position cannot paint a sun onto
   whatever now occupies that pixel.
+
+World lighting uses the captured scene day/night state and persistent per-body
+world directions, not whether a billboard happens to be inside the frustum. A
+strong night signal can select a confirmed moon direction even when the moon's
+blue captured light has high luminance; a billboard's current visibility never
+selects or drops the direction. Before either body has been tracked, the
+renderer keeps the deterministic overhead approximation; the first verified
+disc eases toward its world direction instead of replacing it in one frame.
+Cloud diagnostics report `directLightDirectionConfirmed`, direction, selected
+body, intensity, day/night factors and captured light color so a client log can
+separate direction acquisition from changes in the game's light inputs.

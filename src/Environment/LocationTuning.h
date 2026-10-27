@@ -428,6 +428,7 @@ struct FingerprintMemo {
     ULONGLONG localWritten=0,baseWritten=0;
     DWORD localBytes=0,baseBytes=0;
     uint32_t mapId=0,zoneId=0,areaId=0;
+    bool allToGlobal=false;
     uint64_t hash=0;
 };
 // A crossing flaps between two or three places, so a handful of slots is enough
@@ -497,6 +498,19 @@ inline std::wstring GlobalScope(LPCWSTR section) { return std::wstring(L"Global.
 inline bool HasGlobalValue(LPCWSTR section,LPCWSTR key) {
     if(localFile.empty())return false;
     return ScopedValuePresent(GlobalScope(section),key);
+}
+// This mode masks scoped Map/Zone/Area values without rewriting them. Keeping
+// the flag in its own section means turning it off reveals every saved local
+// value exactly as it was before the switch was enabled.
+inline bool AllToGlobalEnabled() {
+    if(localFile.empty())return false;
+    wchar_t value[16]{};
+    ReadProfileString(L"Overlay",L"AllToGlobal",L"0",value,static_cast<DWORD>(std::size(value)),localFile.c_str());
+    return value[0]&&wcstol(value,nullptr,10)!=0;
+}
+inline bool SetAllToGlobal(bool enabled) {
+    if(localFile.empty())return false;
+    return WriteProfile(localFile.c_str(),L"Overlay",L"AllToGlobal",enabled?1:0);
 }
 inline bool ClearGlobalValue(LPCWSTR section,LPCWSTR key) {
     if(localFile.empty())return false;
@@ -724,6 +738,8 @@ inline uint64_t ScopedFingerprint(const LocationContext& location) {
     const LocationContext previous=active;
     active=location;
     uint64_t hash=1469598103934665603ull;
+    const bool allToGlobal=AllToGlobalEnabled();
+    FingerprintMix(hash,allToGlobal?L"all-to-global":L"per-location");
     bool provable=true;
     ULONGLONG localWritten=0,baseWritten=0;
     DWORD localBytes=0,baseBytes=0;
@@ -748,6 +764,7 @@ inline uint64_t ScopedFingerprint(const LocationContext& location) {
         if(memo.localWritten!=localWritten||memo.localBytes!=localBytes)continue;
         if(memo.baseWritten!=baseWritten||memo.baseBytes!=baseBytes)continue;
         if(memo.mapId!=location.mapId||memo.zoneId!=location.zoneId||memo.areaId!=location.areaId)continue;
+        if(memo.allToGlobal!=allToGlobal)continue;
         active=previous;
         return memo.hash;
     }
@@ -837,6 +854,7 @@ inline uint64_t ScopedFingerprint(const LocationContext& location) {
         slot.localWritten=localWritten;slot.localBytes=localBytes;
         slot.baseWritten=baseWritten;slot.baseBytes=baseBytes;
         slot.mapId=location.mapId;slot.zoneId=location.zoneId;slot.areaId=location.areaId;
+        slot.allToGlobal=allToGlobal;
         slot.hash=hash;
     }
     active=previous;
@@ -859,8 +877,8 @@ inline void MarkTuningApplied(const LocationContext& location,bool verified) {
     appliedFingerprint=ScopedFingerprint(location);
     if(!appliedFingerprint)appliedFingerprint=1; // 0 is "nothing applied yet"
 }
-inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
-    if(!IsGlobal(section)&&editable&&path&&baseFile==path) {
+inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel,bool allToGlobal) {
+    if(!IsGlobal(section)&&editable&&!allToGlobal&&path&&baseFile==path) {
         const std::wstring wanted=LowerKeyName(key);
         for(int level=topLevel;level>=0;--level) {
             const auto scope=Scope(level)+L"."+section;
@@ -874,20 +892,25 @@ inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR out
 }
 inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
     // Explicit global edits outrank every location, even without a verified location.
-    // In verified location mode, a setting only inherits global when explicitly opted in.
-    if(!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key)&&(!editable||HasInheritGlobal(section,key)))
+    // Verified locations normally opt in per key; AllToGlobal temporarily masks
+    // every Map/Zone/Area value and applies any explicit Global value everywhere.
+    const bool allToGlobal=AllToGlobalEnabled();
+    if(!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key)&&
+       (!editable||allToGlobal||HasInheritGlobal(section,key)))
         return ReadProfileString(GlobalScope(section).c_str(),key,fallback,output,size,localFile.c_str());
-    return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1);
+    return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1,allToGlobal);
 }
 inline UINT ReadEditorInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
-    // Location editors show their own layer, or the inherited global override when opted in.
+    // Location editors show their own layer, or the global layer while the
+    // reversible all-to-global mask is active.
     wchar_t value[128]{};
-    if((editGlobal||!editable)&&!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
+    const bool allToGlobal=AllToGlobalEnabled();
+    if((editGlobal||!editable||allToGlobal)&&!IsGlobal(section)&&path&&baseFile==path&&HasGlobalValue(section,key))
         ReadProfileString(GlobalScope(section).c_str(),key,L"",value,128,localFile.c_str());
-    else if(editGlobal)ReadProfileString(section,key,L"",value,128,path);
+    else if(editGlobal||allToGlobal)ReadProfileString(section,key,L"",value,128,path);
     else if(!IsGlobal(section)&&editable&&path&&baseFile==path&&HasInheritGlobal(section,key)&&HasGlobalValue(section,key))
         ReadProfileString(GlobalScope(section).c_str(),key,L"",value,128,localFile.c_str());
-    else ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2);
+    else ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2,allToGlobal);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
 inline UINT ReadInt(LPCWSTR section, LPCWSTR key, INT fallback, LPCWSTR path) {
@@ -899,8 +922,9 @@ inline UINT ReadInt(LPCWSTR section, LPCWSTR key, INT fallback, LPCWSTR path) {
 // global file - and the water colours need the distinction: a shipped per-zone
 // colour replaces the global default, but never a player's own scoped override.
 inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
-    if(HasGlobalValue(section,key)&&(!editable||HasInheritGlobal(section,key)))return true;
-    if(!editable||localFile.empty())return false;
+    const bool allToGlobal=AllToGlobalEnabled();
+    if(HasGlobalValue(section,key)&&(!editable||allToGlobal||HasInheritGlobal(section,key)))return true;
+    if(!editable||localFile.empty()||allToGlobal)return false;
     const std::wstring wanted=LowerKeyName(key);
     for(int level=active.areaId?2:1;level>=0;--level) {
         const auto scope=Scope(level)+L"."+section;
@@ -912,10 +936,10 @@ inline bool HasScopedValue(LPCWSTR section,LPCWSTR key) {
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     if(IsGlobal(section))return WriteProfile(baseFile.c_str(),section,key,value);
-    // An explicit Global override (the overlay's third scope) outranks every
-    // location, and it belongs to the scoped file - so it is the same write path
-    // and the same invalidation as a location scope, not a third one.
-    if(editGlobal||(!editable&&HasGlobalValue(section,key))) {
+    // An explicit Global override (the overlay's third scope), or the reversible
+    // all-to-global mode, writes to the shared layer rather than destroying any
+    // value authored in a Map/Zone/Area section.
+    if(editGlobal||AllToGlobalEnabled()||(!editable&&HasGlobalValue(section,key))) {
         const bool written=WriteProfile(localFile.c_str(),GlobalScope(section).c_str(),key,value);
         if(written)InvalidateScopedKeys();
         return written;

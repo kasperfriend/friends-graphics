@@ -21,5 +21,9 @@ struct WoWClientContext {
     // launch of the same client reads a few dozen bytes instead of hashing.
     void EnsureSha256(const std::wstring& cachePath);
     bool Read(uintptr_t rva,void* value,size_t size) const;
+    // Read a client-owned pointer target after its RVA has been resolved.
+    // This remains read-only and checks the containing committed region before
+    // calling ReadProcessMemory; it never follows a pointer supplied by config.
+    bool ReadAddress(uintptr_t address,void* value,size_t size) const;
 };
 }

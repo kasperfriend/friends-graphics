@@ -157,9 +157,16 @@ int main() try
         Require(Contains(provider, "failure=configureFailure=LocationFailure::NoWorldContext;"),
             "a configured provider waiting on a world frame says so instead of not configured");
         Require(Contains(provider, "57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da") &&
+                Contains(provider, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d") &&
                 Contains(provider, "HasVerified12340CodeSignature") &&
                 Contains(provider, "StockParentZone"),
-            "stock 3.3.5a build 12340 and its starter-valley parent zones are recognized out of the box");
+            "stock 3.3.5a and the supplied ArdenWoW fingerprint use the supported location provider");
+        const std::string inspector=ReadSource("tools/EnvironmentDatabaseBuilder/inspect_client.py");
+        const std::string tableVerifier=ReadSource("tools/EnvironmentDatabaseBuilder/verify_live_database.py");
+        Require(Contains(inspector, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d") &&
+                Contains(tableVerifier, "if sha not in TABLE_LAYOUT_SHA256") &&
+                Contains(tableVerifier, "--executable"),
+            "Arden's location fingerprint is inspectable without claiming unverified DBC table globals");
     }
     {
         // The hold defended a confirmed zone against a frame with no world evidence. It

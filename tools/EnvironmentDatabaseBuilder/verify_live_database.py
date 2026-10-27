@@ -12,6 +12,14 @@ from pathlib import Path
 from build_database import parse_dbc
 from inspect_client import KNOWN_SHA256
 
+# The following table-global addresses were read and compared only for these
+# Ascension builds. A known 3.3.5 location-provider fingerprint is not enough
+# to assume its live DBC globals or table contents match this layout.
+TABLE_LAYOUT_SHA256 = {
+    'e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6',
+    'f4b9f6fce448194638c5b1c751483090a48c597c6272237f31b3d151b50d3114',
+}
+
 
 class ReadOnlyClient:
     def __init__(self, pid, executable):
@@ -111,14 +119,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('client', type=Path)
     parser.add_argument('--pid', type=int, required=True)
+    parser.add_argument('--executable', type=Path,
+                        help='client executable to fingerprint (defaults to client/Ascension.exe)')
     parser.add_argument('--archive', type=Path)
     parser.add_argument('--export-live', type=Path)
     parser.add_argument('--output', type=Path, default=Path('build/client-research/live-database-verification.json'))
     args = parser.parse_args()
-    executable = args.client / 'Ascension.exe'
+    if args.executable:
+        executable = args.executable
+        if not executable.is_absolute() and not executable.exists():
+            executable = args.client / executable
+    else:
+        executable = args.client / 'Ascension.exe'
     sha = hashlib.sha256(executable.read_bytes()).hexdigest()
     if sha not in KNOWN_SHA256:
-        raise ValueError('Unsupported executable fingerprint; table globals must be researched first')
+        raise ValueError('Unsupported executable fingerprint; location getter signatures must be researched first')
+    if sha not in TABLE_LAYOUT_SHA256:
+        raise ValueError('Location fingerprint is recognized, but live table globals have not been verified for this executable')
     import pefile
     pe = pefile.PE(str(executable))
     checks = {0x119CA0: bytes.fromhex('a1 10 08 bd 00 8b 0d'), 0x119640: bytes.fromhex('a1 8c 08 bd 00 8b 0d')}

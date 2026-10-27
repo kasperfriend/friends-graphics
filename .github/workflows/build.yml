@@ -111,6 +111,32 @@ jobs:
         shell: pwsh
         run: ./tools/ValidateShaders.ps1
 
+      - name: Atmosphere and cloud device regressions
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $output = & cmd.exe /c tools\Test-Atmosphere.cmd 2>&1
+          $result = $LASTEXITCODE
+          $text = ($output | Out-String).Trim()
+          Write-Output $text
+          if ($result -eq 77) {
+            Write-Output "::notice title=Atmosphere regressions skipped::Hosted runner lacks a stable D3D9 HAL/software adapter for GPU tests"
+            exit 0
+          }
+          $tail = (($text -split "`r?`n") | Select-Object -Last 40) -join "`n"
+          if ($result -ne 0) {
+            $progress = ($output | Where-Object { "$_" -match '^PASS ' } | Select-Object -Last 20) -join "`n"
+            $diagnostics = ($output | Where-Object { "$_" -match '(?i)(error C[0-9]+|fatal error|LINK :|FAIL |SKIP:|HRESULT=|INTZ|D3D9 adapter|Running atmosphere|process exited with code)' }) -join "`n"
+            if (![string]::IsNullOrWhiteSpace($progress)) { $diagnostics = "$progress`n$diagnostics" }
+            if ([string]::IsNullOrWhiteSpace($diagnostics)) { $diagnostics = $tail }
+            $flat = ($diagnostics -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+            Write-Output "::error title=Atmosphere regression failed::$flat"
+            exit $result
+          }
+          $passed = ($output | Where-Object { $_ -match '^PASS ' }) -join '; '
+          $passed = $passed -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+          Write-Output "::notice title=Atmosphere regressions::$passed"
+
       - name: Water device regressions
         if: matrix.configuration == 'Release'
         shell: pwsh

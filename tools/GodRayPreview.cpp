@@ -179,9 +179,9 @@ int main(int argc, char** argv)
     std::string out = "godrays.png";
     Scene scene = BuildScene();
     SourceLook look;
-    // amount = sun.z (strength * glow) in the shaders; the previous pass used 1.28.
-    // 0.45 = the shipped look (GodRayCore defaults, shader gain 0.35 on sun.z*glow).
-    float newStrength = 0.45f;
+    // Preview-scale source intensity; the in-game pass additionally applies the
+    // selected sun/moon strength, glow slider and clear-air visibility floor.
+    float newStrength = 0.30f;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         if (!std::strcmp(argv[i], "--out")) out = argv[i + 1];

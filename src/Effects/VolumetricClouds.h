@@ -10,6 +10,7 @@
 #include "../Core/DeviceHealth.h"
 #include "CloudDynamics.h"
 #include "../Core/FrameContext.h"
+#include "../Environment/ManualColor.h"
 
 namespace renderer
 {
@@ -64,20 +65,21 @@ namespace renderer
         float multiScatterEccentricity = .55f;
 
         // March shape: the step grows with distance because a 1400-unit-thick
-        // layer seen edge-on is 25000 units long, and the width of the fade
-        // band that hides the layer's edge at the horizon.
+        // layer can stretch to the 200000-unit march limit at the horizon; the
+        // fade hides the final edge without erasing shallow upward views.
         float baseStep = 70.f;
         float stepGrowth = .010f;
         float coarseScale = 3.f;
         float jitter = .25f;
         float horizonFade = .018f;
-        float maxDistance = 26000.f;
+        float maxDistance = 200000.f;
 
         // Aerial perspective: how much of the sky's own haze colour a cloud
         // picks up over the draw distance. Distance has to wash a cloud out,
         // or near and far clouds read as the same contrast and the deck
         // looks like a backdrop painting.
         float aerialPerspective = .60f;
+        manualcolor::Override manualCloudColor{};
 
         // Cloud shadows and rays share a small map on a fixed world plane.
         // It stores the unitless cloud amount of the column between each
@@ -122,6 +124,9 @@ namespace renderer
         void ForgetWeather() noexcept { m_dynamics.ForgetWeather(); }
         IDirect3DTexture9* GetCloudTexture() const { return m_cloudTexture.Get(); }
         IDirect3DTexture9* GetShadowTexture() const { return m_shadowValid ? m_shadowTexture.Get() : nullptr; }
+        // A screen-direction recovery has no world cloud texture or shadow to
+        // publish to later atmosphere/ray passes; the composite is already on target.
+        bool UsedSkyFallback() const { return m_skyFallbackUsed; }
         Vec4 ShadowArea() const { return m_shadowArea; }
         Vec4 LightProjection() const { return m_lightProjection; }
         // True once the noise fields exist on the GPU. Generation happens on
@@ -132,6 +137,11 @@ namespace renderer
     private:
         VolumetricClouds() = default;
         bool EnsureShaders(IDirect3DDevice9* device);
+        bool EnsureSkyFallbackShaders(IDirect3DDevice9* device);
+        bool RenderSkyFallback(IDirect3DDevice9* device, const FrameContext& frameContext,
+                               IDirect3DSurface9* targetSurface,
+                               const VolumetricCloudSettings& settings,
+                               const CloudMotion& motion);
         bool EnsureResources(IDirect3DDevice9* device, uint32_t fullWidth, uint32_t fullHeight);
         bool EnsureFields(IDirect3DDevice9* device);
         void DrawScreenQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
@@ -153,10 +163,13 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_marchShader;
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_shadowShader;
+        ComPtr<IDirect3DPixelShader9> m_skyFallbackShader;
+        ComPtr<IDirect3DPixelShader9> m_skyCompositeShader;
         std::wstring m_logPath;
         std::wstring m_shaderCacheDir;
         std::wstring m_cachePath;
         RetryGate m_shaderRetry;
+        RetryGate m_skyShaderRetry;
         bool m_fieldsReady = false;
         IDirect3DDevice9* m_fieldsDevice = nullptr;
         // Detached generation can outlive a device transition (or DLL object
@@ -166,11 +179,13 @@ namespace renderer
         std::shared_ptr<FieldWorkerState> m_fieldWorker = std::make_shared<FieldWorkerState>();
         uint64_t m_fieldsWaitStart = 0; // first frame that skipped for the worker
         bool m_shadowValid = false;
+        bool m_skyFallbackUsed = false;
         Vec4 m_shadowArea;
         Vec4 m_lightProjection;
         uint32_t m_shadowSize = 0;
         float m_shadowOrigin[2] = { 0.f, 0.f };
         uint64_t m_renderFrames = 0;
+        std::string m_lastDiagnosticState;
         uint64_t m_windSequence = 0;
         FrameClock m_clock;
         CloudDynamics m_dynamics;

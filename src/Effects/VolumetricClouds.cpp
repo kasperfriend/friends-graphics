@@ -11,6 +11,7 @@
 #include <thread>
 #include "../D3D9/CelestialStability.h"
 #include "../D3D9/DepthCapture.h"
+#include "../D3D9/CelestialTracker.h"
 #include "../D3D9/ScopedPassState.h"
 #include "../D3D9/ShaderBytecodeCache.h"
 #include "../Diagnostics/PerformanceProfiler.h"
@@ -72,6 +73,17 @@ float4 moonControl:register(c25);   // x=vertical UV radius, y=depth tolerance, 
 // across its whole face; an angled floor, wall or roof at the same distance is
 // not. See src/Effects/CelestialDiscGate.h - change both in the same commit.
 float4 moonSprite:register(c26);
+float4 sunDisc:register(c27); // xy=tracked sun centre, z=radius squared (negative when invalid)
+float4 sunDepth:register(c28); // x=horizontal scale, y=minimum qualifying raw depth
+float SunDiscPixel(float2 uv,float rawDepth) {
+ float2 delta=float2((uv.x-sunDisc.x)*sunDepth.x,uv.y-sunDisc.y);
+ float disc=step(dot(delta,delta),sunDisc.z);
+ // Normal D3D depth grows with distance: clear sky and the far sun are at or
+ // beyond the tracked depth; nearer scene geometry remains an occluder. The
+ // depth threshold and disc radius squared are precomputed by the host.
+ float depthOpen=step(sunDepth.y,rawDepth);
+ return disc*depthOpen;
+}
 float SpriteVerified(float2 centre) {
  if(moonSprite.w<.5) return 0;
  float2 h=float2(moonSprite.z/max(moonControl.w,1e-3),0),v=float2(0,moonSprite.z);
@@ -122,7 +134,10 @@ float Density(float3 p,float h,float erosion) {
    // leaves the silhouette smooth or hollows the cloud out; real cumulus
    // shred at the edges and stay solid in the middle.
    float strength=erosion*(1-d*.7);
-   d=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*strength)/max(1-erosion,1e-4));
+   float eroded=saturate((d-lerp(1-dfbm,dfbm,saturate(h*4))*strength)/max(1-erosion,1e-4));
+   // Preserve enough of the thin lower cloud boundary for grazing rays;
+   // full detail erosion fades in through the base instead of erasing it.
+   d=lerp(d,eroded,saturate(h*10));
  }
  // More water higher up, modulated by the weather map's variation channel.
  return d*lerp(.45,1.25,saturate(h*1.4))*lerp(.75,1.2,w.b)*lighting.x;
@@ -178,7 +193,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float moonPixel=MoonDiscPixel(uv,rawDepth,sceneViewDepth,
                                withinDisc>.5?SpriteVerified(moonDisc.xy):0);
- float sceneLimit=hasGeometry>.5&&moonPixel<.5?sceneViewDepth*viewLength:layer.w;
+ float sunPixel=SunDiscPixel(uv,rawDepth);
+ // Both tracked billboards are sky radiance rather than terrain depth. The
+ // cloud composite will still shade the sun; this only lets the march pass
+ // through the sprite's finite depth instead of treating it as an occluder.
+ float sceneLimit=hasGeometry>.5&&moonPixel<.5&&sunPixel<.5
+     ?sceneViewDepth*viewLength:layer.w;
 
  // Intersect fixed world-height planes, never a camera-centred dome.
  // Horizontal rays inside the layer march to the scene/distance limit;
@@ -195,14 +215,12 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  exitDistance=min(exitDistance,min(layer.w,sceneLimit));
  if(exitDistance<=entry) return float4(0,0,0,1);
 
- // The horizon fade stops a grazing ray from UNDER the deck stretching the
- // layer to infinity and showing a hard band; from inside or above the
- // layer, downward rays are the whole point, so it is gated on the region.
- float fade=(region.w>.5&&region.w<1.5)?smoothstep(0,max(groundColor.w,.001),ray.z):1;
- // The march stops at its own limit long before the layer does: fade there
- // too or the cut shows up as a straight edge across the sky.
- fade*=1-smoothstep(layer.w*.55,layer.w,entry);
- if(fade<=.002) return float4(0,0,0,1);
+ // Do not attenuate by view pitch: that made the deck vanish over a band of
+ // upward angles. The fixed-height intersection and scene depth already decide
+ // which rays can hit clouds; only soften the configured finite-distance edge.
+ float fadeWidth=max(groundColor.w,.1);
+ float fadeStart=layer.w*(1-fadeWidth);
+ float fade=1-smoothstep(fadeStart,layer.w,entry);
 
  // Phase depends only on the angle between the ray and the light, so all
  // three scattering octaves are evaluated once per pixel.
@@ -217,9 +235,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float3 phase=float3(single,lerp(1,single,lobe.z),lerp(1,single,lobe.z*lobe.z));
 
  // A step tied to world length, never to the span divided by the step
- // count: the layer is 1400 units thick but 25000 long near the horizon,
- // and dividing the span is what turns detail into putty. It grows with
- // distance because far clouds cover fewer pixels.
+ // count: the layer is 1400 units thick but can stretch 200000 units along
+ // shallow rays. Distance growth preserves detail while keeping that far field affordable.
  float baseStep=max(stepping.x,(exitDistance-entry)/max(depthRange.w*3,1));
  float jitter=.5+(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)*stepping.w;
  float t=entry+jitter*baseStep;
@@ -240,10 +257,14 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    // sites here cost about seventy instruction slots of the 512 budget.
    float density=Density(p,h,mode<0?0:scales.w);
    if(mode<0) {
-     // Big strides until something is hit, then step back and integrate
-     // properly. Doubles the usable range for free.
-     if(density>0) { mode=0; t-=stepLength*stepping.z; }
-     else t+=stepLength*stepping.z;
+     // Coarse probes remain below a feature-sized stride even when t is far
+     // away. A pitch change can move the deck hundreds of kilometres out;
+     // letting t*growth skip whole cells made the entire sky blink off.
+     // The remaining-span term still guarantees progress within the budget.
+     float coarseStride=max(min(stepLength*stepping.z,.75/scales.x),
+                            (exitDistance-t)/(depthRange.w-i));
+     if(density>0) { mode=0; t=max(entry,t-coarseStride); }
+     else t+=coarseStride;
    } else {
      if(density<=0) {
        mode+=1;
@@ -423,6 +444,14 @@ float4 moonControl:register(c10);  // x=vertical UV radius, y=depth tolerance, z
 // Same contract as the march's c26 (see CelestialDiscGate.h).
 float4 moonSprite:register(c12);
 float4 mediumControl:register(c11); // x=how far the camera is under water (0 air, 1 submerged)
+float4 sunDisc:register(c13); // xy=tracked sun centre, z=radius squared (negative when invalid)
+float4 sunDepth:register(c14); // x=horizontal scale, y=minimum qualifying raw depth
+float SunDiscPixel(float2 pixelUv,float rawDepth) {
+ float2 delta=float2((pixelUv.x-sunDisc.x)*sunDepth.x,pixelUv.y-sunDisc.y);
+ float disc=step(dot(delta,delta),sunDisc.z);
+ float depthOpen=step(sunDepth.y,rawDepth);
+ return disc*depthOpen;
+}
 float MoonDiscPixel(float2 pixelUv,float rawDepth,float viewDepth,float sprite) {
  float2 delta=(pixelUv-moonDisc.xy)*float2(moonControl.w,1);
  float disc=1-step(moonControl.x*moonControl.x,dot(delta,delta));
@@ -446,6 +475,11 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float4 scene=tex2D(sceneMap,uv);
  if(depthRange.w>3.5) return tex2D(shadowMap,uv).rrra;
  float linearRaw=tex2D(depthMap,uv).r;
+ // The sampled scene is the client's original frame, before this cloud pass.
+ // Tracked sun pixels are composited like sky, not returned unchanged: a cloud
+ // over the sun must attenuate the original disc rather than leave a bright
+ // unshaded cut-out. The depth helper below keeps the tracked disc from being
+ // mistaken for foreground geometry.
 
  // Depth-aware upsample of the quarter-resolution march. The deck is no
  // longer sky-only - it is clipped by the scene, so a cloud in front of a
@@ -476,13 +510,19 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float withinDisc=1-step(length(discDelta),moonControl.x*1.75);
  float sprite=withinDisc>.5?SpriteVerified(moonDisc.xy):0;
  float moonCentre=MoonDiscPixel(uv,linearRaw,centreZ,sprite);
+ // The verified near moon sprite is not a depth occluder for the cloud march,
+ // but it is still part of the scene radiance: composite clouds over it just
+ // as over the tracked sun, rather than leaving a clear circular cut-out.
+ float sunCentre=SunDiscPixel(uv,linearRaw);
  float4 moonTaps=float4(MoonDiscPixel(tapUv0,taps.x,tapZ.x,sprite),MoonDiscPixel(tapUv1,taps.y,tapZ.y,sprite),
                         MoonDiscPixel(tapUv2,taps.z,tapZ.z,sprite),MoonDiscPixel(tapUv3,taps.w,tapZ.w,sprite));
- // The moon's near billboard depth is a sprite, not a foreground surface.
- // Treat only those matched pixels as clear sky while choosing the four
- // depth-aware taps, so it cannot pull a dark ring through the low-res cloud.
- float filterCentreZ=lerp(centreZ,clearZ,moonCentre);
- float4 filterTapZ=lerp(tapZ,float4(clearZ,clearZ,clearZ,clearZ),moonTaps);
+ float4 sunTaps=float4(SunDiscPixel(tapUv0,taps.x),SunDiscPixel(tapUv1,taps.y),
+                       SunDiscPixel(tapUv2,taps.z),SunDiscPixel(tapUv3,taps.w));
+ // Tracked sprite depths are not cloud/terrain edges. Treat matched sun pixels
+ // as clear sky for upsample weighting, while still applying the cloud colour
+ // and transmittance to the original sun pixel below.
+ float filterCentreZ=lerp(centreZ,clearZ,max(moonCentre,sunCentre));
+ float4 filterTapZ=lerp(tapZ,float4(clearZ,clearZ,clearZ,clearZ),max(moonTaps,sunTaps));
  float4 weight=float4((1-fr.x)*(1-fr.y),fr.x*(1-fr.y),(1-fr.x)*fr.y,fr.x*fr.y)
               /(.002+abs(filterTapZ-filterCentreZ)/max(filterCentreZ,1));
  float4 cloud=(tex2D(cloudMap,base)*weight.x+tex2D(cloudMap,base+float2(lowTexel.x,0))*weight.y
@@ -490,7 +530,7 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
               /max(dot(weight,1),1e-5);
 
  if(depthRange.w>.5&&depthRange.w<1.5) return float4(cloud.rgb,1);
- float sky=max(step((depthRange.z+1)*.5,linearRaw),moonCentre);
+ float sky=max(step((depthRange.z+1)*.5,linearRaw),max(moonCentre,sunCentre));
  // The deck is air, and this pass is the last thing that touches a pixel before the frame is
  // graded. Water writes no depth, so a liquid pixel reads as sky to the march above and the
  // deck lands on it at full air brightness - which is right when the camera is standing in
@@ -499,7 +539,8 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  // own camera column, and a cloud painted over it afterwards is a full-brightness cloud ten
  // yards under water. The ramp gates it, so above water this is an exact identity and the
  // sea keeps the deck it has always had.
- float submergedWater=step(.35,tex2D(waterMask,uv).r)*saturate(mediumControl.x);
+ float4 waterData=tex2D(waterMask,uv);
+ float submergedWater=step(.35,max(waterData.r,waterData.g))*saturate(mediumControl.x);
  cloud.rgb*=1-submergedWater;
  cloud.a=lerp(cloud.a,1,submergedWater);
  // Reconstruct where this pixel is in the world and read the deck's
@@ -534,6 +575,128 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float3 composited=lit*saturate(cloud.a)+max(cloud.rgb,0);
  composited+=(frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))))-.5)/255.0;
  return float4(composited,scene.a);
+})HLSL";
+
+// Scalar reference distance used only to size the sky-only noise field. It is
+// deliberately independent of planet radius and camera position. The former
+// 1500-yard anchor sampled less than one default shape tile across a typical
+// view and, once the world weather map was removed from this direction-only
+// pass, often read as one empty/soft mass. 6000 yards gives roughly two
+// default feature widths across the reported view without planet-scale tiling.
+constexpr float kSkyFallbackReferenceDistance = 6000.f;
+// A subdued, cool floor for the cloud deck alone. Some zones report zero
+// native ambient after sunset; clouds should become dark blue, not disappear
+// into mathematically black radiance. Manual tint is applied after this floor.
+constexpr float kCloudSkyAmbientFloor[3] = {.08f,.10f,.14f};
+constexpr float kCloudGroundAmbientFloor[3] = {.05f,.065f,.09f};
+
+// Emergency sky-only field for the narrow case where the current VIEW
+// orientation is independently corroborated but its eye has aged out. This
+// samples cloud shape on a direction sphere: no camera/world position, layer
+// intersection, depth reconstruction, or world shadow can enter this pass.
+// Its full-resolution composite below is separately restricted to clear sky
+// and explicitly leaves native-water pixels untouched.
+const char* kCloudSkyFallbackSource = R"HLSL(
+sampler3D shapeMap:register(s0); sampler3D detailMap:register(s1);
+float4 invView0:register(c0); float4 invView1:register(c1); float4 invView2:register(c2);
+float4 projection:register(c3); // x=P00, y=P11
+float4 scales:register(c4);     // x=direction-space feature scale, y=shape aspect, z=direction-space detail scale, w=detail strength
+float4 motion:register(c5);     // xy=shape offset
+float4 phase:register(c6);      // xy=detail offset, z=shape slice, w=detail slice
+float4 coverage:register(c7);   // x=climate-resolved mean coverage, y=climate-resolved mean cloud type
+float4 material:register(c8);   // rgb=zone/manual tint, w=density * opacity
+float4 lighting:register(c9);   // xyz=world light direction, w=confirmed silver-lining strength
+float4 volume:register(c10);    // xy=vertical shape/detail span; normalized by each feature size
+float4 shear:register(c11);     // xy=shape shear, zw=detail shear across the virtual depth
+float Gradient(float h,float type) {
+ float stratus=saturate(h*14.2857)*saturate((.32-h)*8.3333);
+ float cumulus=saturate((h-.08)*4.1667)*saturate((.96-h)*2.6316);
+ float tower=saturate((h-.04)*7.1429)*saturate((1-h)*5.5556);
+ return stratus*saturate(1-type*2)+cumulus*saturate(1-abs(type-.5)*2)+tower*saturate(type*2-1);
+}
+float Density(float3 ray,float h,float cov,float cloudType,out float shapeSignal,out float detailSignal) {
+ shapeSignal=0;detailSignal=1;
+ float gradient=Gradient(h,cloudType);
+ if(cov*gradient<=0)return 0;
+ // Treat the fallback as a short direction-space volume, not a single flat
+ // noise sample. Its normalized vertical coordinate spans the configured
+ // deck thickness; no camera eye, world point, or layer intersection enters.
+ float3 shapePoint=float3(ray.x*scales.x+shear.x*h,ray.y*scales.x+shear.y*h,
+     ray.z*scales.x*max(scales.y,.05)+(h-.5)*volume.x*max(scales.y,.05))
+     +float3(motion.xy,phase.z);
+ float4 shape=tex3Dlod(shapeMap,float4(shapePoint,0));
+ float fbm=shape.g*.625+shape.b*.25+shape.a*.125;
+ shapeSignal=saturate((shape.r-fbm+1)/max(2-fbm,1e-4));
+ float density=shapeSignal*gradient;
+ density=saturate((density-1+cov)/max(cov,1e-4))*(.45+.55*cov);
+ if(density<=0)return 0;
+ if(scales.w>0) {
+  float3 detailPoint=float3(ray.x*scales.z+shear.z*h,ray.y*scales.z+shear.w*h,
+      ray.z*scales.z+(h-.5)*volume.y)+float3(phase.xy,phase.w);
+  float3 detail=tex3Dlod(detailMap,float4(detailPoint,0)).rgb;
+  float dfbm=detail.r*.625+detail.g*.25+detail.b*.125;
+  detailSignal=dfbm;
+  float erosion=scales.w*(1-density*.7);
+  density=saturate((density-lerp(1-dfbm,dfbm,h)*erosion)/max(1-scales.w,1e-4));
+ }
+ return density;
+}
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+ float2 focal=max(projection.xy,.01);
+ float3 viewRay=normalize(float3((uv.x*2-1)/focal.x,(1-uv.y*2)/focal.y,1));
+ float3 ray=normalize(viewRay.x*invView0.xyz+viewRay.y*invView1.xyz+viewRay.z*invView2.xyz);
+ // This recovery has no trusted world XY for the spatial weather map. A
+ // direction-space weather projection invented one front across the whole
+ // dome, which produced broad, disconnected blobs as the view turned. The
+ // host supplies the climate/native-weather-resolved mean for this sky-only
+ // approximation; the normal world march keeps the full spatial weather map.
+ float cov=saturate(coverage.x);
+ float cloudType=saturate(coverage.y);
+ float sun=saturate(dot(ray,normalize(lighting.xyz)));
+ float transmittance=1;
+ float3 scattered=0;
+ // Sixteen samples resolve the narrow stratus profile and the detail erosion
+ // across the configured depth; eight left only two or three samples in low clouds.
+ [loop] for(int i=0;i<16;++i) {
+  float h=(i+.5)/16;
+  float shapeSignal,detailSignal;
+  float density=Density(ray,h,cov,cloudType,shapeSignal,detailSignal);
+  if(density>0) {
+   float sampleTransmittance=exp(-density*max(material.w,0)*2.25/16);
+   float deposited=transmittance*(1-sampleTransmittance);
+   float bodyLight=.75+.25*saturate(shapeSignal);
+   float detailLight=.95+.05*saturate(detailSignal);
+   float verticalLight=.75+.25*h;
+   float3 cloudColour=lerp(material.rgb,float3(1,1,1),.12+.20*h)*verticalLight*bodyLight*detailLight;
+   cloudColour+=pow(sun,16)*lighting.w*.16*(.5+.5*h)*saturate(1-density);
+   scattered+=max(cloudColour,0)*deposited;
+   transmittance*=sampleTransmittance;
+  }
+ }
+ // The full-resolution composite is already restricted to clear sky and
+ // excludes native water. A second ray-elevation fade would turn clouds off
+ // merely because the player pitches through the horizon.
+ return float4(max(scattered,0),saturate(transmittance));
+})HLSL";
+
+// Screen-only composite: no inverse view, held eye, world reconstruction or
+// shadow sampler. The clear-depth test preserves all geometry; the coverage
+// mask is an unconditional exclusion so this recovery cannot alter the water
+// shader or turn a native-water pixel into a cloud pixel.
+const char* kCloudSkyCompositeSource = R"HLSL(
+sampler2D sceneMap:register(s0); sampler2D cloudMap:register(s1);
+sampler2D depthMap:register(s2); sampler2D waterMask:register(s3);
+float4 depthRange:register(c0); // x=viewport MinZ, y=depth range, z=MaxZ
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+ float4 scene=tex2D(sceneMap,uv);
+ float rawDepth=tex2D(depthMap,uv).r;
+ float sky=step((depthRange.z+1)*.5,rawDepth);
+ float4 water=tex2D(waterMask,uv);
+ float waterPixel=step(.35,max(water.r,water.g));
+ float active=sky*(1-waterPixel);
+ float4 cloud=tex2D(cloudMap,uv);
+ float3 composited=scene.rgb*saturate(cloud.a)+max(cloud.rgb,0);
+ return float4(lerp(scene.rgb,composited,active),scene.a);
 })HLSL";
 
 bool Compile(IDirect3DDevice9* d,const char* source,const std::wstring& cacheDir,IDirect3DPixelShader9** shader)
@@ -725,8 +888,15 @@ void VolumetricClouds::Configure(const std::wstring& basePath)
  m_settings.coarseScale=float(std::clamp(read(L"CoarseStepScale",3),1,12));
  m_settings.jitter=std::clamp(read(L"JitterPercent",25),0,100)*.01f;
  m_settings.horizonFade=std::clamp(read(L"HorizonFadePermille",18),1,400)*.001f;
- m_settings.maxDistance=float(std::clamp(read(L"MaxDistance",26000),2000,200000));
+ int maxDistance=read(L"MaxDistance",200000);
+ // 26,000 was the shipped pre-sky-view default. Upgrade that legacy value
+ // so existing installs gain the near-horizon reach as well as fresh installs.
+ if(maxDistance==26000)maxDistance=200000;
+ m_settings.maxDistance=float(std::clamp(maxDistance,2000,200000));
  m_settings.aerialPerspective=std::clamp(read(L"AerialPerspectivePercent",60),0,100)*.01f;
+ m_settings.manualCloudColor=manualcolor::Override::FromPercent(
+     read(L"ManualColorRed",255),read(L"ManualColorGreen",255),read(L"ManualColorBlue",255),
+     read(L"ManualColorAlphaPercent",0),read(L"ManualColorBrightnessPercent",100));
  m_settings.groundShadows=read(L"GroundShadows",1)!=0;
  m_settings.groundShadowStrength=std::clamp(read(L"GroundShadowPercent",55),0,100)*.01f;
  m_settings.groundShadowExtent=float(std::clamp(read(L"GroundShadowExtent",24000),2000,80000));
@@ -789,8 +959,9 @@ void VolumetricClouds::Reset(IDirect3DDevice9* device)
  m_cloudSurface.Reset();m_cloudTexture.Reset();
  m_shadowSurface.Reset();m_shadowTexture.Reset();m_shadowValid=false;
  m_marchShader.Reset();m_compositeShader.Reset();m_shadowShader.Reset();
+ m_skyFallbackShader.Reset();m_skyCompositeShader.Reset();m_skyFallbackUsed=false;
  // A new device (or a resize, which is rare) is worth one more attempt.
- m_shaderRetry.Succeed();
+ m_shaderRetry.Succeed();m_skyShaderRetry.Succeed();
  m_clock.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_shadowSize=0;
  // The noise fields live in D3DPOOL_MANAGED and survive a device reset, so
@@ -826,6 +997,26 @@ bool VolumetricClouds::EnsureShaders(IDirect3DDevice9* d)
  {
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   out<<"clouds: pixel shader creation failed; retrying after cooldown\n";
+ }
+ return false;
+}
+
+bool VolumetricClouds::EnsureSkyFallbackShaders(IDirect3DDevice9* d)
+{
+ if(m_skyFallbackShader&&m_skyCompositeShader)return true;
+ const uint64_t now=GetTickCount64();
+ if(!m_skyShaderRetry.Open(now))return false;
+ bool ok=true;
+ if(!m_skyFallbackShader)
+  ok=Compile(d,kCloudSkyFallbackSource,m_shaderCacheDir,m_skyFallbackShader.GetAddressOf());
+ if(ok&&!m_skyCompositeShader)
+  ok=Compile(d,kCloudSkyCompositeSource,m_shaderCacheDir,m_skyCompositeShader.GetAddressOf());
+ if(ok){m_skyShaderRetry.Succeed();return true;}
+ const bool firstFailure=m_skyShaderRetry.Fail(now,kOptionalPassRetryMs);
+ if(firstFailure&&!m_logPath.empty())
+ {
+  std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
+  out<<"clouds: optional sky-only shader creation failed; normal world cloud shaders remain available; retrying after cooldown\n";
  }
  return false;
 }
@@ -922,21 +1113,258 @@ void VolumetricClouds::DrawScreenQuad(IDirect3DDevice9* d,uint32_t w,uint32_t h)
  d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V));
 }
 
+bool VolumetricClouds::RenderSkyFallback(IDirect3DDevice9* d,const FrameContext& f,
+                                              IDirect3DSurface9* target,
+                                              const VolumetricCloudSettings& settings,
+                                              const CloudMotion& motion)
+{
+ if(!d||!target||!EnsureSkyFallbackShaders(d))return false;
+ const float p00=f.projUnpack[2],p11=f.projUnpack[3];
+ if(!std::isfinite(p00)||!std::isfinite(p11)||p00<=.01f||p11<=.01f)return false;
+
+ // The branch never reads the retained eye, reconstructs a world point, or
+ // publishes a shadow. Its only camera input is the fresh, corroborated VIEW
+ // rotation and a previously validated focal scale used to form a screen ray.
+ m_shadowValid=false;m_shadowArea={};m_lightProjection={};
+ ScopedPassState state(d);
+ DepthCapture::Instance().RawSetDepth(d,nullptr);
+ for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,
+             D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,
+             D3DRS_ALPHABLENDENABLE})d->SetRenderState(s,FALSE);
+ d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);
+ d->SetRenderState(D3DRS_COLORWRITEENABLE,0xF);
+ d->SetVertexShader(nullptr);
+
+ D3DVIEWPORT9 low{0,0,m_lowWidth,m_lowHeight,0,1};
+ {
+  ScopedGpuTimer timer(d,GpuPerfStage::VolumetricClouds);
+  d->SetViewport(&low);d->SetRenderTarget(0,m_cloudSurface.Get());
+  d->SetPixelShader(m_skyFallbackShader.Get());
+  d->SetTexture(0,m_shapeTexture.Get());SetSampler(d,0,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
+  d->SetTexture(1,m_detailTexture.Get());SetSampler(d,1,D3DTEXF_LINEAR,D3DTADDRESS_WRAP);
+  const float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},
+                         {f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},
+                         {f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};
+  const float projection[4]={p00,p11,0,0};
+  const float featureSize=std::max(settings.featureSize,1.f);
+  const float detailSize=std::max(settings.detailSize,1.f);
+  // Screen-direction recovery has no eye with which to intersect the world
+  // layer or weather map. Use a fixed, medium angular footprint for shape and
+  // detail: 1500 yards made one broad/soft patch in the reported view, while
+  // planet-radius scaling made many tiny camera-following tiles. The user
+  // feature/detail sizes still control their relative scales.
+  const float angularScale=kSkyFallbackReferenceDistance/featureSize;
+  const float detailAngularScale=kSkyFallbackReferenceDistance/detailSize;
+  const float scales[4]={angularScale,std::max(settings.shapeAspect,.05f),
+                         detailAngularScale,std::clamp(settings.detailStrength,0.f,.9f)};
+  const float motionConstants[4]={float(motion.shape[0]),float(motion.shape[1]),0.f,0.f};
+  const float phase[4]={float(motion.detail[0]),float(motion.detail[1]),
+                        float(motion.shapeZ),float(motion.detailZ)};
+  const float depthSpan=std::clamp(settings.thickness,100.f,12000.f);
+  const float volume[4]={depthSpan/featureSize,depthSpan/detailSize,0.f,0.f};
+  const float windRadians=settings.windAngle*.01745329252f;
+  const float shear[4]={std::cos(windRadians)*settings.windShear,
+                        std::sin(windRadians)*settings.windShear,
+                        std::cos(windRadians)*settings.windShear*featureSize/detailSize,
+                        std::sin(windRadians)*settings.windShear*featureSize/detailSize};
+  const float fallbackCoverage=SkyFallbackCoverage(settings);
+  const float fallbackCloudType=SkyFallbackCloudType(settings);
+  const float coverageConstants[4]={fallbackCoverage,fallbackCloudType,0.f,0.f};
+  const auto& envFog=EnvironmentFogCapture::Instance().State();
+  const float ambientLevel=std::clamp(std::max(std::clamp(f.daylightFactor,0.f,1.f),
+                                                   std::clamp(f.moonlightFactor,0.f,1.f)*.5f),.2f,1.f);
+  const float skyR=envFog.colorValid?envFog.ambientFogColor[0]:.42f;
+  const float skyG=envFog.colorValid?envFog.ambientFogColor[1]:.56f;
+  const float skyB=envFog.colorValid?envFog.ambientFogColor[2]:.80f;
+  const auto color=manualcolor::Multiplier(settings.manualCloudColor);
+  const float material[4]={std::clamp(std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0])*color[0],0.f,2.f),
+                           std::clamp(std::max(skyG*ambientLevel,kCloudSkyAmbientFloor[1])*color[1],0.f,2.f),
+                           std::clamp(std::max(skyB*ambientLevel,kCloudSkyAmbientFloor[2])*color[2],0.f,2.f),
+                           std::clamp(settings.density,0.f,3.f)*std::clamp(settings.opacity,0.f,3.f)};
+  Vec3 light{0,0,1};
+  if(f.directLightValid&&IsUsableCelestialDirection(f.directLightDirectionWorld))
+   light=Normalize(f.directLightDirectionWorld);
+  const float silver=f.directLightValid&&f.directLightDirectionConfirmed
+      ?std::clamp(settings.silverLining,0.f,3.f):0.f;
+  const float lighting[4]={light.x,light.y,light.z,silver};
+  d->SetPixelShaderConstantF(0,inv[0],3);d->SetPixelShaderConstantF(3,projection,1);
+  d->SetPixelShaderConstantF(4,scales,1);d->SetPixelShaderConstantF(5,motionConstants,1);
+  d->SetPixelShaderConstantF(6,phase,1);d->SetPixelShaderConstantF(7,coverageConstants,1);
+  d->SetPixelShaderConstantF(8,material,1);d->SetPixelShaderConstantF(9,lighting,1);
+  d->SetPixelShaderConstantF(10,volume,1);d->SetPixelShaderConstantF(11,shear,1);
+  DrawScreenQuad(d,m_lowWidth,m_lowHeight);
+  for(DWORD stage=0;stage<3;++stage)d->SetTexture(stage,nullptr);
+ }
+
+ D3DVIEWPORT9 full{0,0,m_fullWidth,m_fullHeight,0,1};
+ {
+  ScopedGpuTimer timer(d,GpuPerfStage::VolumetricClouds);
+  d->SetViewport(&full);d->SetRenderTarget(0,target);
+  d->SetPixelShader(m_skyCompositeShader.Get());
+  d->SetTexture(0,f.sceneColor);SetSampler(d,0,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
+  d->SetTexture(1,m_cloudTexture.Get());SetSampler(d,1,D3DTEXF_LINEAR,D3DTADDRESS_CLAMP);
+  d->SetTexture(2,f.depthTexture);SetSampler(d,2,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
+  // A missing mask reads as zero, just like the normal composite; a captured
+  // native-water mask makes every covered pixel an exact scene-color identity.
+  d->SetTexture(3,f.waterMaskTexture);SetSampler(d,3,D3DTEXF_POINT,D3DTADDRESS_CLAMP);
+  const float depthRange[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,0.f};
+  d->SetPixelShaderConstantF(0,depthRange,1);
+  DrawScreenQuad(d,m_fullWidth,m_fullHeight);
+  for(DWORD stage=0;stage<4;++stage)d->SetTexture(stage,nullptr);
+ }
+ m_skyFallbackUsed=true;
+ return true;
+}
+
 bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3DSurface9* target)
 {
  m_shadowValid=false;
+ m_skyFallbackUsed=false;
  VolumetricCloudSettings settings=m_settings;
  if(!settings.enabled)return false;
- if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor)return false;
- // The deck is anchored in WORLD space at absolute heights, so it is only
- // correct from the camera that is actually being rendered. In a city the
- // terrain capture never latches while everything overhead is culled, and the
- // frame used to fall back to whatever fixed-function transform it found
- // first - the deck then rotated with the mouse instead of with the world
- // ("the clouds are dragged along with the camera"). The capture now says
- // plainly when it could not corroborate the pose; draw nothing rather than
- // draw the sky from a camera the player has already left.
- if(f.cameraPoseStale)return false;
+ const bool diagnosticFrame=(++m_renderFrames==1||m_renderFrames%600==0);
+ const bool freshCameraPose=f.cameraValid&&!f.cameraPoseStale;
+ const bool freshOrientation=f.cameraOrientationFresh;
+ const bool knownWorldDraw=f.worldTerrainSeenThisFrame||f.worldWaterSeenThisFrame;
+ const bool normalWorldPath=CanRenderWorldClouds(f.worldScene.state,knownWorldDraw,freshCameraPose);
+ const bool skyFallback=!normalWorldPath&&
+     CanRenderSkyCloudFallback(f.worldScene.state,freshOrientation,freshCameraPose);
+ float thickness=std::max(settings.thickness,20.f);
+ float layerTop=settings.baseAltitude+thickness;
+ const char* cameraLayer=skyFallback?"screen-only":"unavailable";
+ auto refreshLayerDiagnostic=[&]{
+  thickness=std::max(settings.thickness,20.f);
+  layerTop=settings.baseAltitude+thickness;
+  if(!skyFallback&&freshCameraPose)
+   cameraLayer=f.cameraPosition.z<settings.baseAltitude?"below":
+       (f.cameraPosition.z>layerTop?"above":"inside");
+ };
+ if(!skyFallback&&freshCameraPose)refreshLayerDiagnostic();
+ auto logState=[&](const char* event){
+  const bool stateChanged=m_lastDiagnosticState!=event;
+  if((!diagnosticFrame&&!stateChanged)||m_logPath.empty())return;
+  m_lastDiagnosticState=event;
+  std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
+  if(!out)return;
+  const auto& celestialTrack = CelestialTracker::Instance().Diagnostics();
+  out<<"clouds "<<event<<" scene="<<int(f.worldScene.state)
+     <<" worldDraw="<<(knownWorldDraw?1:0)<<" freshCamera="<<(freshCameraPose?1:0)
+     <<" orientationFresh="<<(freshOrientation?1:0)
+     <<" skyFallbackEligible="<<(skyFallback?1:0)
+     <<" cameraStale="<<(f.cameraPoseStale?1:0)<<" eyeCurrent="<<(f.cameraEyeObservedThisFrame?1:0)
+     <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
+     <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
+     <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" clientPoseRead="<<(f.clientCameraPoseReadStatus?f.clientCameraPoseReadStatus:"unknown")
+     <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
+     <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
+     <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'
+     <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
+     <<" skyCandidates="<<int(f.skyPoseCandidateCount)
+     <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
+     <<" skyEyeCandidate="<<(f.skyEyeCandidateObserved?1:0)
+     <<'('<<f.skyEyeCandidateDistanceYards<<"yd)"
+     <<" skyObserve="<<f.SkyObservationName()
+     <<" camCap=("<<f.cameraCaptureAttempts<<','<<f.cameraCaptureAccepted<<','
+     <<f.cameraCaptureStateRejected<<','<<f.cameraCaptureNonFinite<<','
+     <<f.cameraCaptureNotFullFrame<<','<<f.cameraCaptureProjectionRejected<<','
+     <<f.cameraCaptureBasisRejected<<','<<f.cameraCaptureContinuityRejected<<','
+     <<f.cameraCaptureProjectionScaleMatches<<','<<f.cameraCaptureProjectionEyeMatches<<','
+     <<f.cameraCaptureProjectionFallbackCandidates<<')';
+  if(f.skyProjectionAvailable)
+   out<<" skyProj="<<f.skyProjection[0]<<','<<f.skyProjection[1]<<','
+      <<f.skyProjection[2]<<','<<f.skyProjection[3]<<','
+      <<f.skyProjection[4]<<','<<f.skyProjection[5];
+  else
+   out<<" skyProj=none";
+  out<<" skyProjCacheOk="<<(f.skyProjectionCacheUsable?1:0)
+     <<" skyProjCache=("<<f.skyProjectionCacheAgeMs<<','
+     <<f.skyProjectionCacheScaleX<<','<<f.skyProjectionCacheScaleY<<')'
+     <<" skyProjVp=("<<f.skyProjectionCacheMinZ<<','<<f.skyProjectionCacheMaxZ<<';'
+     <<f.skyProjectionObservedMinZ<<','<<f.skyProjectionObservedMaxZ<<')'
+     <<" skyProjCached="<<(f.skyProjectionFallbackUsed?1:0)
+     <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
+     <<" base="<<settings.baseAltitude<<" top="<<layerTop;
+  if(skyFallback)out<<" cameraZ=unused";
+  else out<<" cameraZ="<<f.cameraPosition.z;
+  out<<" directLight=(moon="<<(f.directLightIsMoon?1:0)<<",strength="<<f.directLightIntensity
+     <<",day="<<f.daylightFactor<<",night="<<f.moonlightFactor
+     <<",confirmed="<<(f.directLightDirectionConfirmed?1:0)
+     <<",dir="<<f.directLightDirectionWorld.x<<','<<f.directLightDirectionWorld.y<<','
+     <<f.directLightDirectionWorld.z<<",color="<<f.directionalLightColor.x<<','
+     <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')';
+  if(skyFallback){
+   const auto& fieldMotion=m_dynamics.Motion();
+   const auto& fog=EnvironmentFogCapture::Instance().State();
+   const auto tint=manualcolor::Multiplier(settings.manualCloudColor);
+   const float fallbackAmbientLevel=std::clamp(std::max(std::clamp(f.daylightFactor,0.f,1.f),
+                                                          std::clamp(f.moonlightFactor,0.f,1.f)*.5f),.2f,1.f);
+   const float fallbackSkyR=fog.colorValid?fog.ambientFogColor[0]:.42f;
+   const float fallbackSkyG=fog.colorValid?fog.ambientFogColor[1]:.56f;
+   const float fallbackSkyB=fog.colorValid?fog.ambientFogColor[2]:.80f;
+   const float fallbackCloudR=std::max(fallbackSkyR*fallbackAmbientLevel,kCloudSkyAmbientFloor[0]);
+   const float fallbackCloudG=std::max(fallbackSkyG*fallbackAmbientLevel,kCloudSkyAmbientFloor[1]);
+   const float fallbackCloudB=std::max(fallbackSkyB*fallbackAmbientLevel,kCloudSkyAmbientFloor[2]);
+   out<<" skyField=(samples=16,coverageSource=climate-mean,coverage="
+      <<SkyFallbackCoverage(settings)<<",type="<<SkyFallbackCloudType(settings)
+      <<",typeBias="<<settings.cloudType<<",weatherField=unused"
+      <<",feature="<<settings.featureSize<<",detail="<<settings.detailSize
+      <<",angularScale="<<kSkyFallbackReferenceDistance/std::max(settings.featureSize,1.f)
+      <<",detailAngularScale="<<kSkyFallbackReferenceDistance/std::max(settings.detailSize,1.f)
+      <<",shapeDepth="<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.featureSize,1.f)
+      <<",detailDepth="<<std::clamp(settings.thickness,100.f,12000.f)/std::max(settings.detailSize,1.f)
+      <<",density="<<settings.density<<",opacity="<<settings.opacity
+      <<",weather="<<int(settings.weather)<<",wind="<<settings.windSpeed
+      <<",windAngle="<<settings.windAngle<<",windShear="<<settings.windShear
+      <<",evolution="<<settings.evolutionSpeed<<",shapePhase="<<fieldMotion.shapeZ
+      <<",detailPhase="<<fieldMotion.detailZ<<",weatherPhaseUnused="<<fieldMotion.weather[0]<<','
+      <<fieldMotion.weather[1]<<",ambientValid="<<(fog.colorValid?1:0)
+      <<",ambientLevel="<<fallbackAmbientLevel<<",ambient="<<fog.ambientFogColor[0]<<','
+      <<fog.ambientFogColor[1]<<','<<fog.ambientFogColor[2]
+      <<",cloudAmbient="<<fallbackCloudR<<','<<fallbackCloudG<<','<<fallbackCloudB
+      <<",manual="<<tint[0]<<','<<tint[1]<<','<<tint[2]<<')';
+  }
+  out<<" trackedSun="<<(f.sunBillboardObserved?1:0)<<'('<<f.sunBillboardScreenX<<','
+     <<f.sunBillboardScreenY<<','<<f.sunBillboardViewDepth<<')'
+     <<" trackedMoon="<<(f.moonBillboardObserved?1:0)<<'('<<f.moonBillboardScreenX<<','
+     <<f.moonBillboardScreenY<<','<<f.moonBillboardViewDepth<<')'
+     <<" bodyTrackValid=(sun="<<(CelestialTracker::Instance().Sun().worldDirectionValid?1:0)
+     <<",moon="<<(CelestialTracker::Instance().Moon().worldDirectionValid?1:0)<<')'
+     <<" celTrack=("<<celestialTrack.drawCalls<<','<<celestialTrack.primitiveRejected<<','
+     <<celestialTrack.vertexShaderDraws<<','<<celestialTrack.pixelShaderDraws<<','
+     <<celestialTrack.fixedFunctionDraws<<','<<celestialTrack.alphaTestDraws<<','
+     <<celestialTrack.texturedDraws<<','<<celestialTrack.unknownTextureSize<<','
+     <<celestialTrack.largeTextureDraws<<','<<celestialTrack.moonTextureDraws<<','
+     <<celestialTrack.sunSignatureDraws<<','<<celestialTrack.sunAcceptedDraws<<','
+     <<celestialTrack.moonSignatureDraws<<','<<celestialTrack.moonAcceptedDraws<<')'
+     <<" moonCandidate=("<<celestialTrack.moonTransformCandidates<<','
+     <<celestialTrack.lastMoonWorldScaleSq<<','
+     <<(celestialTrack.lastMoonViewTranslationZero?1:0)<<','
+     <<celestialTrack.lastMoonViewTranslationZ<<','
+     <<celestialTrack.lastMoonCameraSpaceZ<<')'
+     <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
+     <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
+     <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
+     <<" sunRaw=("<<f.sunDiscExpectedRawDepth<<','<<f.sunDiscRawDepthTolerance<<')'
+     <<" moonDisc="<<(f.moonDiscValid?1:0)<<'('<<f.moonDiscScreenX<<','<<f.moonDiscScreenY<<','<<f.moonDiscViewDepth<<')'
+     <<"\n";
+ };
+ // World-space marching still needs the unchanged fresh-eye gate. The
+ // separate screen-direction recovery is allowed only for a confirmed
+ // in-world frame with a current, corroborated orientation; menu and unknown
+ // scenes never reach it.
+ if(!normalWorldPath&&!skyFallback){
+  const bool lacksWorldContext=f.worldScene.state==WorldSceneState::OutOfWorld||
+      (!knownWorldDraw&&f.worldScene.state!=WorldSceneState::InWorld);
+  logState(lacksWorldContext?"skip=world-gate":"skip=stale-camera");return false;
+ }
+ if(!d||!target||!f.cameraValid||!f.depthAvailable||!f.depthTexture||!f.sceneColor){
+  logState("skip=frame-input");return false;
+ }
+ if(skyFallback&&(!std::isfinite(f.projUnpack[2])||!std::isfinite(f.projUnpack[3])||
+                  f.projUnpack[2]<=.01f||f.projUnpack[3]<=.01f)){
+  logState("skip=sky-projection");return false;
+ }
 
  // Advance before the clear-sky early-out: an empty deck must still be
  // able to develop a storm. The clock bounds loading/focus gaps.
@@ -948,13 +1376,23 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  static_cast<CloudShape&>(settings)=m_dynamics.Update(m_settings,f.environment,
      settings.zoneClouds,settings.weatherClouds?settings.weather:CloudWeather::Clear,
      settings.weatherClouds?settings.weatherStrength:0.f,settings.transitionSeconds,dt,f.wind);
- if(settings.coverage<=0.f||settings.density<=0.f)return false;
+ if(!skyFallback)refreshLayerDiagnostic();
+ if(settings.coverage<=0.f||settings.density<=0.f){logState("skip=empty-cloud-field");return false;}
  const auto& motion=m_dynamics.Motion();
 
  D3DSURFACE_DESC desc{};
- if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)||!EnsureShaders(d)||!EnsureFields(d))return false;
+ if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height)){
+  logState("skip=resources");return false;
+ }
+ if(skyFallback){
+  if(!EnsureFields(d)||!RenderSkyFallback(d,f,target,settings,motion)){
+   logState("skip=sky-fallback-resources");return false;
+  }
+  logState("render=sky-fallback");
+  return true;
+ }
+ if(!EnsureShaders(d)||!EnsureFields(d)){logState("skip=resources");return false;}
 
- const float thickness=std::max(settings.thickness,20.f);
  const float featureSize=std::max(settings.featureSize,1.f);
  const float detailSize=std::max(settings.detailSize,1.f);
  const float weatherSize=std::max(settings.weatherSize,1.f);
@@ -982,9 +1420,19 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  const float skyR=envFog.colorValid?envFog.ambientFogColor[0]:.42f;
  const float skyG=envFog.colorValid?envFog.ambientFogColor[1]:.56f;
  const float skyB=envFog.colorValid?envFog.ambientFogColor[2]:.80f;
+ const auto cloudColourMultiplier=manualcolor::Multiplier(settings.manualCloudColor);
  const float daylight=std::clamp(f.daylightFactor,0.f,1.f);
  const float moonlight=std::clamp(f.moonlightFactor,0.f,1.f);
  const float ambientLevel=std::clamp(std::max(daylight,moonlight*.5f),.2f,1.f);
+ // Apply day/night scaling once, and keep a small zone-independent floor for
+ // clouds alone when native ambient is black. The floor is deliberately
+ // subdued and cool, then still passes through the user's manual tint.
+ const float cloudSkyR=std::max(skyR*ambientLevel,kCloudSkyAmbientFloor[0]);
+ const float cloudSkyG=std::max(skyG*ambientLevel,kCloudSkyAmbientFloor[1]);
+ const float cloudSkyB=std::max(skyB*ambientLevel,kCloudSkyAmbientFloor[2]);
+ const float cloudGroundR=std::max(skyR*ambientLevel*.62f,kCloudGroundAmbientFloor[0]);
+ const float cloudGroundG=std::max(skyG*ambientLevel*.52f,kCloudGroundAmbientFloor[1]);
+ const float cloudGroundB=std::max(skyB*ambientLevel*.45f,kCloudGroundAmbientFloor[2]);
  // Direct light comes from the stabilized signal when the compositor
  // filled it: the disc-draw signal (celestialIntensity) toggles as the
  // camera pans the disc in and out of frame and made the deck blink
@@ -1031,20 +1479,44 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
  m_shadowArea={m_shadowOrigin[0],m_shadowOrigin[1],1.f/shadowExtent,CloudShadowElevationFade(lightDir[2])};
  m_lightProjection={slopeX,slopeY,settings.baseAltitude,thickness};
 
- if((++m_renderFrames%600)==0&&!m_logPath.empty()){
+ if(diagnosticFrame&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   // `sun` is the world direction the deck is lit from and the direction the
   // ground shadow is projected along, and `stable` says where it came from
   // (1 = the tracked disc, 0 = the captured light constant). Panning the
   // camera must not move `sun`; if it does, this line is where to see it.
-  out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" coverage="<<settings.coverage
+  // An upward ray from above this fixed world-Z layer correctly misses it.
+  // Record the camera/layer relationship and forward pitch so a sky-only
+  // disappearance at a floating map can be distinguished from a render gate.
+  out<<"clouds base="<<settings.baseAltitude<<" thickness="<<thickness<<" top="<<layerTop
+     <<" cameraLayer="<<cameraLayer<<" forwardZ="<<f.inverseView.m[2][2]
+     <<" coverage="<<settings.coverage
      <<" type="<<settings.cloudType<<" feature="<<settings.featureSize
      <<" weather="<<int(settings.weather)<<" wet="<<m_dynamics.WeatherAmount()
      <<" evolution="<<settings.evolutionSpeed<<" phase="<<motion.shapeZ
      <<" density="<<settings.density<<" steps="<<settings.sampleCount<<" region="<<region
      <<" moon="<<(moon?1:0)<<" intensity="<<directIntensity<<" shadows="<<(shadowsOn?1:0)
-     <<" sun=("<<lightDir[0]<<','<<lightDir[1]<<','<<lightDir[2]<<") stable="<<(f.directLightValid?1:0)
+     <<" sun=("<<lightDir[0]<<','<<lightDir[1]<<','<<lightDir[2]<<") directionSource="
+     <<(f.directLightDirectionConfirmed?"tracked":"overhead")
      <<" shade="<<shadowStrength
+     <<" lightInput=(moon="<<(moon?1:0)<<",intensity="<<directIntensity
+     <<",day="<<daylight<<",night="<<moonlight<<",color="<<f.directionalLightColor.x<<','
+     <<f.directionalLightColor.y<<','<<f.directionalLightColor.z<<')'
+     <<" ambient=("<<skyR<<','<<skyG<<','<<skyB<<") ambientLevel="<<ambientLevel
+     <<" cloudAmbient=("<<cloudSkyR<<','<<cloudSkyG<<','<<cloudSkyB<<')'
+     <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
+     <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
+     <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" clientPoseRead="<<(f.clientCameraPoseReadStatus?f.clientCameraPoseReadStatus:"unknown")
+     <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
+     <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
+     <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'
+     <<" eyeAgeMs="<<f.cameraEyeAgeMs<<" poseSource="<<int(f.cameraPoseSource)
+     <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
+     <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'
+     <<" sunDisc="<<(f.sunDiscValid?1:0)<<'('<<f.sunDiscScreenX<<','<<f.sunDiscScreenY<<','<<f.sunDiscViewDepth<<')'
+     <<" sunRaw=("<<f.sunDiscExpectedRawDepth<<','<<f.sunDiscRawDepthTolerance<<')'
+     <<" moonDisc="<<(f.moonDiscValid?1:0)<<'('<<f.moonDiscScreenX<<','<<f.moonDiscScreenY<<','<<f.moonDiscViewDepth<<')'
      <<" camera=("<<f.cameraPosition.x<<','<<f.cameraPosition.y<<','<<f.cameraPosition.z<<")\n";
  }
 
@@ -1089,7 +1561,16 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
                             (f.moonDiscValid&&f.moonDiscViewDepth>.05f&&!f.cameraPoseStale)?1.f:0.f};
  const float c14[4]={kBaseExtinction*settings.density*settings.opacity,settings.lightAbsorption,
                      settings.sunIntensity*directIntensity,
-                     settings.ambientIntensity*ambientLevel*ambientOcclusion};
+                     settings.ambientIntensity*ambientOcclusion};
+ const float sunViewDepth=f.sunDiscValid?f.sunDiscViewDepth:1.f;
+ const float sunDepthScale=std::max(f.depthMaxZ-f.viewport.MinZ,0.f);
+ const float expectedSunDepth=f.viewport.MinZ+
+     renderer::discgate::RawDepth(f.projUnpack[0],f.projUnpack[1],sunViewDepth)*sunDepthScale;
+ const float sunDepthTolerance=renderer::discgate::RawTolerance(f.projUnpack[0],f.projUnpack[1],
+     sunViewDepth,std::max(.75f,sunViewDepth*.04f))*sunDepthScale;
+ const float sunDisc[4]={f.sunDiscScreenX,f.sunDiscScreenY,f.sunDiscValid?.000484f:-1.f,0.f};
+ const float sunDepth[4]={f.projUnpack[3]/std::max(f.projUnpack[2],1e-4f),
+                          expectedSunDepth-sunDepthTolerance,0.f,0.f};
 
  ScopedPassState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
@@ -1146,11 +1627,18 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   const float c6[4]={f.viewport.MinZ,f.depthMaxZ-f.viewport.MinZ,f.depthMaxZ,
                      float(std::clamp(settings.sampleCount,8u,160u))};
   const float c13[4]={std::max(settings.baseStep,1.f),settings.stepGrowth,settings.coarseScale,settings.jitter};
-  const float c15[4]={sunR,sunG,sunB,settings.powder};
-  const float c16[4]={skyR*ambientLevel,skyG*ambientLevel,skyB*ambientLevel,settings.silverLining};
-  // Ground bounce keeps the tuned relationship with whatever palette the
-  // zone pushed: cooler, much darker, never a flat grey.
-  const float c17[4]={skyR*ambientLevel*.62f,skyG*ambientLevel*.52f,skyB*ambientLevel*.45f,settings.horizonFade};
+  const float c15[4]={sunR*cloudColourMultiplier[0],sunG*cloudColourMultiplier[1],
+                      sunB*cloudColourMultiplier[2],settings.powder};
+  // Day/night scaling and the low-ambient floor are already applied once
+  // in cloudSky/cloudGround. c14.w is a gain only; putting ambientLevel in
+  // both places squared the night dimmer and made clouds nearly black.
+  const float c16[4]={cloudSkyR*cloudColourMultiplier[0],
+                      cloudSkyG*cloudColourMultiplier[1],
+                      cloudSkyB*cloudColourMultiplier[2],settings.silverLining};
+  // Ground bounce keeps the zone palette, with its own lower night fill.
+  const float c17[4]={cloudGroundR*cloudColourMultiplier[0],
+                      cloudGroundG*cloudColourMultiplier[1],
+                      cloudGroundB*cloudColourMultiplier[2],settings.horizonFade};
   const float c18[4]={settings.forwardScatter,settings.backwardScatter,settings.multiScatterEccentricity,
                       float(uint32_t(settings.debugMode))};
   const float a=settings.multiScatterAttenuation,bContribution=settings.multiScatterContribution;
@@ -1161,21 +1649,22 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(2,inv[0],3);
   d->SetPixelShaderConstantF(5,c5,1);d->SetPixelShaderConstantF(6,c6,1);
   // Absolute world heights: never recenter the visible layer on the viewer.
-  const float layer[4]={settings.baseAltitude,settings.baseAltitude+thickness,1.f/thickness,settings.maxDistance};
+  const float layer[4]={settings.baseAltitude,layerTop,1.f/thickness,settings.maxDistance};
   d->SetPixelShaderConstantF(7,layer,1);d->SetPixelShaderConstantF(8,c8,1);
   d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);
   d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(23,c23,1);
   d->SetPixelShaderConstantF(24,moonDisc,1);d->SetPixelShaderConstantF(25,moonControl,1);
   d->SetPixelShaderConstantF(26,moonSprite,1);
+  d->SetPixelShaderConstantF(27,sunDisc,1);d->SetPixelShaderConstantF(28,sunDepth,1);
   d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);
   d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(16,c16,1);
   d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,c18,1);
   // Aerial perspective colour: the zone's own sky, lifted toward white,
   // so the haze belongs to the palette the atmosphere pass is already
   // using instead of being a second opinion about what distance looks like.
-  const float c22[4]={(skyR+(1.f-skyR)*.28f)*ambientLevel,
-                      (skyG+(1.f-skyG)*.28f)*ambientLevel,
-                      (skyB+(1.f-skyB)*.28f)*ambientLevel,
+  const float c22[4]={(skyR+(1.f-skyR)*.28f)*ambientLevel*cloudColourMultiplier[0],
+                      (skyG+(1.f-skyG)*.28f)*ambientLevel*cloudColourMultiplier[1],
+                      (skyB+(1.f-skyB)*.28f)*ambientLevel*cloudColourMultiplier[2],
                       1.f/std::max(settings.maxDistance*.5f,1.f)};
   d->SetPixelShaderConstantF(19,c19,1);d->SetPixelShaderConstantF(20,c20,1);
   d->SetPixelShaderConstantF(22,c22,1);
@@ -1213,9 +1702,12 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
   d->SetPixelShaderConstantF(12,moonSprite,1);
   const float c11[4]={std::clamp(f.underwaterRamp,0.f,1.f),0,0,0};
   d->SetPixelShaderConstantF(11,c11,1);
+  d->SetPixelShaderConstantF(13,sunDisc,1);d->SetPixelShaderConstantF(14,sunDepth,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   for(DWORD s=0;s<5;++s)d->SetTexture(s,nullptr);
  }
+ if(m_lastDiagnosticState.rfind("skip=",0)==0)logState("render=active");
+ else m_lastDiagnosticState="render=active";
  return true;
 }
 }

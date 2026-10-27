@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include "../Core/MathTypes.h"
 
 namespace renderer
@@ -37,6 +38,43 @@ namespace renderer
         });
     }
 
+    inline bool IsUsableCelestialDirection(const Vec3& direction) noexcept
+    {
+        const float length = Length(direction);
+        return std::isfinite(direction.x) && std::isfinite(direction.y) && std::isfinite(direction.z) &&
+            std::isfinite(length) && length > 0.25f;
+    }
+
+    // The moon is a camera-relative billboard. Its world direction may only be
+    // recomputed with a camera pose accepted for THIS frame; FrameContext keeps
+    // the last raw view matrix around while the current pose is stale. In that
+    // case the last independently confirmed celestial direction is better
+    // evidence than multiplying the billboard by yesterday's camera rotation.
+    // With no confirmed direction yet, fail closed so sky-pose selection falls
+    // back to camera continuity instead of comparing a pose with stale data.
+    inline bool ResolveCameraRelativeWorldDirection(
+        const Vec3& viewDirection, const float view[4][4], bool cameraPoseFresh,
+        const Vec3& retainedWorldDirection, bool retainedDirectionValid,
+        Vec3& worldDirection) noexcept
+    {
+        if (cameraPoseFresh && view)
+        {
+            const Vec3 current = ViewDirectionToWorld(viewDirection, view);
+            if (IsUsableCelestialDirection(current))
+            {
+                worldDirection = current;
+                return true;
+            }
+        }
+        if (retainedDirectionValid && IsUsableCelestialDirection(retainedWorldDirection))
+        {
+            worldDirection = Normalize(retainedWorldDirection);
+            return true;
+        }
+        worldDirection = {};
+        return false;
+    }
+
     struct CelestialLightInput
     {
         // Deliberately no disc visibility/kind: those depend on the camera,
@@ -53,6 +91,11 @@ namespace renderer
         // can read near zero at a cool-tinted noon, and a bright colour
         // must not let those factors reclassify noon as moonlit.
         float directionalLuminance = 0.0f;
+        // Persistent world-direction evidence, not per-frame billboard visibility.
+        // When only one body's direction has been corroborated, strong scene
+        // day/night factors can identify it even if its color is very blue.
+        bool sunDirectionConfirmed = false;
+        bool moonDirectionConfirmed = false;
         float deltaSeconds = 1.0f / 60.0f;
     };
 
@@ -66,6 +109,45 @@ namespace renderer
         bool isMoon = false;
         float targetIntensity = 0.0f;
     };
+
+    enum class VisibleCelestialSource : std::uint8_t { None, Sun, Moon };
+
+    // Pick the screen-space glare origin using the already-stabilized scene
+    // light, not the tint-only day/night estimate. A cool, bright noon can
+    // make moonlightFactor exceed daylightFactor even while the sun is plainly
+    // the dominant source; following that weaker estimate pins the halo to the
+    // moon and creates a second pale "sun" elsewhere in the sky.
+    inline VisibleCelestialSource ChooseVisibleCelestialSource(
+        bool sunVisible, bool moonVisible, bool moonDominant) noexcept
+    {
+        if (moonVisible && (moonDominant || !sunVisible))
+            return VisibleCelestialSource::Moon;
+        if (sunVisible)
+            return VisibleCelestialSource::Sun;
+        return VisibleCelestialSource::None;
+    }
+
+    // Project a view-space point with the actual row-vector D3D projection
+    // matrix, including off-centre terms. Most WoW captures are symmetric, for
+    // which this reduces to the familiar P00/P11 formula; using the complete
+    // matrix keeps a tracked disc on the client-painted pixel if the viewport
+    // projection is shifted or otherwise not perfectly symmetric.
+    inline bool ProjectViewPosition(const Vec3& point, const float projection[4][4],
+                                   float& screenX, float& screenY) noexcept
+    {
+        const float clipX = point.x * projection[0][0] + point.y * projection[1][0] +
+                            point.z * projection[2][0] + projection[3][0];
+        const float clipY = point.x * projection[0][1] + point.y * projection[1][1] +
+                            point.z * projection[2][1] + projection[3][1];
+        const float clipW = point.x * projection[0][3] + point.y * projection[1][3] +
+                            point.z * projection[2][3] + projection[3][3];
+        if (!std::isfinite(clipX) || !std::isfinite(clipY) ||
+            !std::isfinite(clipW) || clipW <= 1e-4f)
+            return false;
+        screenX = .5f + .5f * clipX / clipW;
+        screenY = .5f - .5f * clipY / clipW;
+        return std::isfinite(screenX) && std::isfinite(screenY);
+    }
 
     class CelestialLightStabilizer
     {
@@ -85,6 +167,18 @@ namespace renderer
                 isMoon = false;
             else if (input.moonlight > input.daylight + 0.25f)
                 isMoon = true;
+
+            // A saturated blue moon can have directional luminance above the
+            // old sun threshold. If only one body has a real, retained world
+            // direction, strong scene factors identify that track without
+            // following the billboard's current visibility. This only resolves
+            // an otherwise ambiguous body choice; it cannot invent a direction.
+            if (input.moonDirectionConfirmed && !input.sunDirectionConfirmed &&
+                input.moonlight > input.daylight + 0.25f)
+                isMoon = true;
+            else if (input.sunDirectionConfirmed && !input.moonDirectionConfirmed &&
+                     input.daylight > input.moonlight + 0.25f)
+                isMoon = false;
 
             // Magnitudes are still gates, not strength multipliers. Taking
             // either period avoids extinguishing the light inside the body
@@ -132,39 +226,46 @@ namespace renderer
     // a camera turn become a slow sunset (at 2.5 degrees/s it could remove
     // every ground shadow in under a minute). Never integrate that source.
     // Until a body is observed, use a deterministic overhead approximation;
-    // afterwards retain its own direction while its billboard is culled.
+    // the first real track eases into that approximation instead of making
+    // the world light jump on the exact frame its billboard enters the view.
+    // Once confirmed, retain that body's direction while its billboard is culled.
     class CelestialDirectionStabilizer
     {
     public:
         Vec3 Update(const Vec3* confirmed, bool moon, float dt) noexcept
         {
             const unsigned body = moon ? 1u : 0u;
+            if (!m_initialized[body])
+            {
+                m_direction[body] = {0, 0, 1};
+                m_initialized[body] = true;
+            }
             if (!confirmed)
-                return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
+                return m_direction[body];
             const float length = Length(*confirmed);
             if (!std::isfinite(length) || length < 1e-4f)
-                return m_primed[body] ? m_direction[body] : Vec3{0, 0, 1};
+                return m_direction[body];
+
             const Vec3 target = *confirmed * (1.f / length);
-            if (!m_primed[body])
-            {
-                m_direction[body] = target;
-                m_primed[body] = true;
-            }
-            else
-            {
-                // Follow actual celestial movement, including server time
-                // changes. A culled disc never supplies a replacement target.
-                const float step = std::clamp(dt, 0.f, .25f);
-                const float alpha = 1.f - std::exp(-step / .35f);
-                const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
-                if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
-            }
+            // A newly observed billboard is real direction evidence, but its
+            // first frame is also when the old overhead approximation was
+            // replaced abruptly. Use the same bounded, view-independent
+            // response for acquisition and subsequent server-time motion.
+            const float step = std::clamp(dt, 0.f, .25f);
+            const float alpha = 1.f - std::exp(-step / .35f);
+            const Vec3 blended = m_direction[body] * (1.f - alpha) + target * alpha;
+            if (Length(blended) > 1e-4f) m_direction[body] = Normalize(blended);
+            m_confirmed[body] = true;
             return m_direction[body];
         }
+
+        bool HasConfirmed(bool moon) const noexcept { return m_confirmed[moon ? 1u : 0u]; }
         void Reset() noexcept { *this = CelestialDirectionStabilizer{}; }
+
     private:
-        Vec3 m_direction[2]{};
-        bool m_primed[2]{};
+        Vec3 m_direction[2]{{0, 0, 1}, {0, 0, 1}};
+        bool m_initialized[2]{};
+        bool m_confirmed[2]{};
     };
 
     // ---- which body's direction a consumer inside the draw stream takes ----------

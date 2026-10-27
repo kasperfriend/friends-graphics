@@ -334,6 +334,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             waterreflection::Finish();
             volume::Finish(d);
             weathervisuals::Present(d, true);
+            renderer::FrameContext::Current().ResetWorldSceneFrame();
             FlushLog();
             return originalPresent(d, a, b, w, r);
         }
@@ -355,6 +356,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
             renderer::ShouldHoldLocation(worldFrame, environment.Location().valid));
     }
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
+    volume::ResolveWorldSceneForFrame();
     {
         // A confirmed zone change is also a weather discontinuity. The detected
         // precipitation (and the deck coverage it forces) described the place the
@@ -456,7 +458,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         ReloadWindTuning();stage(tWind);
         watereffect::ReloadTuning();stage(tWater);
         distancefog::ReloadTuning();stage(tFog);
-        volume::ReloadTuning();stage(tVolume);
+        volume::ReloadTuning();distancefog::ApplyRuntimeState();stage(tVolume);
         celestialhighlight::ReloadTuning(g_basePath);stage(tCelestial);
         nativeshadowdiag::ReloadEnhancement();stage(tShadow);
         renderer::LocalLightManager::Instance().ReloadTuning();stage(tLights);
@@ -495,7 +497,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;
-        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
+        if(down&&!tuningKeyDown&&renderer::FrameContext::Current().wowFocused){renderer::locationtuning::InvalidateScopedKeys();ReloadWindTuning();watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();distancefog::ApplyRuntimeState();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);waterdiag::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini, EnvironmentProfiles.ini and water diagnostic settings");}
         tuningKeyDown=down;
     }
     // All scene/cloud rendering has finished. Publish ONE wind snapshot for
@@ -538,6 +540,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
         try { waterreflection::Finish(); } catch (...) {}
         try { volume::Finish(d); } catch (...) {}
     }
+    renderer::FrameContext::Current().ResetWorldSceneFrame();
     const HRESULT presentResult = originalPresent(d,a,b,w,r);
     // One write per frame for every line the frame produced: see Log.
     FlushLog();
@@ -608,6 +611,7 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
     return originalClear(d,n,rect,flags,color,z,stencil);
 }
 using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+using SetTransformFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
 using SetRenderTargetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
 using SetVertexDeclarationFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
@@ -616,6 +620,7 @@ using SetVertexShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexSha
 using SetPixelShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
 
 SetRenderStateFn originalSetRenderState = nullptr;
+SetTransformFn originalSetTransform = nullptr;
 SetRenderTargetFn originalSetRenderTarget = nullptr;
 SetTextureFn originalSetTexture = nullptr;
 SetVertexDeclarationFn originalSetVertexDeclaration = nullptr;
@@ -641,6 +646,22 @@ HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
     if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay)
     {
         try { renderer::LocalLightManager::Instance().OnLightEnable(index, enabled); } catch (...) {}
+    }
+    return hr;
+}
+
+HRESULT WINAPI HookedSetTransform(IDirect3DDevice9* d, D3DTRANSFORMSTATETYPE state, const D3DMATRIX* matrix)
+{
+    const HRESULT hr = originalSetTransform(d, state, matrix);
+    if (SUCCEEDED(hr) && matrix && (state == D3DTS_VIEW || state == D3DTS_PROJECTION) &&
+        !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !volume::ready && ((volume::enabled && volume::active) || watereffect::NeedsScene()))
+    {
+        // The shader camera and fixed-function transforms are not synchronized
+        // on every draw. Observe immediately when VIEW/PROJECTION changes, before
+        // a later moon/UI pass can replace them; the same full-frame, projection,
+        // viewport, rigid-basis, eye-leash and selector checks still decide use.
+        try { renderer::CameraCapture::Instance().ObserveSkyFallback(d); } catch (...) {}
     }
     return hr;
 }
@@ -755,7 +776,8 @@ struct WaterDrawObservation {
 };
 WaterDrawObservation ObserveWaterForDraw(IDirect3DDevice9* d,bool requested) {
     const bool effectNeedsMaterial=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled;
-    if(g_drawingOverlay||(!requested&&!effectNeedsMaterial))return {};
+    const bool nativeCoverageNeedsMaterial=watereffect::NeedsNativeWaterCoverage();
+    if(g_drawingOverlay||(!requested&&!effectNeedsMaterial&&!nativeCoverageNeedsMaterial))return {};
     return {renderer::water::Observe(d),true};
 }
 
@@ -769,13 +791,17 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
-    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDraw(d,t,start,n);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDraw(d,t,start,n);});
@@ -824,13 +850,17 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     // Observe native state before effect setup, including with F11 OFF.
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
-    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexed(d,t,base,min,vertices,start,n);});
@@ -880,12 +910,16 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawUP(d,t,n,v,stride);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawUP(d,t,n,v,stride);});
@@ -903,7 +937,6 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
-    weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawUP(d,t,n,v,stride);
     gameDrawRan=true;
@@ -936,12 +969,16 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay)weathervisuals::ObserveWorldDraw();
+    if(!g_drawingOverlay)volume::ResolveWorldSceneForFrame();
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     const bool updateShadows=!g_drawingOverlay&&volume::ShouldUpdateShadows();
     const bool captureGround=n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed;
-    const bool needsWaterMaterial=updateShadows||captureGround;
+    const bool needsWaterMaterial=updateShadows||captureGround||watereffect::NeedsNativeWaterCoverage();
     const auto waterDraw=ObserveWaterForDraw(d,needsWaterMaterial);
+    if(waterDraw.available&&watereffect::NeedsNativeWaterCoverage())
+        watereffect::CaptureNativeWaterCoverage(d,waterDraw.material,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     if(updateShadows){
         auto dc=ClassifyCurrentDraw(d,t,n,waterDraw.available?&waterDraw.material:nullptr);
         volume::ShadowDraw(d,dc,[&]{gameDrawRan=true;return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
@@ -959,7 +996,6 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     watereffect::Scope water(d,g_drawingOverlay||tint.changed,
         waterDraw.available?&waterDraw.material:nullptr);
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
-    weathervisuals::ObserveWorldDraw();
     weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     gameDrawRan=true;
@@ -989,6 +1025,7 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     if(!VirtualProtect(&table[16],95*sizeof(void*),PAGE_READWRITE,&oldProtect))return;
 
     InterlockedExchangePointer(&table[42],reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[44],reinterpret_cast<void*>(HookedSetTransform));
     InterlockedExchangePointer(&table[51],reinterpret_cast<void*>(HookedSetLight));
     InterlockedExchangePointer(&table[53],reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37],reinterpret_cast<void*>(HookedSetRenderTarget));
@@ -1055,6 +1092,7 @@ void HookDevice(IDirect3DDevice9* device)
     originalReset=reinterpret_cast<ResetFn>(table[16]);
     originalPresent=reinterpret_cast<PresentFn>(table[17]);
     originalSetRenderTarget=reinterpret_cast<SetRenderTargetFn>(table[37]);
+    originalSetTransform=reinterpret_cast<SetTransformFn>(table[44]);
     originalSetRenderState=reinterpret_cast<SetRenderStateFn>(table[57]);
     originalSetTexture=reinterpret_cast<SetTextureFn>(table[65]);
     originalDraw=reinterpret_cast<DrawFn>(table[81]);
@@ -1069,6 +1107,7 @@ void HookDevice(IDirect3DDevice9* device)
     originalLightEnable=reinterpret_cast<LightEnableFn>(table[53]);
 
     InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[44], reinterpret_cast<void*>(HookedSetTransform));
     InterlockedExchangePointer(&table[51], reinterpret_cast<void*>(HookedSetLight));
     InterlockedExchangePointer(&table[53], reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37], reinterpret_cast<void*>(HookedSetRenderTarget));
