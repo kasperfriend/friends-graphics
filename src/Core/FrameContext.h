@@ -189,9 +189,9 @@ namespace renderer
         // only says a pose was published; it does not say the pose is this
         // frame's. In a place where the terrain capture never latches - a city
         // with everything overhead culled, which is most of Orgrimmar from
-        // street level - the frame may use a corroborated sky orientation and,
-        // on supported clients, a separately verified active-camera eye. When
-        // no current pose can be corroborated, the previous frame is held.
+        // street level - a stable supported-client camera pose may provide both
+        // the eye and its matching orientation ahead of sky candidates. When no
+        // current pose can be corroborated, the previous frame is held.
         // Drawing the deck or a torch from that pose is what "the clouds and the
         // dynamic lights go with the camera" looks like: they are anchored to a
         // camera the player already left. A pass that places something in WORLD
@@ -204,8 +204,9 @@ namespace renderer
         bool cameraOrientationFresh = false;
         // Milliseconds since a current camera-eye source was accepted: a
         // full-frame shader capture, a leash-checked D3D eye, or (on an exact
-        // supported client) its active CGCamera position. A rotation-only sky
-        // transform never refreshes the eye. Anything placed within a few yards
+        // supported client) a stable CGCamera eye paired with its matching live
+        // world-view orientation. A rotation-only sky transform never refreshes
+        // the eye. Anything placed within a few yards
         // of the camera - torch emitters above all - needs a fresh eye, where
         // far-away anchoring also needs a current corroborated orientation.
         // The 1000 ms hold bridges capture gaps, but an expired eye remains
@@ -215,13 +216,15 @@ namespace renderer
         // True only when this frame accepted a current camera-eye source rather
         // than inheriting the previous eye's age.
         bool cameraEyeObservedThisFrame = false;
-        // Verified-client active-camera memory is only a current eye source;
-        // it still needs a corroborated D3D orientation and continuity acceptance.
+        // Verified-client camera memory publishes the eye and its independently
+        // cross-checked live world-view orientation as one pose snapshot. It is
+        // still subject to CameraContinuityGate before refreshing the world pose.
         bool clientCameraEyeReadThisFrame = false;
+        bool clientCameraOrientationReadThisFrame = false;
         bool clientCameraEyeAcceptedThisFrame = false;
         float clientCameraEyeDistanceYards = -1.f;
         // How the pose was obtained, for diagnostics and the regression
-        // tools. 0 none, 1 captured, 2 sky orientation, 3 held, 4 verified client eye.
+        // tools. 0 none, 1 captured, 2 sky orientation, 3 held, 4 verified client pose.
         uint8_t cameraPoseSource = 0;
         enum CameraPoseSource : uint8_t
         {

@@ -1,8 +1,10 @@
 #include "WoWLocationProvider.h"
 #include "../Environment/LocationTuning.h"
 #include "../Environment/EnvironmentDatabase.h"
+#include "../D3D9/CameraContinuity.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -29,13 +31,29 @@ bool IsKnownVerified12340Client(const WoWClientContext& client) {
            client.sha256=="ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d";
 }
 
-// WoW 3.3.5a (12340): *(WorldFrame global) -> CGWorldFrame, whose active
-// CGCamera is at +0x7E20; CGCamera::position is the float3 at +0x08. The
-// offsets are used only after the exact supported-client/signature gate above.
+// WoW 3.3.5a (12340) active-camera pointer chain: *(WorldFrame global) ->
+// CGWorldFrame, CGCamera at +0x7E20, with the existing position at +0x08.
+// Candidate orientation fields are forward/right/up at +0x14/+0x20/+0x2C;
+// the candidate row-major world->view global is VA 0x00ADF5E8. The new
+// orientation/matrix offsets are not independently verified against Arden;
+// they remain supported-client-gated and fail closed on the cross-checks.
 constexpr uintptr_t kWorldFramePointerRva=0x77436C; // VA 0x00B7436C at image base 0x00400000
 constexpr uintptr_t kWorldFrameCameraOffset=0x7E20;
 constexpr uintptr_t kCameraPositionOffset=0x08;
+constexpr uintptr_t kCameraPoseFieldsOffset=kCameraPositionOffset;
+constexpr uintptr_t kCameraForwardOffset=0x14;
+constexpr uintptr_t kCameraRightOffset=0x20;
+constexpr uintptr_t kCameraUpOffset=0x2C;
+constexpr std::size_t kCameraForwardFieldIndex=(kCameraForwardOffset-kCameraPoseFieldsOffset)/sizeof(float);
+constexpr std::size_t kCameraRightFieldIndex=(kCameraRightOffset-kCameraPoseFieldsOffset)/sizeof(float);
+constexpr std::size_t kCameraUpFieldIndex=(kCameraUpOffset-kCameraPoseFieldsOffset)/sizeof(float);
+static_assert(kCameraForwardFieldIndex==3&&kCameraRightFieldIndex==6&&kCameraUpFieldIndex==9);
+constexpr uintptr_t kWorldViewMatrixRva=0x6DF5E8;
 constexpr uint32_t kMinimumClientPointer=0x10000;
+constexpr float kCameraEyeSnapshotDistanceSquared=.25f;
+constexpr float kCameraPoseFieldTolerance=.002f;
+constexpr float kCameraViewSnapshotTolerance=.002f;
+constexpr float kCameraViewEyeLeashYards=5.f;
 
 bool IsPlausibleClientPointer(uint32_t pointer) {
     return pointer>=kMinimumClientPointer&&(pointer&3u)==0;
@@ -117,10 +135,11 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     failure=configureFailure=LocationFailure::NoWorldContext;
     validation="Configured; no world frame sampled yet";
 }
-bool WoWLocationProvider::ReadCameraEye(float position[3]) const {
+bool WoWLocationProvider::ReadCameraPose(ClientCameraPoseSnapshot& pose) const {
+    pose={};
     // The camera layout is supported only for the verified 12340 client family;
     // a configurable location RVA must never authorize unrelated pointer reads.
-    if(!position||!available||!verified||!cameraLayoutSupported)return false;
+    if(!available||!verified||!cameraLayoutSupported)return false;
 
     uint32_t worldFrame=0,camera=0;
     if(!client.Read(kWorldFramePointerRva,&worldFrame,sizeof(worldFrame))||
@@ -128,14 +147,49 @@ bool WoWLocationProvider::ReadCameraEye(float position[3]) const {
        worldFrame>std::numeric_limits<uintptr_t>::max()-kWorldFrameCameraOffset||
        !client.ReadAddress(uintptr_t(worldFrame)+kWorldFrameCameraOffset,&camera,sizeof(camera))||
        !IsPlausibleClientPointer(camera)||
-       camera>std::numeric_limits<uintptr_t>::max()-kCameraPositionOffset)return false;
+       camera>std::numeric_limits<uintptr_t>::max()-kCameraPoseFieldsOffset)return false;
 
-    float first[3]{},second[3]{};
-    const uintptr_t positionAddress=uintptr_t(camera)+kCameraPositionOffset;
-    if(!client.ReadAddress(positionAddress,first,sizeof(first))||!IsPlausibleWorldPosition(first)||
-       !client.ReadAddress(positionAddress,second,sizeof(second))||!IsPlausibleWorldPosition(second))return false;
-    const float dx=second[0]-first[0],dy=second[1]-first[1],dz=second[2]-first[2];
-    if(dx*dx+dy*dy+dz*dz>.25f)return false;
+    float firstFields[12]{},secondFields[12]{};
+    float firstView[16]{},secondView[16]{};
+    const uintptr_t fieldsAddress=uintptr_t(camera)+kCameraPoseFieldsOffset;
+    if(!client.ReadAddress(fieldsAddress,firstFields,sizeof(firstFields))||
+       !client.Read(kWorldViewMatrixRva,firstView,sizeof(firstView))||
+       !client.ReadAddress(fieldsAddress,secondFields,sizeof(secondFields))||
+       !client.Read(kWorldViewMatrixRva,secondView,sizeof(secondView))||
+       !IsPlausibleWorldPosition(firstFields)||!IsPlausibleWorldPosition(secondFields))return false;
+
+    // The eye and all three orientation axes must come from a stable camera
+    // object snapshot. A mixed eye/basis during a turn is not a usable pose.
+    const float dx=secondFields[0]-firstFields[0];
+    const float dy=secondFields[1]-firstFields[1];
+    const float dz=secondFields[2]-firstFields[2];
+    if(dx*dx+dy*dy+dz*dz>kCameraEyeSnapshotDistanceSquared)return false;
+    for(int i=3;i<12;++i)
+        if(!std::isfinite(firstFields[i])||!std::isfinite(secondFields[i])||
+           std::fabs(secondFields[i]-firstFields[i])>kCameraPoseFieldTolerance)return false;
+    for(int i=0;i<16;++i)
+        if(!std::isfinite(firstView[i])||!std::isfinite(secondView[i])||
+           std::fabs(secondView[i]-firstView[i])>kCameraViewSnapshotTolerance)return false;
+
+    // The live world->view matrix is the orientation source, not D3DTS_VIEW
+    // left over from a sky billboard. Require a standard affine view matrix and
+    // cross-check its right/up/forward columns against the same active CGCamera
+    // object and its translation against that object's current position.
+    if(std::fabs(firstView[3])>.001f||std::fabs(firstView[7])>.001f||
+       std::fabs(firstView[11])>.001f||std::fabs(firstView[15]-1.f)>.001f)return false;
+    float basis[3][4]{};
+    for(int row=0;row<3;++row){
+        for(int col=0;col<3;++col)basis[row][col]=firstView[row*4+col];
+        basis[row][3]=0.f;
+    }
+    if(!IsOrthonormalViewBasis(basis,.002f))return false;
+    for(int axis=0;axis<3;++axis){
+        if(std::fabs(firstFields[kCameraRightFieldIndex+axis]-firstView[axis*4+0])>kCameraPoseFieldTolerance||
+           std::fabs(firstFields[kCameraUpFieldIndex+axis]-firstView[axis*4+1])>kCameraPoseFieldTolerance||
+           std::fabs(firstFields[kCameraForwardFieldIndex+axis]-firstView[axis*4+2])>kCameraPoseFieldTolerance)return false;
+    }
+    if(!ViewTranslationMatchesCameraEye(firstView+12,basis,secondFields,
+                                         kCameraViewEyeLeashYards))return false;
 
     // Do not publish a mixed pointer-chain snapshot if the client replaced its
     // active world frame/camera during the read.
@@ -144,7 +198,10 @@ bool WoWLocationProvider::ReadCameraEye(float position[3]) const {
        worldFrameAfter!=worldFrame||
        !client.ReadAddress(uintptr_t(worldFrameAfter)+kWorldFrameCameraOffset,
                            &cameraAfter,sizeof(cameraAfter))||cameraAfter!=camera)return false;
-    std::copy(second,second+3,position);
+
+    std::copy(secondFields,secondFields+3,pose.position);
+    for(int row=0;row<3;++row)
+        std::copy(basis[row],basis[row]+4,pose.viewBasis[row]);
     return true;
 }
 LocationContext WoWLocationProvider::Sample(const EnvironmentDatabase& db,bool world) const {

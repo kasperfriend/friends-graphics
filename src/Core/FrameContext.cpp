@@ -81,6 +81,7 @@ namespace renderer
         cameraEyeAgeMs = 1.0e6f;
         cameraEyeObservedThisFrame = false;
         clientCameraEyeReadThisFrame = false;
+        clientCameraOrientationReadThisFrame = false;
         clientCameraEyeAcceptedThisFrame = false;
         clientCameraEyeDistanceYards = -1.f;
         cameraPoseSource = PoseNone;

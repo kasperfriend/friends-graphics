@@ -140,7 +140,7 @@ int main() try
             "a shader-captured eye establishes the world-camera anchor");
         Require(BuildViewTranslationForCameraEye(eye,straightUp,viewTranslation) &&
                 gate.AcceptFallback(viewTranslation,straightUp,1920,1080),
-            "a fresh client eye paired with a corroborated straight-up basis refreshes the normal world pose");
+            "a complete current client pose refreshes the normal world pose even when looking straight up");
         Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f &&
                 std::fabs(gate.Position()[1]-eye[1])<1e-3f &&
                 std::fabs(gate.Position()[2]-eye[2])<1e-3f,
@@ -151,6 +151,75 @@ int main() try
             "a client-eye jump beyond the existing continuity leash cannot refresh the world pose");
         Require(std::fabs(gate.Position()[0]-eye[0])<1e-3f,
             "a rejected client-eye jump leaves the accepted world anchor unchanged");
+
+        const float turnedView[3][4]={{0,-1,0,0},{1,0,0,0},{0,0,1,0}};
+        ClientCameraPoseSnapshot clientPose{};
+        std::copy(eye,eye+3,clientPose.position);
+        for(int r=0;r<3;++r)std::copy(turnedView[r],turnedView[r]+4,clientPose.viewBasis[r]);
+        Require(IsOrthonormalViewBasis(clientPose.viewBasis)&&
+                BuildViewTranslationForCameraEye(clientPose.position,clientPose.viewBasis,viewTranslation)&&
+                ViewTranslationMatchesCameraEye(viewTranslation,clientPose.viewBasis,
+                                                clientPose.position,5.f),
+            "a turned live client view basis is a rigid pose matched to the active camera eye");
+        Require(gate.AcceptFallback(viewTranslation,clientPose.viewBasis,1920,1080)&&
+                gate.MatchesBasis(clientPose.viewBasis,1920,1080),
+            "a current client view rotation updates the accepted world basis instead of retaining the screen-facing one");
+        viewTranslation[0]+=6.f;
+        Require(!ViewTranslationMatchesCameraEye(viewTranslation,clientPose.viewBasis,
+                                                  clientPose.position,5.f),
+            "a view matrix whose translation no longer matches the active camera eye is rejected");
+        const float shearedView[3][4]={{1,.03f,0,0},{0,1,0,0},{0,0,1,0}};
+        Require(!IsOrthonormalViewBasis(shearedView),
+            "a non-rigid client view matrix cannot refresh camera orientation");
+    }
+
+    // A world-space cloud point must move across the screen as the camera yaws,
+    // and the same center pixel must therefore query a different world column.
+    {
+        constexpr float halfPi=1.57079632679f;
+        constexpr float planeZ=1000.f;
+        const float eye[3]={0.f,0.f,0.f};
+        auto worldFromView=[](float yaw,float pitch,float matrix[3][4]) {
+            const float cy=std::cos(yaw),sy=std::sin(yaw);
+            const float cp=std::cos(pitch),sp=std::sin(pitch);
+            matrix[0][0]=cy;    matrix[0][1]=sy;     matrix[0][2]=0.f;
+            matrix[1][0]=sp*sy; matrix[1][1]=-sp*cy; matrix[1][2]=cp;
+            matrix[2][0]=-cp*sy;matrix[2][1]=cp*cy; matrix[2][2]=sp;
+            for(int r=0;r<3;++r)matrix[r][3]=0.f;
+        };
+        auto viewBasisFromWorldFromView=[](const float inverse[3][4],float view[3][4]) {
+            for(int r=0;r<3;++r)for(int c=0;c<3;++c)view[r][c]=inverse[c][r];
+            for(int r=0;r<3;++r)view[r][3]=0.f;
+        };
+        auto centreCloudSample=[&](const float inverse[3][4],float sample[3]) {
+            const float ray[3]={inverse[2][0],inverse[2][1],inverse[2][2]};
+            if(!(ray[2]>0.f))return false;
+            const float distance=(planeZ-eye[2])/ray[2];
+            for(int axis=0;axis<3;++axis)sample[axis]=eye[axis]+ray[axis]*distance;
+            return std::isfinite(sample[0])&&std::isfinite(sample[1])&&std::isfinite(sample[2]);
+        };
+        float yaw0WorldFromView[3][4]{},yaw90WorldFromView[3][4]{};
+        float yaw0View[3][4]{},yaw90View[3][4]{};
+        worldFromView(0.f,halfPi*.5f,yaw0WorldFromView);
+        worldFromView(halfPi,halfPi*.5f,yaw90WorldFromView);
+        viewBasisFromWorldFromView(yaw0WorldFromView,yaw0View);
+        viewBasisFromWorldFromView(yaw90WorldFromView,yaw90View);
+        float centreSampleYaw0[3]{},centreSampleYaw90[3]{};
+        Require(centreCloudSample(yaw0WorldFromView,centreSampleYaw0)&&
+                centreCloudSample(yaw90WorldFromView,centreSampleYaw90)&&
+                std::fabs(centreSampleYaw0[0]-centreSampleYaw90[0])>900.f&&
+                std::fabs(centreSampleYaw0[1]-centreSampleYaw90[1])>900.f,
+            "the normal world-ray transform samples different fixed world columns after a 90-degree yaw");
+        float sampleScreenX0=0.f,sampleScreenY0=0.f;
+        float sampleScreenX90=0.f,sampleScreenY90=0.f;
+        Require(renderer::ProjectWorldDirection(yaw0View,1.f,1.f,centreSampleYaw0,
+                                                sampleScreenX0,sampleScreenY0)&&
+                renderer::ProjectWorldDirection(yaw90View,1.f,1.f,centreSampleYaw0,
+                                      sampleScreenX90,sampleScreenY90)&&
+                std::fabs(sampleScreenX0-.5f)<1e-4f&&std::fabs(sampleScreenY0-.5f)<1e-4f&&
+                (sampleScreenX90<0.f||sampleScreenX90>1.f||
+                 sampleScreenY90<0.f||sampleScreenY90>1.f),
+            "one fixed world-space cloud sample leaves its original screen position when the camera yaws");
     }
 
     // ---------------------------------------------------------------- floor ---
@@ -337,6 +406,12 @@ int main() try
 
         const auto clouds = Read("src/Effects/VolumetricClouds.cpp");
         const auto composite = Read("VolumeIntegration.h");
+        Require(Contains(clouds,"float3 ray=(view.x*invView0.xyz+view.y*invView1.xyz+view.z*invView2.xyz)/viewLength;")&&
+                Contains(clouds,"float3 p=cameraPos.xyz+ray*t;")&&
+                Contains(clouds,"float3 w=tex2Dlod(weatherMap,float4(p.xy*motion.z+motion2.xy,0,0)).rgb;"),
+            "the normal cloud shader reconstructs world rays from the camera basis and samples weather at world XY");
+        Require(Contains(clouds,"clientOrientationRead=")&&Contains(clouds,"worldViewBasis="),
+            "the cloud diagnostic exposes client-pose acceptance and yaw-sensitive world-view basis values");
         Require(Contains(clouds, "float SpriteVerified(float2 centre)") &&
                 Contains(clouds, "SpriteVerified(moonDisc.xy)") &&
                 Contains(clouds, "renderer::discgate::RawTolerance") &&
@@ -400,22 +475,41 @@ int main() try
         Require(Contains(cameraProvider, "kWorldFramePointerRva=0x77436C") &&
                 Contains(cameraProvider, "kWorldFrameCameraOffset=0x7E20") &&
                 Contains(cameraProvider, "kCameraPositionOffset=0x08") &&
+                Contains(cameraProvider, "kCameraPoseFieldsOffset=kCameraPositionOffset") &&
+                Contains(cameraProvider, "kCameraForwardOffset=0x14") &&
+                Contains(cameraProvider, "kCameraRightOffset=0x20") &&
+                Contains(cameraProvider, "kCameraUpOffset=0x2C") &&
+                Contains(cameraProvider, "kWorldViewMatrixRva=0x6DF5E8") &&
+                Contains(cameraProvider, "kCameraViewEyeLeashYards=5.f") &&
                 Contains(cameraProvider, "cameraLayoutSupported=knownClient&&client.base==0x00400000") &&
                 Contains(cameraProvider, "!available||!verified||!cameraLayoutSupported") &&
+                Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,firstView,sizeof(firstView))") &&
+                Contains(cameraProvider, "client.Read(kWorldViewMatrixRva,secondView,sizeof(secondView))") &&
+                Contains(cameraProvider, "IsOrthonormalViewBasis(basis,.002f)") &&
+                Contains(cameraProvider, "firstFields[kCameraRightFieldIndex+axis]-firstView[axis*4+0]") &&
+                Contains(cameraProvider, "firstFields[kCameraUpFieldIndex+axis]-firstView[axis*4+1]") &&
+                Contains(cameraProvider, "firstFields[kCameraForwardFieldIndex+axis]-firstView[axis*4+2]") &&
+                Contains(cameraProvider, "static_assert(kCameraForwardFieldIndex==3&&kCameraRightFieldIndex==6&&kCameraUpFieldIndex==9)") &&
+                Contains(cameraProvider, "ViewTranslationMatchesCameraEye(firstView+12,basis,secondFields") &&
                 Contains(cameraProvider, "worldFrameAfter!=worldFrame") &&
                 Contains(cameraProvider, "cameraAfter!=camera") &&
-                Contains(cameraProvider, "dx*dx+dy*dy+dz*dz>.25f"),
-            "the active-camera eye reader is pinned to the supported 3.3.5a layout and client gate");
+                Contains(cameraProvider, "kCameraEyeSnapshotDistanceSquared"),
+            "the active camera pose is stable, matrix-matched, pointer-revalidated and pinned to the supported 3.3.5a layout");
         Require(Contains(cameraProvider, "ed62bd406dbe92cabe4b38759c630df25a8d3b02a2646e1b77f62cb7be273c1d"),
             "the ArdenWoW executable fingerprint remains an explicitly supported camera source");
         Require(Contains(composite, "frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&") &&
-                Contains(composite, "ReadCameraEye(clientCameraEye)"),
-            "the direct eye read is attempted only in a confirmed playable world");
-        Require(Contains(cameraCapture, "BuildViewTranslationForCameraEye(currentCameraEye, basis, eyeTranslation)") &&
-                Contains(cameraCapture, "m_cameraGate.AcceptFallback(") &&
-                Contains(cameraCapture, "cameraPoseStale = !corroborated || !eyeFresh") &&
-                Contains(cameraCapture, "FrameContext::kCameraEyeHoldMs"),
-            "a client eye still needs corroborated orientation, the existing continuity leash and freshness gate");
+                Contains(composite, "ReadCameraPose(clientCameraPose)"),
+            "the complete camera pose read is attempted only in a confirmed playable world");
+        const auto clientPoseUse=cameraCapture.find("if (currentClientPose &&");
+        const auto skyPoseResolve=cameraCapture.find("m_skyPose.Resolve(disc, basis, corroborated)");
+        Require(clientPoseUse!=std::string::npos&&skyPoseResolve!=std::string::npos&&
+                clientPoseUse<skyPoseResolve&&
+                Contains(cameraCapture,"BuildViewTranslationForCameraEye(currentClientPose->position,")&&
+                Contains(cameraCapture,"m_cameraGate.AcceptFallback(eyeTranslation,currentClientPose->viewBasis,")&&
+                !Contains(cameraCapture,"currentCameraEye")&&
+                Contains(cameraCapture,"cameraPoseStale = !corroborated || !eyeFresh")&&
+                Contains(cameraCapture,"FrameContext::kCameraEyeHoldMs"),
+            "the live client basis takes priority over a possibly stale sky transform, while the eye continuity and freshness guards remain");
     }
 
     std::printf("ALL CAMERA ANCHORING TESTS PASSED\n");

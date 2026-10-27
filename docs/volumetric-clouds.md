@@ -70,7 +70,7 @@ The march itself:
 
 ## Direction-only recovery
 
-Normal rendering samples the weather map at world XY and requires a fresh camera eye. When an upward view culls every full-frame world draw, the D3D sky transform can corroborate orientation but cannot supply that eye. For verified 3.3.5a clients, the location provider now reads the active `CGCamera` position from the client-owned world-frame pointer chain. It takes a stable double snapshot, is used only in confirmed `InWorld`, and refreshes the eye only after the corroborated basis passes the existing viewport/continuity gate. This keeps the **normal world-space march** active, including world weather, layer intersection, lighting, and shadows; the shipped ArdenWoW fingerprint is included in that supported-client gate.
+Normal rendering samples the weather map at world XY and requires a fresh camera pose. When an upward view culls every full-frame world draw, a D3D sky transform may be a billboard rather than the current camera basis. For the exact supported 12340 client family, the location provider reads the active-camera position and orientation plus the live world-view matrix from the client-owned world-frame chain. The read is a stable double snapshot; matrix axes must match the active camera basis, its translation must reconstruct the same eye within five yards, and pointer-chain identity is rechecked. It runs only in confirmed `InWorld`, then the complete pose still passes the existing viewport/40-yard continuity gate before updating the **normal world-space march**. This candidate memory layout is cross-checked at runtime and remains fail-closed; the shipped ArdenWoW fingerprint is included in the supported-client gate.
 
 If no trusted current eye can be read or accepted, the separate direction-only recovery remains a last resort, not a replacement for normal clouds. It uses the already zone/native-weather-resolved mean coverage and cloud type from `CloudDynamics`, while shape and detail still come from the generated 3D fields. Its fixed 6000-yard angular reference is independent of any held eye, planet radius, or world-layer intersection. This recovery remains screen-space only, composites only over clear sky, and leaves geometry and native water untouched.
 
@@ -419,10 +419,10 @@ recognition still requires a supported client draw signature.
 
 ### Camera pose freshness: cities, interiors, and looking up
 
-The deck is anchored at absolute world heights, so "the clouds are dragged along with the camera" can only
-mean the *frame's camera* was wrong while the client's depth buffer was the real one. That happens where no
-draw ever carries a full-frame rigid camera - most of Orgrimmar seen from street level, with the terrain over
-the player's head frustum-culled - and it clears up on higher ground because a real capture latches there.
+The deck is anchored at absolute world heights, so a cloud that stays at the same screen position during a
+stationary yaw points to a stale or mismatched world-view basis, not to feature size or altitude. This can happen
+where no draw carries a full-frame rigid camera - for example, terrain above the player's head is frustum-culled.
+A fresh eye alone is not enough: the cloud ray needs the orientation from the same current camera pose.
 
 `CameraCapture` now treats every sky/draw transform it sees as a *candidate* for the frame, not as the camera:
 
@@ -439,25 +439,30 @@ the player's head frustum-culled - and it clears up on higher ground because a r
 - Without a disc, continuity with the accepted camera decides (`BasisAgreement >= .75`). A discontinuous
   transform is held for two frames and only adopted if the frame repeats it; one that changes every frame is
   never adopted.
-- A zero-translation sky transform still never moves the eye. On the verified 3.3.5a family, the active
-  `CGCamera` position may refresh it only from a stable read of the client-owned WorldFrame/CGCamera
-  pointer chain, while the current view basis is independently corroborated. The candidate still passes
-  `CameraContinuityGate::AcceptFallback` (same viewport and the existing 40-yard leash) before it becomes
-  the normal world-space camera; unknown executables and configured custom location RVAs do not authorize
-  this memory layout.
+- A zero-translation sky transform still never moves the eye. On the supported 12340 client family, the
+  client-owned WorldFrame/CGCamera chain supplies one position-plus-orientation snapshot and the live world-view
+  matrix. Two reads must agree; the matrix must be rigid, its right/up/forward axes must match the active camera
+  fields, its translation must reconstruct the same eye within five yards, and the pointer chain is rechecked.
+  This complete client pose is tried before D3D sky candidates; the renderer never pairs a fresh client eye with
+  a separately selected sky basis. `CameraContinuityGate::AcceptFallback` still requires the same viewport and
+  the existing 40-yard eye leash before adopting it as the normal world-space camera. Unknown executables and
+  configured custom location RVAs do not authorize this memory layout.
 
 Frames that still cannot be corroborated publish `FrameContext::cameraPoseStale` and keep the previous
 eye for consumers that need it. `cameraOrientationFresh` is tracked separately: a current rigid VIEW basis
 can be trustworthy even after its eye has aged out. The world-height cloud march, local lights, torches,
-fog and weather still require the unchanged fresh-eye/world gate; a verified current client eye can satisfy
-the eye half without weakening that gate. If no trusted eye is available, clouds may use the separate
+fog and weather still require the unchanged fresh-pose/world gate; a fully validated current client pose can
+satisfy it without weakening the existing continuity or scene-state guards. If no trusted eye is available,
+clouds may use the separate
 screen-direction recovery: it samples the noise field over view rays, composites only clear sky, excludes
 water-mask pixels, and never reads the held eye, intersects the world layer, or renders/publishes a world
 shadow or cloud-ray texture. Unknown, menu and out-of-world scenes still fail closed. If the projection cache
 has expired, the camera observer can still corroborate the current rigid VIEW basis by continuity; that
 expired projection is not reused for scene-depth or celestial-disc validation. The cloud log records
 `clientEye=(read,accepted,distance)`, `orientationFresh`, `skyFallbackEligible`, eye age,
-projection-cache state and the selected path.
+projection-cache state and the selected path. `clientOrientationRead` reports whether the complete memory pose
+passed its snapshot checks; `worldViewBasis` logs the accepted basis so a stationary yaw test can verify it rotates
+with the player rather than remaining screen-locked.
 
 `LocalLightingRenderer::Render` and `LocalLightManager::ObserveTorchDraw` refuse a stale pose while
 `cameraEyeAgeMs` also exceeds `kCameraEyeHoldMs`, so a pose held briefly keeps the lamps steady (a frame-late
@@ -469,7 +474,9 @@ attempt's shader as "terrain".
 `tools/DeviceHealthRegression.cpp` pins the projection convention, the disc contradiction, jump confirmation,
 the empty-frame case, and the source-level guards on the deck, the lamp pool and the torch emitters.
 `tools/CameraAnchoringRegression.cpp` also pins the supported 12340 camera layout, the ArdenWoW fingerprint,
-world-eye reconstruction, and rejection of an eye jump beyond the existing continuity leash.
+rigid/axis/eye checks, a turned live basis refreshing the world orientation, and rejection of a mismatched matrix
+translation or a client-eye jump beyond the existing continuity leash. Live yaw testing in Arden is still needed
+to verify the candidate memory fields and world-view RVA against that executable.
 
 ### The celestial disc, verified against geometry (2026-10-19)
 

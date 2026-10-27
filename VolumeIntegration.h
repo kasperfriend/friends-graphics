@@ -718,13 +718,14 @@ bool CaptureSkyFallback() {
     cfg.rayFalloff = rayFalloff;
 
     renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
-    float clientCameraEye[3]{};
-    const bool haveClientCameraEye=frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&
-        renderer::EnvironmentProfileManager::Instance().ReadCameraEye(clientCameraEye);
-    frameCtx.clientCameraEyeReadThisFrame=haveClientCameraEye;
+    renderer::ClientCameraPoseSnapshot clientCameraPose{};
+    const bool haveClientCameraPose=frameCtx.worldScene.state==renderer::WorldSceneState::InWorld&&
+        renderer::EnvironmentProfileManager::Instance().ReadCameraPose(clientCameraPose);
+    frameCtx.clientCameraEyeReadThisFrame=haveClientCameraPose;
+    frameCtx.clientCameraOrientationReadThisFrame=haveClientCameraPose;
     bool ok = renderer::CameraCapture::Instance().ApplySkyFallback(
         frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid,
-        haveClientCameraEye?clientCameraEye:nullptr);
+        haveClientCameraPose?&clientCameraPose:nullptr);
     if (ok) {
         renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         frameCtx.depthTexture = resources.depth.Get();

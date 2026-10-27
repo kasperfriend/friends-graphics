@@ -70,7 +70,7 @@ namespace renderer
             float outConstants[13][4],
             float outCapturedViewTranslation[3],
             bool& outCapturedViewValid,
-            const float currentCameraEye[3] = nullptr);
+            const ClientCameraPoseSnapshot* currentClientPose = nullptr);
 
         bool IsValid() const { return m_valid; }
         uint32_t GetCapturedFrames() const { return m_capturedFrames; }
@@ -144,9 +144,10 @@ namespace renderer
         bool m_fallbackProjectionValid = false;
         // Performance-clock seconds of the last validated full-frame projection.
         double m_fallbackProjectionSeconds = -1.0;
-        // A current non-zero VIEW translation may carry the actual camera eye.
-        // Keep it only when it is within five yards of the accepted anchor, and
-        // refresh the anchor only if this exact basis wins sky-pose selection.
+        // A current non-zero D3D VIEW translation may carry the actual camera eye.
+        // Keep it only within five yards of the accepted anchor, and refresh the
+        // anchor only if its exact basis wins sky selection; a validated client
+        // pose has priority and uses its own world-view matrix instead.
         bool m_skyEyeCandidateValid = false;
         bool m_skyEyeCandidateObserved = false;
         float m_skyEyeCandidateDistanceYards = 1e30f;

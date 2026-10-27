@@ -684,15 +684,15 @@ namespace renderer
         float outConstants[13][4],
         float outCapturedViewTranslation[3],
         bool& outCapturedViewValid,
-        const float currentCameraEye[3])
+        const ClientCameraPoseSnapshot* currentClientPose)
     {
         frameContext.cameraOrientationFresh = false;
         if (!m_valid || !m_cameraGate.Valid() || !frameContext.viewRawValid || !m_fallbackProjectionValid)
             return false;
 
         // A rotation-only sky transform says nothing about where the camera is,
-        // so the last trusted eye ages unless a current shader/D3D/client source
-        // is paired with this frame's corroborated orientation below.
+        // so the last trusted eye ages unless a current shader/D3D eye source or
+        // a complete supported-client pose refreshes it below.
         const double now = PerformanceSeconds();
         const float eyeAge = m_lastEyeSeconds >= 0.0
             ? float(std::clamp(now - m_lastEyeSeconds, 0.0, 1e6)) : 1e6f;
@@ -729,8 +729,46 @@ namespace renderer
             ? m_skyEyeCandidateDistanceYards : -1.f;
         if (m_skyProjectionAvailable)
             std::copy(m_skyProjection, m_skyProjection + 6, frameContext.skyProjection);
-        const bool havePose = m_skyPose.HasCandidate() &&
-            m_skyPose.Resolve(disc, basis, corroborated);
+        bool havePose = false;
+        bool refreshedEye = false;
+        bool refreshedClientEye = false;
+        if (currentClientPose &&
+            IsOrthonormalViewBasis(currentClientPose->viewBasis, .002f) &&
+            std::isfinite(currentClientPose->position[0]) &&
+            std::isfinite(currentClientPose->position[1]) &&
+            std::isfinite(currentClientPose->position[2]) &&
+            std::fabs(currentClientPose->position[0]) < 1000000.f &&
+            std::fabs(currentClientPose->position[1]) < 1000000.f &&
+            std::fabs(currentClientPose->position[2]) < 1000000.f)
+        {
+            const float* acceptedEye = m_cameraGate.Position();
+            const float dx = currentClientPose->position[0] - acceptedEye[0];
+            const float dy = currentClientPose->position[1] - acceptedEye[1];
+            const float dz = currentClientPose->position[2] - acceptedEye[2];
+            frameContext.clientCameraEyeDistanceYards = std::sqrt(dx*dx + dy*dy + dz*dz);
+            float eyeTranslation[4]{};
+            if (BuildViewTranslationForCameraEye(currentClientPose->position,
+                                                 currentClientPose->viewBasis,eyeTranslation) &&
+                m_cameraGate.AcceptFallback(eyeTranslation,currentClientPose->viewBasis,
+                                            m_fallbackVp.Width,m_fallbackVp.Height))
+            {
+                for (int r = 0; r < 3; ++r)
+                    std::copy(currentClientPose->viewBasis[r],
+                              currentClientPose->viewBasis[r] + 4,basis[r]);
+                corroborated = true;
+                havePose = true;
+                refreshedEye = true;
+                refreshedClientEye = true;
+                frameContext.clientCameraEyeAcceptedThisFrame = true;
+                // Prefer the active camera's live world-view matrix over a
+                // zero-translation sky billboard transform. This is a current
+                // full pose, but it still passed the same viewport/eye leash.
+                m_skyPose.SetReference(basis);
+            }
+        }
+        if (!havePose)
+            havePose = m_skyPose.HasCandidate() &&
+                m_skyPose.Resolve(disc, basis, corroborated);
 
         if (!havePose)
         {
@@ -758,38 +796,14 @@ namespace renderer
             v[r][3] = 0.0f;
         }
 
-        // The corroborated rotation is what the gate should expect a real
-        // capture to continue from. A current eye read from the supported
-        // client's active CGCamera is independently tied to this same frame;
-        // it can refresh the anchor only through the existing continuity gate.
-        // A selected D3D eye remains the fallback source when it itself carried
-        // a bounded, non-zero translation. Rotation-only sky transforms never
-        // move the anchor.
+        // A stable active-client pose provides both the current eye and the
+        // matching world-view basis; a selected D3D eye remains a fallback only
+        // when its own non-zero translation passed the anchor leash. A
+        // rotation-only sky transform never moves the world anchor.
         const bool selectedRejectedCapture = m_rejectedCaptureValid &&
             BasisAgreement(m_rejectedCaptureBasis, basis) > .9999f;
         const bool selectedD3DEye = m_skyEyeCandidateValid &&
             BasisAgreement(m_skyEyeBasis, basis) > .9999f;
-        bool refreshedEye = false;
-        bool refreshedClientEye = false;
-        if (currentCameraEye &&
-            std::isfinite(currentCameraEye[0]) && std::isfinite(currentCameraEye[1]) &&
-            std::isfinite(currentCameraEye[2]) &&
-            std::fabs(currentCameraEye[0]) < 1000000.f &&
-            std::fabs(currentCameraEye[1]) < 1000000.f &&
-            std::fabs(currentCameraEye[2]) < 1000000.f)
-        {
-            const float* acceptedEye = m_cameraGate.Position();
-            const float dx = currentCameraEye[0] - acceptedEye[0];
-            const float dy = currentCameraEye[1] - acceptedEye[1];
-            const float dz = currentCameraEye[2] - acceptedEye[2];
-            frameContext.clientCameraEyeDistanceYards = std::sqrt(dx*dx + dy*dy + dz*dz);
-            float eyeTranslation[4]{};
-            if (BuildViewTranslationForCameraEye(currentCameraEye, basis, eyeTranslation))
-                refreshedEye = m_cameraGate.AcceptFallback(
-                    eyeTranslation, basis, m_fallbackVp.Width, m_fallbackVp.Height);
-            refreshedClientEye = refreshedEye;
-            frameContext.clientCameraEyeAcceptedThisFrame = refreshedClientEye;
-        }
         if (!refreshedEye && selectedRejectedCapture)
         {
             float eyeTranslation[4]{};
@@ -820,7 +834,7 @@ namespace renderer
             // A current rigid view with a five-yard eye leash and matching P00/P11
             // revalidates use of the last full perspective/depth mapping, but it
             // never supplies its own rejected depth terms. Renew only after this
-            // exact basis has passed sky-pose corroboration.
+            // exact client or sky basis has passed the applicable pose gate.
             if (selectedRejectedCapture && m_rejectedCaptureProjectionScaleMatched)
             {
                 m_fallbackProjectionSeconds = refreshedAt;
@@ -840,11 +854,11 @@ namespace renderer
             }
         }
 
-        // A zero-translation skybox transform still cannot move the eye. A
-        // non-zero transform refreshes it only when it was independently
-        // leash-checked against the accepted position and this exact basis won;
-        // camera-relative billboards and reflections therefore cannot drag the
-        // world anchor along with the view.
+        // The client pose (when present) has already refreshed the eye through
+        // the same continuity gate. Otherwise a zero-translation skybox cannot
+        // move it; a non-zero D3D candidate refreshes only when its translation
+        // independently passed the leash and this exact basis won. Camera-facing
+        // billboards and reflections therefore cannot drag the world anchor.
         const float* anchor = m_cameraGate.Position();
         const float camPos[3] = { anchor[0], anchor[1], anchor[2] };
         for (int c = 0; c < 3; ++c)

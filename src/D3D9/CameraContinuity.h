@@ -40,6 +40,60 @@ inline bool BuildViewTranslationForCameraEye(const float position[3],
     return true;
 }
 
+// A supported client's live world-view matrix and active-camera eye form one
+// pose snapshot. Keep them together so an eye-only read can never refresh the
+// age on top of an unrelated/stale D3DTS_VIEW orientation.
+struct ClientCameraPoseSnapshot
+{
+    float position[3]{};
+    float viewBasis[3][4]{}; // upper 3x3 of the live world->view matrix
+};
+
+inline bool IsOrthonormalViewBasis(const float viewBasis[3][4],
+                                   float tolerance = 0.002f) noexcept
+{
+    if (!viewBasis || !std::isfinite(tolerance) || tolerance < 0.f)
+        return false;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            if (!std::isfinite(viewBasis[r][c])) return false;
+    for (int r = 0; r < 3; ++r)
+        for (int s = 0; s < 3; ++s)
+        {
+            float dot = 0.f;
+            for (int c = 0; c < 3; ++c)
+                dot += viewBasis[r][c] * viewBasis[s][c];
+            if (std::fabs(dot - (r == s ? 1.f : 0.f)) > tolerance)
+                return false;
+        }
+    return true;
+}
+
+inline bool ViewTranslationMatchesCameraEye(const float viewTranslation[4],
+                                            const float viewBasis[3][4],
+                                            const float position[3],
+                                            float maxDistance) noexcept
+{
+    if (!viewTranslation || !position || !std::isfinite(maxDistance) || maxDistance < 0.f ||
+        !IsOrthonormalViewBasis(viewBasis))
+        return false;
+    for (int i = 0; i < 4; ++i)
+        if (!std::isfinite(viewTranslation[i])) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(position[i])) return false;
+
+    float viewEye[3]{};
+    for (int axis = 0; axis < 3; ++axis)
+        viewEye[axis] = -(viewTranslation[0] * viewBasis[axis][0] +
+                          viewTranslation[1] * viewBasis[axis][1] +
+                          viewTranslation[2] * viewBasis[axis][2]);
+    const float dx = viewEye[0] - position[0];
+    const float dy = viewEye[1] - position[1];
+    const float dz = viewEye[2] - position[2];
+    return std::isfinite(dx * dx + dy * dy + dz * dz) &&
+           dx * dx + dy * dy + dz * dz <= maxDistance * maxDistance;
+}
+
 // Decides whether a candidate view matrix is the frame's real camera.
 //
 // CameraCapture reads the projection, the light direction and the daylight

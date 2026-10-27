@@ -1254,6 +1254,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" cameraStale="<<(f.cameraPoseStale?1:0)<<" eyeCurrent="<<(f.cameraEyeObservedThisFrame?1:0)
      <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
      <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
+     <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
+     <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
+     <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'
      <<" poseSource="<<int(f.cameraPoseSource)<<" eyeAgeMs="<<f.cameraEyeAgeMs
      <<" skyCandidates="<<int(f.skyPoseCandidateCount)
      <<" skyDisc="<<(f.skyPoseDiscEvidence?1:0)
@@ -1501,6 +1505,10 @@ bool VolumetricClouds::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3
      <<" cloudAmbient=("<<cloudSkyR<<','<<cloudSkyG<<','<<cloudSkyB<<')'
      <<" clientEye=("<<(f.clientCameraEyeReadThisFrame?1:0)<<','
      <<(f.clientCameraEyeAcceptedThisFrame?1:0)<<','<<f.clientCameraEyeDistanceYards<<')'
+     <<" clientOrientationRead="<<(f.clientCameraOrientationReadThisFrame?1:0)
+     <<" worldViewBasis=("<<f.inverseView.m[0][0]<<','<<f.inverseView.m[1][0]<<','<<f.inverseView.m[2][0]<<';'
+     <<f.inverseView.m[0][1]<<','<<f.inverseView.m[1][1]<<','<<f.inverseView.m[2][1]<<';'
+     <<f.inverseView.m[0][2]<<','<<f.inverseView.m[1][2]<<','<<f.inverseView.m[2][2]<<')'
      <<" eyeAgeMs="<<f.cameraEyeAgeMs<<" poseSource="<<int(f.cameraPoseSource)
      <<" glareSource="<<(f.celestialIntensity>.001f?(f.celestialIsMoon?"moon":"sun"):"none")
      <<" glare=("<<f.sunScreenX<<','<<f.sunScreenY<<')'

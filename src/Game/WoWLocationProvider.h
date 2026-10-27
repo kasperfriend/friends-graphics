@@ -4,6 +4,7 @@
 #include "../Environment/LocationStatus.h"
 namespace renderer {
 class EnvironmentDatabase;
+struct ClientCameraPoseSnapshot;
 struct WoWLocationOffsets { uintptr_t map=0,zone=0,area=0; };
 class WoWLocationProvider {
 public:
@@ -15,10 +16,10 @@ public:
     bool Verified() const {return available&&verified;}
     const std::string& Status() const {return status;}
     const WoWClientContext& Client() const {return client;}
-    // Reads the active 3.3.5a world camera only for a verified supported
-    // client. The caller must still require current in-world/orientation
-    // evidence and pass the eye through CameraContinuityGate before use.
-    bool ReadCameraEye(float position[3]) const;
+    // Reads the active 3.3.5a camera eye and its matching live world-view
+    // basis only for a verified supported client. The caller still requires
+    // confirmed InWorld and passes the complete pose through CameraContinuityGate.
+    bool ReadCameraPose(ClientCameraPoseSnapshot& pose) const;
     const LocationContext& RawSample() const {return rawSample;}
     // True once the three addresses have been read successfully at least once, so the
     // panel can tell "the client says 0 / 0 / 0" from "we never got to read".
