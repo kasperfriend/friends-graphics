@@ -37,14 +37,14 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 ## Installation
 
 1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
-2. Extract its contents into the Ascension client directory, next to the game executable.
+2. Extract its contents into the WoW 3.3.5 client directory, next to the game executable.
 3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, `GraphicsEffects.ini`, `EnvironmentProfiles.ini`, and `LocationGraphics.ini` are in that directory. Keep the packaged `textures`, `MaterialCache`, and `data` directories beside it; `data/areas.txt` is what lets the renderer recognise the zone you are standing in.
 4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` or `LocationGraphics.ini` by hand.
 
 Example layout:
 
 ```text
-Ascension/
+WoW_3.3.5/
 ├── d3d9.dll
 ├── ModernWoWRenderer.ini
 ├── GraphicsEffects.ini
